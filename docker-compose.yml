@@ -1,0 +1,18 @@
+services:
+  tesla-analyzer:
+    build: .
+    container_name: tesla-analyzer
+    ports:
+      - "8000:8000"
+    environment:
+      # Leave TESLA_ACCESS_TOKEN empty for DEMO mode with generated data.
+      - DATABASE_URL=sqlite:////app/data/tesla_analyzer.db
+      - TESLA_ACCESS_TOKEN=${TESLA_ACCESS_TOKEN:-}
+      - TESLA_REFRESH_TOKEN=${TESLA_REFRESH_TOKEN:-}
+      - TESLA_API_BASE_URL=${TESLA_API_BASE_URL:-https://owner-api.teslamotors.com}
+      - ENERGY_PRICE_PER_KWH=${ENERGY_PRICE_PER_KWH:-0.30}
+      - CURRENCY=${CURRENCY:-USD}
+      - RATED_WH_PER_KM=${RATED_WH_PER_KM:-150}
+    volumes:
+      - ./data:/app/data
+    restart: unless-stopped
