@@ -131,18 +131,31 @@ function renderRecommendations(recs) {
   document.getElementById("recommendations").innerHTML = html;
 }
 
+// In static mode (e.g. GitHub Pages) the dashboard reads pre-built JSON
+// snapshots instead of calling the live API. window.SUMMARY_URL is set by the
+// static index.html; otherwise we fall back to the live API endpoint.
+const STATIC_MODE = typeof window.SUMMARY_URL === "function";
+const summaryUrl = STATIC_MODE
+  ? window.SUMMARY_URL
+  : (days) => `/api/summary?days=${days}`;
+
 async function load() {
   const days = document.getElementById("range").value;
   document.getElementById("kpis").innerHTML = '<div class="loading">Loading…</div>';
   try {
-    const res = await fetch(`/api/summary?days=${days}`);
+    const res = await fetch(summaryUrl(days));
     if (!res.ok) throw new Error(await res.text());
     const d = await res.json();
 
     const badge = document.getElementById("mode-badge");
-    const health = await (await fetch("/api/health")).json();
-    badge.textContent = health.mode;
-    badge.className = "badge " + health.mode;
+    if (STATIC_MODE) {
+      badge.textContent = "demo";
+      badge.className = "badge demo";
+    } else {
+      const health = await (await fetch("/api/health")).json();
+      badge.textContent = health.mode;
+      badge.className = "badge " + health.mode;
+    }
 
     document.getElementById("subtitle").textContent =
       `${d.vehicle.name} · ${d.vehicle.model} ${d.vehicle.trim}`;

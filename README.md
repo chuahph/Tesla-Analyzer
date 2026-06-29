@@ -9,6 +9,26 @@ cost and protect long-term battery health.
 It ships with a **demo mode** that generates realistic sample data, so you can
 explore the full dashboard immediately — no Tesla account or token required.
 
+### 🔗 Live demo dashboard
+
+**▶ https://chuahph.github.io/Tesla-Analyzer/**
+
+A static build of the dashboard (with baked-in demo data) is published to
+GitHub Pages automatically on every push to `main` by the
+[Deploy dashboard to GitHub Pages](.github/workflows/pages.yml) workflow, so the
+analytics can be viewed straight from the repo with no setup.
+
+> First-time setup: in the repository, go to **Settings → Pages** and set the
+> **Source** to **GitHub Actions**. The workflow then builds and deploys on the
+> next push to `main`. You can also run the workflow manually from the Actions
+> tab (*Run workflow*).
+
+To build the same static site locally:
+
+```bash
+python scripts/build_site.py --out site   # → ./site (open site/index.html)
+```
+
 ---
 
 ## Features
