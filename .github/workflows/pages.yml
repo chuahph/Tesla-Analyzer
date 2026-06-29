@@ -31,6 +31,14 @@ jobs:
       - name: Build static dashboard
         run: python scripts/build_site.py --out site
 
+      # enablement: true turns on GitHub Pages (source = GitHub Actions) via the
+      # API if it isn't already, so the deploy job below won't fail on a repo
+      # where Pages hasn't been enabled manually.
+      - name: Configure Pages
+        uses: actions/configure-pages@v5
+        with:
+          enablement: true
+
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v3
         with:
