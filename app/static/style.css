@@ -20,9 +20,9 @@ body {
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
   background: var(--bg);
   color: var(--text);
-  /* Respect the iPhone notch / home-indicator safe areas when installed. */
-  padding: env(safe-area-inset-top) env(safe-area-inset-right)
-           env(safe-area-inset-bottom) env(safe-area-inset-left);
+  /* Respect the iPhone home-indicator / side safe areas. The status-bar inset
+     is applied to the sticky header instead, so it never hides the header. */
+  padding: 0 env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);
 }
 
 header {
@@ -31,12 +31,22 @@ header {
   justify-content: space-between;
   gap: 12px;
   flex-wrap: wrap;
-  padding: 18px 28px;
+  /* Extra top padding reserves space for the iPhone status bar / notch so the
+     header content is never overlapped, even when the sticky header is at top. */
+  padding: calc(18px + env(safe-area-inset-top)) 28px 18px;
   border-bottom: 1px solid var(--border);
   background: linear-gradient(180deg, #14181f, #0e1116);
   position: sticky;
   top: 0;
   z-index: 10;
+}
+
+.clock {
+  margin: 4px 0 0;
+  color: var(--muted);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: .2px;
 }
 
 .brand { display: flex; align-items: center; gap: 14px; }
@@ -53,6 +63,7 @@ select {
   border-radius: 8px;
   padding: 7px 10px;
   font-size: 14px;
+  min-height: 44px;            /* touch target */
 }
 .badge {
   padding: 4px 10px;
@@ -142,11 +153,17 @@ footer { padding: 18px 28px; color: var(--muted); font-size: 12px; border-top: 1
   color: var(--text);
   border: 1px solid var(--border);
   border-radius: 8px;
-  padding: 8px 14px;
+  padding: 8px 16px;
   font-size: 13px;
   font-weight: 600;
   cursor: pointer;
   transition: background .15s, border-color .15s, opacity .15s;
+  /* Minimum 44x44 touch target (Apple HIG). */
+  min-height: 44px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
 }
 .btn:hover { background: #2a313c; }
 .btn:disabled { opacity: .5; cursor: not-allowed; }
@@ -173,12 +190,14 @@ footer { padding: 18px 28px; color: var(--muted); font-size: 12px; border-top: 1
   max-height: 90vh; overflow-y: auto;
   box-shadow: 0 20px 60px rgba(0,0,0,.5);
 }
-.modal-card h2 { margin: 0 0 8px; font-size: 18px; }
+.modal-card h2 { margin: 0 0 8px; font-size: 18px; padding-right: 44px; }
 .modal-sub { color: var(--muted); font-size: 13px; line-height: 1.5; margin: 0 0 16px; }
 .modal-close {
-  position: absolute; top: 14px; right: 16px;
+  position: absolute; top: 8px; right: 8px;
+  width: 44px; height: 44px;                 /* touch target */
+  display: flex; align-items: center; justify-content: center;
   background: none; border: none; color: var(--muted);
-  font-size: 24px; cursor: pointer; line-height: 1;
+  font-size: 26px; cursor: pointer; line-height: 1;
 }
 .modal-close:hover { color: var(--text); }
 .modal-actions { display: flex; align-items: center; justify-content: flex-end; gap: 12px; margin-top: 18px; }
@@ -207,6 +226,7 @@ footer { padding: 18px 28px; color: var(--muted); font-size: 12px; border-top: 1
   background: none; border: none; color: var(--muted);
   padding: 10px 14px; cursor: pointer; font-size: 14px; font-weight: 600;
   border-bottom: 2px solid transparent; margin-bottom: -1px;
+  min-height: 44px;            /* touch target */
 }
 .tab.active { color: var(--text); border-bottom-color: var(--accent); }
 .tab-panel.hidden { display: none; }
@@ -216,8 +236,10 @@ footer { padding: 18px 28px; color: var(--muted); font-size: 12px; border-top: 1
 .field textarea, .field input[type="text"], .field select {
   display: block; width: 100%; margin-top: 6px;
   background: var(--panel-2); color: var(--text);
-  border: 1px solid var(--border); border-radius: 8px; padding: 9px 11px;
-  font-size: 13px; font-family: inherit; resize: vertical;
+  border: 1px solid var(--border); border-radius: 8px; padding: 11px;
+  font-size: 16px;             /* >=16px stops iOS auto-zoom on focus */
+  font-family: inherit; resize: vertical;
+  min-height: 44px;            /* touch target */
 }
 
 .status { font-size: 13px; color: var(--muted); }
@@ -227,7 +249,7 @@ footer { padding: 18px 28px; color: var(--muted); font-size: 12px; border-top: 1
 
 /* --- Mobile / iPhone layout --- */
 @media (max-width: 640px) {
-  header { padding: 14px 16px; }
+  header { padding: calc(14px + env(safe-area-inset-top)) 16px 14px; }
   header h1 { font-size: 18px; }
   .controls { width: 100%; flex-wrap: wrap; gap: 8px; }
   .controls .btn { flex: 1 1 auto; }
