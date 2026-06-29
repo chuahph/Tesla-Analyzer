@@ -177,12 +177,30 @@ async function load() {
     renderRecommendations(d.recommendations);
 
     document.getElementById("footer-meta").textContent =
-      `Generated ${d.generated_at} · ${d.window_days}-day window · Tesla Analyzer v0.1`;
+      `Generated ${footerFmt.format(new Date())} MYT · ${d.window_days}-day window · Tesla Analyzer v0.1`;
   } catch (e) {
     document.getElementById("kpis").innerHTML =
       `<div class="loading">Could not load data: ${e.message}</div>`;
   }
 }
+
+// Live date/time in the header, fixed to Malaysia time (Asia/Kuala_Lumpur),
+// regardless of the device's own timezone.
+const clockFmt = new Intl.DateTimeFormat("en-GB", {
+  timeZone: "Asia/Kuala_Lumpur",
+  weekday: "short", day: "2-digit", month: "short", year: "numeric",
+  hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false,
+});
+const footerFmt = new Intl.DateTimeFormat("en-GB", {
+  timeZone: "Asia/Kuala_Lumpur",
+  day: "2-digit", month: "short", year: "numeric", hour: "2-digit", minute: "2-digit", hour12: false,
+});
+function tickClock() {
+  const el = document.getElementById("clock");
+  if (el) el.textContent = clockFmt.format(new Date()) + " MYT";
+}
+tickClock();
+setInterval(tickClock, 1000);
 
 document.getElementById("range").addEventListener("change", load);
 
