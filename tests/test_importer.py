@@ -64,6 +64,52 @@ def test_parse_zip_bundle():
     assert len(charges) == 2
 
 
+def test_parse_zip_nested_with_macos_junk():
+    """Real exports nest files in folders and include __MACOSX / AppleDouble junk."""
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        zf.writestr("TeslaData/2026/drives.csv", DRIVE_CSV)
+        zf.writestr("TeslaData/2026/charges.txt", CHARGE_CSV)  # .txt treated as CSV
+        zf.writestr("__MACOSX/TeslaData/._drives.csv", b"\x00\x01garbage")
+        zf.writestr(".DS_Store", b"\x00\x00")
+    drives, charges = parse_upload("MyTeslaData.zip", buf.getvalue())
+    assert len(drives) == 2
+    assert len(charges) == 2
+
+
+def test_parse_zip_detects_by_magic_without_extension():
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        zf.writestr("drives.csv", DRIVE_CSV)
+    # No .zip extension, but PK magic bytes should still be recognised.
+    drives, charges = parse_upload("export", buf.getvalue())
+    assert len(drives) == 2
+
+
+def test_parse_nested_zip():
+    inner = io.BytesIO()
+    with zipfile.ZipFile(inner, "w") as zf:
+        zf.writestr("charges.csv", CHARGE_CSV)
+    outer = io.BytesIO()
+    with zipfile.ZipFile(outer, "w") as zf:
+        zf.writestr("drives.csv", DRIVE_CSV)
+        zf.writestr("inner.zip", inner.getvalue())
+    drives, charges = parse_upload("bundle.zip", outer.getvalue())
+    assert len(drives) == 2
+    assert len(charges) == 2
+
+
+def test_empty_zip_raises_helpful_error():
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        zf.writestr("readme.txt", "no data here")
+    try:
+        parse_upload("empty.zip", buf.getvalue())
+        assert False, "expected ImportError_"
+    except ImportError_ as exc:
+        assert "ZIP" in str(exc)
+
+
 def test_parse_garbage_raises():
     try:
         parse_upload("notes.txt", b"hello world, nothing useful here")

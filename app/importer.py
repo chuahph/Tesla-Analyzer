@@ -234,33 +234,92 @@ def _parse_json(text: str) -> tuple[list[dict], list[dict]]:
     return drives, charges
 
 
-def parse_upload(filename: str, content: bytes) -> tuple[list[dict], list[dict]]:
-    """Parse an uploaded export into (drives, charges) normalised dicts."""
-    name = (filename or "").lower()
+def _is_junk(path: str) -> bool:
+    """Skip macOS bundle metadata, AppleDouble files and hidden entries."""
+    parts = path.replace("\\", "/").split("/")
+    base = parts[-1]
+    return (
+        path.startswith("__MACOSX")
+        or "__MACOSX" in parts
+        or base.startswith("._")
+        or base.startswith(".")
+        or base in {"Thumbs.db", "desktop.ini"}
+    )
+
+
+def _parse_zip(content: bytes, _depth: int = 0) -> tuple[list[dict], list[dict], list[str]]:
+    """Parse every recognised data file inside a ZIP (recursing into nested zips).
+
+    Returns (drives, charges, data_filenames_seen). Real Tesla exports nest files
+    in folders and ship macOS junk, so this is deliberately forgiving: it tries
+    CSV for .csv/.tsv/.txt and JSON for .json, and a failure in one inner file
+    never aborts the whole import.
+    """
     drives: list[dict] = []
     charges: list[dict] = []
+    seen: list[str] = []
 
-    if name.endswith(".zip") or content[:2] == b"PK":
-        with zipfile.ZipFile(io.BytesIO(content)) as zf:
-            for info in zf.infolist():
-                if info.is_dir():
-                    continue
-                inner = info.filename.lower()
+    with zipfile.ZipFile(io.BytesIO(content)) as zf:
+        for info in zf.infolist():
+            if info.is_dir() or _is_junk(info.filename):
+                continue
+            inner = info.filename.lower()
+            try:
                 raw = zf.read(info)
-                if inner.endswith(".csv"):
+            except Exception:  # noqa: BLE001 - skip unreadable entries
+                continue
+
+            if inner.endswith(".zip") and _depth < 3:
+                d, c, s = _parse_zip(raw, _depth + 1)
+                drives += d
+                charges += c
+                seen += s
+                continue
+
+            try:
+                if inner.endswith((".csv", ".tsv", ".txt")):
                     d, c = _parse_csv(raw.decode("utf-8-sig", errors="replace"))
                 elif inner.endswith(".json"):
                     d, c = _parse_json(raw.decode("utf-8-sig", errors="replace"))
                 else:
                     continue
-                drives += d
-                charges += c
+            except Exception:  # noqa: BLE001 - ignore an unparsable inner file
+                continue
+
+            if d or c:
+                seen.append(info.filename)
+            drives += d
+            charges += c
+
+    return drives, charges, seen
+
+
+def parse_upload(filename: str, content: bytes) -> tuple[list[dict], list[dict]]:
+    """Parse an uploaded export into (drives, charges) normalised dicts.
+
+    Accepts a single CSV/JSON file or a ZIP bundle (e.g. Tesla's *Download Your
+    Data* export), including nested folders and zips.
+    """
+    name = (filename or "").lower()
+    drives: list[dict] = []
+    charges: list[dict] = []
+    zip_seen: list[str] = []
+
+    if name.endswith(".zip") or content[:2] == b"PK":
+        drives, charges, zip_seen = _parse_zip(content)
     elif name.endswith(".json") or content[:1] in (b"{", b"["):
         drives, charges = _parse_json(content.decode("utf-8-sig", errors="replace"))
     else:  # assume CSV
         drives, charges = _parse_csv(content.decode("utf-8-sig", errors="replace"))
 
     if not drives and not charges:
+        if name.endswith(".zip") or content[:2] == b"PK":
+            raise ImportError_(
+                "No drive or charge records were found inside the ZIP. Make sure it "
+                "contains CSV/JSON files with columns like start_time, distance, "
+                "energy and soc (drives) or energy_added, charge_type and power "
+                "(charges)."
+            )
         raise ImportError_(
             "No drive or charge records found. Expected CSV/JSON/ZIP with columns "
             "like start_time, distance, energy, soc (drives) or energy_added, "
