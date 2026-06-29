@@ -176,8 +176,9 @@ async function load() {
     renderLists(d);
     renderRecommendations(d.recommendations);
 
+    const now = new Date();
     document.getElementById("footer-meta").textContent =
-      `Generated ${footerFmt.format(new Date())} MYT · ${d.window_days}-day window · Tesla Analyzer v0.1`;
+      `Generated ${footerDateFmt.format(now)} ${hhmm(now)} MYT · ${d.window_days}-day window · Tesla Analyzer v0.1`;
   } catch (e) {
     document.getElementById("kpis").innerHTML =
       `<div class="loading">Could not load data: ${e.message}</div>`;
@@ -185,19 +186,22 @@ async function load() {
 }
 
 // Live date/time in the header, fixed to Malaysia time (Asia/Kuala_Lumpur),
-// regardless of the device's own timezone.
-const clockFmt = new Intl.DateTimeFormat("en-GB", {
+// regardless of the device's own timezone. Time is shown as a 4-digit 24-hour
+// value (HHMM, e.g. 1530); the year is 4 digits.
+const dateFmt = new Intl.DateTimeFormat("en-GB", {
   timeZone: "Asia/Kuala_Lumpur",
   weekday: "short", day: "2-digit", month: "short", year: "numeric",
-  hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false,
 });
-const footerFmt = new Intl.DateTimeFormat("en-GB", {
-  timeZone: "Asia/Kuala_Lumpur",
-  day: "2-digit", month: "short", year: "numeric", hour: "2-digit", minute: "2-digit", hour12: false,
+const footerDateFmt = new Intl.DateTimeFormat("en-GB", {
+  timeZone: "Asia/Kuala_Lumpur", day: "2-digit", month: "short", year: "numeric",
 });
+const hmFmt = new Intl.DateTimeFormat("en-GB", {
+  timeZone: "Asia/Kuala_Lumpur", hour: "2-digit", minute: "2-digit", hourCycle: "h23",
+});
+const hhmm = (d) => hmFmt.format(d).replace(":", ""); // "15:30" -> "1530"
 function tickClock() {
   const el = document.getElementById("clock");
-  if (el) el.textContent = clockFmt.format(new Date()) + " MYT";
+  if (el) { const n = new Date(); el.textContent = `${dateFmt.format(n)} ${hhmm(n)} MYT`; }
 }
 tickClock();
 setInterval(tickClock, 1000);
