@@ -16,7 +16,7 @@ STATIC_DIR = Path(__file__).parent / "static"
 
 app = FastAPI(
     title="Tesla Analyzer",
-    description="TeslaMate-style analytics for driving, usage and charging patterns.",
+    description="Self-hosted analytics for driving, usage and charging patterns.",
     version="0.1.0",
 )
 

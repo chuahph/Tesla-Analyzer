@@ -1,10 +1,9 @@
 # ⚡ Tesla Analyzer
 
-A self-hosted, [TeslaMate](https://github.com/teslamate-org/teslamate)-style
-analytics app for your Tesla. It logs **drives** and **charging sessions**, then
-analyses your **driving, usage and charging patterns** and produces
-**concrete, prioritised recommendations** to improve efficiency, cut charging
-cost and protect long-term battery health.
+A self-hosted analytics app for your Tesla with its own clean dashboard design.
+It logs **drives** and **charging sessions**, analyses your **driving, usage and
+charging patterns**, and produces **concrete, prioritised recommendations** to
+improve efficiency, cut charging cost and protect long-term battery health.
 
 It ships with a **demo mode** that generates realistic sample data, so you can
 explore the full dashboard immediately — no Tesla account or token required.
@@ -143,8 +142,7 @@ Once linked, run `python run.py collect` to log new drives/charges over time.
 ## Connecting your real Tesla (via .env)
 
 1. Obtain an access token for the **Owner API** or **Fleet API** (e.g. via
-   [Tesla Auth](https://github.com/adriankumpf/tesla_auth), the same tool the
-   TeslaMate community uses).
+   [Tesla Auth](https://github.com/adriankumpf/tesla_auth)).
 2. Copy `.env.example` to `.env` and set:
 
    ```env

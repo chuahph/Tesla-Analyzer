@@ -6,8 +6,8 @@ vehicle_data snapshots and persisting completed sessions.
 
 The live collector is intentionally compact: it tracks state transitions
 (parked → driving → parked, unplugged → charging → unplugged) and writes a row
-when a session completes. Running a full-fidelity logger like TeslaMate's is out
-of scope, but this captures everything the analytics need.
+when a session completes. A full-fidelity GPS/telemetry logger is out of scope,
+but this captures everything the analytics need.
 """
 from __future__ import annotations
 
