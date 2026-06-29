@@ -96,8 +96,9 @@ docker compose up --build      # → http://localhost:8000
 
 ## Loading your own data
 
-The dashboard header has two buttons (both require the self-hosted backend —
-they're informational only on the static Pages demo):
+The dashboard header has two buttons. **📁 Load Tesla Data** works everywhere,
+including the static Pages app / installed PWA (it parses and analyses in the
+browser). **🔗 Link Tesla Account** needs the self-hosted backend.
 
 ### 📁 Load Tesla Data (manual import)
 
@@ -172,10 +173,20 @@ dashboard badge shows **live**.
 
 ---
 
-## Install on iPhone / iPad (PWA)
+## Install on iPhone / iPad (PWA) — no computer needed
 
 Tesla Analyzer is an installable **Progressive Web App** — it adds to your home
 screen, launches full-screen with its own icon, and works offline.
+
+**It runs entirely on the phone.** In the installed app / on the Pages site, the
+import and the full analysis run **in the browser** (`analysis.js` + `importer.js`,
+with JSZip for `.zip`) — no backend, no host PC. Upload your Tesla export on the
+iPhone and it parses and analyses on-device; your data is kept only in the
+browser's local storage (use **Use demo data** in the import dialog to clear it).
+
+> The **🔗 Link Tesla Account** button still needs the self-hosted backend (Tesla's
+> API can't be called directly from a browser). For on-device use, export your
+> data from Tesla and use **📁 Load Tesla Data**.
 
 1. Open the dashboard in **Safari** on your iPhone/iPad:
    - the live demo — **https://chuahph.github.io/Tesla-Analyzer/**, or

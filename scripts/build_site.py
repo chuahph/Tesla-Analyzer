@@ -21,14 +21,13 @@ from sqlalchemy.orm import sessionmaker
 
 ROOT = Path(__file__).resolve().parent.parent
 STATIC = ROOT / "app" / "static"
-WINDOWS = [30, 60, 90, 180, 365]
 
 
 def build(out_dir: Path) -> None:
     import sys
 
     sys.path.insert(0, str(ROOT))
-    from app.api.routes import summary
+    from app.api.routes import export_data
     from app.database import Base
     from app.sample_data import generate
 
@@ -41,21 +40,24 @@ def build(out_dir: Path) -> None:
     data_dir = out_dir / "data"
     data_dir.mkdir(exist_ok=True)
 
+    # Export the raw demo dataset; the in-browser engine computes the analysis
+    # for any window client-side (the same code path used for imported data).
     with Session() as session:
         generate(session, days=365, seed=42)
-        for days in WINDOWS:
-            payload = summary(days=days, session=session)
-            (data_dir / f"summary-{days}.json").write_text(
-                json.dumps(payload, default=str, indent=2)
-            )
-            print(f"  wrote data/summary-{days}.json")
+        payload = export_data(days=400, session=session)
+        (data_dir / "demo.json").write_text(json.dumps(payload, default=str))
+        print(f"  wrote data/demo.json "
+              f"({len(payload['drives'])} drives, {len(payload['charges'])} charges)")
 
     # --- Copy shared assets --------------------------------------------------
     shutil.copy(STATIC / "style.css", out_dir / "style.css")
     shutil.copy(STATIC / "app.js", out_dir / "app.js")
     shutil.copy(STATIC / "sw.js", out_dir / "sw.js")
+    shutil.copy(STATIC / "analysis.js", out_dir / "analysis.js")
+    shutil.copy(STATIC / "importer.js", out_dir / "importer.js")
     (out_dir / "vendor").mkdir(exist_ok=True)
     shutil.copy(STATIC / "vendor" / "chart.umd.js", out_dir / "vendor" / "chart.umd.js")
+    shutil.copy(STATIC / "vendor" / "jszip.min.js", out_dir / "vendor" / "jszip.min.js")
 
     # PWA icons (copied as-is) and a manifest tailored to the Pages subpath.
     shutil.copytree(STATIC / "icons", out_dir / "icons", dirs_exist_ok=True)
@@ -70,15 +72,18 @@ def build(out_dir: Path) -> None:
     index = (STATIC / "index.html").read_text()
     index = index.replace('href="/static/style.css"', 'href="style.css"')
     index = index.replace('src="/static/vendor/chart.umd.js"', 'src="vendor/chart.umd.js"')
+    index = index.replace('src="/static/vendor/jszip.min.js"', 'src="vendor/jszip.min.js"')
+    index = index.replace('src="/static/analysis.js"', 'src="analysis.js"')
+    index = index.replace('src="/static/importer.js"', 'src="importer.js"')
     index = index.replace('src="/static/app.js"', 'src="app.js"')
     # PWA assets: rewrite root-absolute paths to relative for the Pages subpath.
     index = index.replace('href="/manifest.webmanifest"', 'href="manifest.webmanifest"')
     index = index.replace('href="/static/icons/', 'href="icons/')
-    # Tell app.js to read the pre-built JSON snapshots, and add a banner.
+    # Enable in-browser (no-backend) mode and point at the raw demo dataset.
     index = index.replace(
-        "<script src=\"app.js\"></script>",
-        '<script>window.SUMMARY_URL = (days) => `data/summary-${days}.json`;</script>\n'
-        '  <script src="app.js"></script>',
+        '<script src="analysis.js"></script>',
+        '<script>window.TA_STATIC = true; window.DEMO_URL = "data/demo.json";</script>\n'
+        '  <script src="analysis.js"></script>',
     )
     (out_dir / "index.html").write_text(index)
 

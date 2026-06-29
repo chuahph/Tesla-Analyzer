@@ -71,6 +71,7 @@
         <p>Column names are matched loosely (case / spacing insensitive).</p>
       </details>
       <div class="modal-actions">
+        <button id="import-reset" class="btn hidden">Use demo data</button>
         <span id="import-status" class="status"></span>
         <button id="import-submit" class="btn btn-accent" disabled>Import</button>
       </div>
@@ -179,6 +180,10 @@
     <span id="footer-meta"></span>
   </footer>
 
+  <!-- In-browser engine (used by the static/PWA build to import & analyse on-device). -->
+  <script src="/static/vendor/jszip.min.js"></script>
+  <script src="/static/analysis.js"></script>
+  <script src="/static/importer.js"></script>
   <script src="/static/app.js"></script>
 </body>
 </html>

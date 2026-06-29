@@ -131,34 +131,45 @@ function renderRecommendations(recs) {
   document.getElementById("recommendations").innerHTML = html;
 }
 
-// In static mode (e.g. GitHub Pages) the dashboard reads pre-built JSON
-// snapshots instead of calling the live API. window.SUMMARY_URL is set by the
-// static index.html; otherwise we fall back to the live API endpoint.
-const STATIC_MODE = typeof window.SUMMARY_URL === "function";
-const summaryUrl = STATIC_MODE
-  ? window.SUMMARY_URL
-  : (days) => `/api/summary?days=${days}`;
+// Static/PWA mode computes everything in-browser with no backend (TA.buildSummary);
+// the self-hosted app uses the REST API. window.TA_STATIC is set by the static
+// index.html (window.SUMMARY_URL kept for backward compatibility).
+const STATIC_MODE = window.TA_STATIC === true || typeof window.SUMMARY_URL === "function";
+const DEMO_URL = window.DEMO_URL || "data/demo.json";
+const STORE_KEY = "ta_dataset";
+let demoCache = null;
+
+function importedDataset() {
+  try { return JSON.parse(localStorage.getItem(STORE_KEY)); } catch (_) { return null; }
+}
+async function demoDataset() {
+  if (!demoCache) demoCache = await (await fetch(DEMO_URL)).json();
+  return demoCache;
+}
 
 async function load() {
-  const days = document.getElementById("range").value;
+  const days = +document.getElementById("range").value;
   document.getElementById("kpis").innerHTML = '<div class="loading">Loading…</div>';
   try {
-    const res = await fetch(summaryUrl(days));
-    if (!res.ok) throw new Error(await res.text());
-    const d = await res.json();
-
-    const badge = document.getElementById("mode-badge");
+    let d, mode;
     if (STATIC_MODE) {
-      badge.textContent = "demo";
-      badge.className = "badge demo";
+      const ds = importedDataset() || (await demoDataset());
+      d = TA.buildSummary(ds, days);
+      mode = ds.source === "imported" ? "imported" : "demo";
     } else {
-      const health = await (await fetch("/api/health")).json();
-      badge.textContent = health.mode;
-      badge.className = "badge " + health.mode;
+      const res = await fetch(`/api/summary?days=${days}`);
+      if (!res.ok) throw new Error(await res.text());
+      d = await res.json();
+      mode = (await (await fetch("/api/health")).json()).mode;
     }
 
+    const badge = document.getElementById("mode-badge");
+    badge.textContent = mode;
+    badge.className = "badge " + mode;
+    if (STATIC_MODE) updateResetButton();
+
     document.getElementById("subtitle").textContent =
-      `${d.vehicle.name} · ${d.vehicle.model} ${d.vehicle.trim}`;
+      `${d.vehicle.name} · ${d.vehicle.model}${d.vehicle.trim ? " " + d.vehicle.trim : ""}`;
 
     renderKpis(d);
     renderCharts(d);
@@ -207,8 +218,24 @@ let pendingFile = null;
 
 document.getElementById("btn-import").addEventListener("click", () => {
   openModal("import-modal");
-  if (STATIC_MODE) setStatus(importStatus, staticNote, "warn");
+  updateResetButton();
 });
+
+// "Use demo data" reset (static/PWA mode): clears the imported dataset.
+function updateResetButton() {
+  const btn = document.getElementById("import-reset");
+  if (!btn) return;
+  btn.classList.toggle("hidden", !(STATIC_MODE && importedDataset()));
+}
+const resetBtn = document.getElementById("import-reset");
+if (resetBtn) {
+  resetBtn.addEventListener("click", () => {
+    localStorage.removeItem(STORE_KEY);
+    setStatus(importStatus, "Reverted to demo data.", "ok");
+    updateResetButton();
+    setTimeout(() => { closeModal("import-modal"); load(); }, 600);
+  });
+}
 
 dropzone.addEventListener("click", () => fileInput.click());
 ["dragover", "dragenter"].forEach((ev) =>
@@ -221,22 +248,34 @@ fileInput.addEventListener("change", () => { if (fileInput.files[0]) selectFile(
 function selectFile(file) {
   pendingFile = file;
   document.getElementById("file-name").textContent = file.name;
-  importSubmit.disabled = STATIC_MODE;
-  if (!STATIC_MODE) setStatus(importStatus, "", "");
+  importSubmit.disabled = false;
+  setStatus(importStatus, "", "");
 }
 
 importSubmit.addEventListener("click", async () => {
-  if (!pendingFile || STATIC_MODE) return;
+  if (!pendingFile) return;
   setStatus(importStatus, "Importing…", "");
   importSubmit.disabled = true;
   try {
-    const fd = new FormData();
-    fd.append("file", pendingFile);
-    const res = await fetch("/api/import", { method: "POST", body: fd });
-    const body = await res.json();
-    if (!res.ok) throw new Error(body.detail || "Import failed");
-    setStatus(importStatus,
-      `Imported ${body.imported_drives} drives & ${body.imported_charges} charges.`, "ok");
+    let drivesN, chargesN;
+    if (STATIC_MODE) {
+      // Parse and analyse entirely in the browser — no backend needed.
+      const { drives, charges } = await TA.parseUpload(pendingFile);
+      const dataset = {
+        vehicle: { name: "Imported Tesla", model: "Imported", trim: "" },
+        drives, charges, source: "imported",
+      };
+      localStorage.setItem(STORE_KEY, JSON.stringify(dataset));
+      drivesN = drives.length; chargesN = charges.length;
+    } else {
+      const fd = new FormData();
+      fd.append("file", pendingFile);
+      const res = await fetch("/api/import", { method: "POST", body: fd });
+      const body = await res.json();
+      if (!res.ok) throw new Error(body.detail || "Import failed");
+      drivesN = body.imported_drives; chargesN = body.imported_charges;
+    }
+    setStatus(importStatus, `Imported ${drivesN} drives & ${chargesN} charges.`, "ok");
     setTimeout(() => { closeModal("import-modal"); load(); }, 800);
   } catch (e) {
     setStatus(importStatus, e.message, "err");
