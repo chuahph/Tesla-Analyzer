@@ -102,9 +102,12 @@ they're informational only on the static Pages demo):
 ### 📁 Load Tesla Data (manual import)
 
 Request your data from Tesla (**tesla.com → Privacy → Download Your Data**),
-then upload the export. The importer accepts **CSV**, **JSON**, or a **ZIP**
-bundle and replaces the current data set. Columns are matched loosely
-(case/spacing/punctuation insensitive); miles are converted to km automatically.
+then upload the export. The importer accepts **CSV**, **JSON**, or the whole
+**ZIP** export and replaces the current data set. The ZIP reader walks nested
+folders, recurses into nested zips, treats `.csv`/`.tsv`/`.txt` as delimited
+data, and skips macOS `__MACOSX`/`.DS_Store` junk. Columns are matched loosely
+(case/spacing/punctuation insensitive) and miles are converted to km
+automatically.
 
 | Drives | Charges |
 |--------|---------|
