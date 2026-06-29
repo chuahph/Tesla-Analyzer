@@ -19,6 +19,14 @@ class Settings(BaseSettings):
     tesla_api_base_url: str = "https://owner-api.teslamotors.com"
     poll_interval_seconds: int = 60
 
+    # Tesla OAuth (Fleet API). Required only for the "Sign in with Tesla" button;
+    # the access-token paste flow and demo/import modes do not need these.
+    tesla_client_id: str = ""
+    tesla_client_secret: str = ""
+    tesla_redirect_uri: str = "http://localhost:8000/api/link/oauth/callback"
+    tesla_oauth_scope: str = "openid offline_access vehicle_device_data"
+    tesla_oauth_audience: str = "https://fleet-api.prd.na.vn.cloud.tesla.com"
+
     # Analysis parameters
     energy_price_per_kwh: float = 0.30
     currency: str = "USD"

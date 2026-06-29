@@ -60,6 +60,14 @@ Turns the analysis into actionable advice with estimated savings, e.g.:
 A dark, responsive single-page dashboard (Chart.js) with KPI cards, six charts
 and the recommendation feed. Plus a CLI text/JSON report.
 
+**Two ways to load your own data** (buttons in the dashboard header)
+1. **📁 Load Tesla Data** — upload a Tesla *Download Your Data* export
+   (CSV / JSON / ZIP). The importer matches columns loosely, converts miles→km,
+   and replaces the demo data with yours.
+2. **🔗 Link Tesla Account** — either *Sign in with Tesla* (OAuth, needs a Tesla
+   developer app) or paste an access token. The token is stored only on your
+   own server; run the collector to log new sessions over time.
+
 ---
 
 ## Quick start (demo mode)
@@ -86,7 +94,53 @@ docker compose up --build      # → http://localhost:8000
 
 ---
 
-## Connecting your real Tesla
+## Loading your own data
+
+The dashboard header has two buttons (both require the self-hosted backend —
+they're informational only on the static Pages demo):
+
+### 📁 Load Tesla Data (manual import)
+
+Request your data from Tesla (**tesla.com → Privacy → Download Your Data**),
+then upload the export. The importer accepts **CSV**, **JSON**, or a **ZIP**
+bundle and replaces the current data set. Columns are matched loosely
+(case/spacing/punctuation insensitive); miles are converted to km automatically.
+
+| Drives | Charges |
+|--------|---------|
+| `start_time`, `end_time` | `start_time`, `end_time` |
+| `distance` (km or miles) | `energy_added` (kWh) |
+| `duration`, `start_soc`, `end_soc` | `charge_type` (AC/DC), `max_power` |
+| `energy_used`, `avg_speed`, `max_speed` | `start_soc`, `end_soc` |
+| `outside_temp`, `start_location`, `end_location` | `location`, `cost`, `outside_temp` |
+
+Drive vs charge files are detected automatically from their columns. You can
+also re-import this app's own `GET /api/export` JSON. Equivalent API call:
+
+```bash
+curl -F "file=@my_drives.csv" http://localhost:8000/api/import
+```
+
+### 🔗 Link Tesla Account
+
+- **Sign in with Tesla (OAuth):** set `TESLA_CLIENT_ID` / `TESLA_CLIENT_SECRET`
+  (from a [Tesla developer app](https://developer.tesla.com)) in `.env`, then
+  click the button to complete the OAuth flow.
+- **Access token:** paste a token (from
+  [tesla_auth](https://github.com/adriankumpf/tesla_auth)) and pick the API base
+  URL. The token is validated against Tesla and stored only on your server.
+
+```bash
+curl -X POST http://localhost:8000/api/link/token \
+  -H 'Content-Type: application/json' \
+  -d '{"access_token":"<token>","base_url":"https://owner-api.teslamotors.com"}'
+```
+
+Once linked, run `python run.py collect` to log new drives/charges over time.
+
+---
+
+## Connecting your real Tesla (via .env)
 
 1. Obtain an access token for the **Owner API** or **Fleet API** (e.g. via
    [Tesla Auth](https://github.com/adriankumpf/tesla_auth), the same tool the
@@ -135,6 +189,10 @@ python run.py reset                            Drop & recreate schema
 | `GET /api/drives?days=30` | Drive records |
 | `GET /api/charges?days=30` | Charging records |
 | `GET /api/summary?days=90` | **Full analysis + recommendations** (powers the dashboard) |
+| `GET /api/export` | Export stored data as re-importable JSON |
+| `POST /api/import` | Import a Tesla data export (CSV/JSON/ZIP) |
+| `POST /api/link/token` | Link an account with an access token |
+| `GET /api/link/oauth/start` · `…/callback` | Tesla OAuth sign-in flow |
 
 ---
 

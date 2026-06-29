@@ -3,16 +3,20 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+import httpx
+from fastapi import APIRouter, Body, Depends, File, HTTPException, Query, UploadFile
+from fastapi.responses import RedirectResponse
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from .. import auth, services, state
 from ..analysis import charging as charging_analysis
 from ..analysis import driving as driving_analysis
 from ..analysis import efficiency as efficiency_analysis
 from ..analysis import recommendations as recommendations_engine
 from ..config import get_settings
 from ..database import get_session
+from ..importer import ImportError_, parse_upload
 from ..models import Charge, Drive, Vehicle
 from ..schemas import ChargeOut, DriveOut, VehicleOut
 
@@ -42,9 +46,95 @@ def _window(session: Session, vehicle_id: int, days: int):
 
 
 @router.get("/health")
-def health():
-    settings = get_settings()
-    return {"status": "ok", "mode": "demo" if settings.demo_mode else "live"}
+def health(session: Session = Depends(get_session)):
+    source = state.data_source(session)
+    mode = "live" if state.is_live(session) else ("imported" if source == "imported" else "demo")
+    return {
+        "status": "ok",
+        "mode": mode,
+        "source": source,
+        "oauth_available": auth.oauth_configured(),
+    }
+
+
+# --- Data source: manual import -------------------------------------------
+
+
+@router.post("/import")
+async def import_data(
+    file: UploadFile = File(...), session: Session = Depends(get_session)
+):
+    """Button 1 — load a Tesla privacy/usage data export (CSV/JSON/ZIP)."""
+    content = await file.read()
+    try:
+        drives, charges = parse_upload(file.filename or "upload", content)
+    except ImportError_ as exc:
+        raise HTTPException(422, str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(400, f"Could not read file: {exc}") from exc
+    return services.replace_with_import(session, drives, charges)
+
+
+# --- Data source: link Tesla account --------------------------------------
+
+
+@router.post("/link/token")
+def link_token(
+    payload: dict = Body(...), session: Session = Depends(get_session)
+):
+    """Button 2 (token flow) — link an account with an access token."""
+    token = (payload.get("access_token") or "").strip()
+    if not token:
+        raise HTTPException(422, "access_token is required.")
+    try:
+        return services.link_with_token(
+            session,
+            token,
+            refresh_token=(payload.get("refresh_token") or "").strip(),
+            base_url=(payload.get("base_url") or "").strip() or None,
+        )
+    except httpx.HTTPStatusError as exc:
+        raise HTTPException(401, f"Tesla rejected the token ({exc.response.status_code}).") from exc
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(400, f"Could not link account: {exc}") from exc
+
+
+@router.get("/link/oauth/start")
+def oauth_start():
+    """Button 2 (OAuth flow) — redirect to Tesla's sign-in page."""
+    if not auth.oauth_configured():
+        raise HTTPException(
+            400,
+            "Tesla OAuth is not configured. Set TESLA_CLIENT_ID / TESLA_CLIENT_SECRET, "
+            "or use the access-token option instead.",
+        )
+    url, _state = auth.authorize_url()
+    return RedirectResponse(url)
+
+
+@router.get("/link/oauth/callback")
+def oauth_callback(
+    code: str | None = None, error: str | None = None,
+    session: Session = Depends(get_session),
+):
+    if error:
+        raise HTTPException(400, f"Tesla sign-in failed: {error}")
+    if not code:
+        raise HTTPException(400, "Missing authorization code.")
+    try:
+        tokens = auth.exchange_code(code)
+        result = services.link_with_token(
+            session,
+            tokens["access_token"],
+            refresh_token=tokens.get("refresh_token", ""),
+            base_url=get_settings().tesla_oauth_audience,
+        )
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(400, f"OAuth exchange failed: {exc}") from exc
+    # Land the user back on the dashboard.
+    return RedirectResponse(f"/?linked={result['source']}")
 
 
 @router.get("/vehicles", response_model=list[VehicleOut])
@@ -72,6 +162,20 @@ def list_charges(
     vehicle = _first_vehicle(session)
     _, charges = _window(session, vehicle.id, days)
     return charges[-limit:]
+
+
+@router.get("/export")
+def export_data(
+    days: int = Query(730, ge=1, le=3650), session: Session = Depends(get_session)
+):
+    """Export stored drives & charges as JSON (re-importable via /api/import)."""
+    vehicle = _first_vehicle(session)
+    drives, charges = _window(session, vehicle.id, days)
+    return {
+        "vehicle": VehicleOut.model_validate(vehicle).model_dump(),
+        "drives": [DriveOut.model_validate(d).model_dump() for d in drives],
+        "charges": [ChargeOut.model_validate(c).model_dump() for c in charges],
+    }
 
 
 @router.get("/summary")

@@ -18,6 +18,8 @@
       </div>
     </div>
     <div class="controls">
+      <button id="btn-import" class="btn">📁 Load Tesla Data</button>
+      <button id="btn-link" class="btn btn-accent">🔗 Link Tesla Account</button>
       <label for="range">Window</label>
       <select id="range">
         <option value="30">30 days</option>
@@ -29,6 +31,90 @@
       <span id="mode-badge" class="badge">…</span>
     </div>
   </header>
+
+  <!-- Modal: Load Tesla data export -->
+  <div id="import-modal" class="modal hidden">
+    <div class="modal-card">
+      <button class="modal-close" data-close>×</button>
+      <h2>📁 Load Tesla privacy / usage data</h2>
+      <p class="modal-sub">
+        Request your data from Tesla (<em>tesla.com → Privacy → Download Your Data</em>),
+        then upload the export here. Accepts <strong>CSV</strong>, <strong>JSON</strong>
+        or a <strong>ZIP</strong> bundle of drive / charge records.
+      </p>
+      <div id="dropzone" class="dropzone">
+        <input type="file" id="file-input" accept=".csv,.json,.zip" hidden />
+        <div class="dz-inner">
+          <span class="dz-icon">⬆️</span>
+          <span>Drop a file here or <u>browse</u></span>
+          <small id="file-name"></small>
+        </div>
+      </div>
+      <details class="format-help">
+        <summary>Expected columns</summary>
+        <p><strong>Drives:</strong> start_time, end_time, distance (km or miles), duration,
+          start_soc, end_soc, energy_used, avg_speed, outside_temp, start/end_location.</p>
+        <p><strong>Charges:</strong> start_time, end_time, energy_added, charge_type (AC/DC),
+          max_power, start_soc, end_soc, location, cost.</p>
+        <p>Column names are matched loosely (case / spacing insensitive).</p>
+      </details>
+      <div class="modal-actions">
+        <span id="import-status" class="status"></span>
+        <button id="import-submit" class="btn btn-accent" disabled>Import</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Modal: Link Tesla account -->
+  <div id="link-modal" class="modal hidden">
+    <div class="modal-card">
+      <button class="modal-close" data-close>×</button>
+      <h2>🔗 Link your Tesla account</h2>
+      <div class="tabs">
+        <button class="tab active" data-tab="oauth">Sign in with Tesla</button>
+        <button class="tab" data-tab="token">Use access token</button>
+      </div>
+
+      <div class="tab-panel" data-panel="oauth">
+        <p class="modal-sub">
+          Sign in through Tesla's secure OAuth page. Requires a Tesla developer
+          application to be configured on the server
+          (<code>TESLA_CLIENT_ID</code> / <code>TESLA_CLIENT_SECRET</code>).
+        </p>
+        <a id="oauth-btn" class="btn btn-accent block" href="/api/link/oauth/start">
+          Continue to Tesla sign-in →
+        </a>
+        <p id="oauth-unavailable" class="status warn hidden">
+          OAuth isn't configured on this server. Use the access-token tab instead.
+        </p>
+      </div>
+
+      <div class="tab-panel hidden" data-panel="token">
+        <p class="modal-sub">
+          Paste an access token (e.g. from the
+          <a href="https://github.com/adriankumpf/tesla_auth" target="_blank" rel="noopener">tesla_auth</a>
+          tool). It is stored only on your own server.
+        </p>
+        <label class="field">Access token
+          <textarea id="token-input" rows="3" placeholder="eyJhbGciOi..."></textarea>
+        </label>
+        <label class="field">Refresh token <span class="opt">(optional)</span>
+          <input id="refresh-input" type="text" placeholder="optional" />
+        </label>
+        <label class="field">API base URL
+          <select id="baseurl-input">
+            <option value="https://owner-api.teslamotors.com">Owner API</option>
+            <option value="https://fleet-api.prd.na.vn.cloud.tesla.com">Fleet API — North America</option>
+            <option value="https://fleet-api.prd.eu.vn.cloud.tesla.com">Fleet API — Europe</option>
+          </select>
+        </label>
+        <div class="modal-actions">
+          <span id="link-status" class="status"></span>
+          <button id="link-submit" class="btn btn-accent">Link account</button>
+        </div>
+      </div>
+    </div>
+  </div>
 
   <main id="dashboard">
     <section id="kpis" class="kpi-grid"></section>

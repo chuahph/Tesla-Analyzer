@@ -9,6 +9,15 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 from .database import Base
 
 
+class Setting(Base):
+    """Simple key/value store for runtime configuration (e.g. a linked token)."""
+
+    __tablename__ = "settings"
+
+    key: Mapped[str] = mapped_column(String(64), primary_key=True)
+    value: Mapped[str] = mapped_column(String(2048), default="")
+
+
 class Vehicle(Base):
     __tablename__ = "vehicles"
 
