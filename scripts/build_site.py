@@ -53,14 +53,27 @@ def build(out_dir: Path) -> None:
     # --- Copy shared assets --------------------------------------------------
     shutil.copy(STATIC / "style.css", out_dir / "style.css")
     shutil.copy(STATIC / "app.js", out_dir / "app.js")
+    shutil.copy(STATIC / "sw.js", out_dir / "sw.js")
     (out_dir / "vendor").mkdir(exist_ok=True)
     shutil.copy(STATIC / "vendor" / "chart.umd.js", out_dir / "vendor" / "chart.umd.js")
+
+    # PWA icons (copied as-is) and a manifest tailored to the Pages subpath.
+    shutil.copytree(STATIC / "icons", out_dir / "icons", dirs_exist_ok=True)
+    manifest = json.loads((STATIC / "manifest.webmanifest").read_text())
+    manifest["start_url"] = "./"
+    manifest["scope"] = "./"
+    for icon in manifest["icons"]:
+        icon["src"] = icon["src"].replace("/static/icons/", "icons/")
+    (out_dir / "manifest.webmanifest").write_text(json.dumps(manifest, indent=2))
 
     # --- Static index.html (relative asset paths + static data source) -------
     index = (STATIC / "index.html").read_text()
     index = index.replace('href="/static/style.css"', 'href="style.css"')
     index = index.replace('src="/static/vendor/chart.umd.js"', 'src="vendor/chart.umd.js"')
     index = index.replace('src="/static/app.js"', 'src="app.js"')
+    # PWA assets: rewrite root-absolute paths to relative for the Pages subpath.
+    index = index.replace('href="/manifest.webmanifest"', 'href="manifest.webmanifest"')
+    index = index.replace('href="/static/icons/', 'href="icons/')
     # Tell app.js to read the pre-built JSON snapshots, and add a banner.
     index = index.replace(
         "<script src=\"app.js\"></script>",

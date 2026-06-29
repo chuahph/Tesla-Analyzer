@@ -303,4 +303,14 @@ document.getElementById("link-submit").addEventListener("click", async () => {
   }
 });
 
+// Register the service worker so the app installs and works offline on iOS.
+// Self-hosted serves it at /sw.js (root scope); the static Pages build serves
+// it next to index.html (relative scope under the project subpath).
+if ("serviceWorker" in navigator) {
+  const swUrl = STATIC_MODE ? "./sw.js" : "/sw.js";
+  window.addEventListener("load", () =>
+    navigator.serviceWorker.register(swUrl).catch(() => {})
+  );
+}
+
 load();
