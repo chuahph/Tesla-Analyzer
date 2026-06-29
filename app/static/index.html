@@ -1,0 +1,86 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Tesla Analyzer</title>
+  <link rel="stylesheet" href="/static/style.css" />
+  <!-- Chart.js is vendored locally so the dashboard works fully offline. -->
+  <script src="/static/vendor/chart.umd.js"></script>
+</head>
+<body>
+  <header>
+    <div class="brand">
+      <span class="logo">⚡</span>
+      <div>
+        <h1>Tesla Analyzer</h1>
+        <p id="subtitle">Driving · Usage · Charging analytics</p>
+      </div>
+    </div>
+    <div class="controls">
+      <label for="range">Window</label>
+      <select id="range">
+        <option value="30">30 days</option>
+        <option value="60">60 days</option>
+        <option value="90" selected>90 days</option>
+        <option value="180">180 days</option>
+        <option value="365">1 year</option>
+      </select>
+      <span id="mode-badge" class="badge">…</span>
+    </div>
+  </header>
+
+  <main id="dashboard">
+    <section id="kpis" class="kpi-grid"></section>
+
+    <section class="card-grid">
+      <div class="card">
+        <h2>Efficiency vs Temperature</h2>
+        <canvas id="effTempChart"></canvas>
+      </div>
+      <div class="card">
+        <h2>Weekly Efficiency Trend</h2>
+        <canvas id="effTrendChart"></canvas>
+      </div>
+      <div class="card">
+        <h2>Distance by Speed Band</h2>
+        <canvas id="speedBandChart"></canvas>
+      </div>
+      <div class="card">
+        <h2>Trips by Hour of Day</h2>
+        <canvas id="tripsHourChart"></canvas>
+      </div>
+      <div class="card">
+        <h2>Charging: AC vs DC Energy</h2>
+        <canvas id="acdcChart"></canvas>
+      </div>
+      <div class="card">
+        <h2>Charge Target (End SoC)</h2>
+        <canvas id="socTargetChart"></canvas>
+      </div>
+    </section>
+
+    <section class="card full">
+      <h2>Recommendations to improve efficiency &amp; battery health</h2>
+      <div id="recommendations"></div>
+    </section>
+
+    <section class="card-grid">
+      <div class="card">
+        <h2>Top Routes</h2>
+        <ul id="topRoutes" class="plain-list"></ul>
+      </div>
+      <div class="card">
+        <h2>Charging Locations</h2>
+        <ul id="topLocations" class="plain-list"></ul>
+      </div>
+    </section>
+  </main>
+
+  <footer>
+    <span id="footer-meta"></span>
+  </footer>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>

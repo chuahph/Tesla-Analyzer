@@ -1,0 +1,34 @@
+"""Application configuration loaded from environment / .env file."""
+from __future__ import annotations
+
+from functools import lru_cache
+
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+class Settings(BaseSettings):
+    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+
+    # Storage
+    database_url: str = "sqlite:///./data/tesla_analyzer.db"
+
+    # Tesla API credentials. When the access token is empty the app runs in
+    # DEMO mode and serves generated sample data instead of calling Tesla.
+    tesla_access_token: str = ""
+    tesla_refresh_token: str = ""
+    tesla_api_base_url: str = "https://owner-api.teslamotors.com"
+    poll_interval_seconds: int = 60
+
+    # Analysis parameters
+    energy_price_per_kwh: float = 0.30
+    currency: str = "USD"
+    rated_wh_per_km: float = 150.0
+
+    @property
+    def demo_mode(self) -> bool:
+        return not self.tesla_access_token.strip()
+
+
+@lru_cache
+def get_settings() -> Settings:
+    return Settings()
