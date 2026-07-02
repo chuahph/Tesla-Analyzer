@@ -32,6 +32,7 @@ DRIVE_ALIASES = {
     "distance_km": ["distancekm", "distance", "km", "kilometers"],
     "distance_miles": ["distancemiles", "distancemi", "miles", "mi"],
     "duration_min": ["durationmin", "duration", "durationminutes", "minutes"],
+    "duration_sec": ["durations", "durationsec", "durationseconds", "drivedurations"],
     "start_soc": ["startsoc", "startbatterylevel", "socstart", "beginsoc"],
     "end_soc": ["endsoc", "endbatterylevel", "socend"],
     "energy_used_kwh": ["energyusedkwh", "energyused", "energy", "kwhused", "consumedkwh"],
@@ -46,10 +47,11 @@ CHARGE_ALIASES = {
     "start_time": ["starttime", "startdate", "begin", "date", "chargestarttime"],
     "end_time": ["endtime", "enddate", "finish", "chargeendtime"],
     "duration_min": ["durationmin", "duration", "minutes"],
+    "duration_sec": ["durations", "durationsec", "durationseconds", "chargedurations"],
     "start_soc": ["startsoc", "startbatterylevel", "socstart"],
     "end_soc": ["endsoc", "endbatterylevel", "socend"],
     "energy_added_kwh": ["energyaddedkwh", "energyadded", "kwhadded", "energy", "addedkwh"],
-    "charge_type": ["chargetype", "type", "current", "chargercurrenttype"],
+    "charge_type": ["chargetype", "chargertype", "type", "current", "chargercurrenttype"],
     "max_power_kw": ["maxpowerkw", "maxpower", "power", "chargerpower"],
     "location": ["location", "site", "address", "sitename"],
     "cost": ["cost", "price", "amount", "totalcost"],
@@ -67,8 +69,18 @@ def _norm(name: str) -> str:
 
 
 def _build_index(headers: list[str], aliases: dict[str, list[str]]) -> dict[str, str]:
-    """Map our field name -> the actual header present in the file."""
-    normalised = {_norm(h): h for h in headers}
+    """Map our field name -> the actual header present in the file.
+
+    Also registers a copy of each header with a trailing "utc" timezone marker
+    stripped, so Tesla's real export columns like "Charge Start Time (UTC)"
+    ("chargestarttimeutc") match the "chargestarttime" alias.
+    """
+    normalised: dict[str, str] = {}
+    for h in headers:
+        key = _norm(h)
+        normalised.setdefault(key, h)
+        if key.endswith("utc"):
+            normalised.setdefault(key[:-3], h)
     index: dict[str, str] = {}
     for field, names in aliases.items():
         for candidate in [field, *names]:
@@ -111,7 +123,7 @@ def _normalise_drive(row: dict[str, Any], index: dict[str, str]) -> dict[str, An
     start = _dt(g("start_time"))
     if start is None:
         return None
-    duration = _num(g("duration_min"))
+    duration = _num(g("duration_min")) or _num(g("duration_sec")) / 60.0
     end = _dt(g("end_time"))
     if end is None and duration:
         from datetime import timedelta
@@ -151,7 +163,7 @@ def _normalise_charge(row: dict[str, Any], index: dict[str, str]) -> dict[str, A
     start = _dt(g("start_time"))
     if start is None:
         return None
-    duration = _num(g("duration_min"))
+    duration = _num(g("duration_min")) or _num(g("duration_sec")) / 60.0
     end = _dt(g("end_time"))
     if end is None and duration:
         from datetime import timedelta

@@ -110,6 +110,26 @@ def test_empty_zip_raises_helpful_error():
         assert "ZIP" in str(exc)
 
 
+OFFICIAL_TESLA_CHARGING = (
+    "VIN,Charge Start Time (UTC),Charge End Time (UTC),Charge Duration (s),"
+    "Energy Added (kWh),Charger Type,Location\n"
+    "LRW3F7EK3RC309372,2026-06-11 06:59:28,2026-06-11 09:14:39,8111,25.02,General - AC power,Home\n"
+    "LRW3F7EK3RC309372,2026-06-14 23:43:47,2026-06-15 07:51:39,29272,52.78,General - AC power,Work\n"
+)
+
+
+def test_official_tesla_charging_export():
+    """Tesla's real export uses '(UTC)' suffixes, 'Charger Type', and seconds."""
+    drives, charges = parse_upload("Charging_Data.csv", OFFICIAL_TESLA_CHARGING.encode())
+    assert drives == []
+    assert len(charges) == 2
+    assert [c["charge_type"] for c in charges] == ["AC", "AC"]
+    assert abs(charges[0]["energy_added_kwh"] - 25.02) < 1e-6
+    # 8111 seconds -> ~135.2 minutes
+    assert 134 < charges[0]["duration_min"] < 136
+    assert charges[0]["location"] == "Home"
+
+
 def test_parse_garbage_raises():
     try:
         parse_upload("notes.txt", b"hello world, nothing useful here")

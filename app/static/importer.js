@@ -12,6 +12,7 @@
     distance_km: ["distancekm", "distance", "km", "kilometers"],
     distance_miles: ["distancemiles", "distancemi", "miles", "mi"],
     duration_min: ["durationmin", "duration", "durationminutes", "minutes"],
+    duration_sec: ["durations", "durationsec", "durationseconds", "drivedurations"],
     start_soc: ["startsoc", "startbatterylevel", "socstart", "beginsoc"],
     end_soc: ["endsoc", "endbatterylevel", "socend"],
     energy_used_kwh: ["energyusedkwh", "energyused", "energy", "kwhused", "consumedkwh"],
@@ -25,10 +26,11 @@
     start_time: ["starttime", "startdate", "begin", "date", "chargestarttime"],
     end_time: ["endtime", "enddate", "finish", "chargeendtime"],
     duration_min: ["durationmin", "duration", "minutes"],
+    duration_sec: ["durations", "durationsec", "durationseconds", "chargedurations"],
     start_soc: ["startsoc", "startbatterylevel", "socstart"],
     end_soc: ["endsoc", "endbatterylevel", "socend"],
     energy_added_kwh: ["energyaddedkwh", "energyadded", "kwhadded", "energy", "addedkwh"],
-    charge_type: ["chargetype", "type", "current", "chargercurrenttype"],
+    charge_type: ["chargetype", "chargertype", "type", "current", "chargercurrenttype"],
     max_power_kw: ["maxpowerkw", "maxpower", "power", "chargerpower"],
     location: ["location", "site", "address", "sitename"],
     cost: ["cost", "price", "amount", "totalcost"],
@@ -38,7 +40,12 @@
   const norm = (s) => s.toLowerCase().replace(/[^a-z0-9]/g, "");
   function buildIndex(headers, aliases) {
     const normed = {};
-    headers.forEach((h) => { normed[norm(h)] = h; });
+    headers.forEach((h) => {
+      const key = norm(h);
+      if (normed[key] === undefined) normed[key] = h;
+      // Strip a trailing "utc" so "Charge Start Time (UTC)" matches "chargestarttime".
+      if (key.endsWith("utc") && normed[key.slice(0, -3)] === undefined) normed[key.slice(0, -3)] = h;
+    });
     const idx = {};
     for (const field in aliases) {
       for (const cand of [field, ...aliases[field]]) {
@@ -66,7 +73,7 @@
     const g = (f) => (idx[f] !== undefined ? row[idx[f]] : undefined);
     const start = dt(g("start_time"));
     if (!start) return null;
-    let duration = num(g("duration_min"));
+    let duration = num(g("duration_min")) || num(g("duration_sec")) / 60;
     let end = dt(g("end_time"));
     if (!end && duration) end = new Date(start.getTime() + duration * 60000);
     end = end || start;
@@ -88,7 +95,7 @@
     const g = (f) => (idx[f] !== undefined ? row[idx[f]] : undefined);
     const start = dt(g("start_time"));
     if (!start) return null;
-    let duration = num(g("duration_min"));
+    let duration = num(g("duration_min")) || num(g("duration_sec")) / 60;
     let end = dt(g("end_time"));
     if (!end && duration) end = new Date(start.getTime() + duration * 60000);
     end = end || start;
