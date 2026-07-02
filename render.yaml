@@ -1,0 +1,20 @@
+# Render.com Blueprint — deploy the Tesla Analyzer backend from a phone browser.
+# In Render: New → Blueprint → connect this repo. Render reads this file and
+# builds the Dockerfile. Free plan; Singapore region (closest to Malaysia).
+services:
+  - type: web
+    name: tesla-analyzer
+    runtime: docker
+    region: singapore
+    plan: free
+    branch: main
+    healthCheckPath: /api/health
+    envVars:
+      - key: ENERGY_PRICE_PER_KWH
+        value: "0.90"
+      - key: CURRENCY
+        value: RM
+      - key: RATED_WH_PER_KM
+        value: "150"
+      # Leave Tesla credentials unset — you'll link your account from the
+      # dashboard (🔗 Link Tesla Account → paste an access token).
