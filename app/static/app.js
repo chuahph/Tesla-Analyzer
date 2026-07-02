@@ -189,8 +189,9 @@ async function load() {
     badge.className = "badge " + mode;
     if (STATIC_MODE) updateResetButton();
 
+    const v = d.vehicle;
     document.getElementById("subtitle").textContent =
-      `${d.vehicle.name} · ${d.vehicle.model}${d.vehicle.trim ? " " + d.vehicle.trim : ""}`;
+      [v.name, [v.model, v.trim].filter(Boolean).join(" ")].filter(Boolean).join(" · ");
 
     renderKpis(d);
     renderCharts(d);
@@ -257,7 +258,7 @@ const fileInput = document.getElementById("file-input");
 const dropzone = document.getElementById("dropzone");
 const importSubmit = document.getElementById("import-submit");
 const importStatus = document.getElementById("import-status");
-let pendingFile = null;
+let pendingFiles = [];
 
 document.getElementById("btn-import").addEventListener("click", () => {
   openModal("import-modal");
@@ -285,37 +286,42 @@ dropzone.addEventListener("click", () => fileInput.click());
   dropzone.addEventListener(ev, (e) => { e.preventDefault(); dropzone.classList.add("dragover"); }));
 ["dragleave", "drop"].forEach((ev) =>
   dropzone.addEventListener(ev, (e) => { e.preventDefault(); dropzone.classList.remove("dragover"); }));
-dropzone.addEventListener("drop", (e) => { if (e.dataTransfer.files[0]) selectFile(e.dataTransfer.files[0]); });
-fileInput.addEventListener("change", () => { if (fileInput.files[0]) selectFile(fileInput.files[0]); });
+dropzone.addEventListener("drop", (e) => { if (e.dataTransfer.files.length) selectFiles(e.dataTransfer.files); });
+fileInput.addEventListener("change", () => { if (fileInput.files.length) selectFiles(fileInput.files); });
 
-function selectFile(file) {
-  pendingFile = file;
-  document.getElementById("file-name").textContent = file.name;
+function selectFiles(files) {
+  pendingFiles = Array.from(files);
+  document.getElementById("file-name").textContent =
+    pendingFiles.map((f) => f.name).join(", ");
   importSubmit.disabled = false;
   setStatus(importStatus, "", "");
 }
 
 importSubmit.addEventListener("click", async () => {
-  if (!pendingFile) return;
+  if (!pendingFiles.length) return;
   setStatus(importStatus, "Importing…", "");
   importSubmit.disabled = true;
   try {
     let drivesN, chargesN;
     if (STATIC_MODE) {
-      // Parse and analyse entirely in the browser — no backend needed.
-      const { drives, charges } = await TA.parseUpload(pendingFile);
+      // Parse, merge and analyse entirely in the browser — no backend needed.
+      const { drives, charges, vehicle } = await TA.parseFiles(pendingFiles);
       const dataset = {
-        vehicle: { name: "Imported Tesla", model: "Imported", trim: "" },
+        vehicle: vehicle || { name: "Imported Tesla", model: "Imported", trim: "" },
         drives, charges, source: "imported",
       };
       localStorage.setItem(STORE_KEY, JSON.stringify(dataset));
       drivesN = drives.length; chargesN = charges.length;
     } else {
-      const fd = new FormData();
-      fd.append("file", pendingFile);
-      const res = await fetch("/api/import", { method: "POST", body: fd });
-      const body = await res.json();
-      if (!res.ok) throw new Error(body.detail || "Import failed");
+      // Self-hosted: send each selected file to the API (last one wins for now).
+      let body;
+      for (const f of pendingFiles) {
+        const fd = new FormData();
+        fd.append("file", f);
+        const res = await fetch("/api/import", { method: "POST", body: fd });
+        body = await res.json();
+        if (!res.ok) throw new Error(body.detail || "Import failed");
+      }
       drivesN = body.imported_drives; chargesN = body.imported_charges;
     }
     setStatus(importStatus, `Imported ${drivesN} drives & ${chargesN} charges.`, "ok");

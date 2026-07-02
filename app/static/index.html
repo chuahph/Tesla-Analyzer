@@ -50,13 +50,13 @@
       <button class="modal-close" data-close>×</button>
       <h2>📁 Load Tesla privacy / usage data</h2>
       <p class="modal-sub">
-        Request your data from Tesla (<em>tesla.com → Privacy → Download Your Data</em>),
-        then upload the export here. Drop in the whole <strong>.zip</strong> — nested
-        folders are fine — or a single <strong>CSV</strong> / <strong>JSON</strong> file
-        of drive / charge records.
+        Request your data from Tesla (<em>tesla.com → Privacy → Download Your Data</em>).
+        Tesla's ZIP is password-protected, so <strong>unzip it first</strong> and select
+        the CSVs inside — you can pick <strong>several at once</strong> (e.g. “Charging
+        Data.csv” + “Vehicle Details.csv”) and they'll be merged. CSV / JSON accepted.
       </p>
       <div id="dropzone" class="dropzone">
-        <input type="file" id="file-input" accept=".csv,.json,.zip" hidden />
+        <input type="file" id="file-input" accept=".csv,.json,.zip" multiple hidden />
         <div class="dz-inner">
           <span class="dz-icon">⬆️</span>
           <span>Drop a file here or <u>browse</u></span>
