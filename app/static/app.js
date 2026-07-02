@@ -61,8 +61,23 @@ function barConfig(labels, data, label, color) {
   };
 }
 
+// Show/hide a chart's card; destroy the chart when hidden so stale data from a
+// previous dataset (e.g. demo) never lingers after importing charge-only data.
+function showCard(canvasId, show) {
+  const canvas = document.getElementById(canvasId);
+  const card = canvas && canvas.closest(".card");
+  if (card) card.style.display = show ? "" : "none";
+  if (!show) destroy(canvasId);
+}
+
 function renderCharts(d) {
   const eff = d.efficiency, drv = d.driving, chg = d.charging;
+
+  showCard("effTempChart", eff.available);
+  showCard("effTrendChart", eff.available);
+  showCard("speedBandChart", drv.available);
+  showCard("tripsHourChart", drv.available);
+  showCard("acdcChart", chg.available);
 
   if (eff.available) {
     const t = eff.efficiency_by_temp;
@@ -102,8 +117,14 @@ function renderCharts(d) {
     });
 
     const st = chg.end_soc_targets;
-    makeChart("socTargetChart", barConfig(Object.keys(st).map(s => s + "%"),
-      Object.values(st), "sessions", "#3b82f6"));
+    const hasSoc = Object.keys(st).some((k) => +k > 0); // exports without SoC -> all "0"
+    showCard("socTargetChart", hasSoc);
+    if (hasSoc) {
+      makeChart("socTargetChart", barConfig(Object.keys(st).map(s => s + "%"),
+        Object.values(st), "sessions", "#3b82f6"));
+    }
+  } else {
+    showCard("socTargetChart", false);
   }
 }
 
