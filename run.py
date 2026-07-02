@@ -12,7 +12,11 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
+
+# Cloud hosts (Render/Railway/Fly/…) inject the port to bind via $PORT.
+DEFAULT_PORT = int(os.environ.get("PORT", "8000"))
 
 
 def cmd_serve(args):
@@ -102,7 +106,7 @@ def main(argv=None):
 
     p = sub.add_parser("serve", help="Run the web dashboard + API")
     p.add_argument("--host", default="0.0.0.0")
-    p.add_argument("--port", type=int, default=8000)
+    p.add_argument("--port", type=int, default=DEFAULT_PORT)
     p.add_argument("--reload", action="store_true")
     p.set_defaults(func=cmd_serve)
 
@@ -126,7 +130,7 @@ def main(argv=None):
     if not getattr(args, "command", None):
         args.command = "serve"
         args.func = cmd_serve
-        args.host, args.port, args.reload = "0.0.0.0", 8000, False
+        args.host, args.port, args.reload = "0.0.0.0", DEFAULT_PORT, False
     args.func(args)
 
 
