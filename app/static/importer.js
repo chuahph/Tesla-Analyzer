@@ -108,7 +108,7 @@
     else ctype = power > 22 ? "DC" : "AC";
     let cost = num(g("cost"));
     const energy = +num(g("energy_added_kwh")).toFixed(3);
-    if (!cost && energy) cost = +(energy * (ctype === "DC" ? 0.45 : 0.30)).toFixed(2);
+    if (!cost && energy) cost = +(energy * 0.90).toFixed(2); // RM 0.90/kWh
     return {
       start_time: start.toISOString(), end_time: end.toISOString(),
       duration_min: +duration.toFixed(1), start_soc: num(g("start_soc")), end_soc: num(g("end_soc")),

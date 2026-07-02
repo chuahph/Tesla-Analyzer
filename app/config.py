@@ -28,8 +28,8 @@ class Settings(BaseSettings):
     tesla_oauth_audience: str = "https://fleet-api.prd.na.vn.cloud.tesla.com"
 
     # Analysis parameters
-    energy_price_per_kwh: float = 0.30
-    currency: str = "USD"
+    energy_price_per_kwh: float = 0.90
+    currency: str = "RM"
     rated_wh_per_km: float = 150.0
 
     @property

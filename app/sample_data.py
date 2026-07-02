@@ -58,7 +58,7 @@ def generate(session: Session, days: int = 120, seed: int = 42) -> Vehicle:
 
     rated = 148.0  # Wh/km nominal for this model
     capacity = vehicle.battery_capacity_kwh
-    energy_price = 0.30
+    energy_price = 0.90   # RM per kWh (home AC)
 
     soc = 80.0  # start state of charge (%)
     start = datetime.now() - timedelta(days=days)
@@ -127,7 +127,7 @@ def generate(session: Session, days: int = 120, seed: int = 42) -> Vehicle:
                 power = rng.uniform(120, 250)
                 duration = energy_added / power * 60.0 * rng.uniform(1.2, 1.6)
                 location = rng.choice(SUPERCHARGERS)
-                price = 0.45
+                price = 1.25   # RM per kWh (DC / Supercharger)
                 t0 = day.replace(hour=rng.choice([13, 14, 15]), minute=rng.randint(0, 59))
             else:
                 power = rng.uniform(7, 11)
