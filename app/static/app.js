@@ -391,6 +391,58 @@ document.getElementById("link-submit").addEventListener("click", async () => {
   }
 });
 
+// --- Button 3: live snapshot via iOS Shortcut ---
+function renderLiveStatus() {
+  const el = document.getElementById("live-status");
+  const s = TA.liveStatus && TA.liveStatus();
+  if (!s) { el.textContent = "No live data yet."; return; }
+  const when = new Date(s.ts);
+  const state = s.charging
+    ? `⚡ charging ${Math.round(s.charger_kw)} kW`
+    : (s.shift && s.shift !== "P" ? `🚗 driving ${Math.round(s.speed_kmh)} km/h` : "🅿️ parked");
+  el.innerHTML =
+    `<strong>${s.name}</strong> · ${dateFmt.format(when)} ${hhmm(when)} MYT<br>` +
+    `🔋 ${Math.round(s.soc)}% (${Math.round(s.range_km)} km) · ${state}<br>` +
+    `odometer ${Math.round(s.odo_km).toLocaleString()} km · ${Math.round(s.out_temp)}°C`;
+}
+
+function ingestLive(json) {
+  const res = TA.ingestSnapshot(json);
+  renderLiveStatus();
+  const a = res.added;
+  setStatus(document.getElementById("live-msg"),
+    a.drives || a.charges
+      ? `Logged ${a.drives} drive(s) & ${a.charges} charge(s).`
+      : "Snapshot saved. Tap again at your next stop to log a trip.", "ok");
+  load();
+  return res;
+}
+
+const btnLive = document.getElementById("btn-live");
+if (btnLive && !STATIC_MODE) btnLive.style.display = "none"; // live ingest targets the in-browser dataset
+if (btnLive) {
+  btnLive.addEventListener("click", () => { openModal("live-modal"); renderLiveStatus(); });
+  document.getElementById("live-submit").addEventListener("click", () => {
+    const box = document.getElementById("live-input");
+    const txt = box.value.trim();
+    if (!txt) { setStatus(document.getElementById("live-msg"), "Paste the vehicle_data JSON first.", "err"); return; }
+    try { ingestLive(txt); box.value = ""; }
+    catch (e) { setStatus(document.getElementById("live-msg"), "Couldn't read that JSON: " + e.message, "err"); }
+  });
+}
+
+// Auto-ingest when an iOS Shortcut opens the app with #live=<base64 json>.
+(function () {
+  const m = location.hash.match(/[#&]live=([^&]+)/);
+  if (!m) return;
+  try {
+    const json = decodeURIComponent(escape(atob(decodeURIComponent(m[1]))));
+    history.replaceState(null, "", location.pathname + location.search);
+    openModal("live-modal");
+    ingestLive(json);
+  } catch (e) { /* ignore a malformed live payload */ }
+})();
+
 // Register the service worker so the app installs and works offline on iOS.
 // Self-hosted serves it at /sw.js (root scope); the static Pages build serves
 // it next to index.html (relative scope under the project subpath).

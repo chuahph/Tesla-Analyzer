@@ -31,6 +31,7 @@
     </div>
     <div class="controls">
       <button id="btn-import" class="btn">📁 Load Tesla Data</button>
+      <button id="btn-live" class="btn">⚡ Live</button>
       <button id="btn-link" class="btn btn-accent">🔗 Link Tesla Account</button>
       <label for="range">Window</label>
       <select id="range">
@@ -130,6 +131,44 @@
     </div>
   </div>
 
+  <!-- Modal: Live snapshot via iOS Shortcut -->
+  <div id="live-modal" class="modal hidden">
+    <div class="modal-card">
+      <button class="modal-close" data-close>×</button>
+      <h2>⚡ Live snapshot (iOS Shortcut)</h2>
+      <p class="modal-sub">
+        A browser can't call Tesla's API directly, but the iPhone <strong>Shortcuts</strong>
+        app can. Run your Shortcut to grab a live reading, then it lands here. Tap once
+        when you park at each stop and the app turns consecutive snapshots into drives
+        &amp; charges.
+      </p>
+
+      <div id="live-status" class="live-status">No live data yet.</div>
+
+      <label class="field">Paste <code>vehicle_data</code> JSON
+        <textarea id="live-input" rows="4" placeholder='{"response":{"drive_state":{…},"charge_state":{…}}}'></textarea>
+      </label>
+      <div class="modal-actions">
+        <span id="live-msg" class="status"></span>
+        <button id="live-submit" class="btn btn-accent">Add snapshot</button>
+      </div>
+
+      <details class="format-help">
+        <summary>Set up the iPhone Shortcut (one time)</summary>
+        <ol>
+          <li>Get a Tesla <strong>access token</strong> (e.g. the <em>Auth app for Tesla</em> or a token Shortcut).</li>
+          <li>New Shortcut → <strong>Get Contents of URL</strong>:
+            <br><code>https://owner-api.teslamotors.com/api/1/vehicles/&lt;id&gt;/vehicle_data</code>
+            <br>Header <code>Authorization: Bearer &lt;token&gt;</code>.</li>
+          <li>Add <strong>Base64 Encode</strong> the result, then <strong>Open URL</strong>:
+            <br><code>https://chuahph.github.io/Tesla-Analyzer/#live=[Base64]</code></li>
+          <li>Run it → the app opens and logs the snapshot automatically. (Or just paste the JSON above.)</li>
+        </ol>
+        <p>Snapshots and any reconstructed trips are stored only on your phone.</p>
+      </details>
+    </div>
+  </div>
+
   <main id="dashboard">
     <section id="kpis" class="kpi-grid"></section>
 
@@ -185,6 +224,7 @@
   <script src="/static/vendor/jszip.min.js"></script>
   <script src="/static/analysis.js"></script>
   <script src="/static/importer.js"></script>
+  <script src="/static/live.js"></script>
   <script src="/static/app.js"></script>
 </body>
 </html>
