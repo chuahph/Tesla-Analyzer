@@ -6,6 +6,17 @@
 (function () {
   const MILES_TO_KM = 1.60934;
 
+  // Tesla's "Download Your Data" ZIP is password-protected; browsers/JSZip can't
+  // read it. Ask the user to unzip and upload the CSVs instead.
+  class EncryptedZipError extends Error {
+    constructor() {
+      super("This ZIP is password-protected — Tesla encrypts the export. Unzip it " +
+        "(with Tesla's password) and upload the CSV files inside, e.g. “Charging " +
+        "Data.csv” and “Vehicle Details.csv”.");
+      this.name = "EncryptedZipError";
+    }
+  }
+
   const DRIVE_ALIASES = {
     start_time: ["starttime", "startdate", "begin", "starteddate", "date", "departuretime"],
     end_time: ["endtime", "enddate", "finish", "endeddate", "arrivaltime"],
@@ -67,6 +78,34 @@
   function looksLikeCharges(headers) {
     const idx = buildIndex(headers, CHARGE_ALIASES);
     return "energy_added_kwh" in idx || "charge_type" in idx || "max_power_kw" in idx;
+  }
+
+  // --- Vehicle Details (VIN/YEAR/MODEL/COLOR) so the dashboard shows the car ---
+  const VEHICLE_ALIASES = {
+    vin: ["vin"],
+    year: ["year", "modelyear"],
+    model: ["model", "carmodel"],
+    color: ["color", "colour", "paint", "exteriorcolor", "paintcolor"],
+    plate: ["licenseplate", "plate", "registration", "regno"],
+  };
+  function looksLikeVehicle(headers) {
+    const idx = buildIndex(headers, VEHICLE_ALIASES);
+    return "vin" in idx && ("model" in idx || "year" in idx) && !looksLikeCharges(headers);
+  }
+  function titleCase(s) {
+    return String(s || "").trim().split(/\s+/)
+      .map((w) => (w ? w[0].toUpperCase() + w.slice(1).toLowerCase() : w)).join(" ");
+  }
+  function parseVehicle(records, headers) {
+    if (!records.length) return null;
+    const idx = buildIndex(headers, VEHICLE_ALIASES);
+    const r = records[0];
+    const g = (f) => (idx[f] !== undefined ? r[idx[f]] : "");
+    const year = String(g("year") || "").trim();
+    const model = titleCase(g("model"));   // "MODEL 3" -> "Model 3"
+    const color = titleCase(g("color"));
+    const name = [year, model].filter(Boolean).join(" ") || "My Tesla";
+    return { name, model: color, trim: "", vin: String(g("vin") || "").trim() };
   }
 
   function normaliseDrive(row, idx) {
@@ -143,6 +182,9 @@
     if (!rows.length) return { drives: [], charges: [] };
     const headers = rows[0];
     const records = rows.slice(1).map((r) => { const o = {}; headers.forEach((h, i) => o[h] = r[i]); return o; });
+    if (looksLikeVehicle(headers)) {
+      return { drives: [], charges: [], vehicle: parseVehicle(records, headers) };
+    }
     if (looksLikeCharges(headers)) {
       const idx = buildIndex(headers, CHARGE_ALIASES);
       return { drives: [], charges: records.map((r) => normaliseCharge(r, idx)).filter(Boolean) };
@@ -172,47 +214,73 @@
 
   async function parseZip(arrayBuffer) {
     if (typeof JSZip === "undefined") throw new Error("ZIP support failed to load.");
-    const zip = await JSZip.loadAsync(arrayBuffer);
-    let drives = [], charges = [];
+    let zip;
+    try {
+      zip = await JSZip.loadAsync(arrayBuffer);
+    } catch (e) {
+      if (/encrypt|password/i.test(String(e && e.message))) throw new EncryptedZipError();
+      throw e;
+    }
+    let drives = [], charges = [], vehicle = null, encrypted = false;
     const entries = Object.values(zip.files);
     for (const entry of entries) {
       if (entry.dir || isJunk(entry.name)) continue;
       const lower = entry.name.toLowerCase();
       try {
         if (lower.endsWith(".zip")) {
-          const buf = await entry.async("arraybuffer");
-          const inner = await parseZip(buf);
+          const inner = await parseZip(await entry.async("arraybuffer"));
           drives = drives.concat(inner.drives); charges = charges.concat(inner.charges);
+          vehicle = vehicle || inner.vehicle;
         } else if (lower.endsWith(".csv") || lower.endsWith(".tsv") || lower.endsWith(".txt")) {
-          const r = parseCSV(await entry.async("string")); drives = drives.concat(r.drives); charges = charges.concat(r.charges);
+          const r = parseCSV(await entry.async("string"));
+          drives = drives.concat(r.drives); charges = charges.concat(r.charges);
+          vehicle = vehicle || r.vehicle;
         } else if (lower.endsWith(".json")) {
-          const r = parseJSONText(await entry.async("string")); drives = drives.concat(r.drives); charges = charges.concat(r.charges);
+          const r = parseJSONText(await entry.async("string"));
+          drives = drives.concat(r.drives); charges = charges.concat(r.charges);
         }
-      } catch (e) { /* skip an unreadable inner file */ }
+      } catch (e) {
+        if (/encrypt|password/i.test(String(e && e.message))) encrypted = true;
+        // otherwise skip an unreadable inner file
+      }
     }
-    return { drives, charges };
+    if (encrypted && !drives.length && !charges.length && !vehicle) throw new EncryptedZipError();
+    return { drives, charges, vehicle };
   }
 
-  async function parseUpload(file) {
+  async function parseOne(file) {
     const name = (file.name || "").toLowerCase();
     const head = new Uint8Array(await file.slice(0, 2).arrayBuffer());
     const isZip = name.endsWith(".zip") || (head[0] === 0x50 && head[1] === 0x4b); // "PK"
-    let result;
-    if (isZip) {
-      result = await parseZip(await file.arrayBuffer());
-    } else {
-      const text = await file.text();
-      const t = text.trimStart();
-      result = name.endsWith(".json") || t[0] === "{" || t[0] === "[" ? parseJSONText(text) : parseCSV(text);
+    if (isZip) return await parseZip(await file.arrayBuffer());
+    const text = await file.text();
+    const t = text.trimStart();
+    return name.endsWith(".json") || t[0] === "{" || t[0] === "[" ? parseJSONText(text) : parseCSV(text);
+  }
+
+  // Parse and MERGE one or more files (e.g. Vehicle Details + Charging Data).
+  async function parseFiles(files) {
+    let drives = [], charges = [], vehicle = null;
+    for (const f of Array.from(files)) {
+      const r = await parseOne(f);
+      drives = drives.concat(r.drives || []);
+      charges = charges.concat(r.charges || []);
+      vehicle = vehicle || r.vehicle || null;
     }
-    if (!result.drives.length && !result.charges.length) {
-      throw new Error(isZip
-        ? "No drive or charge records found inside the ZIP. Make sure it contains CSV/JSON files with columns like start_time, distance, energy, soc (drives) or energy_added, charge_type, power (charges)."
-        : "No records found. Expected CSV/JSON/ZIP with columns like start_time, distance, energy, soc (drives) or energy_added, charge_type, power (charges).");
+    if (!drives.length && !charges.length) {
+      throw new Error(vehicle
+        ? "Loaded the vehicle details, but no drive or charge records were found. Add your Charging Data / trips file too."
+        : "No records found. Upload your Tesla Charging Data (and optionally Vehicle Details) as CSV/JSON, or an unencrypted ZIP of them.");
     }
+    return { drives, charges, vehicle };
+  }
+
+  async function parseUpload(file) {
+    const result = await parseFiles([file]);
     return result;
   }
 
   window.TA = window.TA || {};
   window.TA.parseUpload = parseUpload;
+  window.TA.parseFiles = parseFiles;
 })();
