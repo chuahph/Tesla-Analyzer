@@ -5,8 +5,8 @@
  */
 (function () {
   const RATED_WH_PER_KM = 150.0;
-  const ENERGY_PRICE = 0.30;
-  const CURRENCY = "USD";
+  const ENERGY_PRICE = 0.90;   // RM per kWh
+  const CURRENCY = "RM";
 
   // --- stats helpers (mirror app/analysis/__init__.py) ---
   function mean(xs) {

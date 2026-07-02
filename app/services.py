@@ -32,8 +32,7 @@ def replace_with_import(
     for c in charges:
         c = dict(c)
         if not c.get("cost") and c.get("energy_added_kwh"):
-            price = 0.45 if c.get("charge_type") == "DC" else settings.energy_price_per_kwh
-            c["cost"] = round(c["energy_added_kwh"] * price, 2)
+            c["cost"] = round(c["energy_added_kwh"] * settings.energy_price_per_kwh, 2)
         session.add(Charge(vehicle_id=vehicle.id, **c))
 
     session.commit()
