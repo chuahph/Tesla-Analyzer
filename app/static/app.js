@@ -286,8 +286,10 @@ async function load() {
     }
 
     const v = d.vehicle;
+    const realVin = v.vin && !/^(DEMO|IMPORT|LINKED)/.test(v.vin) ? `VIN ${v.vin}` : null;
     document.getElementById("subtitle").textContent =
-      [v.name, [v.model, v.trim].filter(Boolean).join(" ")].filter(Boolean).join(" · ");
+      [v.name, [v.model, v.trim].filter(Boolean).join(" "), realVin]
+        .filter(Boolean).join(" · ");
 
     renderKpis(d);
     renderCharts(d);
