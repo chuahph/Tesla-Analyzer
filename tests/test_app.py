@@ -51,6 +51,28 @@ def test_linked_vehicle_preferred_and_demo_purged(seeded):
     assert vins == [real.vin]  # demo vehicle and its data are gone
 
 
+def test_sync_key_lets_cron_through_the_gate():
+    settings = get_settings()
+    old_pc, old_sk = settings.app_passcode, settings.sync_key
+    settings.app_passcode = "secret123"
+    settings.sync_key = "cron-key-42"
+    try:
+        with TestClient(app) as client:
+            # No key / wrong key -> locked.
+            assert client.get("/api/sync").status_code == 401
+            assert client.get("/api/sync?key=nope").status_code == 401
+            assert client.post("/api/sync").status_code == 401
+            # Correct key passes the gate (400 = reached the endpoint, no
+            # linked account in the test database).
+            resp = client.get("/api/sync?key=cron-key-42")
+            assert resp.status_code == 400
+            assert "link" in resp.json()["detail"].lower()
+            # The key opens only /api/sync, nothing else.
+            assert client.get("/api/summary?key=cron-key-42").status_code == 401
+    finally:
+        settings.app_passcode, settings.sync_key = old_pc, old_sk
+
+
 def test_no_passcode_means_open():
     settings = get_settings()
     old = settings.app_passcode

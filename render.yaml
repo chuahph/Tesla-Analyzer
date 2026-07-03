@@ -29,6 +29,10 @@ services:
       # passcode; the app then requires it to open.
       - key: APP_PASSCODE
         sync: false
+      # Secret for hands-off logging: an external cron service calls
+      # /api/sync?key=<SYNC_KEY> every few minutes.
+      - key: SYNC_KEY
+        sync: false
       # Talk to Tesla's current (Fleet) API — Asia-Pacific is served by the
       # North America endpoint.
       - key: TESLA_API_BASE_URL

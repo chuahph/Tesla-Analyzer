@@ -172,6 +172,7 @@ def oauth_callback(
     return RedirectResponse(f"/?linked={result['source']}")
 
 
+@router.get("/sync")  # GET so external cron/uptime services can trigger it
 @router.post("/sync")
 def sync_now(session: Session = Depends(get_session)):
     """Snapshot the linked car and log what happened since the last snapshot."""
