@@ -118,6 +118,8 @@ main { padding: 24px 28px 60px; max-width: 1280px; margin: 0 auto; }
   padding: 16px 18px;
 }
 .kpi .label { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: .5px; }
+.kpi-empty { grid-column: 1 / -1; }
+.kpi-empty .sub { margin-top: 6px; line-height: 1.5; }
 .kpi .value { font-size: 26px; font-weight: 700; margin-top: 6px; }
 .kpi .sub { color: var(--muted); font-size: 12px; margin-top: 4px; }
 
