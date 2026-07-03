@@ -51,8 +51,11 @@
       </select>
       <span id="mode-badge" class="badge">…</span>
     </div>
-    <!-- Car status line: a full-width header row of its own, always. -->
-    <p id="sync-status" class="status"></p>
+    <!-- Car status: battery on one line, condition/remark on the next. -->
+    <div id="sync-status" class="status" style="display:none">
+      <span id="sync-batt"></span>
+      <span id="sync-cond"></span>
+    </div>
   </header>
 
   <!-- Modal: Load Tesla data export -->

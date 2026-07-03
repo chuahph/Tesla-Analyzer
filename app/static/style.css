@@ -276,10 +276,12 @@ footer { padding: 18px 28px; color: var(--muted); font-size: 12px; border-top: 1
 .status { font-size: 13px; color: var(--muted); }
 .status.ok { color: var(--green); }
 .status.err, .status.warn { color: var(--amber); }
-/* The battery/remark line is its own full-width header row — structurally,
-   not via flex ordering, so no layout can pull it inline. */
+/* The car status is its own full-width header block — battery on one line,
+   condition/remark on the next. */
 #sync-status { width: 100%; margin: 0; line-height: 1.5; }
-#sync-status:empty { display: none; }
+#sync-status span { display: block; }
+#sync-status span:empty { display: none; }
+#sync-batt { font-weight: 700; }
 .hidden { display: none; }
 
 /* --- Mobile / iPhone layout --- */

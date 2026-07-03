@@ -533,31 +533,42 @@ document.getElementById("link-submit").addEventListener("click", async () => {
 });
 
 // --- Sync now (live mode): snapshot the car, log drives/charges since last time ---
+// Battery reading on the first line, car condition/remark on the second.
+function setSyncStatus(batt, cond, kind) {
+  const wrap = document.getElementById("sync-status");
+  const b = document.getElementById("sync-batt");
+  const c = document.getElementById("sync-cond");
+  if (!wrap || !b || !c) return;
+  b.textContent = batt || "";
+  c.textContent = cond || "";
+  wrap.className = "status" + (kind ? " " + kind : "");
+  wrap.style.display = batt || cond ? "" : "none";
+}
+
 let syncBusy = false;
 async function syncNow() {
   if (syncBusy) return;
   syncBusy = true;
-  const status = document.getElementById("sync-status");
-  setStatus(status, "Syncing…", "");
+  setSyncStatus("", "Syncing…", "");
   try {
     const res = await fetch("/api/sync", { method: "POST" });
     const body = await res.json();
     if (!res.ok) throw new Error(body.detail || "Sync failed");
     if (body.status === "asleep") {
-      const last = body.last && body.last.soc
-        ? ` · last known 🔋 ${Math.round(body.last.soc)}%` : "";
-      setStatus(status, `😴 Car asleep${last} — sync after a drive or while charging.`, "warn");
+      const batt = body.last && body.last.soc
+        ? `🔋 ${Math.round(body.last.soc)}% (last known)` : "";
+      setSyncStatus(batt, "😴 Car asleep — sync after a drive or while charging.", "warn");
     } else {
       const l = body.logged || {};
       const extra = (l.drives || l.charges)
         ? ` · logged ${l.drives} drive(s), ${l.charges} charge(s)`
         : "";
       const trip = body.trip_in_progress ? " · 🚗 trip in progress" : "";
-      setStatus(status, `🔋 ${Math.round(body.soc)}% · ${body.status}${trip}${extra}`, "ok");
+      setSyncStatus(`🔋 ${Math.round(body.soc)}%`, `${body.status}${trip}${extra}`, "ok");
       if (l.drives || l.charges) load();
     }
   } catch (e) {
-    setStatus(status, e.message, "err");
+    setSyncStatus("", e.message, "err");
   } finally {
     syncBusy = false;
   }
