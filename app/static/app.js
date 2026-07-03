@@ -128,7 +128,26 @@ function renderCharts(d) {
   }
 }
 
+// "2026-07-03T21:15" (wall time) or "...Z" (UTC) -> "03 Jul 21:15" in MYT.
+const TRIP_MONTHS = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
+const tripTimeFmt = new Intl.DateTimeFormat("en-GB", {
+  timeZone: "Asia/Kuala_Lumpur", day: "2-digit", month: "short",
+  hour: "2-digit", minute: "2-digit", hourCycle: "h23",
+});
+function tripWhen(s) {
+  if (/Z$|[+-]\d\d:\d\d$/.test(s)) return tripTimeFmt.format(new Date(s)).replace(",", "");
+  const m = String(s).match(/(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2})/);
+  if (!m) return s;
+  return `${m[3]} ${TRIP_MONTHS[+m[2] - 1]} ${m[4]}:${m[5]}`;
+}
+
 function renderLists(d) {
+  const trips = (d.driving.recent_trips || [])
+    .map((t) => `<li><span>${tripWhen(t.start_time)}${t.route ? " · " + t.route : ""}</span>` +
+      `<span class="count">${t.distance_km} km · ${t.duration_min} min · ${t.wh_per_km} Wh/km</span></li>`)
+    .join("");
+  document.getElementById("recentTrips").innerHTML = trips || "<li>No trips yet</li>";
+
   const routes = (d.driving.top_routes || [])
     .map(([r, c]) => `<li><span>${r}</span><span class="count">${c}×</span></li>`).join("");
   document.getElementById("topRoutes").innerHTML = routes || "<li>No data</li>";
@@ -446,7 +465,8 @@ async function syncNow() {
       const extra = (l.drives || l.charges)
         ? ` · logged ${l.drives} drive(s), ${l.charges} charge(s)`
         : "";
-      setStatus(status, `🔋 ${Math.round(body.soc)}% · ${body.status}${extra}`, "ok");
+      const trip = body.trip_in_progress ? " · 🚗 trip in progress" : "";
+      setStatus(status, `🔋 ${Math.round(body.soc)}% · ${body.status}${trip}${extra}`, "ok");
       if (l.drives || l.charges) load();
     }
   } catch (e) {
