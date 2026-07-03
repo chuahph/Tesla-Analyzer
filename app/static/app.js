@@ -238,7 +238,34 @@ function tickClock() {
 tickClock();
 setInterval(tickClock, 1000);
 
-document.getElementById("range").addEventListener("change", load);
+// Window selector: fixed choices plus "Custom…" which asks for any number of
+// days (1–730, the API's window limit) and pins it as a selectable option.
+const rangeSel = document.getElementById("range");
+let lastRange = rangeSel.value;
+rangeSel.addEventListener("change", () => {
+  if (rangeSel.value !== "custom") {
+    lastRange = rangeSel.value;
+    load();
+    return;
+  }
+  const raw = prompt("Show how many days? (1–730)", lastRange);
+  const days = Math.round(+String(raw).trim());
+  if (!raw || !isFinite(days) || days < 1 || days > 730) {
+    rangeSel.value = lastRange; // cancelled or invalid — keep the old window
+    return;
+  }
+  let opt = document.getElementById("custom-days");
+  if (!opt) {
+    opt = document.createElement("option");
+    opt.id = "custom-days";
+    rangeSel.insertBefore(opt, rangeSel.querySelector('option[value="custom"]'));
+  }
+  opt.value = String(days);
+  opt.textContent = `${days} days`;
+  rangeSel.value = String(days);
+  lastRange = String(days);
+  load();
+});
 
 /* ------------------------------------------------------------------ */
 /* Data-source buttons: import file + link account                     */
