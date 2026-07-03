@@ -274,7 +274,18 @@
     const rated = opts.rated || RATED_WH_PER_KM;
     const price = opts.price || ENERGY_PRICE;
     const currency = opts.currency || CURRENCY;
-    const since = Date.now() - days * 86400000;
+    let since, windowLabel = null;
+    if (days === "charge") {
+      // Window starts when the most recent charge ended ("since last charge").
+      const ends = (dataset.charges || [])
+        .map((c) => new Date(c.end_time || c.start_time).getTime())
+        .filter((t) => isFinite(t));
+      since = ends.length ? Math.max(...ends) : 0;
+      windowLabel = ends.length ? "since last charge" : "all data";
+      days = 0;
+    } else {
+      since = Date.now() - days * 86400000;
+    }
     const drives = (dataset.drives || []).filter((d) => new Date(d.start_time).getTime() >= since);
     const charges = (dataset.charges || []).filter((c) => new Date(c.start_time).getTime() >= since);
 
@@ -286,6 +297,7 @@
     return {
       vehicle: dataset.vehicle || { name: "Tesla", model: "", trim: "" },
       window_days: days,
+      window_label: windowLabel,
       generated_at: new Date().toISOString().slice(0, 19),
       currency,
       driving, charging, efficiency, recommendations,

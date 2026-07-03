@@ -188,16 +188,18 @@ async function demoDataset() {
 }
 
 async function load() {
-  const days = +document.getElementById("range").value;
+  const rawRange = document.getElementById("range").value;
+  const sinceCharge = rawRange === "charge";
+  const days = sinceCharge ? 90 : +rawRange;
   document.getElementById("kpis").innerHTML = '<div class="loading">Loading…</div>';
   try {
     let d, mode;
     if (STATIC_MODE) {
       const ds = importedDataset() || (await demoDataset());
-      d = TA.buildSummary(ds, days);
+      d = TA.buildSummary(ds, sinceCharge ? "charge" : days);
       mode = ds.source === "imported" ? "imported" : "demo";
     } else {
-      const res = await fetch(`/api/summary?days=${days}`);
+      const res = await fetch(`/api/summary?days=${days}${sinceCharge ? "&since_charge=1" : ""}`);
       if (!res.ok) throw new Error(await res.text());
       d = await res.json();
       mode = (await (await fetch("/api/health")).json()).mode;
@@ -228,8 +230,9 @@ async function load() {
     renderRecommendations(d.recommendations);
 
     const now = new Date();
+    const windowText = d.window_label || `${d.window_days}-day window`;
     document.getElementById("footer-meta").textContent =
-      `Generated ${footerDateFmt.format(now)} ${hhmm(now)} MYT · ${d.window_days}-day window · Tesla Analyzer v0.1`;
+      `Generated ${footerDateFmt.format(now)} ${hhmm(now)} MYT · ${windowText} · Tesla Analyzer v0.1`;
   } catch (e) {
     document.getElementById("kpis").innerHTML =
       `<div class="loading">Could not load data: ${e.message}</div>`;

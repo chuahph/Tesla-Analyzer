@@ -6,7 +6,7 @@ from datetime import datetime, timedelta
 import httpx
 from fastapi import APIRouter, Body, Depends, File, HTTPException, Query, Request, UploadFile
 from fastapi.responses import RedirectResponse
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from .. import auth, services, state
@@ -38,8 +38,9 @@ def _first_vehicle(session: Session) -> Vehicle:
     return vehicle
 
 
-def _window(session: Session, vehicle_id: int, days: int):
-    since = datetime.now() - timedelta(days=days)
+def _window(session: Session, vehicle_id: int, days: int, since: datetime | None = None):
+    if since is None:
+        since = datetime.now() - timedelta(days=days)
     drives = session.scalars(
         select(Drive)
         .where(Drive.vehicle_id == vehicle_id, Drive.start_time >= since)
@@ -322,11 +323,28 @@ def export_data(
 
 
 @router.get("/summary")
-def summary(days: int = Query(90, ge=1, le=730), session: Session = Depends(get_session)):
-    """The single endpoint the dashboard consumes: full analysis + recommendations."""
+def summary(
+    days: int = Query(90, ge=1, le=730),
+    since_charge: bool = Query(False),
+    session: Session = Depends(get_session),
+):
+    """The single endpoint the dashboard consumes: full analysis + recommendations.
+
+    With ``since_charge`` the window starts when the most recent charging
+    session ended — i.e. the car's "since last charge" view.
+    """
     settings = get_settings()
     vehicle = _first_vehicle(session)
-    drives, charges = _window(session, vehicle.id, days)
+    since = None
+    window_label = None
+    if since_charge:
+        last_end = session.scalar(
+            select(func.max(Charge.end_time)).where(Charge.vehicle_id == vehicle.id)
+        )
+        if last_end is not None:
+            since = last_end
+            window_label = "since last charge"
+    drives, charges = _window(session, vehicle.id, days, since=since)
 
     driving = driving_analysis.analyze(drives)
     charging = charging_analysis.analyze(charges)
@@ -342,6 +360,7 @@ def summary(days: int = Query(90, ge=1, le=730), session: Session = Depends(get_
     return {
         "vehicle": VehicleOut.model_validate(vehicle).model_dump(),
         "window_days": days,
+        "window_label": window_label,
         "generated_at": datetime.now().isoformat(timespec="seconds"),
         "currency": settings.currency,
         "driving": driving,

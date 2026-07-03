@@ -73,6 +73,26 @@ def test_sync_key_lets_cron_through_the_gate():
         settings.app_passcode, settings.sync_key = old_pc, old_sk
 
 
+def test_summary_since_charge_window():
+    settings = get_settings()
+    old = settings.app_passcode
+    settings.app_passcode = ""
+    try:
+        with TestClient(app) as client:  # startup seeds demo data
+            full = client.get("/api/summary?days=365").json()
+            since = client.get("/api/summary?days=365&since_charge=1").json()
+            assert since["window_label"] == "since last charge"
+            # The window starts at the last charge, so it holds a subset of drives
+            # and no completed charging sessions from before it.
+            full_drives = full["driving"].get("total_drives", 0)
+            since_drives = since["driving"].get("total_drives", 0) if since["driving"]["available"] else 0
+            assert since_drives <= full_drives
+            since_charges = since["charging"].get("total_sessions", 0) if since["charging"]["available"] else 0
+            assert since_charges <= 1  # at most a charge that started after the last one ended
+    finally:
+        settings.app_passcode = old
+
+
 def test_no_passcode_means_open():
     settings = get_settings()
     old = settings.app_passcode
