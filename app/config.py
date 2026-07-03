@@ -23,7 +23,6 @@ class Settings(BaseSettings):
     # the access-token paste flow and demo/import modes do not need these.
     tesla_client_id: str = ""
     tesla_client_secret: str = ""
-    tesla_redirect_uri: str = "http://localhost:8000/api/link/oauth/callback"
     tesla_oauth_scope: str = "openid offline_access vehicle_device_data"
     tesla_oauth_audience: str = "https://fleet-api.prd.na.vn.cloud.tesla.com"
 
