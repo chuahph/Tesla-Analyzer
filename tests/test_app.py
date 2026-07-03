@@ -33,6 +33,24 @@ def test_open_paths_with_passcode_set():
         settings.app_passcode = old
 
 
+def test_linked_vehicle_preferred_and_demo_purged(seeded):
+    from app import services, state
+    from app.api.routes import _first_vehicle
+    from app.models import Vehicle
+
+    # Demo data exists; a real linked vehicle arrives.
+    real = Vehicle(vin="LRW3F7EK3RC309372", name="My Model 3", model="Model 3")
+    seeded.add(real)
+    seeded.commit()
+    state.put(seeded, state.LINKED_VIN_KEY, real.vin)
+
+    assert _first_vehicle(seeded).vin == real.vin  # linked wins over demo
+
+    services.purge_demo(seeded)
+    vins = [v.vin for v in seeded.query(Vehicle).all()]
+    assert vins == [real.vin]  # demo vehicle and its data are gone
+
+
 def test_no_passcode_means_open():
     settings = get_settings()
     old = settings.app_passcode

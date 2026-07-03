@@ -16,6 +16,7 @@ REFRESH_KEY = "tesla_refresh_token"
 BASE_URL_KEY = "tesla_api_base_url"
 SOURCE_KEY = "data_source"  # one of: demo | imported | linked
 SNAPSHOT_KEY = "last_snapshot"  # JSON of the last synced vehicle snapshot
+LINKED_VIN_KEY = "linked_vin"  # VIN of the account-linked vehicle
 
 
 def get(session: Session, key: str, default: str = "") -> str:
