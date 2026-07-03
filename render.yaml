@@ -27,5 +27,13 @@ services:
       # passcode; the app then requires it to open.
       - key: APP_PASSCODE
         sync: false
-      # Leave Tesla credentials unset — you'll link your account from the
-      # dashboard (🔗 Link Tesla Account → paste an access token).
+      # Talk to Tesla's current (Fleet) API — Asia-Pacific is served by the
+      # North America endpoint.
+      - key: TESLA_API_BASE_URL
+        value: https://fleet-api.prd.na.vn.cloud.tesla.com
+      # From your app at developer.tesla.com — enables "Sign in with Tesla"
+      # with auto-refreshing tokens. Render prompts for both on apply.
+      - key: TESLA_CLIENT_ID
+        sync: false
+      - key: TESLA_CLIENT_SECRET
+        sync: false

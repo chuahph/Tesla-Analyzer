@@ -4,7 +4,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta
 
 import httpx
-from fastapi import APIRouter, Body, Depends, File, HTTPException, Query, UploadFile
+from fastapi import APIRouter, Body, Depends, File, HTTPException, Query, Request, UploadFile
 from fastapi.responses import RedirectResponse
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -101,8 +101,20 @@ def link_token(
         raise HTTPException(400, f"Could not link account: {exc}") from exc
 
 
+def _oauth_redirect_uri(request: Request) -> str:
+    """Callback URL derived from the live host, so no env config is needed.
+
+    Cloud proxies terminate TLS, so anything that isn't localhost is forced to
+    https (Tesla also refuses plain-http redirect URIs).
+    """
+    host = request.url.hostname or "localhost"
+    if host in ("localhost", "127.0.0.1"):
+        return str(request.base_url).rstrip("/") + "/api/link/oauth/callback"
+    return f"https://{request.url.netloc}/api/link/oauth/callback"
+
+
 @router.get("/link/oauth/start")
-def oauth_start():
+def oauth_start(request: Request, session: Session = Depends(get_session)):
     """Button 2 (OAuth flow) — redirect to Tesla's sign-in page."""
     if not auth.oauth_configured():
         raise HTTPException(
@@ -110,12 +122,27 @@ def oauth_start():
             "Tesla OAuth is not configured. Set TESLA_CLIENT_ID / TESLA_CLIENT_SECRET, "
             "or use the access-token option instead.",
         )
-    url, _state = auth.authorize_url()
+    # One-time Fleet API requirement: register this domain with Tesla. Tesla
+    # fetches the public key the app serves under /.well-known/ during the call.
+    if state.get(session, "partner_registered") != "yes":
+        domain = request.url.hostname or ""
+        try:
+            auth.register_partner(domain)
+            state.put(session, "partner_registered", "yes")
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(
+                400,
+                f"Tesla app registration for domain '{domain}' failed: {exc}. "
+                "Check TESLA_CLIENT_ID / TESLA_CLIENT_SECRET and that this domain "
+                "is listed under Allowed Origins in your Tesla developer app.",
+            ) from exc
+    url, _state = auth.authorize_url(_oauth_redirect_uri(request))
     return RedirectResponse(url)
 
 
 @router.get("/link/oauth/callback")
 def oauth_callback(
+    request: Request,
     code: str | None = None, error: str | None = None,
     session: Session = Depends(get_session),
 ):
@@ -124,7 +151,7 @@ def oauth_callback(
     if not code:
         raise HTTPException(400, "Missing authorization code.")
     try:
-        tokens = auth.exchange_code(code)
+        tokens = auth.exchange_code(code, _oauth_redirect_uri(request))
         result = services.link_with_token(
             session,
             tokens["access_token"],
@@ -135,6 +162,22 @@ def oauth_callback(
         raise HTTPException(400, f"OAuth exchange failed: {exc}") from exc
     # Land the user back on the dashboard.
     return RedirectResponse(f"/?linked={result['source']}")
+
+
+@router.post("/link/refresh")
+def refresh_link(session: Session = Depends(get_session)):
+    """Mint a fresh access token from the stored refresh token (OAuth links)."""
+    refresh = state.get(session, state.REFRESH_KEY)
+    if not refresh:
+        raise HTTPException(400, "No refresh token stored — link the account first.")
+    try:
+        tokens = auth.refresh_tokens(refresh)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(401, f"Token refresh failed: {exc}") from exc
+    state.put(session, state.TOKEN_KEY, tokens["access_token"])
+    if tokens.get("refresh_token"):
+        state.put(session, state.REFRESH_KEY, tokens["refresh_token"])
+    return {"status": "refreshed"}
 
 
 @router.get("/vehicles", response_model=list[VehicleOut])

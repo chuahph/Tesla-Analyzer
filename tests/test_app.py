@@ -1,0 +1,45 @@
+"""App-level tests: passcode gate boundaries and the Tesla partner key path."""
+from fastapi.testclient import TestClient
+
+from app.config import get_settings
+from app.main import app
+
+PEM_PATH = "/.well-known/appspecific/com.tesla.3p.public-key.pem"
+
+
+def test_open_paths_with_passcode_set():
+    settings = get_settings()
+    old = settings.app_passcode
+    settings.app_passcode = "secret123"
+    try:
+        with TestClient(app) as client:
+            # Tesla must reach the partner key; hosts must reach health.
+            pem = client.get(PEM_PATH)
+            assert pem.status_code == 200
+            assert "BEGIN PUBLIC KEY" in pem.text
+            assert client.get("/api/health").status_code == 200
+            # Everything else stays locked.
+            assert client.get("/api/summary").status_code == 401
+            resp = client.get("/", follow_redirects=False)
+            assert resp.status_code == 303
+            assert resp.headers["location"] == "/login"
+            # Correct passcode unlocks.
+            login = client.post(
+                "/login", data={"passcode": "secret123"}, follow_redirects=False
+            )
+            assert login.status_code == 303
+            assert client.get("/").status_code == 200
+    finally:
+        settings.app_passcode = old
+
+
+def test_no_passcode_means_open():
+    settings = get_settings()
+    old = settings.app_passcode
+    settings.app_passcode = ""
+    try:
+        with TestClient(app) as client:
+            assert client.get("/").status_code == 200
+            assert client.get(PEM_PATH).status_code == 200
+    finally:
+        settings.app_passcode = old

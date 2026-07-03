@@ -68,9 +68,11 @@ LOGIN_HTML = """<!DOCTYPE html>
 </form></body></html>"""
 
 
-# Paths that stay open even when a passcode is set: the login page itself and
-# the health endpoint (cloud hosts probe it to decide the deploy succeeded).
-_OPEN_PATHS = {"/login", "/api/health"}
+# Paths that stay open even when a passcode is set: the login page itself, the
+# health endpoint (cloud hosts probe it to decide the deploy succeeded), and
+# Tesla's partner public key (Tesla fetches it to verify the registered domain).
+TESLA_KEY_PATH = "/.well-known/appspecific/com.tesla.3p.public-key.pem"
+_OPEN_PATHS = {"/login", "/api/health", TESLA_KEY_PATH}
 
 
 @app.middleware("http")
@@ -137,3 +139,12 @@ def service_worker() -> FileResponse:
 @app.get("/manifest.webmanifest")
 def manifest() -> FileResponse:
     return FileResponse(STATIC_DIR / "manifest.webmanifest", media_type="application/manifest+json")
+
+
+@app.get(TESLA_KEY_PATH)
+def tesla_public_key() -> FileResponse:
+    """Partner public key Tesla checks when registering this domain (Fleet API)."""
+    return FileResponse(
+        STATIC_DIR / "well-known" / "com.tesla.3p.public-key.pem",
+        media_type="application/x-pem-file",
+    )
