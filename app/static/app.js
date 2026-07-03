@@ -157,6 +157,33 @@ function renderLists(d) {
   document.getElementById("topLocations").innerHTML = locs || "<li>No data</li>";
 }
 
+function renderBehaviour(d) {
+  const card = document.getElementById("behaviour-card");
+  const body = document.getElementById("behaviour-body");
+  if (!card || !body) return;
+  const b = (d.driving || {}).behaviour;
+  if (!b || !b.available) { card.style.display = "none"; return; }
+  card.style.display = "";
+  const rows = [
+    ["Highway >110 km/h", b.speeding_share_pct, b.speeding_penalty_wh],
+    ["Stop-and-go", b.stopgo_share_pct, b.stopgo_penalty_wh],
+    ["Short trips <3 km", b.short_trip_share_pct, b.short_trip_penalty_wh],
+    ["Peak hours", b.peak_hour_share_pct, b.peak_hour_penalty_wh],
+    ["Hot weather 33°C+", b.hot_weather_share_pct, b.hot_weather_penalty_wh],
+  ].filter(([, share, pen]) => share >= 5 && pen > 0)
+   .map(([label, share, pen]) =>
+     `<div class="bat-line">${label}: <strong>${share}%</strong> of km · +${pen} Wh/km</div>`)
+   .join("");
+  body.innerHTML = `
+    <div class="bat-health">${b.score}<span style="font-size:20px">/100</span></div>
+    <div class="bat-line">Typical driving vs your own best quartile
+      (<strong>${Math.round(b.best_quartile_wh_per_km)} Wh/km</strong>)</div>
+    ${rows || '<div class="bat-line">No costly habits detected in this window 🎉</div>'}
+    ${b.potential_saving_kwh >= 1
+      ? `<div class="bat-line">Potential if all drives matched your best: <strong>${b.potential_saving_kwh} kWh</strong></div>`
+      : ""}`;
+}
+
 function renderBattery(d) {
   const card = document.getElementById("battery-card");
   const body = document.getElementById("battery-body");
@@ -253,6 +280,7 @@ async function load() {
 
     renderKpis(d);
     renderCharts(d);
+    renderBehaviour(d);
     renderBattery(d);
     renderLists(d);
     renderRecommendations(d.recommendations);

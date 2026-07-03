@@ -60,6 +60,55 @@ def build(
                 )
             )
 
+    # --- Personal driving behaviour (measured from this driver's own data) ---
+    beh = (driving or {}).get("behaviour") or {}
+    if beh.get("available"):
+        def _cost(kwh: float) -> str:
+            return f"~{kwh:.1f} kWh / {currency} {kwh * energy_price:.2f} in this window"
+
+        factors = [
+            ("speeding", "medium", "Fast highway driving is costing you range",
+             "In {share}% of your kilometres you exceeded 110 km/h, and those "
+             "drives averaged +{pen} Wh/km versus your calmer ones. Easing the "
+             "cruise speed by ~10 km/h recovers most of it."),
+            ("stopgo", "medium", "Stop-and-go driving pattern detected",
+             "{share}% of your kilometres show a stop-go signature (low average "
+             "but high peak speed), costing +{pen} Wh/km. Smoother acceleration "
+             "and letting regen do the braking (one-pedal style) narrows this."),
+            ("short_trip", "low", "Short cold-start trips are inefficient",
+             "Trips under 3 km make up {share}% of your kilometres at +{pen} "
+             "Wh/km — the battery and cabin never reach efficient temperature. "
+             "Chaining errands into one round trip helps."),
+            ("peak_hour", "low", "Peak-hour congestion is measurable in your data",
+             "Driving at 7–8 or 17–19 h costs you +{pen} Wh/km over {share}% of "
+             "your kilometres. Shifting departures even 30 minutes can help."),
+            ("hot_weather", "low", "Hot-weather driving penalty",
+             "Drives at 33°C+ cost +{pen} Wh/km ({share}% of km) — mostly A/C "
+             "load. Pre-cool the cabin while still plugged in and park in shade "
+             "where possible."),
+        ]
+        for key, pri, title, detail in factors:
+            share = beh.get(f"{key}_share_pct", 0)
+            pen = beh.get(f"{key}_penalty_wh", 0)
+            kwh = beh.get(f"{key}_saving_kwh", 0)
+            if share >= 10 and pen >= 8 and kwh >= 0.5:
+                recs.append(_rec(
+                    "Driving behaviour", pri, title,
+                    detail.format(share=share, pen=pen), _cost(kwh),
+                ))
+
+        if beh.get("potential_saving_kwh", 0) >= 1 and beh.get("score", 100) < 90:
+            recs.append(_rec(
+                "Driving behaviour", "low",
+                f"Driving like your own best quartile would save "
+                f"{beh['potential_saving_kwh']:.1f} kWh",
+                f"Your most efficient quartile of drives averages "
+                f"{beh['best_quartile_wh_per_km']:.0f} Wh/km — a benchmark you "
+                "already achieve regularly. Matching it across all driving is the "
+                "single biggest efficiency lever in your data.",
+                f"{currency} {beh['potential_saving_kwh'] * energy_price:.2f} in this window",
+            ))
+
     # --- Efficiency vs rated -------------------------------------------------
     if efficiency.get("available"):
         vs_rated = efficiency["vs_rated_pct"]
