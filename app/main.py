@@ -68,11 +68,16 @@ LOGIN_HTML = """<!DOCTYPE html>
 </form></body></html>"""
 
 
+# Paths that stay open even when a passcode is set: the login page itself and
+# the health endpoint (cloud hosts probe it to decide the deploy succeeded).
+_OPEN_PATHS = {"/login", "/api/health"}
+
+
 @app.middleware("http")
 async def _passcode_gate(request: Request, call_next):
     passcode = get_settings().app_passcode.strip()
     path = request.url.path
-    if not passcode or path == "/login" or _is_authed(request, passcode):
+    if not passcode or path in _OPEN_PATHS or _is_authed(request, passcode):
         return await call_next(request)
     if path.startswith("/api/"):
         return JSONResponse({"detail": "Passcode required."}, status_code=401)

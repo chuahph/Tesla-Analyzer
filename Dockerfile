@@ -15,4 +15,5 @@ RUN mkdir -p /app/data
 EXPOSE 8000
 
 # Runs in DEMO mode by default; provide TESLA_ACCESS_TOKEN for live data.
-CMD ["python", "run.py", "serve", "--host", "0.0.0.0", "--port", "8000"]
+# No --port flag: the app binds $PORT when a cloud host sets it (fallback 8000).
+CMD ["python", "run.py", "serve", "--host", "0.0.0.0"]
