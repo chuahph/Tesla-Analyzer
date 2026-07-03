@@ -18,6 +18,69 @@ def _speed_bucket(speed: float) -> str:
     return "Highway (90+)"
 
 
+def _behaviour(drives: list[Drive], total_distance: float, total_energy: float,
+               effs: list[float]) -> dict[str, Any]:
+    """Study the driver's own patterns and measure what each habit costs.
+
+    Every factor is measured from this driver's data (penalty = mean Wh/km of
+    the habit's drives minus the rest), so the advice is personal, not generic.
+    """
+    w = [d for d in drives if d.distance_km > 0]
+    if len(w) < 5 or not total_distance:
+        return {"available": False, "n_drives": len(w)}
+
+    def eff(sub):
+        return mean([d.wh_per_km for d in sub])
+
+    def km_share(sub):
+        return 100.0 * sum(d.distance_km for d in sub) / total_distance
+
+    def factor(sub, rest):
+        """(share of km, measured Wh/km penalty, kWh it cost in this window)."""
+        if not sub or not rest:
+            return 0.0, 0.0, 0.0
+        pen = eff(sub) - eff(rest)
+        kwh = sum(d.distance_km for d in sub) * max(pen, 0.0) / 1000.0
+        return round(km_share(sub), 1), round(pen, 1), round(kwh, 2)
+
+    fast = [d for d in w if d.max_speed_kmh > 110]
+    stopgo = [d for d in w if d.avg_speed_kmh < 50
+              and d.max_speed_kmh > 2.2 * d.avg_speed_kmh]
+    short = [d for d in w if d.distance_km < 3]
+    peak = [d for d in w if d.start_time.hour in (7, 8, 17, 18, 19)]
+    hot = [d for d in w if d.outside_temp_c >= 33]
+
+    speeding = factor(fast, [d for d in w if d not in fast])
+    sg = factor(stopgo, [d for d in w if d not in stopgo])
+    st = factor(short, [d for d in w if d not in short])
+    pk = factor(peak, [d for d in w if d not in peak])
+    ht = factor(hot, [d for d in w if d not in hot])
+
+    # Personal-best benchmark: the driver's own most efficient quartile.
+    best_q = percentile(effs, 0.25)
+    overall = mean(effs)
+    potential_kwh = max(0.0, total_energy - best_q * total_distance / 1000.0)
+    score = round(min(100.0, 100.0 * best_q / overall)) if overall else 0
+
+    return {
+        "available": True,
+        "n_drives": len(w),
+        "score": score,  # 100 = typical driving matches your personal best
+        "best_quartile_wh_per_km": round(best_q, 1),
+        "potential_saving_kwh": round(potential_kwh, 1),
+        "speeding_share_pct": speeding[0], "speeding_penalty_wh": speeding[1],
+        "speeding_saving_kwh": speeding[2],
+        "stopgo_share_pct": sg[0], "stopgo_penalty_wh": sg[1],
+        "stopgo_saving_kwh": sg[2],
+        "short_trip_share_pct": st[0], "short_trip_penalty_wh": st[1],
+        "short_trip_saving_kwh": st[2],
+        "peak_hour_share_pct": pk[0], "peak_hour_penalty_wh": pk[1],
+        "peak_hour_saving_kwh": pk[2],
+        "hot_weather_share_pct": ht[0], "hot_weather_penalty_wh": ht[1],
+        "hot_weather_saving_kwh": ht[2],
+    }
+
+
 def analyze(drives: list[Drive]) -> dict[str, Any]:
     if not drives:
         return {"available": False}
@@ -70,6 +133,7 @@ def analyze(drives: list[Drive]) -> dict[str, Any]:
         "top_routes": routes.most_common(5),
         "speed_efficiency_slope_wh_per_kmh": round(speed_slope, 3),
         "avg_efficiency_wh_per_km": round(mean(effs), 1),
+        "behaviour": _behaviour(drives, total_distance, total_energy, effs),
         "recent_trips": [
             {
                 "start_time": d.start_time.isoformat(timespec="minutes"),

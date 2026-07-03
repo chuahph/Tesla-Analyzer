@@ -67,6 +67,41 @@
     return out;
   }
 
+  // --- driving behaviour (mirror driving.py _behaviour) ---
+  function analyzeBehaviour(drives, totalDistance, totalEnergy, effs) {
+    const w = drives.filter((d) => d.distance_km > 0);
+    if (w.length < 5 || !totalDistance) return { available: false, n_drives: w.length };
+    const eff = (sub) => mean(sub.map(whPerKm));
+    const factor = (sub) => {
+      const rest = w.filter((d) => !sub.includes(d));
+      if (!sub.length || !rest.length) return [0, 0, 0];
+      const pen = eff(sub) - eff(rest);
+      const km = sub.reduce((a, d) => a + d.distance_km, 0);
+      return [round(100 * km / totalDistance, 1), round(pen, 1),
+              round(km * Math.max(pen, 0) / 1000, 2)];
+    };
+    const hour = (d) => new Date(d.start_time).getHours();
+    const speeding = factor(w.filter((d) => d.max_speed_kmh > 110));
+    const sg = factor(w.filter((d) => d.avg_speed_kmh < 50 && d.max_speed_kmh > 2.2 * d.avg_speed_kmh));
+    const st = factor(w.filter((d) => d.distance_km < 3));
+    const pk = factor(w.filter((d) => [7, 8, 17, 18, 19].includes(hour(d))));
+    const ht = factor(w.filter((d) => d.outside_temp_c >= 33));
+    const bestQ = percentile(effs, 0.25);
+    const overall = mean(effs);
+    const potential = Math.max(0, totalEnergy - bestQ * totalDistance / 1000);
+    return {
+      available: true, n_drives: w.length,
+      score: overall ? Math.round(Math.min(100, 100 * bestQ / overall)) : 0,
+      best_quartile_wh_per_km: round(bestQ, 1),
+      potential_saving_kwh: round(potential, 1),
+      speeding_share_pct: speeding[0], speeding_penalty_wh: speeding[1], speeding_saving_kwh: speeding[2],
+      stopgo_share_pct: sg[0], stopgo_penalty_wh: sg[1], stopgo_saving_kwh: sg[2],
+      short_trip_share_pct: st[0], short_trip_penalty_wh: st[1], short_trip_saving_kwh: st[2],
+      peak_hour_share_pct: pk[0], peak_hour_penalty_wh: pk[1], peak_hour_saving_kwh: pk[2],
+      hot_weather_share_pct: ht[0], hot_weather_penalty_wh: ht[1], hot_weather_saving_kwh: ht[2],
+    };
+  }
+
   // --- driving (mirror app/analysis/driving.py) ---
   function analyzeDriving(drives) {
     if (!drives.length) return { available: false };
@@ -111,6 +146,9 @@
       top_routes: counterTop(routes, 5),
       speed_efficiency_slope_wh_per_kmh: round(slope, 3),
       avg_efficiency_wh_per_km: round(mean(effs), 1),
+      behaviour: analyzeBehaviour(drives,
+        drives.reduce((a, d) => a + d.distance_km, 0),
+        drives.reduce((a, d) => a + d.energy_used_kwh, 0), effs),
       recent_trips: [...drives]
         .sort((a, b) => new Date(b.start_time) - new Date(a.start_time))
         .slice(0, 5)
@@ -239,6 +277,35 @@
   }
   function buildRecommendations(driving, charging, efficiency, price, currency, battery) {
     const recs = [];
+    const beh = (driving || {}).behaviour || {};
+    if (beh.available) {
+      const cost = (kwh) => `~${kwh.toFixed(1)} kWh / ${currency} ${(kwh * price).toFixed(2)} in this window`;
+      const factors = [
+        ["speeding", "medium", "Fast highway driving is costing you range",
+         (s, p) => `In ${s}% of your kilometres you exceeded 110 km/h, and those drives averaged +${p} Wh/km versus your calmer ones. Easing the cruise speed by ~10 km/h recovers most of it.`],
+        ["stopgo", "medium", "Stop-and-go driving pattern detected",
+         (s, p) => `${s}% of your kilometres show a stop-go signature (low average but high peak speed), costing +${p} Wh/km. Smoother acceleration and letting regen do the braking (one-pedal style) narrows this.`],
+        ["short_trip", "low", "Short cold-start trips are inefficient",
+         (s, p) => `Trips under 3 km make up ${s}% of your kilometres at +${p} Wh/km — the battery and cabin never reach efficient temperature. Chaining errands into one round trip helps.`],
+        ["peak_hour", "low", "Peak-hour congestion is measurable in your data",
+         (s, p) => `Driving at 7–8 or 17–19 h costs you +${p} Wh/km over ${s}% of your kilometres. Shifting departures even 30 minutes can help.`],
+        ["hot_weather", "low", "Hot-weather driving penalty",
+         (s, p) => `Drives at 33°C+ cost +${p} Wh/km (${s}% of km) — mostly A/C load. Pre-cool the cabin while still plugged in and park in shade where possible.`],
+      ];
+      for (const [key, pri, title, detail] of factors) {
+        const s = beh[`${key}_share_pct`] || 0, p = beh[`${key}_penalty_wh`] || 0,
+              k = beh[`${key}_saving_kwh`] || 0;
+        if (s >= 10 && p >= 8 && k >= 0.5) {
+          recs.push(rec("Driving behaviour", pri, title, detail(s, p), cost(k)));
+        }
+      }
+      if ((beh.potential_saving_kwh || 0) >= 1 && (beh.score ?? 100) < 90) {
+        recs.push(rec("Driving behaviour", "low",
+          `Driving like your own best quartile would save ${beh.potential_saving_kwh.toFixed(1)} kWh`,
+          `Your most efficient quartile of drives averages ${Math.round(beh.best_quartile_wh_per_km)} Wh/km — a benchmark you already achieve regularly. Matching it across all driving is the single biggest efficiency lever in your data.`,
+          `${currency} ${(beh.potential_saving_kwh * price).toFixed(2)} in this window`));
+      }
+    }
     if (battery && battery.available) {
       const deg = battery.degradation_pct;
       if (deg >= 8) {
