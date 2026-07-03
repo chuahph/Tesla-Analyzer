@@ -16,20 +16,16 @@ services:
         value: RM
       - key: RATED_WH_PER_KM
         value: "150"
-      # Persistent storage: free Postgres defined below, so imported data and
-      # the linked token survive restarts/redeploys.
+      # Persistent storage: paste a PERMANENTLY-FREE Postgres connection string
+      # from Neon (neon.tech → sign up with GitHub → create project → copy the
+      # connection string). Render prompts you for this value when applying the
+      # blueprint. Unlike Render's own free Postgres, Neon's free tier does not
+      # expire after 30 days.
       - key: DATABASE_URL
-        fromDatabase:
-          name: tesla-analyzer-db
-          property: connectionString
-      # Private dashboard: Render prompts you for this value when applying the
-      # blueprint — pick any passcode; the app then requires it to open.
+        sync: false
+      # Private dashboard: Render prompts you for this value too — pick any
+      # passcode; the app then requires it to open.
       - key: APP_PASSCODE
         sync: false
       # Leave Tesla credentials unset — you'll link your account from the
       # dashboard (🔗 Link Tesla Account → paste an access token).
-
-databases:
-  - name: tesla-analyzer-db
-    plan: free
-    region: singapore
