@@ -119,11 +119,16 @@
     let distance = num(g("distance_km"));
     if (!distance && idx.distance_miles !== undefined) distance = num(g("distance_miles")) * MILES_TO_KM;
     if (!duration && end && start) duration = Math.max((end - start) / 60000, 0);
+    const startSoc = num(g("start_soc")), endSoc = num(g("end_soc"));
+    let energy = num(g("energy_used_kwh"));
+    // Manual logs record battery % but not kWh — estimate from the SoC drop
+    // against a typical ~60 kWh usable pack.
+    if (!energy && startSoc > endSoc && endSoc > 0) energy = (startSoc - endSoc) / 100 * 60;
     return {
       start_time: start.toISOString(), end_time: end.toISOString(),
       distance_km: +distance.toFixed(2), duration_min: +duration.toFixed(1),
-      start_soc: num(g("start_soc")), end_soc: num(g("end_soc")),
-      energy_used_kwh: +num(g("energy_used_kwh")).toFixed(3),
+      start_soc: startSoc, end_soc: endSoc,
+      energy_used_kwh: +energy.toFixed(3),
       avg_speed_kmh: num(g("avg_speed_kmh")) || (duration ? +(distance / (duration / 60)).toFixed(1) : 0),
       max_speed_kmh: num(g("max_speed_kmh")),
       outside_temp_c: num(g("outside_temp_c"), 20.0),

@@ -130,6 +130,18 @@ def test_official_tesla_charging_export():
     assert charges[0]["location"] == "Home"
 
 
+def test_manual_log_estimates_energy_from_soc():
+    """A hand-kept log has battery % but no kWh — energy comes from the SoC drop."""
+    csv = (
+        "start_time,end_time,distance_km,start_soc,end_soc,origin,destination\n"
+        "2026-07-01 08:00,2026-07-01 08:35,25,80,72,Home,Office\n"
+    )
+    drives, _ = parse_upload("My_Drives.csv", csv.encode())
+    assert len(drives) == 1
+    # 8% of a 60 kWh pack = 4.8 kWh -> 192 Wh/km over 25 km
+    assert abs(drives[0]["energy_used_kwh"] - 4.8) < 1e-6
+
+
 def test_parse_garbage_raises():
     try:
         parse_upload("notes.txt", b"hello world, nothing useful here")
