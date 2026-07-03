@@ -10,6 +10,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from .. import auth, services, state
+from ..analysis import battery as battery_analysis
 from ..analysis import charging as charging_analysis
 from ..analysis import driving as driving_analysis
 from ..analysis import efficiency as efficiency_analysis
@@ -17,7 +18,7 @@ from ..analysis import recommendations as recommendations_engine
 from ..config import get_settings
 from ..database import get_session
 from ..importer import ImportError_, parse_upload
-from ..models import Charge, Drive, Vehicle
+from ..models import BatteryReading, Charge, Drive, Vehicle
 from ..schemas import ChargeOut, DriveOut, VehicleOut
 
 router = APIRouter(prefix="/api", tags=["analytics"])
@@ -268,6 +269,25 @@ def sync_now(session: Session = Depends(get_session)):
         session.add(Drive(vehicle_id=vehicle.id, **d))
     for c in charges:
         session.add(Charge(vehicle_id=vehicle.id, **c))
+    # Battery-health history: store a reading when the SoC actually moved
+    # (avoids piling up identical rows from a parked car).
+    if snap["soc"] > 0 and snap.get("range_km", 0) > 0:
+        last_reading = session.scalars(
+            select(BatteryReading)
+            .where(BatteryReading.vehicle_id == vehicle.id)
+            .order_by(BatteryReading.ts.desc())
+        ).first()
+        if last_reading is None or abs(last_reading.soc - snap["soc"]) >= 1.0:
+            session.add(
+                BatteryReading(
+                    vehicle_id=vehicle.id,
+                    ts=datetime.fromtimestamp(snap["ts"], sync_mod.MYT).replace(tzinfo=None),
+                    soc=snap["soc"],
+                    range_km=round(snap["range_km"], 1),
+                    odo_km=round(snap["odo_km"], 1),
+                )
+            )
+
     session.commit()
     state.put(session, state.SNAPSHOT_KEY, _json.dumps(snap))
     state.put(session, state.OPEN_TRIP_KEY, _json.dumps(open_trip) if open_trip else "")
@@ -370,10 +390,23 @@ def summary(
     driving = driving_analysis.analyze(drives)
     charging = charging_analysis.analyze(charges)
     efficiency = efficiency_analysis.analyze(drives, settings.rated_wh_per_km)
+
+    # Battery health uses the full reading history, not the display window.
+    readings = session.scalars(
+        select(BatteryReading)
+        .where(BatteryReading.vehicle_id == vehicle.id)
+        .order_by(BatteryReading.ts)
+        .limit(2000)
+    ).all()
+    battery = battery_analysis.analyze(
+        [{"soc": r.soc, "range_km": r.range_km} for r in readings]
+    )
+
     recs = recommendations_engine.build(
         driving,
         charging,
         efficiency,
+        battery,
         energy_price=settings.energy_price_per_kwh,
         currency=settings.currency,
     )
@@ -387,5 +420,6 @@ def summary(
         "driving": driving,
         "charging": charging,
         "efficiency": efficiency,
+        "battery": battery,
         "recommendations": recs,
     }

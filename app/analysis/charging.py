@@ -47,6 +47,7 @@ def analyze(charges: list[Charge]) -> dict[str, Any]:
         "avg_dc_power_kw": round(mean([c.max_power_kw for c in dc]), 1) if dc else 0.0,
         "full_charges": full_charges,
         "full_charge_share_pct": round(100 * safe_div(full_charges, len(charges)), 1),
+        "avg_end_soc": round(mean([c.end_soc for c in charges if c.end_soc > 0]), 0),
         "end_soc_targets": dict(sorted(end_soc_targets.items())),
         "charges_by_hour": {str(h): by_hour.get(h, 0) for h in range(24)},
         "top_locations": by_location.most_common(5),

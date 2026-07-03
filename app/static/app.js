@@ -157,6 +157,31 @@ function renderLists(d) {
   document.getElementById("topLocations").innerHTML = locs || "<li>No data</li>";
 }
 
+function renderBattery(d) {
+  const card = document.getElementById("battery-card");
+  const body = document.getElementById("battery-body");
+  if (!card || !body) return;
+  const b = d.battery;
+  const chg = d.charging || {};
+  if (!b || (!b.available && !(b.n_readings > 0))) { card.style.display = "none"; return; }
+  card.style.display = "";
+  if (!b.available) {
+    body.innerHTML = `<p class="bat-note">${b.note}</p>`;
+    return;
+  }
+  const habits = chg.available
+    ? `<div class="bat-line">Charging habits: avg target ${chg.avg_end_soc}% · ` +
+      `${chg.full_charge_share_pct}% to 100% · DC ${chg.dc_energy_share_pct}% of energy</div>`
+    : "";
+  body.innerHTML = `
+    <div class="bat-health">${b.health_pct}%</div>
+    <div class="bat-line">Estimated full range <strong>${b.est_full_range_km} km</strong>
+      · best seen ${b.baseline_full_range_km} km
+      (${b.degradation_pct}% degradation)</div>
+    <div class="bat-line">Based on ${b.n_readings} readings · avg SoC ${b.avg_soc}% · lowest seen ${b.min_soc_seen}%</div>
+    ${habits}`;
+}
+
 function renderRecommendations(recs) {
   const html = recs.map(r => `
     <div class="rec ${r.priority}">
@@ -228,6 +253,7 @@ async function load() {
 
     renderKpis(d);
     renderCharts(d);
+    renderBattery(d);
     renderLists(d);
     renderRecommendations(d.recommendations);
 

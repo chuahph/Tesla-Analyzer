@@ -67,6 +67,24 @@ class Drive(Base):
         return (self.energy_used_kwh * 1000.0) / self.distance_km
 
 
+class BatteryReading(Base):
+    """A point-in-time battery reading captured on sync, for health trending.
+
+    ``range_km`` is the car's rated remaining range at ``soc`` percent, so
+    ``range_km / (soc/100)`` projects the full-pack range — its drift over
+    time is the degradation signal.
+    """
+
+    __tablename__ = "battery_readings"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    vehicle_id: Mapped[int] = mapped_column(ForeignKey("vehicles.id"), index=True)
+    ts: Mapped[datetime] = mapped_column(DateTime, index=True)
+    soc: Mapped[float] = mapped_column(Float)
+    range_km: Mapped[float] = mapped_column(Float)
+    odo_km: Mapped[float] = mapped_column(Float, default=0.0)
+
+
 class Charge(Base):
     """A single charging session."""
 

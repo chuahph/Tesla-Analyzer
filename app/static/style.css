@@ -50,6 +50,12 @@ header {
 }
 .clock.build { margin-top: 2px; font-size: 10px; opacity: .8; }
 
+/* Battery health card */
+.bat-health { font-size: 40px; font-weight: 800; color: var(--green); margin: 4px 0 10px; }
+.bat-line { color: var(--muted); font-size: 13px; line-height: 1.6; }
+.bat-line strong { color: var(--text); }
+.bat-note { color: var(--muted); font-size: 13px; line-height: 1.6; margin: 6px 0; }
+
 .brand { display: flex; align-items: center; gap: 14px; }
 .logo { font-size: 30px; }
 header h1 { margin: 0; font-size: 20px; letter-spacing: .3px; }

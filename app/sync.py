@@ -45,6 +45,7 @@ def snapshot_from_vehicle_data(data: dict[str, Any]) -> dict[str, Any]:
         "ts": ts,
         "odo_km": float(vs.get("odometer") or 0.0) * MILES_TO_KM,
         "soc": float(cs.get("battery_level") or 0.0),
+        "range_km": float(cs.get("battery_range") or 0.0) * MILES_TO_KM,
         "charging": cs.get("charging_state") == "Charging",
         "charger_kw": float(cs.get("charger_power") or 0.0),
         "fast": bool(cs.get("fast_charger_present")),

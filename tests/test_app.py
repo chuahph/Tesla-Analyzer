@@ -89,6 +89,7 @@ def test_summary_since_charge_window():
             full = client.get("/api/summary?days=365").json()
             since = client.get("/api/summary?days=365&since_charge=1").json()
             assert since["window_label"] == "since last charge"
+            assert "battery" in full  # health section always present
             # The window starts at the last charge, so it holds a subset of drives
             # and no completed charging sessions from before it.
             full_drives = full["driving"].get("total_drives", 0)
