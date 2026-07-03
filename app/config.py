@@ -27,6 +27,10 @@ class Settings(BaseSettings):
     tesla_oauth_scope: str = "openid offline_access vehicle_device_data"
     tesla_oauth_audience: str = "https://fleet-api.prd.na.vn.cloud.tesla.com"
 
+    # Optional passcode protecting the whole app (empty = no login required).
+    # Set APP_PASSCODE on a public host so only you can open the dashboard.
+    app_passcode: str = ""
+
     # Analysis parameters
     energy_price_per_kwh: float = 0.90
     currency: str = "RM"
