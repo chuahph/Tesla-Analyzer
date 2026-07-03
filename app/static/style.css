@@ -278,11 +278,13 @@ footer { padding: 18px 28px; color: var(--muted); font-size: 12px; border-top: 1
 /* --- Mobile / iPhone layout --- */
 @media (max-width: 640px) {
   header { padding: calc(10px + env(safe-area-inset-top)) 14px 10px; gap: 8px; }
-  header h1 { font-size: 17px; }
+  header h1 { font-size: 16px; }
   /* iPhone Pro/Pro Max (402/440pt): brand left, compact meta box top-right —
-     they share the first row without overlapping. */
-  .brand { flex: 1 1 auto; min-width: 0; gap: 10px; }
-  .logo { font-size: 24px; }
+     sharing the first row. flex-basis 0 lets the brand column compress (the
+     car name wraps at a smaller size) instead of pushing the box to row two. */
+  .brand { flex: 1 1 0; min-width: 0; gap: 8px; }
+  .logo { font-size: 22px; }
+  #subtitle { font-size: 11px; line-height: 1.35; }
   .meta-box {
     position: static; margin-left: auto; align-self: flex-start;
     text-align: right; padding: 4px 8px; max-width: 172px; flex: 0 0 auto;
