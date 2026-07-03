@@ -278,13 +278,22 @@ footer { padding: 18px 28px; color: var(--muted); font-size: 12px; border-top: 1
 /* --- Mobile / iPhone layout --- */
 @media (max-width: 640px) {
   header { padding: calc(10px + env(safe-area-inset-top)) 14px 10px; gap: 8px; }
-  header h1 { font-size: 18px; }
-  /* Not enough width beside the title — flow the box as its own row instead. */
-  .brand { padding-right: 0; }
-  .meta-box { position: static; margin: 0; text-align: left; padding: 5px 9px; }
+  header h1 { font-size: 17px; }
+  /* iPhone Pro/Pro Max (402/440pt): brand left, compact meta box top-right —
+     they share the first row without overlapping. */
+  .brand { flex: 1 1 auto; min-width: 0; gap: 10px; }
+  .logo { font-size: 24px; }
+  .meta-box {
+    position: static; margin-left: auto; align-self: flex-start;
+    text-align: right; padding: 4px 8px; max-width: 172px; flex: 0 0 auto;
+  }
+  .meta-box .clock { font-size: 10px; white-space: normal; }
+  .meta-box .clock.build { font-size: 9px; }
   .controls { width: 100%; flex-wrap: wrap; gap: 6px; }
   .controls .btn { flex: 1 1 auto; padding: 8px 10px; font-size: 12.5px; }
   .controls label { display: none; }   /* the select explains itself */
+  /* Sync status gets its own full line — never squeezes the controls. */
+  #sync-status { flex-basis: 100%; order: 10; }
   main { padding: 12px 12px 40px; }
   .card-grid { grid-template-columns: 1fr; gap: 10px; margin-bottom: 12px; }
   .kpi-grid { grid-template-columns: repeat(2, 1fr); gap: 8px; margin-bottom: 12px; }
