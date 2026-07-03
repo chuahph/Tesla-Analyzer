@@ -24,6 +24,7 @@ from typing import Any
 from dateutil import parser as dateparser
 
 MILES_TO_KM = 1.60934
+PACK_KWH = 60.0  # typical usable capacity, used to estimate energy from SoC deltas
 
 # Column aliases (normalised to lower-case, no spaces/underscores).
 DRIVE_ALIASES = {
@@ -137,14 +138,22 @@ def _normalise_drive(row: dict[str, Any], index: dict[str, str]) -> dict[str, An
     if not duration and end and start:
         duration = max((end - start).total_seconds() / 60.0, 0.0)
 
+    start_soc = _num(g("start_soc"))
+    end_soc = _num(g("end_soc"))
+    energy = _num(g("energy_used_kwh"))
+    if not energy and start_soc > end_soc > 0:
+        # Manual logs usually record battery % but not kWh — estimate from the
+        # SoC drop against a typical ~60 kWh usable pack.
+        energy = (start_soc - end_soc) / 100.0 * PACK_KWH
+
     return {
         "start_time": start,
         "end_time": end,
         "distance_km": round(distance, 2),
         "duration_min": round(duration, 1),
-        "start_soc": _num(g("start_soc")),
-        "end_soc": _num(g("end_soc")),
-        "energy_used_kwh": round(_num(g("energy_used_kwh")), 3),
+        "start_soc": start_soc,
+        "end_soc": end_soc,
+        "energy_used_kwh": round(energy, 3),
         "avg_speed_kmh": _num(g("avg_speed_kmh")) or (
             round(distance / (duration / 60.0), 1) if duration else 0.0
         ),
