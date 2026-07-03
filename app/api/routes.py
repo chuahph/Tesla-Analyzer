@@ -239,11 +239,21 @@ def sync_now(session: Session = Depends(get_session)):
             raise HTTPException(code, f"Tesla error: {exc}") from exc
 
     if data is None:
-        return {
+        resp = {
             "status": "asleep",
             "logged": {"drives": 0, "charges": 0},
             "note": "Car is asleep — try again while charging or right after a drive.",
         }
+        # Include the last known reading so the dashboard can still show battery.
+        last_raw = state.get(session, state.SNAPSHOT_KEY)
+        if last_raw:
+            last = _json.loads(last_raw)
+            resp["last"] = {
+                "soc": last.get("soc"),
+                "ts": last.get("ts"),
+                "odo_km": round(last.get("odo_km", 0), 1),
+            }
+        return resp
 
     vin = data.get("vin") or v.get("vin") or "LINKED-UNKNOWN"
     # Retire the seeded demo data and pin the dashboard to the real car.

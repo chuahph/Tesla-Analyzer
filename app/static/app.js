@@ -46,6 +46,17 @@ function renderKpis(d) {
     cards.push(kpiCard("DC Fast Charging", fmt(chg.dc_energy_share_pct, 0) + "%",
       `of energy · ${fmt(chg.full_charge_share_pct, 0)}% to 100%`));
   }
+  if (!cards.length) {
+    // The window is genuinely empty (e.g. "Since charge" right after charging)
+    // — say so instead of leaving a hole where the KPIs were.
+    const label = d.window_label === "all data" ? "yet"
+      : (d.window_label || `in the last ${d.window_days} day${d.window_days > 1 ? "s" : ""}`);
+    document.getElementById("kpis").innerHTML =
+      `<div class="kpi kpi-empty"><div class="label">No activity ${label}</div>` +
+      `<div class="sub">Your stats appear here after the next synced drive or charge — ` +
+      `or pick a longer window (e.g. 7 days) above.</div></div>`;
+    return;
+  }
   document.getElementById("kpis").innerHTML = cards.join("");
 }
 
@@ -531,7 +542,9 @@ async function syncNow() {
     const body = await res.json();
     if (!res.ok) throw new Error(body.detail || "Sync failed");
     if (body.status === "asleep") {
-      setStatus(status, "Car is asleep — try after a drive or while charging.", "warn");
+      const last = body.last && body.last.soc
+        ? ` · last known 🔋 ${Math.round(body.last.soc)}%` : "";
+      setStatus(status, `😴 Car asleep${last} — sync after a drive or while charging.`, "warn");
     } else {
       const l = body.logged || {};
       const extra = (l.drives || l.charges)
