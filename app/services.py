@@ -15,6 +15,19 @@ def _wipe(session) -> None:
     session.commit()
 
 
+def purge_demo(session) -> None:
+    """Remove the seeded demo vehicle and its data (kept until real data arrives)."""
+    demo_ids = [
+        v.id for v in session.query(Vehicle).filter(Vehicle.vin.like("DEMO%"))
+    ]
+    if not demo_ids:
+        return
+    session.execute(delete(Drive).where(Drive.vehicle_id.in_(demo_ids)))
+    session.execute(delete(Charge).where(Charge.vehicle_id.in_(demo_ids)))
+    session.execute(delete(Vehicle).where(Vehicle.id.in_(demo_ids)))
+    session.commit()
+
+
 def replace_with_import(
     session, drives: list[dict], charges: list[dict], *, name: str = "Imported Tesla"
 ) -> dict:
@@ -59,8 +72,12 @@ def link_with_token(
     if not vehicles:
         raise ValueError("Token is valid but no vehicles are associated with this account.")
 
+    # Real data replaces the seeded sample; the dashboard follows this vehicle.
+    purge_demo(session)
+
     v = vehicles[0]
     vin = v.get("vin", "LINKED-UNKNOWN")
+    state.put(session, state.LINKED_VIN_KEY, vin)
     existing = session.query(Vehicle).filter(Vehicle.vin == vin).first()
     if existing is None:
         existing = Vehicle(

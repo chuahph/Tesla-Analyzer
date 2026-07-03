@@ -24,6 +24,14 @@ router = APIRouter(prefix="/api", tags=["analytics"])
 
 
 def _first_vehicle(session: Session) -> Vehicle:
+    # An account-linked vehicle takes precedence over demo/imported rows.
+    linked_vin = state.get(session, state.LINKED_VIN_KEY)
+    if linked_vin:
+        vehicle = session.scalars(
+            select(Vehicle).where(Vehicle.vin == linked_vin)
+        ).first()
+        if vehicle is not None:
+            return vehicle
     vehicle = session.scalars(select(Vehicle).order_by(Vehicle.id)).first()
     if vehicle is None:
         raise HTTPException(404, "No vehicle data. Run the collector or seed demo data.")
@@ -214,6 +222,9 @@ def sync_now(session: Session = Depends(get_session)):
         }
 
     vin = data.get("vin") or v.get("vin") or "LINKED-UNKNOWN"
+    # Retire the seeded demo data and pin the dashboard to the real car.
+    services.purge_demo(session)
+    state.put(session, state.LINKED_VIN_KEY, vin)
     vehicle = session.query(Vehicle).filter(Vehicle.vin == vin).first()
     if vehicle is None:
         vehicle = Vehicle(vin=vin, name=data.get("display_name") or "My Tesla", model="Tesla")
