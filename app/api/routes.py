@@ -265,6 +265,22 @@ def sync_now(session: Session = Depends(get_session)):
         session.add(vehicle)
         session.flush()
 
+    # Enrich the vehicle from the car's own config (real model / trim / colour).
+    cfg = data.get("vehicle_config") or {}
+    car_map = {"model3": "Model 3", "modely": "Model Y",
+               "models": "Model S", "modelx": "Model X"}
+    real_model = car_map.get((cfg.get("car_type") or "").lower().replace(" ", ""))
+    if real_model and vehicle.model in ("Tesla", ""):
+        vehicle.model = real_model
+    if not vehicle.trim:
+        trim_bits = [
+            (cfg.get("trim_badging") or "").upper(),
+            (cfg.get("exterior_color") or ""),
+        ]
+        vehicle.trim = " ".join(b for b in trim_bits if b)
+    if data.get("display_name") and vehicle.name in ("My Tesla", ""):
+        vehicle.name = data["display_name"]
+
     snap = sync_mod.snapshot_from_vehicle_data(data)
     prev_raw = state.get(session, state.SNAPSHOT_KEY)
     prev = _json.loads(prev_raw) if prev_raw else None
