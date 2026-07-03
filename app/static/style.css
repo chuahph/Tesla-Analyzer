@@ -41,14 +41,28 @@ header {
   z-index: 10;
 }
 
+/* Time + build stamp: one compact box pinned to the header's top-right. */
+.meta-box {
+  position: absolute;
+  top: calc(10px + env(safe-area-inset-top));
+  right: max(12px, env(safe-area-inset-right));
+  text-align: right;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 6px 10px;
+  max-width: 210px;
+}
 .clock {
-  margin: 4px 0 0;
+  margin: 0;
   color: var(--muted);
   font-size: 11px;
   font-variant-numeric: tabular-nums;
   letter-spacing: .2px;
+  white-space: nowrap;
 }
-.clock.build { margin-top: 2px; font-size: 10px; opacity: .8; }
+.clock.build { margin-top: 2px; font-size: 9.5px; opacity: .8; }
+.clock.build:empty { display: none; }
 
 /* Battery health card */
 .bat-health { font-size: 40px; font-weight: 800; color: var(--green); margin: 4px 0 10px; }
@@ -56,7 +70,7 @@ header {
 .bat-line strong { color: var(--text); }
 .bat-note { color: var(--muted); font-size: 13px; line-height: 1.6; margin: 6px 0; }
 
-.brand { display: flex; align-items: center; gap: 14px; }
+.brand { display: flex; align-items: center; gap: 14px; padding-right: 175px; }
 .logo { font-size: 30px; }
 header h1 { margin: 0; font-size: 20px; letter-spacing: .3px; }
 #subtitle { margin: 2px 0 0; color: var(--muted); font-size: 13px; }
@@ -258,6 +272,9 @@ footer { padding: 18px 28px; color: var(--muted); font-size: 12px; border-top: 1
 @media (max-width: 640px) {
   header { padding: calc(14px + env(safe-area-inset-top)) 16px 14px; }
   header h1 { font-size: 18px; }
+  /* Not enough width beside the title — flow the box as its own row instead. */
+  .brand { padding-right: 0; }
+  .meta-box { position: static; margin: 2px 0 0; text-align: left; }
   .controls { width: 100%; flex-wrap: wrap; gap: 8px; }
   .controls .btn { flex: 1 1 auto; }
   main { padding: 16px; }
