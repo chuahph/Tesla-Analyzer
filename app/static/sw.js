@@ -6,7 +6,7 @@
  *   - navigations & data  -> network-first, fall back to cache when offline
  *   - other assets        -> cache-first, fall back to network
  */
-const CACHE = "tesla-analyzer-v17"; // bump to invalidate cached assets on update
+const CACHE = "tesla-analyzer-v18"; // bump to invalidate cached assets on update
 
 self.addEventListener("install", (event) => {
   self.skipWaiting();
@@ -21,7 +21,14 @@ self.addEventListener("activate", (event) => {
 });
 
 function isData(url) {
-  return url.pathname.includes("/api/") || /summary-\d+\.json$/.test(url.pathname);
+  return url.pathname.includes("/api/") || /summary-\d+\.json$|demo\.json$/.test(url.pathname);
+}
+
+// App UI files change often — fetch them network-first so a single reload picks
+// up a new deploy. Heavy, rarely-changing bundles (vendor/, icons) stay
+// cache-first for speed/offline.
+function isAppAsset(url) {
+  return /\.(css|js)$/.test(url.pathname) && !url.pathname.includes("/vendor/");
 }
 
 async function networkFirst(request) {
@@ -57,7 +64,7 @@ self.addEventListener("fetch", (event) => {
   const url = new URL(request.url);
   if (url.origin !== self.location.origin) return; // don't touch the Chart.js CDN etc.
 
-  if (request.mode === "navigate" || isData(url)) {
+  if (request.mode === "navigate" || isData(url) || isAppAsset(url)) {
     event.respondWith(networkFirst(request));
   } else {
     event.respondWith(cacheFirst(request));
