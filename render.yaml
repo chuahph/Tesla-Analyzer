@@ -3,7 +3,9 @@
 # builds the Dockerfile. Free plan; Singapore region (closest to Malaysia).
 services:
   - type: web
-    name: tesla-analyzer
+    # No "tesla" in the name: the service name becomes the public URL, and
+    # Tesla's developer portal rejects domains containing their trademark.
+    name: ev-drive-analyzer
     runtime: docker
     region: singapore
     plan: free
