@@ -189,6 +189,16 @@ async function load() {
     badge.className = "badge " + mode;
     if (STATIC_MODE) updateResetButton();
 
+    // Live mode: reveal the Sync button and snapshot the car once per visit.
+    const syncBtn = document.getElementById("btn-sync");
+    if (syncBtn) {
+      syncBtn.classList.toggle("hidden", STATIC_MODE || mode !== "live");
+      if (!STATIC_MODE && mode === "live" && !window._syncedOnce) {
+        window._syncedOnce = true;
+        syncNow();
+      }
+    }
+
     const v = d.vehicle;
     document.getElementById("subtitle").textContent =
       [v.name, [v.model, v.trim].filter(Boolean).join(" ")].filter(Boolean).join(" · ");
@@ -390,6 +400,40 @@ document.getElementById("link-submit").addEventListener("click", async () => {
     setStatus(status, e.message, "err");
   }
 });
+
+// --- Sync now (live mode): snapshot the car, log drives/charges since last time ---
+let syncBusy = false;
+async function syncNow() {
+  if (syncBusy) return;
+  syncBusy = true;
+  const status = document.getElementById("sync-status");
+  setStatus(status, "Syncing…", "");
+  try {
+    const res = await fetch("/api/sync", { method: "POST" });
+    const body = await res.json();
+    if (!res.ok) throw new Error(body.detail || "Sync failed");
+    if (body.status === "asleep") {
+      setStatus(status, "Car is asleep — try after a drive or while charging.", "warn");
+    } else {
+      const l = body.logged || {};
+      const extra = (l.drives || l.charges)
+        ? ` · logged ${l.drives} drive(s), ${l.charges} charge(s)`
+        : "";
+      setStatus(status, `🔋 ${Math.round(body.soc)}% · ${body.status}${extra}`, "ok");
+      if (l.drives || l.charges) load();
+    }
+  } catch (e) {
+    setStatus(status, e.message, "err");
+  } finally {
+    syncBusy = false;
+  }
+}
+const syncBtnEl = document.getElementById("btn-sync");
+if (syncBtnEl) syncBtnEl.addEventListener("click", syncNow);
+// Re-sync every 5 minutes while the dashboard stays open and visible.
+setInterval(() => {
+  if (!document.hidden && !STATIC_MODE && window._syncedOnce) syncNow();
+}, 5 * 60 * 1000);
 
 // Register the service worker so the app installs and works offline on iOS.
 // Self-hosted serves it at /sw.js (root scope); the static Pages build serves
