@@ -164,6 +164,87 @@ def oauth_callback(
     return RedirectResponse(f"/?linked={result['source']}")
 
 
+@router.post("/sync")
+def sync_now(session: Session = Depends(get_session)):
+    """Snapshot the linked car and log what happened since the last snapshot."""
+    import json as _json
+
+    from .. import sync as sync_mod
+    from ..tesla_client import TeslaClient
+
+    settings = get_settings()
+    token = state.active_token(session)
+    if not token:
+        raise HTTPException(400, "No linked Tesla account — link your account first.")
+    base = state.active_base_url(session)
+
+    def fetch(tok: str):
+        client = TeslaClient(access_token=tok, base_url=base)
+        vehicles = client.list_vehicles()
+        if not vehicles:
+            raise HTTPException(404, "No vehicles on this Tesla account.")
+        v = vehicles[0]
+        if v.get("state") and v["state"] != "online":
+            return v, None  # asleep/offline — nothing readable right now
+        return v, client.vehicle_data(v.get("id_s") or v.get("id"))
+
+    try:
+        v, data = fetch(token)
+    except httpx.HTTPStatusError as exc:
+        code = exc.response.status_code
+        if code == 401:
+            refresh = state.get(session, state.REFRESH_KEY)
+            if not refresh or not auth.oauth_configured():
+                raise HTTPException(401, "Token expired — sign in with Tesla again.") from exc
+            tokens = auth.refresh_tokens(refresh)
+            state.put(session, state.TOKEN_KEY, tokens["access_token"])
+            if tokens.get("refresh_token"):
+                state.put(session, state.REFRESH_KEY, tokens["refresh_token"])
+            v, data = fetch(tokens["access_token"])
+        elif code == 408:
+            v, data = None, None  # vehicle asleep
+        else:
+            raise HTTPException(code, f"Tesla error: {exc}") from exc
+
+    if data is None:
+        return {
+            "status": "asleep",
+            "logged": {"drives": 0, "charges": 0},
+            "note": "Car is asleep — try again while charging or right after a drive.",
+        }
+
+    vin = data.get("vin") or v.get("vin") or "LINKED-UNKNOWN"
+    vehicle = session.query(Vehicle).filter(Vehicle.vin == vin).first()
+    if vehicle is None:
+        vehicle = Vehicle(vin=vin, name=data.get("display_name") or "My Tesla", model="Tesla")
+        session.add(vehicle)
+        session.flush()
+
+    snap = sync_mod.snapshot_from_vehicle_data(data)
+    prev_raw = state.get(session, state.SNAPSHOT_KEY)
+    prev = _json.loads(prev_raw) if prev_raw else None
+    drives, charges = sync_mod.sessions_between(
+        prev, snap, vehicle.battery_capacity_kwh, settings.energy_price_per_kwh
+    )
+    for d in drives:
+        session.add(Drive(vehicle_id=vehicle.id, **d))
+    for c in charges:
+        session.add(Charge(vehicle_id=vehicle.id, **c))
+    session.commit()
+    state.put(session, state.SNAPSHOT_KEY, _json.dumps(snap))
+    state.put(session, state.SOURCE_KEY, "linked")
+
+    activity = "charging" if snap["charging"] else (
+        "driving" if snap["shift"] not in ("P", None, "") else "parked"
+    )
+    return {
+        "status": activity,
+        "soc": snap["soc"],
+        "odo_km": round(snap["odo_km"], 1),
+        "logged": {"drives": len(drives), "charges": len(charges)},
+    }
+
+
 @router.post("/link/refresh")
 def refresh_link(session: Session = Depends(get_session)):
     """Mint a fresh access token from the stored refresh token (OAuth links)."""
