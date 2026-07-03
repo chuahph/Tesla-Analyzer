@@ -16,5 +16,20 @@ services:
         value: RM
       - key: RATED_WH_PER_KM
         value: "150"
+      # Persistent storage: free Postgres defined below, so imported data and
+      # the linked token survive restarts/redeploys.
+      - key: DATABASE_URL
+        fromDatabase:
+          name: tesla-analyzer-db
+          property: connectionString
+      # Private dashboard: Render prompts you for this value when applying the
+      # blueprint — pick any passcode; the app then requires it to open.
+      - key: APP_PASSCODE
+        sync: false
       # Leave Tesla credentials unset — you'll link your account from the
       # dashboard (🔗 Link Tesla Account → paste an access token).
+
+databases:
+  - name: tesla-analyzer-db
+    plan: free
+    region: singapore
