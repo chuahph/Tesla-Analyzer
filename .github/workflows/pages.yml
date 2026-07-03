@@ -3,6 +3,18 @@ name: Deploy dashboard to GitHub Pages
 on:
   push:
     branches: [main]
+    # Only redeploy the demo site when something it serves actually changed —
+    # backend-only merges skip Pages entirely (fewer runs, fewer flaky fails).
+    paths:
+      - "app/static/**"
+      - "app/analysis/**"
+      - "app/api/**"
+      - "app/sample_data.py"
+      - "app/importer.py"
+      - "app/models.py"
+      - "scripts/build_site.py"
+      - "requirements.txt"
+      - ".github/workflows/pages.yml"
   workflow_dispatch:
 
 permissions:
@@ -51,6 +63,18 @@ jobs:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
+      # GitHub Pages occasionally rejects a deployment with a transient
+      # "Deployment failed, try again later." — retry once after a pause
+      # instead of failing the run (and emailing) on the first hiccup.
       - name: Deploy to GitHub Pages
         id: deployment
+        uses: actions/deploy-pages@v4
+        continue-on-error: true
+
+      - name: Wait before retry
+        if: steps.deployment.outcome == 'failure'
+        run: sleep 60
+
+      - name: Retry deploy to GitHub Pages
+        if: steps.deployment.outcome == 'failure'
         uses: actions/deploy-pages@v4
