@@ -36,7 +36,7 @@
       <button id="btn-import" class="btn">📁 Load Tesla Data</button>
       <button id="btn-link" class="btn btn-accent">🔗 Link Tesla Account</button>
       <button id="btn-sync" class="btn hidden">⟳ Sync</button>
-      <span id="sync-status" class="status"></span>
+      <button id="btn-export" class="btn" title="Download all data as CSV">⬇ CSV</button>
       <label for="range">Window</label>
       <select id="range">
         <option value="charge" selected>Since charge</option>
@@ -51,6 +51,8 @@
       </select>
       <span id="mode-badge" class="badge">…</span>
     </div>
+    <!-- Car status line: a full-width header row of its own, always. -->
+    <p id="sync-status" class="status"></p>
   </header>
 
   <!-- Modal: Load Tesla data export -->
