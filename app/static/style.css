@@ -79,7 +79,8 @@ header {
 header h1 { margin: 0; font-size: 20px; letter-spacing: .3px; }
 #subtitle { margin: 2px 0 0; color: var(--muted); font-size: 13px; }
 
-.controls { display: flex; align-items: center; gap: 10px; }
+.controls { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; justify-content: flex-end; }
+@media (min-width: 641px) { #sync-status { text-align: right; } }
 .controls label { color: var(--muted); font-size: 13px; }
 select {
   background: var(--panel-2);
@@ -275,6 +276,9 @@ footer { padding: 18px 28px; color: var(--muted); font-size: 12px; border-top: 1
 .status { font-size: 13px; color: var(--muted); }
 .status.ok { color: var(--green); }
 .status.err, .status.warn { color: var(--amber); }
+/* The battery/remark line always stands on its own row, at every width. */
+#sync-status { flex-basis: 100%; order: 10; line-height: 1.5; }
+#sync-status:empty { display: none; }
 .hidden { display: none; }
 
 /* --- Mobile / iPhone layout --- */
@@ -301,7 +305,6 @@ footer { padding: 18px 28px; color: var(--muted); font-size: 12px; border-top: 1
   .controls #btn-import, .controls #btn-link { flex: 1 1 42%; }
   .controls #btn-sync { flex: 0 1 auto; }
   .controls #range { flex: 1 1 auto; min-width: 0; }
-  #sync-status { flex-basis: 100%; order: 10; }
   main { padding: 12px 12px 40px; }
   .card-grid { grid-template-columns: 1fr; gap: 10px; margin-bottom: 12px; }
   .kpi-grid { grid-template-columns: repeat(2, 1fr); gap: 8px; margin-bottom: 12px; }
