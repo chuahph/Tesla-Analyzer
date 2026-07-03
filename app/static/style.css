@@ -48,6 +48,7 @@ header {
   font-variant-numeric: tabular-nums;
   letter-spacing: .2px;
 }
+.clock.build { margin-top: 2px; font-size: 10px; opacity: .8; }
 
 .brand { display: flex; align-items: center; gap: 14px; }
 .logo { font-size: 30px; }

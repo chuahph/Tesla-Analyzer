@@ -73,6 +73,13 @@ def test_sync_key_lets_cron_through_the_gate():
         settings.app_passcode, settings.sync_key = old_pc, old_sk
 
 
+def test_health_reports_build_info():
+    with TestClient(app) as client:
+        body = client.get("/api/health").json()
+        assert "build" in body
+        assert set(body["build"]) == {"sha", "time"}
+
+
 def test_summary_since_charge_window():
     settings = get_settings()
     old = settings.app_passcode

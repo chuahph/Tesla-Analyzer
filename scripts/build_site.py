@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import shutil
 from pathlib import Path
 
@@ -79,10 +80,25 @@ def build(out_dir: Path) -> None:
     # PWA assets: rewrite root-absolute paths to relative for the Pages subpath.
     index = index.replace('href="/manifest.webmanifest"', 'href="manifest.webmanifest"')
     index = index.replace('href="/static/icons/', 'href="icons/')
-    # Enable in-browser (no-backend) mode and point at the raw demo dataset.
+    # Enable in-browser (no-backend) mode, point at the raw demo dataset, and
+    # stamp the build (Actions run #/SHA + MYT build time) for the header.
+    import subprocess
+    from datetime import datetime, timedelta, timezone
+
+    sha = (os.environ.get("GITHUB_SHA") or "")[:7]
+    if not sha:
+        try:
+            sha = subprocess.check_output(
+                ["git", "rev-parse", "--short", "HEAD"], cwd=ROOT, text=True
+            ).strip()
+        except Exception:  # noqa: BLE001
+            sha = ""
+    run = os.environ.get("GITHUB_RUN_NUMBER") or ""
+    btime = datetime.now(timezone(timedelta(hours=8))).strftime("%d %b %Y %H%M")
     index = index.replace(
         '<script src="analysis.js"></script>',
-        '<script>window.TA_STATIC = true; window.DEMO_URL = "data/demo.json";</script>\n'
+        "<script>window.TA_STATIC = true; window.DEMO_URL = \"data/demo.json\"; "
+        f'window.BUILD_INFO = {{run:"{run}",sha:"{sha}",time:"{btime}"}};</script>\n'
         '  <script src="analysis.js"></script>',
     )
     (out_dir / "index.html").write_text(index)

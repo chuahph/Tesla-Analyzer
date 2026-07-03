@@ -54,6 +54,26 @@ def _window(session: Session, vehicle_id: int, days: int, since: datetime | None
     return list(drives), list(charges)
 
 
+def _build_info() -> dict:
+    """Deployed version: git SHA (from the host's env) + image build time in MYT."""
+    import os
+    from pathlib import Path
+
+    from ..sync import MYT
+
+    sha = (os.environ.get("RENDER_GIT_COMMIT") or os.environ.get("GITHUB_SHA") or "")
+    sha = sha.strip()[:7] or None
+    time_str = None
+    for p in ("/app/.build_time", ".build_time"):
+        try:
+            ts = float(Path(p).read_text().strip())
+            time_str = datetime.fromtimestamp(ts, MYT).strftime("%d %b %Y %H%M")
+            break
+        except (OSError, ValueError):
+            continue
+    return {"sha": sha, "time": time_str}
+
+
 @router.get("/health")
 def health(session: Session = Depends(get_session)):
     source = state.data_source(session)
@@ -63,6 +83,7 @@ def health(session: Session = Depends(get_session)):
         "mode": mode,
         "source": source,
         "oauth_available": auth.oauth_configured(),
+        "build": _build_info(),
     }
 
 

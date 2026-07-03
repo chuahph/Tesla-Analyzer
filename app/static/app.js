@@ -202,7 +202,9 @@ async function load() {
       const res = await fetch(`/api/summary?days=${days}${sinceCharge ? "&since_charge=1" : ""}`);
       if (!res.ok) throw new Error(await res.text());
       d = await res.json();
-      mode = (await (await fetch("/api/health")).json()).mode;
+      const health = await (await fetch("/api/health")).json();
+      mode = health.mode;
+      setBuildInfo(health.build);
     }
 
     const badge = document.getElementById("mode-badge");
@@ -257,6 +259,19 @@ function tickClock() {
   const el = document.getElementById("clock");
   if (el) { const n = new Date(); el.textContent = `${dateFmt.format(n)} ${hhmm(n)} MYT`; }
 }
+
+// Build stamp in the header: run #/SHA + build time (MYT), so it's obvious
+// which deployed version the phone is showing.
+function setBuildInfo(info) {
+  const el = document.getElementById("build-info");
+  if (!el || !info) return;
+  const parts = [];
+  if (info.run) parts.push(`build #${info.run}`);
+  if (info.sha) parts.push(info.sha);
+  if (info.time) parts.push(`${info.time} MYT`);
+  el.textContent = parts.length ? `⚙ ${parts.join(" · ")}` : "";
+}
+if (window.BUILD_INFO) setBuildInfo(window.BUILD_INFO);
 tickClock();
 setInterval(tickClock, 1000);
 
