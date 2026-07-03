@@ -30,6 +30,10 @@ class Settings(BaseSettings):
     # Set APP_PASSCODE on a public host so only you can open the dashboard.
     app_passcode: str = ""
 
+    # Optional secret that lets an external cron service trigger /api/sync
+    # (as ?key=...) without the passcode cookie, for hands-off logging.
+    sync_key: str = ""
+
     # Analysis parameters
     energy_price_per_kwh: float = 0.90
     currency: str = "RM"

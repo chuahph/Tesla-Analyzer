@@ -77,9 +77,19 @@ _OPEN_PATHS = {"/login", "/api/health", TESLA_KEY_PATH}
 
 @app.middleware("http")
 async def _passcode_gate(request: Request, call_next):
-    passcode = get_settings().app_passcode.strip()
+    settings = get_settings()
+    passcode = settings.app_passcode.strip()
     path = request.url.path
     if not passcode or path in _OPEN_PATHS or _is_authed(request, passcode):
+        return await call_next(request)
+    # External cron services trigger /api/sync with the secret key instead of
+    # the passcode cookie (hands-off background logging).
+    sync_key = settings.sync_key.strip()
+    if (
+        sync_key
+        and path == "/api/sync"
+        and hmac.compare_digest(request.query_params.get("key", ""), sync_key)
+    ):
         return await call_next(request)
     if path.startswith("/api/"):
         return JSONResponse({"detail": "Passcode required."}, status_code=401)
