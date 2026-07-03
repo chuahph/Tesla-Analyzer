@@ -163,6 +163,7 @@
       avg_dc_power_kw: dc.length ? round(mean(dc.map((c) => c.max_power_kw)), 1) : 0.0,
       full_charges: full,
       full_charge_share_pct: round(100 * safeDiv(full, charges.length), 1),
+      avg_end_soc: round(mean(charges.filter((c) => c.end_soc > 0).map((c) => c.end_soc)), 0),
       end_soc_targets: soc,
       charges_by_hour: cbh,
       top_locations: counterTop(byLoc, 5),
@@ -207,12 +208,49 @@
     };
   }
 
+  // --- battery health (mirror app/analysis/battery.py) ---
+  function analyzeBattery(readings) {
+    const proj = (readings || [])
+      .filter((r) => (r.soc || 0) >= 20 && (r.range_km || 0) > 0)
+      .map((r) => ({ soc: r.soc, p: r.range_km / (r.soc / 100) }));
+    if (proj.length < 5) {
+      return { available: false, n_readings: proj.length,
+        note: `Collecting data — ${proj.length}/5 usable battery readings so far.` };
+    }
+    const values = proj.map((x) => x.p);
+    const baseline = percentile(values, 0.95);
+    const current = mean(values.slice(-10));
+    const degradation = baseline ? Math.max(0, 100 * (baseline - current) / baseline) : 0;
+    const socs = proj.map((x) => x.soc);
+    return {
+      available: true, n_readings: proj.length,
+      health_pct: round(100 - degradation, 1),
+      degradation_pct: round(degradation, 1),
+      est_full_range_km: round(current, 0),
+      baseline_full_range_km: round(baseline, 0),
+      min_soc_seen: round(Math.min(...socs), 0),
+      avg_soc: round(mean(socs), 0),
+    };
+  }
+
   // --- recommendations (mirror app/analysis/recommendations.py) ---
   function rec(category, priority, title, detail, saving) {
     return { category, priority, title, detail, estimated_saving: saving || null };
   }
-  function buildRecommendations(driving, charging, efficiency, price, currency) {
+  function buildRecommendations(driving, charging, efficiency, price, currency, battery) {
     const recs = [];
+    if (battery && battery.available) {
+      const deg = battery.degradation_pct;
+      if (deg >= 8) {
+        recs.push(rec("Battery health", "high",
+          `Estimated battery degradation is ${deg.toFixed(0)}%`,
+          "The pack's projected full range has dropped noticeably from its best observed value. Some loss is normal with age and mileage, but you can slow it down: avoid sitting at very high or very low charge for long periods, prefer AC charging, and minimise DC fast-charging in hot conditions.", null));
+      } else if (deg >= 4) {
+        recs.push(rec("Battery health", "low",
+          `Mild battery degradation (~${deg.toFixed(0)}%)`,
+          "Projected full range is slightly below the best this pack has shown — well within normal ageing. Current charging habits are worth keeping an eye on but no action is needed.", null));
+      }
+    }
     if (efficiency.available) {
       const vs = efficiency.vs_rated_pct;
       if (vs > 12) {
@@ -292,7 +330,8 @@
     const driving = analyzeDriving(drives);
     const charging = analyzeCharging(charges);
     const efficiency = analyzeEfficiency(drives, rated);
-    const recommendations = buildRecommendations(driving, charging, efficiency, price, currency);
+    const battery = analyzeBattery(dataset.battery_readings || []);
+    const recommendations = buildRecommendations(driving, charging, efficiency, price, currency, battery);
 
     return {
       vehicle: dataset.vehicle || { name: "Tesla", model: "", trim: "" },
@@ -300,7 +339,7 @@
       window_label: windowLabel,
       generated_at: new Date().toISOString().slice(0, 19),
       currency,
-      driving, charging, efficiency, recommendations,
+      driving, charging, efficiency, battery, recommendations,
     };
   }
 

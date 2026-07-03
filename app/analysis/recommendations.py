@@ -23,11 +23,42 @@ def build(
     driving: dict[str, Any],
     charging: dict[str, Any],
     efficiency: dict[str, Any],
+    battery: dict[str, Any] | None = None,
     *,
     energy_price: float,
     currency: str,
 ) -> list[dict[str, Any]]:
     recs: list[dict[str, Any]] = []
+
+    # --- Battery degradation --------------------------------------------------
+    if battery and battery.get("available"):
+        deg = battery["degradation_pct"]
+        if deg >= 8:
+            recs.append(
+                _rec(
+                    "Battery health",
+                    "high",
+                    f"Estimated battery degradation is {deg:.0f}%",
+                    "The pack's projected full range has dropped noticeably from its "
+                    "best observed value. Some loss is normal with age and mileage, "
+                    "but you can slow it down: avoid sitting at very high or very low "
+                    "charge for long periods, prefer AC charging, and minimise DC "
+                    "fast-charging in hot conditions.",
+                    None,
+                )
+            )
+        elif deg >= 4:
+            recs.append(
+                _rec(
+                    "Battery health",
+                    "low",
+                    f"Mild battery degradation (~{deg:.0f}%)",
+                    "Projected full range is slightly below the best this pack has "
+                    "shown — well within normal ageing. Current charging habits are "
+                    "worth keeping an eye on but no action is needed.",
+                    None,
+                )
+            )
 
     # --- Efficiency vs rated -------------------------------------------------
     if efficiency.get("available"):
