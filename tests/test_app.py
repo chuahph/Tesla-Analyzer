@@ -101,6 +101,20 @@ def test_summary_since_charge_window():
         settings.app_passcode = old
 
 
+def test_export_csv_round_trips_through_importer():
+    from app.importer import parse_upload
+
+    with TestClient(app) as client:  # startup seeds demo data
+        resp = client.get("/api/export/csv")
+        assert resp.status_code == 200
+        assert resp.headers["content-type"] == "application/zip"
+        assert "attachment" in resp.headers["content-disposition"]
+        drives, charges = parse_upload("export.zip", resp.content)
+        summary = client.get("/api/summary?days=730").json()
+        assert len(drives) == summary["driving"]["total_drives"]
+        assert len(charges) == summary["charging"]["total_sessions"]
+
+
 def test_no_passcode_means_open():
     settings = get_settings()
     old = settings.app_passcode

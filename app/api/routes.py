@@ -389,6 +389,56 @@ def export_data(
     }
 
 
+@router.get("/export/csv")
+def export_csv(session: Session = Depends(get_session)):
+    """Download all drives & charges as a ZIP of CSVs (re-importable)."""
+    import csv
+    import io
+    import zipfile
+
+    from fastapi.responses import Response
+
+    vehicle = _first_vehicle(session)
+    drives, charges = _window(session, vehicle.id, 3650)
+
+    def sheet(headers, rows):
+        buf = io.StringIO()
+        w = csv.writer(buf)
+        w.writerow(headers)
+        w.writerows(rows)
+        return buf.getvalue()
+
+    ts = lambda t: t.isoformat(sep=" ", timespec="minutes")  # noqa: E731
+    drives_csv = sheet(
+        ["start_time", "end_time", "distance_km", "duration_min", "start_soc",
+         "end_soc", "energy_used_kwh", "avg_speed_kmh", "max_speed_kmh",
+         "outside_temp_c", "start_location", "end_location"],
+        [[ts(d.start_time), ts(d.end_time), d.distance_km, d.duration_min,
+          d.start_soc, d.end_soc, d.energy_used_kwh, d.avg_speed_kmh,
+          d.max_speed_kmh, d.outside_temp_c, d.start_location, d.end_location]
+         for d in drives],
+    )
+    charges_csv = sheet(
+        ["start_time", "end_time", "duration_min", "start_soc", "end_soc",
+         "energy_added_kwh", "charge_type", "max_power_kw", "location",
+         "cost", "outside_temp_c"],
+        [[ts(c.start_time), ts(c.end_time), c.duration_min, c.start_soc,
+          c.end_soc, c.energy_added_kwh, c.charge_type, c.max_power_kw,
+          c.location, c.cost, c.outside_temp_c] for c in charges],
+    )
+
+    zbuf = io.BytesIO()
+    with zipfile.ZipFile(zbuf, "w", zipfile.ZIP_DEFLATED) as z:
+        z.writestr("drives.csv", drives_csv)
+        z.writestr("charges.csv", charges_csv)
+    name = f"tesla-analyzer-{vehicle.vin[-6:]}.zip"
+    return Response(
+        zbuf.getvalue(),
+        media_type="application/zip",
+        headers={"Content-Disposition": f'attachment; filename="{name}"'},
+    )
+
+
 @router.get("/summary")
 def summary(
     days: int = Query(90, ge=1, le=730),

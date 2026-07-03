@@ -276,8 +276,9 @@ footer { padding: 18px 28px; color: var(--muted); font-size: 12px; border-top: 1
 .status { font-size: 13px; color: var(--muted); }
 .status.ok { color: var(--green); }
 .status.err, .status.warn { color: var(--amber); }
-/* The battery/remark line always stands on its own row, at every width. */
-#sync-status { flex-basis: 100%; order: 10; line-height: 1.5; }
+/* The battery/remark line is its own full-width header row — structurally,
+   not via flex ordering, so no layout can pull it inline. */
+#sync-status { width: 100%; margin: 0; line-height: 1.5; }
 #sync-status:empty { display: none; }
 .hidden { display: none; }
 

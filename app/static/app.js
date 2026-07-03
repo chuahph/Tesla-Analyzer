@@ -569,6 +569,38 @@ setInterval(() => {
   if (!document.hidden && !STATIC_MODE && window._syncedOnce) syncNow();
 }, 5 * 60 * 1000);
 
+// --- Export all data as a ZIP of CSVs (drives.csv + charges.csv) ---
+function csvOf(rows, headers) {
+  const esc = (v) => {
+    const s = String(v ?? "");
+    return /[",\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
+  };
+  return headers.join(",") + "\n" +
+    rows.map((r) => headers.map((h) => esc(r[h])).join(",")).join("\n") + "\n";
+}
+async function exportCsv() {
+  if (!STATIC_MODE) { window.location.href = "/api/export/csv"; return; }
+  // Static/PWA: build the same ZIP in the browser from the local dataset.
+  const ds = importedDataset() || (await demoDataset());
+  const zip = new JSZip();
+  zip.file("drives.csv", csvOf(ds.drives || [], [
+    "start_time", "end_time", "distance_km", "duration_min", "start_soc",
+    "end_soc", "energy_used_kwh", "avg_speed_kmh", "max_speed_kmh",
+    "outside_temp_c", "start_location", "end_location"]));
+  zip.file("charges.csv", csvOf(ds.charges || [], [
+    "start_time", "end_time", "duration_min", "start_soc", "end_soc",
+    "energy_added_kwh", "charge_type", "max_power_kw", "location",
+    "cost", "outside_temp_c"]));
+  const blob = await zip.generateAsync({ type: "blob" });
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = "tesla-analyzer-export.zip";
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+}
+const exportBtn = document.getElementById("btn-export");
+if (exportBtn) exportBtn.addEventListener("click", exportCsv);
+
 // Register the service worker so the app installs and works offline on iOS.
 // Self-hosted serves it at /sw.js (root scope); the static Pages build serves
 // it next to index.html (relative scope under the project subpath).
