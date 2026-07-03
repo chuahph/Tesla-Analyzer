@@ -235,8 +235,12 @@ def sync_now(session: Session = Depends(get_session)):
     snap = sync_mod.snapshot_from_vehicle_data(data)
     prev_raw = state.get(session, state.SNAPSHOT_KEY)
     prev = _json.loads(prev_raw) if prev_raw else None
-    drives, charges = sync_mod.sessions_between(
-        prev, snap, vehicle.battery_capacity_kwh, settings.energy_price_per_kwh
+    open_trip = _json.loads(state.get(session, state.OPEN_TRIP_KEY) or "null")
+    open_charge = _json.loads(state.get(session, state.OPEN_CHARGE_KEY) or "null")
+
+    drives, charges, open_trip, open_charge = sync_mod.process_snapshot(
+        prev, snap, open_trip, open_charge,
+        vehicle.battery_capacity_kwh, settings.energy_price_per_kwh,
     )
     for d in drives:
         session.add(Drive(vehicle_id=vehicle.id, **d))
@@ -244,6 +248,8 @@ def sync_now(session: Session = Depends(get_session)):
         session.add(Charge(vehicle_id=vehicle.id, **c))
     session.commit()
     state.put(session, state.SNAPSHOT_KEY, _json.dumps(snap))
+    state.put(session, state.OPEN_TRIP_KEY, _json.dumps(open_trip) if open_trip else "")
+    state.put(session, state.OPEN_CHARGE_KEY, _json.dumps(open_charge) if open_charge else "")
     state.put(session, state.SOURCE_KEY, "linked")
 
     activity = "charging" if snap["charging"] else (
@@ -253,6 +259,7 @@ def sync_now(session: Session = Depends(get_session)):
         "status": activity,
         "soc": snap["soc"],
         "odo_km": round(snap["odo_km"], 1),
+        "trip_in_progress": bool(open_trip),
         "logged": {"drives": len(drives), "charges": len(charges)},
     }
 

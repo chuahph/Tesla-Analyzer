@@ -70,4 +70,15 @@ def analyze(drives: list[Drive]) -> dict[str, Any]:
         "top_routes": routes.most_common(5),
         "speed_efficiency_slope_wh_per_kmh": round(speed_slope, 3),
         "avg_efficiency_wh_per_km": round(mean(effs), 1),
+        "recent_trips": [
+            {
+                "start_time": d.start_time.isoformat(timespec="minutes"),
+                "distance_km": round(d.distance_km, 1),
+                "duration_min": round(d.duration_min),
+                "wh_per_km": round(d.wh_per_km),
+                "route": f"{d.start_location} → {d.end_location}"
+                if d.start_location and d.end_location else "",
+            }
+            for d in sorted(drives, key=lambda x: x.start_time, reverse=True)[:5]
+        ],
     }

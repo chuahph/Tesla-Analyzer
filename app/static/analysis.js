@@ -111,6 +111,17 @@
       top_routes: counterTop(routes, 5),
       speed_efficiency_slope_wh_per_kmh: round(slope, 3),
       avg_efficiency_wh_per_km: round(mean(effs), 1),
+      recent_trips: [...drives]
+        .sort((a, b) => new Date(b.start_time) - new Date(a.start_time))
+        .slice(0, 5)
+        .map((d) => ({
+          start_time: d.start_time,
+          distance_km: round(d.distance_km, 1),
+          duration_min: Math.round(d.duration_min),
+          wh_per_km: Math.round(whPerKm(d)),
+          route: d.start_location && d.end_location
+            ? `${d.start_location} → ${d.end_location}` : "",
+        })),
     };
   }
 

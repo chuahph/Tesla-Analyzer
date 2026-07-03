@@ -1,15 +1,19 @@
-"""Tests for snapshot-based drive/charge reconstruction (app/sync.py)."""
-from app.sync import sessions_between, snapshot_from_vehicle_data
+"""Tests for the snapshot session state machine (app/sync.py)."""
+from app.sync import process_snapshot, snapshot_from_vehicle_data
 
 T0 = 1_760_000_000.0  # seconds epoch
 
 
-def snap(ts, odo_km, soc, charging=False, kw=0.0, fast=False):
+def snap(ts, odo_km, soc, shift="P", speed=0.0, charging=False, kw=0.0, fast=False):
     return {
-        "ts": ts, "odo_km": odo_km, "soc": soc, "charging": charging,
-        "charger_kw": kw, "fast": fast, "out_temp": 28.0,
-        "shift": "P", "speed_kmh": 0.0,
+        "ts": ts, "odo_km": odo_km, "soc": soc, "shift": shift,
+        "speed_kmh": speed, "charging": charging, "charger_kw": kw,
+        "fast": fast, "out_temp": 28.0,
     }
+
+
+def step(prev, cur, trip=None, charge=None):
+    return process_snapshot(prev, cur, trip, charge, 60.0, 0.90)
 
 
 def test_snapshot_parses_vehicle_data_ms_timestamp_and_miles():
@@ -25,38 +29,74 @@ def test_snapshot_parses_vehicle_data_ms_timestamp_and_miles():
     assert s["soc"] == 72 and s["out_temp"] == 31.5
 
 
-def test_drive_between_snapshots():
+def test_trip_opens_spans_snapshots_and_closes_on_park():
+    """One drive across four snapshots = exactly one logged entry."""
+    s1 = snap(T0, 10_000.0, 80)                               # parked at home
+    s2 = snap(T0 + 600, 10_005.0, 78, shift="D", speed=60)    # driving
+    s3 = snap(T0 + 1200, 10_015.0, 75, shift="D", speed=90)   # still driving
+    s4 = snap(T0 + 1800, 10_024.9, 72)                        # back to P
+
+    d, c, trip, charge = step(None, s1)
+    assert (d, c, trip, charge) == ([], [], None, None)
+
+    d, c, trip, charge = step(s1, s2)
+    assert d == [] and trip is not None          # trip opened, nothing logged
+    assert trip["odo_km"] == 10_000.0            # anchored at the parked snapshot
+
+    d, c, trip, charge = step(s2, s3, trip)
+    assert d == [] and trip is not None          # still open
+    assert trip["max_speed"] == 90               # max speed tracked
+
+    d, c, trip, charge = step(s3, s4, trip)
+    assert trip is None and len(d) == 1          # closed on P
+    (drive,) = d
+    assert drive["distance_km"] == 24.9          # full span, not fragments
+    assert drive["duration_min"] == 30.0
+    assert abs(drive["energy_used_kwh"] - 4.8) < 1e-6   # 8% of 60 kWh
+    assert drive["max_speed_kmh"] == 90
+
+
+def test_charge_stays_open_until_it_stops():
+    """A charge across snapshots = one entry, no 10-minute fragments."""
+    c1 = snap(T0, 10_000.0, 60)
+    c2 = snap(T0 + 600, 10_000.0, 65, charging=True, kw=11)
+    c3 = snap(T0 + 1800, 10_000.0, 74, charging=True, kw=11)
+    c4 = snap(T0 + 3600, 10_000.0, 78)
+
+    d, c, trip, charge = step(None, c1)
+    d, c, trip, charge = step(c1, c2, charge=charge)
+    assert c == [] and charge is not None        # opened, anchored at c1
+    d, c, trip, charge = step(c2, c3, charge=charge)
+    assert c == [] and charge is not None        # still charging, nothing logged
+    d, c, trip, charge = step(c3, c4, charge=charge)
+    assert charge is None and len(c) == 1
+    (chg,) = c
+    assert abs(chg["energy_added_kwh"] - 10.8) < 1e-6   # 60 -> 78 = 18% of 60 kWh
+    assert chg["charge_type"] == "AC"
+    assert abs(chg["cost"] - 9.72) < 1e-6
+    assert chg["duration_min"] == 60.0
+
+
+def test_gap_fallback_logs_merged_sessions():
+    """Everything missed between two parked snapshots still gets logged."""
     prev = snap(T0, 10_000.0, 80)
-    cur = snap(T0 + 1800, 10_024.9, 72)  # +24.9 km, -8% in 30 min
-    drives, charges = sessions_between(prev, cur, 60.0, 0.90)
-    assert charges == []
-    (d,) = drives
-    assert d["distance_km"] == 24.9
-    assert abs(d["energy_used_kwh"] - 4.8) < 1e-6     # 8% of 60 kWh
-    assert abs(d["avg_speed_kmh"] - 49.8) < 0.1
-    assert d["duration_min"] == 30.0
-
-
-def test_charge_between_snapshots():
-    prev = snap(T0, 10_000.0, 72, charging=True, kw=11)
-    cur = snap(T0 + 3600, 10_000.0, 90, charging=False)
-    drives, charges = sessions_between(prev, cur, 60.0, 0.90)
-    assert drives == []
-    (c,) = charges
-    assert abs(c["energy_added_kwh"] - 10.8) < 1e-6   # 18% of 60 kWh
-    assert c["charge_type"] == "AC"
-    assert abs(c["cost"] - 9.72) < 1e-6               # RM 0.90/kWh
-
-
-def test_no_change_and_no_previous():
-    cur = snap(T0 + 60, 10_000.0, 80)
-    assert sessions_between(None, cur, 60.0, 0.90) == ([], [])
-    assert sessions_between(snap(T0, 10_000.0, 80), cur, 60.0, 0.90) == ([], [])
+    cur = snap(T0 + 7200, 10_030.0, 85)  # drove 30 km AND charged while unseen
+    d, c, trip, charge = step(prev, cur)
+    assert len(d) == 1 and len(c) == 1
+    assert d[0]["distance_km"] == 30.0
+    assert c[0]["energy_added_kwh"] == 3.0       # +5% of 60 kWh
+    assert trip is None and charge is None
 
 
 def test_fast_charge_flag_makes_dc():
     prev = snap(T0, 10_000.0, 40, charging=True, kw=150, fast=True)
     cur = snap(T0 + 1500, 10_000.0, 75)
-    _, charges = sessions_between(prev, cur, 60.0, 0.90)
-    assert charges[0]["charge_type"] == "DC"
-    assert charges[0]["max_power_kw"] == 150
+    _, c, _, _ = step(prev, cur)
+    assert c[0]["charge_type"] == "DC"
+    assert c[0]["max_power_kw"] == 150
+
+
+def test_no_change_logs_nothing():
+    prev = snap(T0, 10_000.0, 80)
+    cur = snap(T0 + 600, 10_000.0, 80)
+    assert step(prev, cur) == ([], [], None, None)
