@@ -90,12 +90,11 @@ function renderKpis(d) {
       cards.push(kpiCard("Efficiency", fmt(lt.wh_per_km) + " Wh/km",
         `${fmt(lt.energy_kwh, 1)} kWh this drive`, "green"));
     }
+    // Battery use and km/1% in one box: % used as the headline, start→now
+    // and the km/1% range figure on the sub-line.
     cards.push(kpiCard("Battery", fmt(lt.soc_used, 1) + "% used",
-      `${fmt(lt.start_soc)}% → ${fmt(lt.soc)}%`, "green"));
-    // A dedicated km/1% box for the live drive, mirroring the windowed view.
-    cards.push(lt.km_per_soc
-      ? kpiCard("km / 1% Battery", fmt(lt.km_per_soc, 1) + " km", "this drive", "teal")
-      : kpiCard("km / 1% Battery", "—", "waiting on range data", "teal"));
+      `${fmt(lt.start_soc)}% → ${fmt(lt.soc)}%` +
+      (lt.km_per_soc ? ` · ${fmt(lt.km_per_soc, 1)} km/1%` : ""), "teal"));
   }
   if (drv.available) {
     cards.push(kpiCard("Distance", fmt(drv.total_distance_km) + " km",
