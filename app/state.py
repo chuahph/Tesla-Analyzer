@@ -19,6 +19,8 @@ SNAPSHOT_KEY = "last_snapshot"  # JSON of the last synced vehicle snapshot
 LINKED_VIN_KEY = "linked_vin"  # VIN of the account-linked vehicle
 OPEN_TRIP_KEY = "open_trip"  # JSON of a trip in progress (car in gear)
 OPEN_CHARGE_KEY = "open_charge"  # JSON of a charge in progress
+LAST_ACTIVE_KEY = "last_active_ts"  # epoch of the last driving/charging/occupied snapshot
+SUSPEND_KEY = "suspend_until_ts"  # epoch until which cron polling stays quiet (car sleep window)
 
 
 def get(session: Session, key: str, default: str = "") -> str:

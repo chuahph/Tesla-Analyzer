@@ -262,6 +262,29 @@ def sync_now(wake: bool = Query(False), session: Session = Depends(get_session))
         raise HTTPException(400, "No linked Tesla account — link your account first.")
     base = state.active_base_url(session)
 
+    # Sleep window: polling an awake-but-idle car resets its sleep timer and
+    # slowly drains the battery. After IDLE_AFTER_MIN of no activity the cron
+    # goes quiet for SUSPEND_MIN so the car can nap; the manual Sync button
+    # (wake=1) always bypasses this and clears the window.
+    now_ts = datetime.now().timestamp()
+    if wake:
+        state.put(session, state.SUSPEND_KEY, "")
+    else:
+        suspend_until = float(state.get(session, state.SUSPEND_KEY) or 0)
+        if now_ts < suspend_until:
+            resp = {
+                "status": "sleep-window",
+                "logged": {"drives": 0, "charges": 0},
+                "note": ("Letting the car sleep — polling resumes in "
+                         f"~{int((suspend_until - now_ts) / 60) + 1} min."),
+            }
+            last_raw = state.get(session, state.SNAPSHOT_KEY)
+            if last_raw:
+                last = _json.loads(last_raw)
+                resp["last"] = {"soc": last.get("soc"), "ts": last.get("ts"),
+                                "odo_km": round(last.get("odo_km", 0), 1)}
+            return resp
+
     def fetch(tok: str):
         client = TeslaClient(access_token=tok, base_url=base)
         vehicles = client.list_vehicles()
@@ -399,6 +422,17 @@ def sync_now(wake: bool = Query(False), session: Session = Depends(get_session))
     state.put(session, state.OPEN_TRIP_KEY, _json.dumps(open_trip) if open_trip else "")
     state.put(session, state.OPEN_CHARGE_KEY, _json.dumps(open_charge) if open_charge else "")
     state.put(session, state.SOURCE_KEY, "linked")
+
+    # Track activity; schedule a quiet window once the car has sat idle.
+    IDLE_AFTER_MIN, SUSPEND_MIN = 15, 30
+    active = snap["charging"] or sync_mod.is_driving(snap) or snap.get("user_present")
+    last_active = float(state.get(session, state.LAST_ACTIVE_KEY) or 0)
+    if active or not last_active:
+        state.put(session, state.LAST_ACTIVE_KEY, str(now_ts))
+        if active:
+            state.put(session, state.SUSPEND_KEY, "")
+    elif not wake and now_ts - last_active >= IDLE_AFTER_MIN * 60:
+        state.put(session, state.SUSPEND_KEY, str(now_ts + SUSPEND_MIN * 60))
 
     if snap["charging"]:
         activity = "charging"
