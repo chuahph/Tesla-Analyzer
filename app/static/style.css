@@ -225,10 +225,11 @@ footer { padding: 18px 28px; color: var(--muted); font-size: 12px; border-top: 1
 .btn-accent:hover { background: #c41a1f; }
 .btn.block { display: block; width: 100%; text-align: center; text-decoration: none; padding: 12px; }
 .btn.disabled { opacity: .5; pointer-events: none; }
-/* Destructive action: quiet outline, sits apart (left) from the main buttons. */
+/* Destructive action: quiet outline. */
 .btn-danger { color: #ff6b70; border-color: rgba(232, 33, 39, .45); background: transparent; }
 .btn-danger:hover { background: rgba(232, 33, 39, .12); }
-.modal-actions .btn-danger { margin-right: auto; }
+/* Small inline action under a list (e.g. clear trip history). */
+.btn-mini { min-height: 34px; padding: 5px 12px; font-size: 12px; margin-top: 12px; }
 
 /* Modal */
 .modal {

@@ -325,6 +325,9 @@ async function load() {
     badge.textContent = mode;
     badge.className = "badge " + mode;
     if (STATIC_MODE) updateResetButton();
+    // The clear-history action only makes sense against a real server DB.
+    const clearBtn = document.getElementById("clear-trips");
+    if (clearBtn) clearBtn.classList.toggle("hidden", STATIC_MODE);
 
     // Live mode: reveal the Sync button and snapshot the car once per visit.
     const syncBtn = document.getElementById("btn-sync");
@@ -455,26 +458,27 @@ let pendingFiles = [];
 document.getElementById("btn-import").addEventListener("click", () => {
   openModal("import-modal");
   updateResetButton();
-  // Self-hosted only: the demo/static build has nothing worth wiping.
-  const clearBtn = document.getElementById("clear-trips");
-  if (clearBtn) clearBtn.classList.toggle("hidden", STATIC_MODE);
 });
 
 // Danger zone: wipe the recorded trip history for a clean start.
+// Lives at the bottom of the Recent Trips card (self-hosted mode only).
 const clearTripsBtn = document.getElementById("clear-trips");
 if (clearTripsBtn) {
   clearTripsBtn.addEventListener("click", async () => {
     if (!confirm("Delete ALL recorded trips?\n\nCharging history and battery-health " +
                  "readings are kept. This cannot be undone.")) return;
-    setStatus(importStatus, "Clearing trips…", "");
+    clearTripsBtn.disabled = true;
+    clearTripsBtn.textContent = "Clearing…";
     try {
       const res = await fetch("/api/data/clear-drives", { method: "POST" });
       const body = await res.json();
       if (!res.ok) throw new Error(body.detail || "Could not clear trips");
-      setStatus(importStatus, `Deleted ${body.deleted_drives} trip(s).`, "ok");
-      setTimeout(() => { closeModal("import-modal"); load(); }, 700);
+      await load();
     } catch (e) {
-      setStatus(importStatus, e.message, "err");
+      alert(e.message);
+    } finally {
+      clearTripsBtn.disabled = false;
+      clearTripsBtn.textContent = "🗑 Clear trip history";
     }
   });
 }

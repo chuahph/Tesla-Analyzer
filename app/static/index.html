@@ -87,8 +87,6 @@
         <p>Column names are matched loosely (case / spacing insensitive).</p>
       </details>
       <div class="modal-actions">
-        <button id="clear-trips" class="btn btn-danger hidden"
-                title="Delete all recorded trips">🗑 Clear trips</button>
         <button id="import-reset" class="btn hidden">Use demo data</button>
         <span id="import-status" class="status"></span>
         <button id="import-submit" class="btn btn-accent" disabled>Import</button>
@@ -186,6 +184,8 @@
       <div class="card">
         <h2>🧭 Recent Trips</h2>
         <ul id="recentTrips" class="plain-list"></ul>
+        <button id="clear-trips" class="btn btn-danger btn-mini hidden"
+                title="Delete all recorded trips">🗑 Clear trip history</button>
       </div>
       <div class="card">
         <h2>🔁 Top Routes</h2>
