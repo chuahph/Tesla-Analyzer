@@ -3,8 +3,9 @@
 The cron pings every few minutes, so sessions are tracked with a small state
 machine instead of raw snapshot deltas:
 
-  * a TRIP opens when the car is seen in gear and closes when it returns to P —
-    one entry per drive, however many snapshots it spanned;
+  * a TRIP opens when the car is seen in gear and closes when the car powers
+    down (driver gone, not merely shifted to P) — so a drive with brief stops
+    stays one entry, however many snapshots it spanned;
   * a CHARGE opens when charging is seen and closes when it stops;
   * if a whole drive/charge happened between two snapshots (car asleep, cron
     gap), the odometer / battery delta still logs it as a single merged entry.
@@ -52,11 +53,32 @@ def snapshot_from_vehicle_data(data: dict[str, Any]) -> dict[str, Any]:
         "out_temp": float(temp) if temp is not None else 20.0,
         "shift": ds.get("shift_state") or "P",
         "speed_kmh": float(ds.get("speed") or 0.0) * MILES_TO_KM,
+        "user_present": bool(vs.get("is_user_present")),
+        "lat": ds.get("latitude"),
+        "lon": ds.get("longitude"),
     }
 
 
 def is_driving(s: dict[str, Any]) -> bool:
     return (s.get("shift") or "P") != "P" or (s.get("speed_kmh") or 0.0) > 0
+
+
+def is_powered_down(s: dict[str, Any]) -> bool:
+    """Trip boundary: parked AND the driver has left (car powered off).
+
+    A brief stop with the driver still inside keeps the trip open, so one
+    errand run with short stops logs as a single power-on-to-power-down trip.
+    Snapshots without ``is_user_present`` fall back to plain "in P" so older
+    stored state keeps working.
+    """
+    return not is_driving(s) and not s.get("user_present")
+
+
+def _coords(s: dict[str, Any] | None) -> str:
+    """'lat, lon' string for the location columns (searchable in any maps app)."""
+    if not s or s.get("lat") is None or s.get("lon") is None:
+        return ""
+    return f"{float(s['lat']):.4f}, {float(s['lon']):.4f}"
 
 
 def _drive_from(start: dict, cur: dict, capacity_kwh: float, max_speed: float = 0.0):
@@ -77,8 +99,28 @@ def _drive_from(start: dict, cur: dict, capacity_kwh: float, max_speed: float = 
         "avg_speed_kmh": round(distance / (dt_min / 60.0), 1) if dt_min else 0.0,
         "max_speed_kmh": round(max_speed, 1),
         "outside_temp_c": cur["out_temp"],
-        "start_location": "",
-        "end_location": "",
+        "start_location": _coords(start),
+        "end_location": _coords(cur),
+    }
+
+
+def live_trip(open_trip: dict | None, snap: dict | None) -> dict | None:
+    """Progress of the drive in flight — the dashboard's "current drive" view."""
+    if not open_trip or not snap:
+        return None
+    distance = max(snap["odo_km"] - open_trip["odo_km"], 0.0)
+    dt_min = max((snap["ts"] - open_trip["ts"]) / 60.0, 0.0)
+    soc_used = max(open_trip["soc"] - snap["soc"], 0.0)
+    return {
+        "start_time": _dt(open_trip["ts"]).isoformat(timespec="minutes"),
+        "distance_km": round(distance, 1),
+        "duration_min": round(dt_min),
+        "avg_speed_kmh": round(distance / (dt_min / 60.0), 1) if dt_min else 0.0,
+        "max_speed_kmh": round(open_trip.get("max_speed", 0.0), 1),
+        "start_soc": open_trip["soc"],
+        "soc": snap["soc"],
+        "soc_used": round(soc_used, 1),
+        "km_per_soc": round(distance / soc_used, 1) if soc_used >= 1 else None,
     }
 
 
@@ -120,13 +162,13 @@ def process_snapshot(
     drives: list[dict] = []
     charges: list[dict] = []
 
-    # --- Trips: open while in gear, close on return to P -------------------
+    # --- Trips: open on power-on/in-gear, close on power-down --------------
     if open_trip:
         open_trip = {
             **open_trip,
             "max_speed": max(open_trip.get("max_speed", 0.0), cur.get("speed_kmh") or 0.0),
         }
-        if not is_driving(cur):
+        if is_powered_down(cur):
             d = _drive_from(open_trip, cur, capacity_kwh, open_trip.get("max_speed", 0.0))
             if d:
                 drives.append(d)
@@ -138,6 +180,8 @@ def process_snapshot(
             "odo_km": base["odo_km"],
             "soc": base["soc"],
             "max_speed": cur.get("speed_kmh") or 0.0,
+            "lat": base.get("lat"),
+            "lon": base.get("lon"),
         }
     elif prev:
         # A whole drive happened between snapshots (asleep / cron gap).

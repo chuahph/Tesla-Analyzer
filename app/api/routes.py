@@ -55,6 +55,43 @@ def _window(session: Session, vehicle_id: int, days: int, since: datetime | None
     return list(drives), list(charges)
 
 
+_PLACE_CACHE: dict[str, str] = {}
+
+
+def _place(coords: str) -> str:
+    """Best-effort reverse geocode of a 'lat, lon' string to a short place name.
+
+    Uses OpenStreetMap's Nominatim (a couple of lookups per completed trip is
+    well within its usage policy). Any failure falls back to the raw
+    coordinates, which stay searchable in a maps app.
+    """
+    if not coords or "," not in coords:
+        return coords
+    if coords in _PLACE_CACHE:
+        return _PLACE_CACHE[coords]
+    try:
+        lat, lon = (p.strip() for p in coords.split(",", 1))
+        resp = httpx.get(
+            "https://nominatim.openstreetmap.org/reverse",
+            params={"format": "jsonv2", "lat": lat, "lon": lon, "zoom": 16},
+            headers={"User-Agent": "tesla-analyzer/0.1"},
+            timeout=4.0,
+        )
+        resp.raise_for_status()
+        addr = resp.json().get("address") or {}
+        name = (
+            addr.get("neighbourhood") or addr.get("suburb") or addr.get("road")
+            or addr.get("village") or addr.get("town") or addr.get("city") or ""
+        )
+        area = addr.get("city") or addr.get("town") or addr.get("county") or ""
+        label = f"{name}, {area}" if name and area and name != area else (name or area)
+        result = (label or coords)[:120]
+    except Exception:  # noqa: BLE001 — never let naming block trip logging
+        result = coords
+    _PLACE_CACHE[coords] = result
+    return result
+
+
 def _build_info() -> dict:
     """Deployed version: git SHA (from the host's env) + image build time in MYT."""
     import os
@@ -292,6 +329,10 @@ def sync_now(session: Session = Depends(get_session)):
         vehicle.battery_capacity_kwh, settings.energy_price_per_kwh,
     )
     for d in drives:
+        # Name the endpoints (best effort) so trips read "Bangsar → KLCC"
+        # instead of raw coordinates.
+        d["start_location"] = _place(d["start_location"])
+        d["end_location"] = _place(d["end_location"])
         session.add(Drive(vehicle_id=vehicle.id, **d))
     for c in charges:
         session.add(Charge(vehicle_id=vehicle.id, **c))
@@ -320,13 +361,19 @@ def sync_now(session: Session = Depends(get_session)):
     state.put(session, state.OPEN_CHARGE_KEY, _json.dumps(open_charge) if open_charge else "")
     state.put(session, state.SOURCE_KEY, "linked")
 
-    activity = "charging" if snap["charging"] else (
-        "driving" if snap["shift"] not in ("P", None, "") else "parked"
-    )
+    if snap["charging"]:
+        activity = "charging"
+    elif sync_mod.is_driving(snap):
+        activity = "driving"
+    elif open_trip:
+        activity = "stopped"  # trip still open — parked briefly, driver present
+    else:
+        activity = "parked"
     return {
         "status": activity,
         "soc": snap["soc"],
         "odo_km": round(snap["odo_km"], 1),
+        "speed_kmh": round(snap.get("speed_kmh") or 0.0),
         "trip_in_progress": bool(open_trip),
         "logged": {"drives": len(drives), "charges": len(charges)},
     }
@@ -393,15 +440,17 @@ def export_data(
 def export_csv(
     days: int = Query(3650, ge=1, le=3650),
     since_charge: bool = Query(False),
+    current_drive: bool = Query(False),
     session: Session = Depends(get_session),
 ):
     """Download drives & charges as a ZIP of CSVs (re-importable).
 
-    Defaults to everything; pass ``days`` or ``since_charge`` to export only
-    the currently viewed window.
+    Defaults to everything; pass ``days``, ``since_charge`` or
+    ``current_drive`` to export only the currently viewed window.
     """
     import csv
     import io
+    import json as _json
     import zipfile
 
     from fastapi.responses import Response
@@ -409,7 +458,19 @@ def export_csv(
     vehicle = _first_vehicle(session)
     since = None
     label = "all"
-    if since_charge:
+    if current_drive:
+        open_trip = _json.loads(state.get(session, state.OPEN_TRIP_KEY) or "null")
+        if open_trip:
+            from .. import sync as sync_mod
+
+            since = datetime.fromtimestamp(open_trip["ts"], sync_mod.MYT).replace(tzinfo=None)
+        else:
+            since = session.scalar(
+                select(func.max(Drive.start_time)).where(Drive.vehicle_id == vehicle.id)
+            )
+        if since is not None:
+            label = "current-drive"
+    elif since_charge:
         last_end = session.scalar(
             select(func.max(Charge.end_time)).where(Charge.vehicle_id == vehicle.id)
         )
@@ -462,18 +523,40 @@ def export_csv(
 def summary(
     days: int = Query(90, ge=1, le=730),
     since_charge: bool = Query(False),
+    current_drive: bool = Query(False),
     session: Session = Depends(get_session),
 ):
     """The single endpoint the dashboard consumes: full analysis + recommendations.
 
     With ``since_charge`` the window starts when the most recent charging
-    session ended — i.e. the car's "since last charge" view.
+    session ended. With ``current_drive`` it covers the drive in progress
+    (plus a live-trip readout) or, if the car is parked, the last drive.
     """
+    import json as _json
+
+    from .. import sync as sync_mod
+
     settings = get_settings()
     vehicle = _first_vehicle(session)
     since = None
     window_label = None
-    if since_charge:
+    live = None
+    if current_drive:
+        open_trip = _json.loads(state.get(session, state.OPEN_TRIP_KEY) or "null")
+        snap_raw = state.get(session, state.SNAPSHOT_KEY)
+        snap = _json.loads(snap_raw) if snap_raw else None
+        if open_trip and snap:
+            live = sync_mod.live_trip(open_trip, snap)
+            since = datetime.fromtimestamp(open_trip["ts"], sync_mod.MYT).replace(tzinfo=None)
+            window_label = "current drive"
+        else:
+            last_start = session.scalar(
+                select(func.max(Drive.start_time)).where(Drive.vehicle_id == vehicle.id)
+            )
+            if last_start is not None:
+                since = last_start
+                window_label = "last drive"
+    elif since_charge:
         last_end = session.scalar(
             select(func.max(Charge.end_time)).where(Charge.vehicle_id == vehicle.id)
         )
@@ -512,6 +595,7 @@ def summary(
         "window_label": window_label,
         "generated_at": datetime.now().isoformat(timespec="seconds"),
         "currency": settings.currency,
+        "live_trip": live,
         "driving": driving,
         "charging": charging,
         "efficiency": efficiency,

@@ -93,6 +93,9 @@ def analyze(drives: list[Drive]) -> dict[str, Any]:
     total_distance = sum(distances)
     total_duration_h = sum(durations) / 60.0
     total_energy = sum(d.energy_used_kwh for d in drives)
+    # Real-world range yardstick: km covered per 1% of battery used.
+    soc_used = sum(max(d.start_soc - d.end_soc, 0.0) for d in drives)
+    km_per_soc = round(total_distance / soc_used, 1) if soc_used >= 1 else None
 
     # Distribution of distance driven across speed regimes.
     by_speed: dict[str, float] = defaultdict(float)
@@ -125,6 +128,8 @@ def analyze(drives: list[Drive]) -> dict[str, Any]:
         "avg_trip_distance_km": round(mean(distances), 1),
         "avg_trip_duration_min": round(mean(durations), 1),
         "avg_speed_kmh": round(mean(speeds), 1),
+        "km_per_soc_pct": km_per_soc,
+        "soc_used_pct": round(soc_used, 1),
         "p95_speed_kmh": round(percentile([d.max_speed_kmh for d in drives], 0.95), 1),
         "longest_trip_km": round(max(distances), 1),
         "distance_by_speed_band": {k: round(v, 1) for k, v in sorted(by_speed.items())},
@@ -137,8 +142,10 @@ def analyze(drives: list[Drive]) -> dict[str, Any]:
         "recent_trips": [
             {
                 "start_time": d.start_time.isoformat(timespec="minutes"),
+                "end_time": d.end_time.isoformat(timespec="minutes"),
                 "distance_km": round(d.distance_km, 1),
                 "duration_min": round(d.duration_min),
+                "avg_speed_kmh": round(d.avg_speed_kmh),
                 "wh_per_km": round(d.wh_per_km),
                 "route": f"{d.start_location} → {d.end_location}"
                 if d.start_location and d.end_location else "",

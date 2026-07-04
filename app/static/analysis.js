@@ -124,6 +124,10 @@
       }
     });
     const [slope] = linregress(withDist.map((d) => d.avg_speed_kmh), effs);
+    // Real-world range yardstick: km covered per 1% of battery used.
+    const socUsed = drives.reduce((a, d) => a + Math.max((d.start_soc || 0) - (d.end_soc || 0), 0), 0);
+    const kmPerSoc = socUsed >= 1
+      ? round(dist.reduce((a, b) => a + b, 0) / socUsed, 1) : null;
 
     const distBand = {}; [...bySpeed.keys()].sort().forEach((k) => distBand[k] = round(bySpeed.get(k), 1));
     const tbh = {}; for (let h = 0; h < 24; h++) tbh[String(h)] = byHour.get(h) || 0;
@@ -138,6 +142,8 @@
       avg_trip_distance_km: round(mean(dist), 1),
       avg_trip_duration_min: round(mean(dur), 1),
       avg_speed_kmh: round(mean(spd), 1),
+      km_per_soc_pct: kmPerSoc,
+      soc_used_pct: round(socUsed, 1),
       p95_speed_kmh: round(percentile(drives.map((d) => d.max_speed_kmh), 0.95), 1),
       longest_trip_km: round(Math.max(...dist), 1),
       distance_by_speed_band: distBand,
@@ -154,8 +160,10 @@
         .slice(0, 5)
         .map((d) => ({
           start_time: d.start_time,
+          end_time: d.end_time,
           distance_km: round(d.distance_km, 1),
           duration_min: Math.round(d.duration_min),
+          avg_speed_kmh: Math.round(d.avg_speed_kmh || 0),
           wh_per_km: Math.round(whPerKm(d)),
           route: d.start_location && d.end_location
             ? `${d.start_location} → ${d.end_location}` : "",
@@ -380,7 +388,15 @@
     const price = opts.price || ENERGY_PRICE;
     const currency = opts.currency || CURRENCY;
     let since, windowLabel = null;
-    if (days === "charge") {
+    if (days === "drive") {
+      // The most recent trip on record — static builds have no live car.
+      const starts = (dataset.drives || [])
+        .map((d) => new Date(d.start_time).getTime())
+        .filter((t) => isFinite(t));
+      since = starts.length ? Math.max(...starts) : 0;
+      windowLabel = starts.length ? "last drive" : "all data";
+      days = 0;
+    } else if (days === "charge") {
       // Window starts when the most recent charge ended ("since last charge").
       const ends = (dataset.charges || [])
         .map((c) => new Date(c.end_time || c.start_time).getTime())

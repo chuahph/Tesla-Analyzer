@@ -101,6 +101,29 @@ def test_summary_since_charge_window():
         settings.app_passcode = old
 
 
+def test_summary_current_drive_falls_back_to_last_drive():
+    settings = get_settings()
+    old = settings.app_passcode
+    settings.app_passcode = ""
+    try:
+        with TestClient(app) as client:  # startup seeds demo data, no open trip
+            body = client.get("/api/summary?current_drive=1").json()
+            assert body["window_label"] == "last drive"
+            assert body["live_trip"] is None
+            # The window is anchored at the newest drive: exactly one drive in it.
+            assert body["driving"]["total_drives"] == 1
+            trip = body["driving"]["recent_trips"][0]
+            assert "end_time" in trip and "avg_speed_kmh" in trip
+            # km per 1% battery is reported alongside the other driving stats.
+            full = client.get("/api/summary?days=365").json()
+            assert full["driving"]["km_per_soc_pct"] > 0
+            # The export honours the same window.
+            resp = client.get("/api/export/csv?current_drive=1")
+            assert "current-drive" in resp.headers["content-disposition"]
+    finally:
+        settings.app_passcode = old
+
+
 def test_export_csv_round_trips_through_importer():
     from app.importer import parse_upload
 

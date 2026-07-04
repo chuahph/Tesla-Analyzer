@@ -30,6 +30,20 @@ function kpiCard(label, value, sub, tone) {
 function renderKpis(d) {
   const drv = d.driving, chg = d.charging, eff = d.efficiency, cur = d.currency;
   const cards = [];
+  const lt = d.live_trip;
+  if (lt) {
+    // A drive is in progress — show its live numbers first.
+    cards.push(kpiCard("Current Drive", fmt(lt.distance_km, 1) + " km",
+      `started ${tripWhen(lt.start_time)} · in progress`, "blue"));
+    cards.push(kpiCard("Drive Time", fmt(lt.duration_min) + " min",
+      `avg ${fmt(lt.avg_speed_kmh)} km/h · max ${fmt(lt.max_speed_kmh)}`, "amber"));
+    cards.push(kpiCard("Battery Used", fmt(lt.soc_used, 1) + "%",
+      `${fmt(lt.start_soc)}% → ${fmt(lt.soc)}%`, "green"));
+    if (lt.km_per_soc) {
+      cards.push(kpiCard("km / 1% Battery", fmt(lt.km_per_soc, 1) + " km",
+        "this drive", "teal"));
+    }
+  }
   if (drv.available) {
     cards.push(kpiCard("Distance", fmt(drv.total_distance_km) + " km",
       `${fmt(drv.total_drives)} drives · ${fmt(drv.total_duration_h)} h`, "blue"));
@@ -37,6 +51,10 @@ function renderKpis(d) {
       `${eff.vs_rated_pct >= 0 ? "+" : ""}${fmt(eff.vs_rated_pct, 1)}% vs rated`, "green"));
     cards.push(kpiCard("Avg Speed", fmt(drv.avg_speed_kmh) + " km/h",
       `peak ${fmt(drv.p95_speed_kmh)} km/h (p95)`, "amber"));
+    if (drv.km_per_soc_pct) {
+      cards.push(kpiCard("km / 1% Battery", fmt(drv.km_per_soc_pct, 1) + " km",
+        `${fmt(drv.soc_used_pct)}% battery used`, "teal"));
+    }
   }
   if (chg.available) {
     cards.push(kpiCard("Energy Charged", fmt(chg.total_energy_kwh) + " kWh",
@@ -162,11 +180,26 @@ function tripWhen(s) {
   if (!m) return s;
   return `${m[3]} ${TRIP_MONTHS[+m[2] - 1]} ${m[4]}:${m[5]}`;
 }
+// End timestamp of a trip: just "HH:MM" when it ends the same day it started.
+function tripEnd(start, end) {
+  const full = tripWhen(end);
+  if (String(start).slice(0, 10) === String(end).slice(0, 10)) {
+    const m = full.match(/(\d{2}:\d{2})$/);
+    if (m) return m[1];
+  }
+  return full;
+}
 
 function renderLists(d) {
   const trips = (d.driving.recent_trips || [])
-    .map((t) => `<li class="trip"><span class="trip-route">${tripWhen(t.start_time)}${t.route ? " · " + t.route : ""}</span>` +
-      `<span class="trip-meta">${t.distance_km} km · ${t.duration_min} min · ${t.wh_per_km} Wh/km</span></li>`)
+    .map((t) => {
+      const when = t.end_time
+        ? `${tripWhen(t.start_time)} → ${tripEnd(t.start_time, t.end_time)}`
+        : tripWhen(t.start_time);
+      const speed = t.avg_speed_kmh ? ` · avg ${t.avg_speed_kmh} km/h` : "";
+      return `<li class="trip"><span class="trip-route">${when}${t.route ? "<br>" + t.route : ""}</span>` +
+        `<span class="trip-meta">${t.distance_km} km · ${t.duration_min} min${speed} · ${t.wh_per_km} Wh/km</span></li>`;
+    })
     .join("");
   document.getElementById("recentTrips").innerHTML =
     trips || '<li class="empty">No trips in this window</li>';
@@ -269,16 +302,18 @@ async function demoDataset() {
 async function load() {
   const rawRange = document.getElementById("range").value;
   const sinceCharge = rawRange === "charge";
-  const days = sinceCharge ? 90 : +rawRange;
+  const currentDrive = rawRange === "drive";
+  const days = sinceCharge || currentDrive ? 90 : +rawRange;
   document.getElementById("kpis").innerHTML = '<div class="loading">Loading…</div>';
   try {
     let d, mode;
     if (STATIC_MODE) {
       const ds = importedDataset() || (await demoDataset());
-      d = TA.buildSummary(ds, sinceCharge ? "charge" : days);
+      d = TA.buildSummary(ds, currentDrive ? "drive" : (sinceCharge ? "charge" : days));
       mode = ds.source === "imported" ? "imported" : "demo";
     } else {
-      const res = await fetch(`/api/summary?days=${days}${sinceCharge ? "&since_charge=1" : ""}`);
+      const extra = currentDrive ? "&current_drive=1" : (sinceCharge ? "&since_charge=1" : "");
+      const res = await fetch(`/api/summary?days=${days}${extra}`);
       if (!res.ok) throw new Error(await res.text());
       d = await res.json();
       const health = await (await fetch("/api/health")).json();
@@ -579,9 +614,16 @@ async function syncNow() {
       const extra = (l.drives || l.charges)
         ? ` · logged ${l.drives} drive(s), ${l.charges} charge(s)`
         : "";
-      const trip = body.trip_in_progress ? " · 🚗 trip in progress" : "";
-      setSyncStatus(`🔋 ${Math.round(body.soc)}%`, `${body.status}${trip}${extra}`, "ok");
-      if (l.drives || l.charges) load();
+      const statusTxt = {
+        charging: "⚡ Charging",
+        driving: `🚗 Driving${body.speed_kmh ? " · " + body.speed_kmh + " km/h" : ""}`,
+        stopped: "🚗 Trip in progress — stopped briefly",
+        parked: "🅿️ Parked",
+      }[body.status] || body.status;
+      setSyncStatus(`🔋 ${Math.round(body.soc)}%`, `${statusTxt}${extra}`, "ok");
+      // Refresh the dashboard when something was logged, or live while a trip
+      // is running so the "Current drive" window tracks the car.
+      if (l.drives || l.charges || body.trip_in_progress) load();
     }
   } catch (e) {
     setSyncStatus("", e.message, "err");
@@ -609,13 +651,16 @@ async function exportCsv() {
   // Ask which scope: OK = everything, Cancel = only the current window.
   const rawRange = document.getElementById("range").value;
   const sinceCharge = rawRange === "charge";
-  const windowTxt = sinceCharge ? "since last charge" : `last ${rawRange} day(s)`;
+  const currentDrive = rawRange === "drive";
+  const windowTxt = currentDrive ? "current drive"
+    : sinceCharge ? "since last charge" : `last ${rawRange} day(s)`;
   const all = confirm(
     `Export ALL data?\n\nOK — everything\nCancel — current window only (${windowTxt})`
   );
 
   if (!STATIC_MODE) {
-    const q = all ? "" : (sinceCharge ? "?since_charge=1" : `?days=${rawRange}`);
+    const q = all ? "" : currentDrive ? "?current_drive=1"
+      : (sinceCharge ? "?since_charge=1" : `?days=${rawRange}`);
     window.location.href = "/api/export/csv" + q;
     return;
   }
@@ -626,7 +671,10 @@ async function exportCsv() {
   let charges = ds.charges || [];
   if (!all) {
     let since = 0;
-    if (sinceCharge) {
+    if (currentDrive) {
+      const starts = drives.map((d) => new Date(d.start_time).getTime()).filter(isFinite);
+      since = starts.length ? Math.max(...starts) : 0;
+    } else if (sinceCharge) {
       const ends = charges.map((c) => new Date(c.end_time || c.start_time).getTime())
         .filter(isFinite);
       since = ends.length ? Math.max(...ends) : 0;
@@ -649,7 +697,7 @@ async function exportCsv() {
   const a = document.createElement("a");
   a.href = URL.createObjectURL(blob);
   a.download = all ? "tesla-analyzer-all.zip"
-    : `tesla-analyzer-${sinceCharge ? "since-charge" : rawRange + "d"}.zip`;
+    : `tesla-analyzer-${currentDrive ? "current-drive" : sinceCharge ? "since-charge" : rawRange + "d"}.zip`;
   a.click();
   setTimeout(() => URL.revokeObjectURL(a.href), 5000);
 }
