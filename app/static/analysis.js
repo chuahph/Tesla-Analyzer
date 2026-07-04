@@ -270,14 +270,15 @@
   // the model substring, ALL listed tokens (badge, optionally wheel type),
   // and — when given — a model-year window (from the VIN). Most specific
   // entries first — first match wins. Mirror of app/analysis/battery.py.
+  // "@19" = any wheel-name token with that diameter (Nova19, Stiletto19, ...).
   const NEW_RANGE_KM = [
     ["MODEL 3", ["P74D"], [2024, 2100], 476],
-    ["MODEL 3", ["74D", "NOVA19"], [2024, 2100], 491],  // LR AWD, 19" Nova (305 mi)
-    ["MODEL 3", ["74D"], [2024, 2100], 549],            // LR AWD, 18" Photon (341 mi)
+    ["MODEL 3", ["74D", "@19"], [2024, 2100], 491],  // LR AWD, 19" (305 mi)
+    ["MODEL 3", ["74D"], [2024, 2100], 549],         // LR AWD, 18" (341 mi)
     ["MODEL 3", ["P74D"], [2017, 2023], 507],
     ["MODEL 3", ["74D"], [2017, 2023], 536],
     ["MODEL 3", ["P74D"], null, 476],
-    ["MODEL 3", ["74D", "NOVA19"], null, 491],
+    ["MODEL 3", ["74D", "@19"], null, 491],
     ["MODEL 3", ["74D"], null, 549],
     ["MODEL 3", ["74"], null, 549], ["MODEL 3", ["50"], null, 438],
     ["MODEL Y", ["P74D"], null, 459], ["MODEL Y", ["74D"], null, 531],
@@ -286,7 +287,16 @@
   function newRangeFor(model, trim, year) {
     const text = `${model || ""} ${trim || ""}`.toUpperCase();
     const tokens = [...new Set(text.split(/[^A-Z0-9]+/))].filter(Boolean);
-    const has = (req) => tokens.some((t) => t === req || t.startsWith(req));
+    const diam = () => {
+      for (const t of tokens) {
+        const m = t.match(/^[A-Z]+(1[89]|2[012])/);
+        if (m) return +m[1];
+      }
+      return null;
+    };
+    const has = (req) => req.startsWith("@")
+      ? diam() === +req.slice(1)
+      : tokens.some((t) => t === req || t.startsWith(req));
     for (const [m, required, years, km] of NEW_RANGE_KM) {
       if (years && (!year || year < years[0] || year > years[1])) continue;
       if (text.includes(m) && required.every(has)) return km;
