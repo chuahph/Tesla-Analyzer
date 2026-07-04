@@ -108,6 +108,33 @@ def test_km_per_soc_from_net_drop_on_short_trips():
     assert r["km_per_soc_pct"] == 3.0
 
 
+def test_zero_energy_drive_does_not_dilute_efficiency():
+    """A 0-kWh drive (range gap) must not lower Wh/km or inflate the score."""
+    from datetime import datetime
+
+    from app.analysis import driving as driving_analysis
+    from app.analysis import efficiency as efficiency_analysis
+    from app.models import Drive
+
+    def mk(hour, dist, kwh):
+        return Drive(start_time=datetime(2026, 7, 4, hour, 0),
+                     end_time=datetime(2026, 7, 4, hour, 30),
+                     distance_km=dist, duration_min=30, avg_speed_kmh=60,
+                     max_speed_kmh=90, start_soc=80, end_soc=75,
+                     energy_used_kwh=kwh, outside_temp_c=28)
+    real = mk(8, 40.0, 6.0)          # 150 Wh/km
+    gap = mk(12, 40.0, 0.0)          # data gap — no energy
+    drv = driving_analysis.analyze([real, gap], 150.0, 75.0)
+    eff = efficiency_analysis.analyze([real, gap], 150.0)
+    # 6 kWh / 40 km = 150 Wh/km — the phantom 40 km of the gap drive excluded.
+    assert drv["avg_efficiency_wh_per_km"] == 150.0
+    assert eff["avg_efficiency_wh_per_km"] == 150.0   # both engines agree
+    assert drv["eco_score"] == 85                      # exactly rated -> 85
+    # Distance/count still include every drive.
+    assert drv["total_distance_km"] == 80.0
+    assert drv["total_drives"] == 2
+
+
 def test_driving_analysis_reports_scores(seeded):
     drives = seeded.scalars(select(Drive)).all()
     result = driving_analysis.analyze(list(drives), 150.0)

@@ -133,7 +133,14 @@ def analyze(drives: list[Drive], rated_wh_per_km: float = 150.0,
     distances = [d.distance_km for d in drives]
     durations = [d.duration_min for d in drives]
     speeds = [d.avg_speed_kmh for d in drives]
-    effs = [d.wh_per_km for d in drives if d.distance_km > 0]
+    # Efficiency-bearing drives only: a drive whose range reading was missing
+    # logs 0 kWh. Including its distance (but no energy) would understate Wh/km
+    # and inflate the eco score, so every efficiency/behaviour figure below is
+    # computed from these — while distance/duration/counts use every drive.
+    eff_drives = [d for d in drives if d.distance_km > 0 and d.energy_used_kwh > 0]
+    effs = [d.wh_per_km for d in eff_drives]
+    eff_distance = sum(d.distance_km for d in eff_drives)
+    eff_energy = sum(d.energy_used_kwh for d in eff_drives)
 
     total_distance = sum(distances)
     total_duration_h = sum(durations) / 60.0
@@ -170,15 +177,13 @@ def analyze(drives: list[Drive], rated_wh_per_km: float = 150.0,
     )
 
     # How strongly speed affects efficiency (Wh/km per km/h).
-    speed_slope, _ = linregress(
-        [d.avg_speed_kmh for d in drives if d.distance_km > 0], effs
-    )
+    speed_slope, _ = linregress([d.avg_speed_kmh for d in eff_drives], effs)
 
-    # Distance-weighted window efficiency, and its absolute driving score.
-    # Zero energy means the range reading was missing (a data gap), not a real
-    # 0 Wh/km — leave efficiency and the score as unknown so the UI shows "—"
-    # instead of a misleading 0 / grade E.
-    window_eff = round(total_energy * 1000.0 / total_distance, 1) if total_distance and total_energy > 0 else None
+    # Distance-weighted window efficiency (energy-bearing drives only), and its
+    # absolute driving score. Zero energy means the range reading was missing (a
+    # data gap), not a real 0 Wh/km — leave efficiency and the score as unknown
+    # so the UI shows "—" instead of a misleading 0 / grade E.
+    window_eff = round(eff_energy * 1000.0 / eff_distance, 1) if eff_distance and eff_energy > 0 else None
     window_score = eco_score(window_eff, rated_wh_per_km) if window_eff else None
 
     return {
@@ -205,7 +210,7 @@ def analyze(drives: list[Drive], rated_wh_per_km: float = 150.0,
         # Absolute driving score for the whole window (efficiency vs rated).
         "eco_score": window_score,
         "eco_grade": score_grade(window_score) if window_score is not None else None,
-        "behaviour": _behaviour(drives, total_distance, total_energy, effs),
+        "behaviour": _behaviour(eff_drives, eff_distance, eff_energy, effs),
         "recent_trips": [
             {
                 "id": getattr(d, "id", None),

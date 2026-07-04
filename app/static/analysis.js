@@ -134,8 +134,13 @@
     const dist = drives.map((d) => d.distance_km);
     const dur = drives.map((d) => d.duration_min);
     const spd = drives.map((d) => d.avg_speed_kmh);
-    const withDist = drives.filter((d) => d.distance_km > 0);
-    const effs = withDist.map(whPerKm);
+    // Efficiency-bearing drives only (energy > 0) — a missing range reading
+    // logs 0 kWh; including its distance would understate Wh/km. Mirror of
+    // app/analysis/driving.py. Distance/duration/counts still use every drive.
+    const effDrives = drives.filter((d) => d.distance_km > 0 && d.energy_used_kwh > 0);
+    const effs = effDrives.map(whPerKm);
+    const effKm = effDrives.reduce((a, d) => a + d.distance_km, 0);
+    const effKwh = effDrives.reduce((a, d) => a + d.energy_used_kwh, 0);
 
     const bySpeed = new Map();
     drives.forEach((d) => { const b = speedBucket(d.avg_speed_kmh); bySpeed.set(b, (bySpeed.get(b) || 0) + d.distance_km); });
@@ -149,7 +154,7 @@
         routes.set(r, (routes.get(r) || 0) + 1);
       }
     });
-    const [slope] = linregress(withDist.map((d) => d.avg_speed_kmh), effs);
+    const [slope] = linregress(effDrives.map((d) => d.avg_speed_kmh), effs);
     const totKm = dist.reduce((a, b) => a + b, 0);
     const totKwh = drives.reduce((a, d) => a + d.energy_used_kwh, 0);
     // Real-world range yardstick: km per 1% of battery. Take the largest of
@@ -167,7 +172,8 @@
     const tbw = {}; for (let i = 0; i < 7; i++) tbw[WEEKDAYS[i]] = byWd.get(i) || 0;
 
     // Zero energy = missing range reading (data gap), not real 0 Wh/km.
-    const windowEff = (totKm && totKwh > 0) ? round(totKwh * 1000.0 / totKm, 1) : null;
+    // Energy-bearing drives only, so phantom 0-energy distance can't dilute it.
+    const windowEff = (effKm && effKwh > 0) ? round(effKwh * 1000.0 / effKm, 1) : null;
     const windowScore = windowEff ? ecoScore(windowEff, rated) : null;
 
     return {
@@ -192,9 +198,7 @@
       avg_efficiency_wh_per_km: windowEff,
       eco_score: windowScore,
       eco_grade: windowScore != null ? scoreGrade(windowScore) : null,
-      behaviour: analyzeBehaviour(drives,
-        drives.reduce((a, d) => a + d.distance_km, 0),
-        drives.reduce((a, d) => a + d.energy_used_kwh, 0), effs),
+      behaviour: analyzeBehaviour(effDrives, effKm, effKwh, effs),
       recent_trips: [...drives]
         .sort((a, b) => new Date(b.start_time) - new Date(a.start_time))
         .slice(0, 5)
