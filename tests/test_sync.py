@@ -98,12 +98,14 @@ def test_live_trip_reports_progress():
 
     trip = {"ts": T0, "odo_km": 10_000.0, "soc": 80, "max_speed": 95}
     now = snap(T0 + 1800, 10_030.0, 74, shift="D", speed=80, present=True)
-    lt = live_trip(trip, now)
+    lt = live_trip(trip, now, capacity_kwh=60.0)
     assert lt["distance_km"] == 30.0
     assert lt["duration_min"] == 30
     assert lt["avg_speed_kmh"] == 60.0
     assert lt["soc_used"] == 6
     assert lt["km_per_soc"] == 5.0
+    assert lt["energy_kwh"] == 3.6                 # 6% of 60 kWh
+    assert lt["wh_per_km"] == 120                  # 3.6 kWh over 30 km
     assert live_trip(None, now) is None
 
 

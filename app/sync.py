@@ -104,13 +104,16 @@ def _drive_from(start: dict, cur: dict, capacity_kwh: float, max_speed: float = 
     }
 
 
-def live_trip(open_trip: dict | None, snap: dict | None) -> dict | None:
+def live_trip(
+    open_trip: dict | None, snap: dict | None, capacity_kwh: float = 75.0
+) -> dict | None:
     """Progress of the drive in flight — the dashboard's "current drive" view."""
     if not open_trip or not snap:
         return None
     distance = max(snap["odo_km"] - open_trip["odo_km"], 0.0)
     dt_min = max((snap["ts"] - open_trip["ts"]) / 60.0, 0.0)
     soc_used = max(open_trip["soc"] - snap["soc"], 0.0)
+    energy_kwh = soc_used / 100.0 * capacity_kwh
     return {
         "start_time": _dt(open_trip["ts"]).isoformat(timespec="minutes"),
         "distance_km": round(distance, 1),
@@ -121,6 +124,8 @@ def live_trip(open_trip: dict | None, snap: dict | None) -> dict | None:
         "soc": snap["soc"],
         "soc_used": round(soc_used, 1),
         "km_per_soc": round(distance / soc_used, 1) if soc_used >= 1 else None,
+        "energy_kwh": round(energy_kwh, 2),
+        "wh_per_km": round(energy_kwh * 1000.0 / distance) if distance >= DRIVE_MIN_KM else None,
     }
 
 
