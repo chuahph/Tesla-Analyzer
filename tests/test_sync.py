@@ -5,12 +5,13 @@ T0 = 1_760_000_000.0  # seconds epoch
 
 
 def snap(ts, odo_km, soc, shift="P", speed=0.0, charging=False, kw=0.0,
-         fast=False, present=False, locked=False, lat=None, lon=None):
+         fast=False, present=False, locked=False, lat=None, lon=None,
+         range_km=None):
     return {
         "ts": ts, "odo_km": odo_km, "soc": soc, "shift": shift,
         "speed_kmh": speed, "charging": charging, "charger_kw": kw,
         "fast": fast, "out_temp": 28.0, "user_present": present,
-        "locked": locked, "lat": lat, "lon": lon,
+        "locked": locked, "lat": lat, "lon": lon, "range_km": range_km,
     }
 
 
@@ -141,6 +142,35 @@ def test_charge_stays_open_until_it_stops():
     assert chg["charge_type"] == "AC"
     assert abs(chg["cost"] - 9.72) < 1e-6
     assert chg["duration_min"] == 60.0
+
+
+def test_energy_prefers_fine_grained_range_delta():
+    """A short trip must not be quantised to whole battery percents.
+
+    7 km at ~120 Wh/km really uses ~1.4% of a 60 kWh pack, but the integer
+    battery_level only ticks from 80 to 79 (= 1% = 0.6 kWh = 86 Wh/km).
+    The fractional rated-range delta captures the true energy instead.
+    """
+    s1 = snap(T0, 10_000.0, 80, range_km=400.0)  # full pack projects 500 km
+    s2 = snap(T0 + 300, 10_003.0, 80, shift="D", speed=50, present=True,
+              range_km=396.5)
+    s3 = snap(T0 + 900, 10_007.0, 79, locked=True, range_km=393.0)
+
+    _, _, trip, _ = step(s1, s2)
+    d, _, trip, _ = step(s2, s3, trip)
+    (drive,) = d
+    # Δrange = 7 km of rated range on a 500 km projection = 1.4% = 0.84 kWh.
+    assert abs(drive["energy_used_kwh"] - 0.84) < 0.01
+    # Without range data the same trip would read 0.6 kWh (1% of 60 kWh).
+
+    # Charges gain the same precision: +2.5% by SoC but Δrange says +2.35%.
+    c1 = snap(T0, 10_000.0, 60, charging=True, kw=11, range_km=300.0)
+    c2 = snap(T0 + 1800, 10_000.0, 62, range_km=311.75)
+    _, c, _, _ = step(c1, c2, charge={"ts": c1["ts"], "soc": 60,
+                                      "range_km": 300.0, "max_kw": 11,
+                                      "fast": False})
+    (chg,) = c
+    assert abs(chg["energy_added_kwh"] - 1.404) < 0.01  # 11.75/502.7*60.05... fine-grained
 
 
 def test_max_speed_never_below_average():
