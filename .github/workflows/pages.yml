@@ -64,8 +64,9 @@ jobs:
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
       # GitHub Pages occasionally rejects a deployment with a transient
-      # "Deployment failed, try again later." — retry once after a pause
-      # instead of failing the run (and emailing) on the first hiccup.
+      # "Deployment failed, try again later." — especially when merges land
+      # back-to-back and the previous deployment is still processing. Try up
+      # to three times with growing pauses before failing (and emailing).
       - name: Deploy to GitHub Pages
         id: deployment
         uses: actions/deploy-pages@v4
@@ -76,5 +77,15 @@ jobs:
         run: sleep 60
 
       - name: Retry deploy to GitHub Pages
+        id: retry1
         if: steps.deployment.outcome == 'failure'
+        uses: actions/deploy-pages@v4
+        continue-on-error: true
+
+      - name: Wait before final retry
+        if: steps.deployment.outcome == 'failure' && steps.retry1.outcome == 'failure'
+        run: sleep 150
+
+      - name: Final retry deploy to GitHub Pages
+        if: steps.deployment.outcome == 'failure' && steps.retry1.outcome == 'failure'
         uses: actions/deploy-pages@v4
