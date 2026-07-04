@@ -244,9 +244,14 @@ def oauth_callback(
 
 @router.get("/sync")  # GET so external cron/uptime services can trigger it
 @router.post("/sync")
-def sync_now(session: Session = Depends(get_session)):
-    """Snapshot the linked car and log what happened since the last snapshot."""
+def sync_now(wake: bool = Query(False), session: Session = Depends(get_session)):
+    """Snapshot the linked car and log what happened since the last snapshot.
+
+    ``wake=1`` (the manual Sync button) nudges a sleeping car online first.
+    The cron never wakes the car, so it can't drain the battery overnight.
+    """
     import json as _json
+    import time
 
     from .. import sync as sync_mod
     from ..tesla_client import TeslaClient
@@ -263,9 +268,20 @@ def sync_now(session: Session = Depends(get_session)):
         if not vehicles:
             raise HTTPException(404, "No vehicles on this Tesla account.")
         v = vehicles[0]
+        vid = v.get("id_s") or v.get("id")
+        if wake and v.get("state") and v["state"] != "online":
+            try:
+                client.wake_up(vid)
+                for _ in range(6):  # cars typically wake within ~15-30 s
+                    time.sleep(5)
+                    v = client.list_vehicles()[0]
+                    if v.get("state") == "online":
+                        break
+            except Exception:  # noqa: BLE001 — wake is best-effort
+                pass
         if v.get("state") and v["state"] != "online":
             return v, None  # asleep/offline — nothing readable right now
-        return v, client.vehicle_data(v.get("id_s") or v.get("id"))
+        return v, client.vehicle_data(vid)
 
     try:
         v, data = fetch(token)
@@ -288,8 +304,11 @@ def sync_now(session: Session = Depends(get_session)):
     if data is None:
         resp = {
             "status": "asleep",
+            "tried_wake": wake,
             "logged": {"drives": 0, "charges": 0},
-            "note": "Car is asleep — try again while charging or right after a drive.",
+            "note": ("Couldn't wake the car — it may be offline. Try again in a minute."
+                     if wake else
+                     "Car is asleep — try again while charging or right after a drive."),
         }
         # Include the last known reading so the dashboard can still show battery.
         last_raw = state.get(session, state.SNAPSHOT_KEY)

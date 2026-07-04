@@ -654,18 +654,22 @@ function setSyncStatus(batt, cond, kind) {
 }
 
 let syncBusy = false;
-async function syncNow() {
+// wake=true (the Sync button) nudges a sleeping car online before reading it;
+// the automatic syncs never wake the car.
+async function syncNow(wake) {
   if (syncBusy) return;
   syncBusy = true;
-  setSyncStatus("", "Syncing…", "");
+  setSyncStatus("", wake ? "Waking car & syncing… (can take ~30 s)" : "Syncing…", "");
   try {
-    const res = await fetch("/api/sync", { method: "POST" });
+    const res = await fetch(`/api/sync${wake ? "?wake=1" : ""}`, { method: "POST" });
     const body = await res.json();
     if (!res.ok) throw new Error(body.detail || "Sync failed");
     if (body.status === "asleep") {
       const batt = body.last && body.last.soc
         ? `🔋 ${Math.round(body.last.soc)}% (last known)` : "";
-      setSyncStatus(batt, "😴 Car asleep — sync after a drive or while charging.", "warn");
+      setSyncStatus(batt, body.tried_wake
+        ? "😴 Couldn't wake the car — it may be offline. Try again in a minute."
+        : "😴 Car asleep — tap Sync to wake it, or sync after a drive.", "warn");
     } else {
       const l = body.logged || {};
       const extra = (l.drives || l.charges)
@@ -691,7 +695,7 @@ async function syncNow() {
   }
 }
 const syncBtnEl = document.getElementById("btn-sync");
-if (syncBtnEl) syncBtnEl.addEventListener("click", syncNow);
+if (syncBtnEl) syncBtnEl.addEventListener("click", () => syncNow(true));
 // Re-sync every 5 minutes while the dashboard stays open and visible.
 setInterval(() => {
   if (!document.hidden && !STATIC_MODE && window._syncedOnce) syncNow();
