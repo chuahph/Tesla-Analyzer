@@ -255,21 +255,40 @@
   }
 
   // --- battery health (mirror app/analysis/battery.py) ---
+  // Tesla VIN: char 4 = model line, char 10 = model-year letter.
+  const VIN_YEARS = { A:2010,B:2011,C:2012,D:2013,E:2014,F:2015,G:2016,H:2017,
+    J:2018,K:2019,L:2020,M:2021,N:2022,P:2023,R:2024,S:2025,T:2026,V:2027,
+    W:2028,X:2029,Y:2030,1:2031,2:2032,3:2033,4:2034,5:2035,6:2036,7:2037,
+    8:2038,9:2039 };
+  function vinYear(vin) {
+    vin = String(vin || "").trim().toUpperCase();
+    if (vin.length !== 17 || /^(DEMO|IMPORT|LINKED)/.test(vin)) return null;
+    return VIN_YEARS[vin[9]] || null;
+  }
+
   // Factory rated range at 100% when new (km, EPA scale). Each entry needs
-  // the model substring plus ALL listed tokens (badge, optionally wheel type);
-  // most specific entries first — first match wins.
+  // the model substring, ALL listed tokens (badge, optionally wheel type),
+  // and — when given — a model-year window (from the VIN). Most specific
+  // entries first — first match wins. Mirror of app/analysis/battery.py.
   const NEW_RANGE_KM = [
-    ["MODEL 3", ["P74D"], 476],
-    ["MODEL 3", ["74D", "NOVA19"], 491],  // 2024 LR AWD on 19" Nova (EPA 305 mi)
-    ["MODEL 3", ["74D"], 549],            // 2024 LR AWD on 18" Photon (EPA 341 mi)
-    ["MODEL 3", ["74"], 549], ["MODEL 3", ["50"], 438],
-    ["MODEL Y", ["P74D"], 459], ["MODEL Y", ["74D"], 531], ["MODEL Y", ["50"], 418],
+    ["MODEL 3", ["P74D"], [2024, 2100], 476],
+    ["MODEL 3", ["74D", "NOVA19"], [2024, 2100], 491],  // LR AWD, 19" Nova (305 mi)
+    ["MODEL 3", ["74D"], [2024, 2100], 549],            // LR AWD, 18" Photon (341 mi)
+    ["MODEL 3", ["P74D"], [2017, 2023], 507],
+    ["MODEL 3", ["74D"], [2017, 2023], 536],
+    ["MODEL 3", ["P74D"], null, 476],
+    ["MODEL 3", ["74D", "NOVA19"], null, 491],
+    ["MODEL 3", ["74D"], null, 549],
+    ["MODEL 3", ["74"], null, 549], ["MODEL 3", ["50"], null, 438],
+    ["MODEL Y", ["P74D"], null, 459], ["MODEL Y", ["74D"], null, 531],
+    ["MODEL Y", ["50"], null, 418],
   ];
-  function newRangeFor(model, trim) {
+  function newRangeFor(model, trim, year) {
     const text = `${model || ""} ${trim || ""}`.toUpperCase();
     const tokens = [...new Set(text.split(/[^A-Z0-9]+/))].filter(Boolean);
     const has = (req) => tokens.some((t) => t === req || t.startsWith(req));
-    for (const [m, required, km] of NEW_RANGE_KM) {
+    for (const [m, required, years, km] of NEW_RANGE_KM) {
+      if (years && (!year || year < years[0] || year > years[1])) continue;
       if (text.includes(m) && required.every(has)) return km;
     }
     return null;
@@ -444,7 +463,8 @@
     const efficiency = analyzeEfficiency(drives, rated);
     const v = dataset.vehicle || {};
     const battery = analyzeBattery(
-      dataset.battery_readings || [], newRangeFor(v.model, v.trim));
+      dataset.battery_readings || [],
+      newRangeFor(v.model, v.trim, vinYear(v.vin)));
     const recommendations = buildRecommendations(driving, charging, efficiency, price, currency, battery);
 
     return {

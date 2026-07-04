@@ -20,23 +20,36 @@ MIN_SOC = 20.0       # low-SoC readings project unreliably
 RECENT_N = 10        # recent projections summarised as the "current" estimate
 
 # Factory rated range at 100% when new, in km (EPA figures — the same scale
-# the API's battery_range field uses). Each entry needs the model substring
-# plus ALL listed tokens (badge, optionally wheel type) in the model+trim
-# text; first match wins, so keep the most specific entries first.
-NEW_RANGE_KM: list[tuple[str, tuple[str, ...], float]] = [
-    ("MODEL 3", ("P74D",), 476.0),          # 2024 Performance (EPA 296 mi)
-    ("MODEL 3", ("74D", "NOVA19"), 491.0),  # 2024 LR AWD, 19" Nova (EPA 305 mi)
-    ("MODEL 3", ("74D",), 549.0),           # 2024 LR AWD, 18" Photon (EPA 341 mi)
-    ("MODEL 3", ("74",), 549.0),            # Long Range badge variations
-    ("MODEL 3", ("50",), 438.0),            # RWD (EPA 272 mi)
-    ("MODEL Y", ("P74D",), 459.0),          # Performance (EPA 285 mi)
-    ("MODEL Y", ("74D",), 531.0),           # Long Range AWD (EPA 330 mi)
-    ("MODEL Y", ("50",), 418.0),            # RWD (EPA 260 mi)
+# the API's battery_range field uses). Each entry needs the model substring,
+# ALL listed tokens (badge, optionally wheel type) in the model+trim text,
+# and — when given — a model-year window (from the VIN). First match wins,
+# so keep the most specific entries first.
+NEW_RANGE_KM: list[tuple[str, tuple[str, ...], tuple[int, int] | None, float]] = [
+    # 2024+ Model 3 "Highland"
+    ("MODEL 3", ("P74D",), (2024, 2100), 476.0),          # Performance (296 mi)
+    ("MODEL 3", ("74D", "NOVA19"), (2024, 2100), 491.0),  # LR AWD, 19" Nova (305 mi)
+    ("MODEL 3", ("74D",), (2024, 2100), 549.0),           # LR AWD, 18" Photon (341 mi)
+    # Pre-Highland Model 3
+    ("MODEL 3", ("P74D",), (2017, 2023), 507.0),          # Performance (315 mi)
+    ("MODEL 3", ("74D",), (2017, 2023), 536.0),           # LR AWD (333 mi)
+    # Year-agnostic fallbacks (no VIN year available)
+    ("MODEL 3", ("P74D",), None, 476.0),
+    ("MODEL 3", ("74D", "NOVA19"), None, 491.0),
+    ("MODEL 3", ("74D",), None, 549.0),
+    ("MODEL 3", ("74",), None, 549.0),
+    ("MODEL 3", ("50",), None, 438.0),                    # RWD (272 mi)
+    ("MODEL Y", ("P74D",), None, 459.0),                  # Performance (285 mi)
+    ("MODEL Y", ("74D",), None, 531.0),                   # LR AWD (330 mi)
+    ("MODEL Y", ("50",), None, 418.0),                    # RWD (260 mi)
 ]
 
 
-def new_range_for(model: str, trim: str) -> float | None:
-    """Factory new range for this exact variant, if we recognise the badge."""
+def new_range_for(model: str, trim: str, year: int | None = None) -> float | None:
+    """Factory new range for this exact variant, if we recognise the badge.
+
+    ``year`` (decoded from the VIN) picks the right generation — e.g. a 74D
+    badge means 536 km on a 2023 Model 3 but 549 km on a 2024 Highland.
+    """
     text = f"{model or ''} {trim or ''}".upper()
     tokens = set(re.split(r"[^A-Z0-9]+", text))
 
@@ -44,7 +57,9 @@ def new_range_for(model: str, trim: str) -> float | None:
         # Exact token, or token prefix for wheel names ("Nova19DarkTinted").
         return req in tokens or any(t.startswith(req) for t in tokens if t)
 
-    for m, required, km in NEW_RANGE_KM:
+    for m, required, years, km in NEW_RANGE_KM:
+        if years is not None and (year is None or not years[0] <= year <= years[1]):
+            continue
         if m in text and all(has(r) for r in required):
             return km
     return None

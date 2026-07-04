@@ -343,8 +343,9 @@ async function load() {
 
     const v = d.vehicle;
     const realVin = v.vin && !/^(DEMO|IMPORT|LINKED)/.test(v.vin) ? `VIN ${v.vin}` : null;
+    // Model year (decoded from the VIN by the server) leads the description.
     document.getElementById("subtitle").textContent =
-      [v.name, [v.model, v.trim].filter(Boolean).join(" "), realVin]
+      [v.name, [v.year, v.model, v.trim].filter(Boolean).join(" "), realVin]
         .filter(Boolean).join(" · ");
 
     renderKpis(d);

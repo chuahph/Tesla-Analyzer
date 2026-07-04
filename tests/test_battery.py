@@ -72,3 +72,23 @@ def test_new_range_19in_nova_wheels():
     assert new_range_for("Model 3", "74D Nova19DarkTinted") == 491.0
     # 18" Photon (or unknown wheels) keeps the 341 mi / 549 km figure.
     assert new_range_for("Model 3", "74D QUICKSILVER Photon18") == 549.0
+
+
+def test_new_range_uses_vin_year_generation():
+    # Same 74D badge, different generation: 2023 pre-Highland vs 2024 Highland.
+    assert new_range_for("Model 3", "74D", year=2023) == 536.0
+    assert new_range_for("Model 3", "74D", year=2024) == 549.0
+    assert new_range_for("Model 3", "74D Nova19", year=2024) == 491.0
+    # No year (no decodable VIN) falls back to the year-agnostic entries.
+    assert new_range_for("Model 3", "74D") == 549.0
+
+
+def test_vin_decode():
+    from app.vin import decode
+
+    info = decode("LRW3F7EK3RC309372")  # 2024 Model 3, Giga Shanghai
+    assert info["model"] == "Model 3"
+    assert info["year"] == 2024
+    assert info["plant"] == "Shanghai"
+    assert decode("DEMO12345") == {}
+    assert decode("") == {}

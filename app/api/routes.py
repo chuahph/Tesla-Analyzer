@@ -9,7 +9,7 @@ from fastapi.responses import RedirectResponse
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from .. import auth, services, state
+from .. import auth, services, state, vin as vin_mod
 from ..analysis import battery as battery_analysis
 from ..analysis import charging as charging_analysis
 from ..analysis import driving as driving_analysis
@@ -312,11 +312,15 @@ def sync_now(session: Session = Depends(get_session)):
         session.add(vehicle)
         session.flush()
 
-    # Enrich the vehicle from the car's own config (real model / trim / colour).
+    # Enrich the vehicle from the car's own config (real model / trim / colour),
+    # with the VIN as a fallback source for the model line.
     cfg = data.get("vehicle_config") or {}
     car_map = {"model3": "Model 3", "modely": "Model Y",
                "models": "Model S", "modelx": "Model X"}
-    real_model = car_map.get((cfg.get("car_type") or "").lower().replace(" ", ""))
+    real_model = (
+        car_map.get((cfg.get("car_type") or "").lower().replace(" ", ""))
+        or vin_mod.decode(vin).get("model")
+    )
     if real_model and vehicle.model in ("Tesla", ""):
         vehicle.model = real_model
     if not vehicle.trim:
@@ -596,9 +600,11 @@ def summary(
         .limit(2000)
     ).all()
     # 100% reference: explicit override, else the factory figure for this
-    # exact variant (badge in the trim, e.g. "74D" = 2024 M3 LR AWD).
+    # exact variant — model+badge+wheel from the trim, generation from the
+    # VIN's model-year letter (74D means 536 km in 2023 but 549 km in 2024).
+    vin_info = vin_mod.decode(vehicle.vin)
     spec_km = settings.battery_new_range_km or battery_analysis.new_range_for(
-        vehicle.model, vehicle.trim
+        vehicle.model, vehicle.trim, year=vin_info.get("year")
     )
     battery = battery_analysis.analyze(
         [{"soc": r.soc, "range_km": r.range_km} for r in readings],
@@ -614,8 +620,10 @@ def summary(
         currency=settings.currency,
     )
 
+    vehicle_out = VehicleOut.model_validate(vehicle).model_dump()
+    vehicle_out.update({k: v for k, v in vin_info.items() if v})  # year, plant
     return {
-        "vehicle": VehicleOut.model_validate(vehicle).model_dump(),
+        "vehicle": vehicle_out,
         "window_days": days,
         "window_label": window_label,
         "generated_at": datetime.now().isoformat(timespec="seconds"),
