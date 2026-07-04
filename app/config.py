@@ -25,7 +25,9 @@ class Settings(BaseSettings):
     tesla_client_secret: str = ""
     # vehicle_location powers trip start/end places and live speed; the sync
     # degrades gracefully (403 fallback) if the Tesla app doesn't grant it.
-    tesla_oauth_scope: str = "openid offline_access vehicle_device_data vehicle_location"
+    tesla_oauth_scope: str = (
+        "openid offline_access vehicle_device_data vehicle_location vehicle_cmds"
+    )
     tesla_oauth_audience: str = "https://fleet-api.prd.na.vn.cloud.tesla.com"
 
     # Optional passcode protecting the whole app (empty = no login required).
