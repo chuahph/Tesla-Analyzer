@@ -65,6 +65,39 @@ function renderScore(d) {
   wireInfoButtons(el);
 }
 
+// Full car-info panel (opened by the "!" after the VIN in the header).
+function fillCarInfo(v) {
+  const el = document.getElementById("car-info");
+  if (!el || !v) return;
+  const realVin = v.vin && !/^(DEMO|IMPORT|LINKED)/.test(v.vin) ? v.vin : null;
+  const badge = ((v.trim || "").match(/\b(P?\d+D?)\b/) || [])[1];
+  const wheel = (v.trim || "").split(/\s+/).find((t) =>
+    /^(nova|photon|pinwheel|gemini|induction|crossflow|uberturbine|apollo|turbine|helix|arachnid|cyberstream|stiletto)/i.test(t));
+  // Colour = trim tokens that aren't the badge or the wheel.
+  const colour = (v.trim || "").split(/\s+/)
+    .filter((t) => t && !/^P?\d+D?$/i.test(t) && !/(1[89]|2[012])/.test(t))
+    .join(" ");
+  const rows = [
+    realVin ? `VIN: <strong>${realVin}</strong>` : null,
+    [v.year, v.model, badge].filter(Boolean).length
+      ? `Model: <strong>${[v.year, v.model, badge].filter(Boolean).join(" ")}</strong>` : null,
+    colour ? `Colour: <strong>${colour}</strong>` : null,
+    wheel ? `Wheels: <strong>${prettyWheel(wheel)}</strong>` : null,
+    v.plant ? `Built at: <strong>Giga ${v.plant}</strong>` : null,
+  ].filter(Boolean);
+  el.innerHTML = rows.map((r) => `<div>${r}</div>`).join("")
+    || "<div>No linked car yet.</div>";
+}
+
+// Close the car-info panel when tapping elsewhere.
+document.addEventListener("click", (e) => {
+  const el = document.getElementById("car-info");
+  if (el && !el.classList.contains("hidden") &&
+      !el.contains(e.target) && !e.target.classList.contains("info-btn")) {
+    el.classList.add("hidden");
+  }
+});
+
 // Wire every ".info-btn[data-info]" inside a container to toggle its popover.
 function wireInfoButtons(root) {
   root.querySelectorAll(".info-btn[data-info]").forEach((btn) => {
@@ -501,13 +534,24 @@ async function load() {
     sub.textContent = [v.name, [v.year, v.model, trimTxt].filter(Boolean).join(" ")]
       .filter(Boolean).join(" · ");
     if (realVin) {
-      // Keep "VIN <number>" together so it wraps onto the last line as a unit.
+      // Keep "VIN <number> !" together so it wraps onto the last line as a unit;
+      // the "!" opens the full car-info panel.
       sub.appendChild(document.createTextNode(" · "));
       const span = document.createElement("span");
       span.className = "nowrap";
-      span.textContent = realVin;
+      span.textContent = realVin + " ";
+      const info = document.createElement("button");
+      info.className = "info-btn";
+      info.textContent = "!";
+      info.title = "Full car info";
+      info.addEventListener("click", (e) => {
+        e.stopPropagation();
+        document.getElementById("car-info").classList.toggle("hidden");
+      });
+      span.appendChild(info);
       sub.appendChild(span);
     }
+    fillCarInfo(d.vehicle);
 
     lastData = d;
     renderScore(d);
