@@ -91,8 +91,11 @@ function renderKpis(d) {
         `${fmt(lt.energy_kwh, 1)} kWh this drive`, "green"));
     }
     cards.push(kpiCard("Battery", fmt(lt.soc_used, 1) + "% used",
-      `${fmt(lt.start_soc)}% → ${fmt(lt.soc)}%` +
-      (lt.km_per_soc ? ` · ${fmt(lt.km_per_soc, 1)} km/1%` : ""), "teal"));
+      `${fmt(lt.start_soc)}% → ${fmt(lt.soc)}%`, "green"));
+    // A dedicated km/1% box for the live drive, mirroring the windowed view.
+    cards.push(lt.km_per_soc
+      ? kpiCard("km / 1% Battery", fmt(lt.km_per_soc, 1) + " km", "this drive", "teal")
+      : kpiCard("km / 1% Battery", "—", "waiting on range data", "teal"));
   }
   if (drv.available) {
     cards.push(kpiCard("Distance", fmt(drv.total_distance_km) + " km",
@@ -107,10 +110,10 @@ function renderKpis(d) {
     }
     cards.push(kpiCard("Avg Speed", fmt(drv.avg_speed_kmh) + " km/h",
       `peak ${fmt(drv.p95_speed_kmh)} km/h (p95)`, "amber"));
-    if (drv.km_per_soc_pct) {
-      cards.push(kpiCard("km / 1% Battery", fmt(drv.km_per_soc_pct, 1) + " km",
-        "real-world range", "teal"));
-    }
+    // Always present so the box never "disappears"; "—" until energy data lands.
+    cards.push(drv.km_per_soc_pct
+      ? kpiCard("km / 1% Battery", fmt(drv.km_per_soc_pct, 1) + " km", "real-world range", "teal")
+      : kpiCard("km / 1% Battery", "—", "waiting on range data from a synced drive", "teal"));
   }
   if (chg.available) {
     cards.push(kpiCard("Energy Charged", fmt(chg.total_energy_kwh) + " kWh",
