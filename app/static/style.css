@@ -11,7 +11,7 @@
   --violet: #a78bfa;
   --teal: #2dd4bf;
   --border: #262b34;
-  --control-h: 38px;   /* uniform height for the top-row controls */
+  --control-h: 33px;   /* uniform height for the top-row controls */
 }
 
 * { box-sizing: border-box; }
@@ -449,9 +449,12 @@ footer { padding: 18px 28px; color: var(--muted); font-size: 12px; border-top: 1
   .brand { flex: 1 1 0; min-width: 0; gap: 8px; }
   .logo { font-size: 22px; }
   #subtitle { font-size: 11px; line-height: 1.35; }
+  /* Match the box height to the car-description block on the left by
+     stretching to the row's height; centre the two clock lines within it. */
   .meta-box {
-    position: static; margin-left: auto; align-self: flex-start;
+    position: static; margin-left: auto; align-self: stretch;
     text-align: right; padding: 4px 8px; max-width: 172px; flex: 0 0 auto;
+    display: flex; flex-direction: column; justify-content: center;
   }
   .meta-box .clock { font-size: 10px; white-space: normal; }
   .meta-box .clock.build { font-size: 9px; }
