@@ -153,6 +153,14 @@ def clear_drives(session: Session = Depends(get_session)):
     return {"deleted_drives": deleted}
 
 
+@router.post("/data/delete-drives")
+def delete_drives(payload: dict = Body(...), session: Session = Depends(get_session)):
+    """Delete only the selected trips (by id); charges/battery kept."""
+    ids = [int(i) for i in (payload.get("ids") or []) if str(i).lstrip("-").isdigit()]
+    deleted = services.delete_drives(session, ids)
+    return {"deleted_drives": deleted}
+
+
 # --- Data source: link Tesla account --------------------------------------
 
 
@@ -644,7 +652,8 @@ def summary(
             window_label = "since last charge"
     drives, charges = _window(session, vehicle.id, days, since=since)
 
-    driving = driving_analysis.analyze(drives, settings.rated_wh_per_km)
+    driving = driving_analysis.analyze(
+        drives, settings.rated_wh_per_km, vehicle.battery_capacity_kwh)
     charging = charging_analysis.analyze(charges)
     efficiency = efficiency_analysis.analyze(drives, settings.rated_wh_per_km)
 

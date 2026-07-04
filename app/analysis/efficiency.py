@@ -25,6 +25,15 @@ def analyze(drives: list[Drive], rated_wh_per_km: float) -> dict[str, Any]:
     if not drives:
         return {"available": False}
 
+    # Only trips with real energy data feed efficiency — a trip whose range
+    # reading was missing logs 0 kWh, which would otherwise drag the average
+    # to a meaningless 0 Wh/km.
+    drives = [d for d in drives if d.energy_used_kwh > 0]
+    if not drives:
+        return {"available": False, "rated_wh_per_km": rated_wh_per_km,
+                "note": "No energy data yet — efficiency needs a synced drive "
+                        "with battery range readings."}
+
     effs = [d.wh_per_km for d in drives]
     # Distance-weighted: total energy over total km, not a mean of ratios.
     _distance = sum(d.distance_km for d in drives)

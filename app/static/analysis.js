@@ -127,8 +127,9 @@
   }
 
   // --- driving (mirror app/analysis/driving.py) ---
-  function analyzeDriving(drives, rated) {
+  function analyzeDriving(drives, rated, capacity) {
     rated = rated || RATED_WH_PER_KM;
+    capacity = capacity || 75.0;
     if (!drives.length) return { available: false };
     const dist = drives.map((d) => d.distance_km);
     const dur = drives.map((d) => d.duration_min);
@@ -149,19 +150,22 @@
       }
     });
     const [slope] = linregress(withDist.map((d) => d.avg_speed_kmh), effs);
-    // Real-world range yardstick: km covered per 1% of battery used.
-    const socUsed = drives.reduce((a, d) => a + Math.max((d.start_soc || 0) - (d.end_soc || 0), 0), 0);
-    const kmPerSoc = socUsed >= 1
-      ? round(dist.reduce((a, b) => a + b, 0) / socUsed, 1) : null;
+    const totKm = dist.reduce((a, b) => a + b, 0);
+    const totKwh = drives.reduce((a, d) => a + d.energy_used_kwh, 0);
+    // Real-world range yardstick: km per 1% of battery. Integer SoC doesn't
+    // tick on a short trip, so derive the % from measured energy when larger.
+    const socFromInt = drives.reduce((a, d) => a + Math.max((d.start_soc || 0) - (d.end_soc || 0), 0), 0);
+    const socFromEnergy = capacity ? (totKwh / capacity * 100.0) : 0;
+    const socUsed = Math.max(socFromInt, socFromEnergy);
+    const kmPerSoc = (socUsed >= 0.2 && totKm) ? round(totKm / socUsed, 1) : null;
 
     const distBand = {}; [...bySpeed.keys()].sort().forEach((k) => distBand[k] = round(bySpeed.get(k), 1));
     const tbh = {}; for (let h = 0; h < 24; h++) tbh[String(h)] = byHour.get(h) || 0;
     const tbw = {}; for (let i = 0; i < 7; i++) tbw[WEEKDAYS[i]] = byWd.get(i) || 0;
 
-    const totKm = dist.reduce((a, b) => a + b, 0);
-    const totKwh = drives.reduce((a, d) => a + d.energy_used_kwh, 0);
-    const windowEff = totKm ? round(totKwh * 1000.0 / totKm, 1) : 0.0;
-    const windowScore = ecoScore(windowEff, rated);
+    // Zero energy = missing range reading (data gap), not real 0 Wh/km.
+    const windowEff = (totKm && totKwh > 0) ? round(totKwh * 1000.0 / totKm, 1) : null;
+    const windowScore = windowEff ? ecoScore(windowEff, rated) : null;
 
     return {
       available: true,
@@ -173,7 +177,7 @@
       avg_trip_duration_min: round(mean(dur), 1),
       avg_speed_kmh: round(mean(spd), 1),
       km_per_soc_pct: kmPerSoc,
-      soc_used_pct: round(socUsed, 1),
+      soc_used_pct: round(socFromInt, 1),
       p95_speed_kmh: round(percentile(drives.map((d) => d.max_speed_kmh), 0.95), 1),
       longest_trip_km: round(Math.max(...dist), 1),
       distance_by_speed_band: distBand,
@@ -184,7 +188,7 @@
       // Distance-weighted (total energy / total km) — see driving.py.
       avg_efficiency_wh_per_km: windowEff,
       eco_score: windowScore,
-      eco_grade: scoreGrade(windowScore),
+      eco_grade: windowScore != null ? scoreGrade(windowScore) : null,
       behaviour: analyzeBehaviour(drives,
         drives.reduce((a, d) => a + d.distance_km, 0),
         drives.reduce((a, d) => a + d.energy_used_kwh, 0), effs),
@@ -192,13 +196,14 @@
         .sort((a, b) => new Date(b.start_time) - new Date(a.start_time))
         .slice(0, 5)
         .map((d) => ({
+          id: d.id,
           start_time: d.start_time,
           end_time: d.end_time,
           distance_km: round(d.distance_km, 1),
           duration_min: Math.round(d.duration_min),
           avg_speed_kmh: Math.round(d.avg_speed_kmh || 0),
-          wh_per_km: Math.round(whPerKm(d)),
-          eco_score: ecoScore(whPerKm(d), rated),
+          wh_per_km: d.energy_used_kwh > 0 ? Math.round(whPerKm(d)) : null,
+          eco_score: d.energy_used_kwh > 0 ? ecoScore(whPerKm(d), rated) : null,
           conditions: tripConditions(d),
           route: d.start_location && d.end_location
             ? `${d.start_location} → ${d.end_location}` : "",
@@ -253,8 +258,11 @@
 
   // --- efficiency (mirror app/analysis/efficiency.py) ---
   function analyzeEfficiency(drives, rated) {
-    const dr = drives.filter((d) => d.distance_km > 0);
-    if (!dr.length) return { available: false };
+    // Only trips with real energy data — a missing range reading logs 0 kWh
+    // and would drag the average to a meaningless 0 Wh/km.
+    const dr = drives.filter((d) => d.distance_km > 0 && d.energy_used_kwh > 0);
+    if (!dr.length) return { available: false, rated_wh_per_km: rated,
+      note: "No energy data yet — efficiency needs a synced drive with battery range readings." };
     const effs = dr.map(whPerKm);
 
     const byTemp = new Map();
@@ -504,7 +512,8 @@
     const drives = (dataset.drives || []).filter((d) => new Date(d.start_time).getTime() >= since);
     const charges = (dataset.charges || []).filter((c) => new Date(c.start_time).getTime() >= since);
 
-    const driving = analyzeDriving(drives, rated);
+    const capacity = (dataset.vehicle && dataset.vehicle.battery_capacity_kwh) || 75.0;
+    const driving = analyzeDriving(drives, rated, capacity);
     const charging = analyzeCharging(charges);
     const efficiency = analyzeEfficiency(drives, rated);
     const v = dataset.vehicle || {};

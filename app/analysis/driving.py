@@ -125,7 +125,8 @@ def _trip_conditions(d: Drive) -> str:
     return " · ".join(parts)
 
 
-def analyze(drives: list[Drive], rated_wh_per_km: float = 150.0) -> dict[str, Any]:
+def analyze(drives: list[Drive], rated_wh_per_km: float = 150.0,
+            capacity_kwh: float = 75.0) -> dict[str, Any]:
     if not drives:
         return {"available": False}
 
@@ -137,9 +138,13 @@ def analyze(drives: list[Drive], rated_wh_per_km: float = 150.0) -> dict[str, An
     total_distance = sum(distances)
     total_duration_h = sum(durations) / 60.0
     total_energy = sum(d.energy_used_kwh for d in drives)
-    # Real-world range yardstick: km covered per 1% of battery used.
-    soc_used = sum(max(d.start_soc - d.end_soc, 0.0) for d in drives)
-    km_per_soc = round(total_distance / soc_used, 1) if soc_used >= 1 else None
+    # Real-world range yardstick: km per 1% of battery used. Integer SoC doesn't
+    # tick on a short trip, so derive the % from the measured energy (which comes
+    # from the fractional range delta) whenever it's the larger, honest figure.
+    soc_from_int = sum(max(d.start_soc - d.end_soc, 0.0) for d in drives)
+    soc_from_energy = (total_energy / capacity_kwh * 100.0) if capacity_kwh else 0.0
+    soc_used = max(soc_from_int, soc_from_energy)
+    km_per_soc = round(total_distance / soc_used, 1) if soc_used >= 0.2 and total_distance else None
 
     # Distribution of distance driven across speed regimes.
     by_speed: dict[str, float] = defaultdict(float)
@@ -164,8 +169,11 @@ def analyze(drives: list[Drive], rated_wh_per_km: float = 150.0) -> dict[str, An
     )
 
     # Distance-weighted window efficiency, and its absolute driving score.
-    window_eff = round(total_energy * 1000.0 / total_distance, 1) if total_distance else 0.0
-    window_score = eco_score(window_eff, rated_wh_per_km)
+    # Zero energy means the range reading was missing (a data gap), not a real
+    # 0 Wh/km — leave efficiency and the score as unknown so the UI shows "—"
+    # instead of a misleading 0 / grade E.
+    window_eff = round(total_energy * 1000.0 / total_distance, 1) if total_distance and total_energy > 0 else None
+    window_score = eco_score(window_eff, rated_wh_per_km) if window_eff else None
 
     return {
         "available": True,
@@ -190,17 +198,18 @@ def analyze(drives: list[Drive], rated_wh_per_km: float = 150.0) -> dict[str, An
         "avg_efficiency_wh_per_km": window_eff,
         # Absolute driving score for the whole window (efficiency vs rated).
         "eco_score": window_score,
-        "eco_grade": score_grade(window_score),
+        "eco_grade": score_grade(window_score) if window_score is not None else None,
         "behaviour": _behaviour(drives, total_distance, total_energy, effs),
         "recent_trips": [
             {
+                "id": getattr(d, "id", None),
                 "start_time": d.start_time.isoformat(timespec="minutes"),
                 "end_time": d.end_time.isoformat(timespec="minutes"),
                 "distance_km": round(d.distance_km, 1),
                 "duration_min": round(d.duration_min),
                 "avg_speed_kmh": round(d.avg_speed_kmh),
-                "wh_per_km": round(d.wh_per_km),
-                "eco_score": eco_score(d.wh_per_km, rated_wh_per_km),
+                "wh_per_km": round(d.wh_per_km) if d.energy_used_kwh > 0 else None,
+                "eco_score": eco_score(d.wh_per_km, rated_wh_per_km) if d.energy_used_kwh > 0 else None,
                 "conditions": _trip_conditions(d),
                 "route": f"{d.start_location} → {d.end_location}"
                 if d.start_location and d.end_location else "",

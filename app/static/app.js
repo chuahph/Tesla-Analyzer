@@ -1,6 +1,7 @@
 "use strict";
 
 const charts = {};
+let lastData = null;   // most recent /summary payload, for re-rendering lists
 const GRID = "#262b34";
 const TICK = "#9aa4b2";
 Chart.defaults.color = TICK;
@@ -38,7 +39,9 @@ function renderScore(d) {
   const el = document.getElementById("score-banner");
   if (!el) return;
   const drv = d.driving || {};
-  if (!drv.available || drv.eco_score === undefined) { el.style.display = "none"; return; }
+  // Hide the score when efficiency is unknown (no energy data) — a 0 would
+  // wrongly read as "grade E".
+  if (!drv.available || drv.eco_score == null) { el.style.display = "none"; return; }
   el.style.display = "";
   const s = drv.eco_score, grade = drv.eco_grade;
   const rated = (d.efficiency && d.efficiency.rated_wh_per_km) || 150;
@@ -94,13 +97,19 @@ function renderKpis(d) {
   if (drv.available) {
     cards.push(kpiCard("Distance", fmt(drv.total_distance_km) + " km",
       `${fmt(drv.total_drives)} drives · ${fmt(drv.total_duration_h)} h`, "blue"));
-    cards.push(kpiCard("Avg Efficiency", fmt(eff.avg_efficiency_wh_per_km) + " Wh/km",
-      `${eff.vs_rated_pct >= 0 ? "+" : ""}${fmt(eff.vs_rated_pct, 1)}% vs rated`, "green"));
+    // Efficiency is unknown when the drive logged no energy (range gap).
+    if (eff.available && eff.avg_efficiency_wh_per_km) {
+      cards.push(kpiCard("Avg Efficiency", fmt(eff.avg_efficiency_wh_per_km) + " Wh/km",
+        `${eff.vs_rated_pct >= 0 ? "+" : ""}${fmt(eff.vs_rated_pct, 1)}% vs rated`, "green"));
+    } else {
+      cards.push(kpiCard("Avg Efficiency", "—",
+        "waiting on range data from a synced drive", "green"));
+    }
     cards.push(kpiCard("Avg Speed", fmt(drv.avg_speed_kmh) + " km/h",
       `peak ${fmt(drv.p95_speed_kmh)} km/h (p95)`, "amber"));
     if (drv.km_per_soc_pct) {
       cards.push(kpiCard("km / 1% Battery", fmt(drv.km_per_soc_pct, 1) + " km",
-        `${fmt(drv.soc_used_pct)}% battery used`, "teal"));
+        "real-world range", "teal"));
     }
   }
   if (chg.available) {
@@ -253,28 +262,37 @@ function tripConditionWhy(t) {
 
 function renderLists(d) {
   const rated = (d.efficiency && d.efficiency.rated_wh_per_km) || 150;
-  const trips = (d.driving.recent_trips || [])
+  const recent = d.driving.recent_trips || [];
+  const trips = recent
     .map((t, i) => {
       const when = t.end_time
         ? `${tripWhen(t.start_time)} → ${tripEnd(t.start_time, t.end_time)}`
         : tripWhen(t.start_time);
       const speed = t.avg_speed_kmh ? ` · avg ${t.avg_speed_kmh} km/h` : "";
-      const score = t.eco_score !== undefined
+      const score = t.eco_score != null
         ? `<span class="trip-score tone-${scoreTone(t.eco_score)}">${t.eco_score}</span>` : "";
+      const whkm = t.wh_per_km != null ? ` · ${t.wh_per_km} Wh/km` : "";
+      // In select mode, a checkbox precedes each trip (self-hosted only).
+      const check = tripSelectMode && t.id != null
+        ? `<input type="checkbox" class="trip-check" value="${t.id}" aria-label="Select trip" />` : "";
       const condId = `cond-why-${i}`;
       const cond = t.conditions
         ? `<span class="trip-cond">🚦 ${t.conditions}` +
           `<button class="info-btn" data-info="${condId}">!</button></span>` +
           `<span id="${condId}" class="info-pop hidden">${tripConditionWhy(t)}</span>`
         : "";
-      return `<li class="trip">` +
-        `<span class="trip-head">${score}<span class="trip-route">${when}${t.route ? "<br>" + t.route : ""}</span></span>` +
-        `<span class="trip-meta">${t.distance_km} km · ${t.duration_min} min${speed} · ${t.wh_per_km} Wh/km</span>${cond}</li>`;
+      return `<li class="trip${tripSelectMode ? " selectable" : ""}">` +
+        `<span class="trip-head">${check}${score}<span class="trip-route">${when}${t.route ? "<br>" + t.route : ""}</span></span>` +
+        `<span class="trip-meta">${t.distance_km} km · ${t.duration_min} min${speed}${whkm}</span>${cond}</li>`;
     })
     .join("");
   const list = document.getElementById("recentTrips");
   list.innerHTML = trips || '<li class="empty">No trips in this window</li>';
   wireInfoButtons(list);
+  // Only offer the trip tools when there's a real (self-hosted) DB behind them.
+  const tools = document.getElementById("trip-tools");
+  if (tools) tools.classList.toggle("hidden", STATIC_MODE || !recent.some((t) => t.id != null));
+  updateDeleteSelectedLabel();
 
   const routes = (d.driving.top_routes || [])
     .map(([r, c]) => `<li><span>${r}</span><span class="count">${c}×</span></li>`).join("");
@@ -445,9 +463,7 @@ async function load() {
     badge.textContent = mode;
     badge.className = "badge " + mode;
     if (STATIC_MODE) updateResetButton();
-    // The clear-history action only makes sense against a real server DB.
-    const clearBtn = document.getElementById("clear-trips");
-    if (clearBtn) clearBtn.classList.toggle("hidden", STATIC_MODE);
+    // (The trip tools' visibility is handled in renderLists, once trips load.)
 
     // Live mode: reveal the Sync button and snapshot the car once per visit.
     const syncBtn = document.getElementById("btn-sync");
@@ -468,6 +484,7 @@ async function load() {
       [v.name, [v.year, v.model, trimTxt].filter(Boolean).join(" "), realVin]
         .filter(Boolean).join(" · ");
 
+    lastData = d;
     renderScore(d);
     renderKpis(d);
     renderCharts(d);
@@ -584,8 +601,61 @@ document.getElementById("btn-import").addEventListener("click", () => {
   updateResetButton();
 });
 
-// Danger zone: wipe the recorded trip history for a clean start.
-// Lives at the bottom of the Recent Trips card (self-hosted mode only).
+// Trip tools (self-hosted only): select individual trips to delete, or clear
+// all. "Select" reveals a checkbox on each trip; "Delete selected" removes the
+// ticked ones. Charging history and battery-health readings are always kept.
+let tripSelectMode = false;
+
+function setSelectMode(on) {
+  tripSelectMode = on;
+  const show = (id, vis) => {
+    const el = document.getElementById(id);
+    if (el) el.classList.toggle("hidden", !vis);
+  };
+  show("select-trips", !on);
+  show("clear-trips", !on);
+  show("delete-selected", on);
+  show("cancel-select", on);
+  renderLists(lastData || {});
+}
+
+function updateDeleteSelectedLabel() {
+  const btn = document.getElementById("delete-selected");
+  if (!btn) return;
+  const n = document.querySelectorAll(".trip-check:checked").length;
+  btn.textContent = n ? `Delete selected (${n})` : "Delete selected";
+  btn.disabled = !n;
+}
+
+document.getElementById("recentTrips")?.addEventListener("change", (e) => {
+  if (e.target.classList.contains("trip-check")) updateDeleteSelectedLabel();
+});
+
+document.getElementById("select-trips")?.addEventListener("click", () => setSelectMode(true));
+document.getElementById("cancel-select")?.addEventListener("click", () => setSelectMode(false));
+
+document.getElementById("delete-selected")?.addEventListener("click", async () => {
+  const ids = [...document.querySelectorAll(".trip-check:checked")].map((c) => +c.value);
+  if (!ids.length) return;
+  if (!confirm(`Delete ${ids.length} selected trip(s)?\n\nThis cannot be undone.`)) return;
+  const btn = document.getElementById("delete-selected");
+  btn.disabled = true; btn.textContent = "Deleting…";
+  try {
+    const res = await fetch("/api/data/delete-drives", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ids }),
+    });
+    const body = await res.json();
+    if (!res.ok) throw new Error(body.detail || "Could not delete trips");
+    tripSelectMode = false;
+    setSelectMode(false);
+    await load();
+  } catch (e) {
+    alert(e.message);
+    btn.disabled = false;
+  }
+});
+
 const clearTripsBtn = document.getElementById("clear-trips");
 if (clearTripsBtn) {
   clearTripsBtn.addEventListener("click", async () => {
@@ -602,7 +672,7 @@ if (clearTripsBtn) {
       alert(e.message);
     } finally {
       clearTripsBtn.disabled = false;
-      clearTripsBtn.textContent = "🗑 Clear trip history";
+      clearTripsBtn.textContent = "🗑 Clear all";
     }
   });
 }

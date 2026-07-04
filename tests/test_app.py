@@ -130,6 +130,36 @@ def test_clear_drives_keeps_charges_and_respects_gate():
         seed_demo_if_empty()
 
 
+def test_delete_selected_drives_by_id():
+    from app.database import SessionLocal
+    from app.models import Drive
+
+    settings = get_settings()
+    old = settings.app_passcode
+    settings.app_passcode = ""
+    try:
+        with TestClient(app) as client:  # startup seeds demo data
+            with SessionLocal() as s:
+                ids = [d.id for d in s.query(Drive).order_by(Drive.id).limit(3).all()]
+                total = s.query(Drive).count()
+            resp = client.post("/api/data/delete-drives", json={"ids": ids})
+            assert resp.status_code == 200
+            assert resp.json()["deleted_drives"] == len(ids)
+            with SessionLocal() as s:
+                assert s.query(Drive).count() == total - len(ids)
+                assert not s.query(Drive).filter(Drive.id.in_(ids)).count()
+            # Empty / no ids deletes nothing.
+            assert client.post("/api/data/delete-drives", json={"ids": []}).json()["deleted_drives"] == 0
+    finally:
+        settings.app_passcode = old
+        from app import services
+        from app.database import SessionLocal as SL
+        with SL() as s:
+            services._wipe(s)
+        from app.collector import seed_demo_if_empty
+        seed_demo_if_empty()
+
+
 def test_summary_current_drive_falls_back_to_last_drive():
     settings = get_settings()
     old = settings.app_passcode

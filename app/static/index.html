@@ -184,8 +184,13 @@
       <div class="card">
         <h2>🧭 Recent Trips</h2>
         <ul id="recentTrips" class="plain-list"></ul>
-        <button id="clear-trips" class="btn btn-danger btn-mini hidden"
-                title="Delete all recorded trips">🗑 Clear trip history</button>
+        <div id="trip-tools" class="trip-tools hidden">
+          <button id="select-trips" class="btn btn-mini">☑ Select</button>
+          <button id="clear-trips" class="btn btn-danger btn-mini"
+                  title="Delete all recorded trips">🗑 Clear all</button>
+          <button id="delete-selected" class="btn btn-danger btn-mini hidden">Delete selected</button>
+          <button id="cancel-select" class="btn btn-mini hidden">Cancel</button>
+        </div>
       </div>
       <div class="card">
         <h2>🔁 Top Routes</h2>
