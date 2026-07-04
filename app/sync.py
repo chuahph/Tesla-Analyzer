@@ -91,6 +91,9 @@ def _drive_from(start: dict, cur: dict, capacity_kwh: float, max_speed: float = 
     dt_min = max((cur["ts"] - start["ts"]) / 60.0, 0.0)
     soc_used = max(start["soc"] - cur["soc"], 0.0)
     energy = soc_used / 100.0 * capacity_kwh
+    avg_speed = distance / (dt_min / 60.0) if dt_min else 0.0
+    # Speed is only visible in the moment, so a drive with no mid-drive
+    # snapshot would record max 0 — the average is the honest floor.
     return {
         "start_time": _dt(start["ts"]),
         "end_time": _dt(cur["ts"]),
@@ -99,8 +102,8 @@ def _drive_from(start: dict, cur: dict, capacity_kwh: float, max_speed: float = 
         "start_soc": start["soc"],
         "end_soc": cur["soc"],
         "energy_used_kwh": round(energy, 2),
-        "avg_speed_kmh": round(distance / (dt_min / 60.0), 1) if dt_min else 0.0,
-        "max_speed_kmh": round(max_speed, 1),
+        "avg_speed_kmh": round(avg_speed, 1),
+        "max_speed_kmh": round(max(max_speed, avg_speed), 1),
         "outside_temp_c": cur["out_temp"],
         "start_location": _coords(start),
         "end_location": _coords(cur),
@@ -117,12 +120,16 @@ def live_trip(
     dt_min = max((snap["ts"] - open_trip["ts"]) / 60.0, 0.0)
     soc_used = max(open_trip["soc"] - snap["soc"], 0.0)
     energy_kwh = soc_used / 100.0 * capacity_kwh
+    avg_speed = distance / (dt_min / 60.0) if dt_min else 0.0
+    # Current speed and average both bound the max from below.
+    observed_max = max(open_trip.get("max_speed", 0.0),
+                       snap.get("speed_kmh") or 0.0, avg_speed)
     return {
         "start_time": _dt(open_trip["ts"]).isoformat(timespec="minutes"),
         "distance_km": round(distance, 1),
         "duration_min": round(dt_min),
-        "avg_speed_kmh": round(distance / (dt_min / 60.0), 1) if dt_min else 0.0,
-        "max_speed_kmh": round(open_trip.get("max_speed", 0.0), 1),
+        "avg_speed_kmh": round(avg_speed, 1),
+        "max_speed_kmh": round(observed_max, 1),
         "start_soc": open_trip["soc"],
         "soc": snap["soc"],
         "soc_used": round(soc_used, 1),
