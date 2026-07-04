@@ -303,8 +303,13 @@ function renderLists(d) {
 
   const locs = (d.charging.top_locations || [])
     .map(([l, c]) => `<li><span>${l}</span><span class="count">${c}×</span></li>`).join("");
+  // "Since charge" / "Current drive" windows start after the last charge, so
+  // they never contain a charging session — say so instead of looking broken.
+  const noChargeMsg = /charge|drive/.test(d.window_label || "")
+    ? "This window starts after your last charge — pick a wider window (e.g. 7 days) to see charging spots."
+    : "No charging sessions in this window";
   document.getElementById("topLocations").innerHTML =
-    locs || '<li class="empty">No charging sessions in this window</li>';
+    locs || `<li class="empty">${noChargeMsg}</li>`;
 }
 
 function renderBehaviour(d) {

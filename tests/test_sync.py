@@ -227,6 +227,25 @@ def test_charge_records_location():
     assert chg["location"] == "3.1600, 101.7100"
 
 
+def test_charge_location_falls_back_to_type_without_gps():
+    """No GPS (no location scope) still groups by charger type, not blank."""
+    a1 = snap(T0, 10_000.0, 60)
+    a2 = snap(T0 + 600, 10_000.0, 65, charging=True, kw=7)      # AC, no lat/lon
+    a3 = snap(T0 + 1800, 10_000.0, 74)
+    _, _, _, charge = step(None, a1)
+    _, _, _, charge = step(a1, a2, charge=charge)
+    _, c, _, _ = step(a2, a3, charge=charge)
+    assert c[0]["location"] == "AC / home charger"
+
+    d1 = snap(T0, 10_000.0, 40)
+    d2 = snap(T0 + 600, 10_000.0, 50, charging=True, kw=150, fast=True)
+    d3 = snap(T0 + 1800, 10_000.0, 70)
+    _, _, _, charge = step(None, d1)
+    _, _, _, charge = step(d1, d2, charge=charge)
+    _, c, _, _ = step(d2, d3, charge=charge)
+    assert c[0]["location"] == "DC fast charger"
+
+
 def test_charge_uses_teslas_measured_energy():
     """When Tesla reports charge_energy_added, use it instead of estimating."""
     c1 = snap(T0, 10_000.0, 60)
