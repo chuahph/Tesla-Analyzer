@@ -50,17 +50,33 @@ def analyze(charges: list[Charge], drives: list[Drive] | None = None) -> dict[st
     # by charger type so the card still fills meaningfully.
     drives = drives or []
 
-    def _loc(c: Charge) -> str:
-        if c.location and "," not in c.location:
-            return c.location  # already a named place
+    def _place(c: Charge) -> str:
+        # A named place has letters; a raw "lat, lon" is all digits/punctuation.
+        if c.location and any(ch.isalpha() for ch in c.location):
+            return c.location
         inferred = _infer_location(c, drives)
         if inferred:
             return inferred
         if c.location:
             return c.location  # raw coords — better than nothing
-        return "DC fast charger" if c.charge_type == "DC" else "AC / home charger"
+        return ""
+
+    def _loc(c: Charge) -> str:
+        place = _place(c)
+        # Tag each spot with its charger type (AC/DC); the type alone is the
+        # fallback label when there's no place at all.
+        return f"{place} · {c.charge_type}" if place \
+            else ("DC fast charger" if c.charge_type == "DC" else "AC / home charger")
 
     by_location = Counter(_loc(c) for c in charges)
+    # Energy delivered at each spot, so the card can show "12.4 kWh · 3×".
+    loc_energy: dict[str, float] = defaultdict(float)
+    for c in charges:
+        loc_energy[_loc(c)] += c.energy_added_kwh
+    top_locations = [
+        [name, count, round(loc_energy[name], 1)]
+        for name, count in by_location.most_common(5)
+    ]
 
     return {
         "available": True,
@@ -80,5 +96,5 @@ def analyze(charges: list[Charge], drives: list[Drive] | None = None) -> dict[st
         "avg_end_soc": round(mean([c.end_soc for c in charges if c.end_soc > 0]), 0),
         "end_soc_targets": dict(sorted(end_soc_targets.items())),
         "charges_by_hour": {str(h): by_hour.get(h, 0) for h in range(24)},
-        "top_locations": by_location.most_common(5),
+        "top_locations": top_locations,
     }

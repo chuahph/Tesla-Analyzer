@@ -302,7 +302,8 @@ function renderLists(d) {
     routes || '<li class="empty">No repeated routes yet</li>';
 
   const locs = (d.charging.top_locations || [])
-    .map(([l, c]) => `<li><span>${l}</span><span class="count">${c}×</span></li>`).join("");
+    .map(([l, c, kwh]) => `<li><span>${l}</span>` +
+      `<span class="count">${kwh != null ? fmt(kwh, 1) + " kWh · " : ""}${c}×</span></li>`).join("");
   // "Since charge" / "Current drive" windows start after the last charge, so
   // they never contain a charging session — say so instead of looking broken.
   const noChargeMsg = /charge|drive/.test(d.window_label || "")
