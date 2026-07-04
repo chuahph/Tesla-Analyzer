@@ -3,6 +3,16 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 
+# A real drive can't average below this over its whole distance; a lower figure
+# means the range reading was refilled mid-trip (charge / BMS recalibration), so
+# the drive's energy is treated as unknown wherever efficiency is computed.
+MIN_PLAUSIBLE_WH_PER_KM = 40.0
+
+
+def has_valid_energy(drive) -> bool:
+    """True when a drive's energy is real enough to feed efficiency figures."""
+    return drive.energy_used_kwh > 0 and drive.wh_per_km >= MIN_PLAUSIBLE_WH_PER_KM
+
 
 def mean(values: Sequence[float]) -> float:
     values = [v for v in values if v is not None]

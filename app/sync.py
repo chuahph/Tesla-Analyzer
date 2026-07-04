@@ -105,6 +105,9 @@ def _energy_kwh(frm: dict, to: dict, capacity_kwh: float) -> float:
     return max(soc0 - (to.get("soc") or 0.0), 0.0) / 100.0 * capacity_kwh
 
 
+MIN_PLAUSIBLE_WH_PER_KM = 40.0  # below this over a whole trip = contaminated data
+
+
 def _drive_from(start: dict, cur: dict, capacity_kwh: float, max_speed: float = 0.0):
     distance = cur["odo_km"] - start["odo_km"]
     if distance < DRIVE_MIN_KM:
@@ -112,6 +115,12 @@ def _drive_from(start: dict, cur: dict, capacity_kwh: float, max_speed: float = 
     dt_min = max((cur["ts"] - start["ts"]) / 60.0, 0.0)
     soc_used = max(start["soc"] - cur["soc"], 0.0)
     energy = _energy_kwh(start, cur, capacity_kwh)
+    # A real drive can't average below ~40 Wh/km over its whole distance — that
+    # means the range reading was refilled mid-trip (a charge or BMS recalibration
+    # slipped into the session). Flag energy unknown so the trip shows "—" and is
+    # left out of Wh/km averages rather than reporting an impossibly low figure.
+    if energy * 1000.0 / distance < MIN_PLAUSIBLE_WH_PER_KM:
+        energy = 0.0
     avg_speed = distance / (dt_min / 60.0) if dt_min else 0.0
     # Speed is only visible in the moment, so a drive with no mid-drive
     # snapshot would record max 0 — the average is the honest floor.
@@ -147,6 +156,10 @@ def live_trip(
                        snap.get("speed_kmh") or 0.0, avg_speed)
     # Integer SoC barely ticks on a short live drive, so derive the % used from
     # the measured energy (fractional range delta) when it's the larger figure.
+    # Same contamination guard as completed drives: sub-40 Wh/km over the trip
+    # means the range reading was refilled mid-drive — treat energy as unknown.
+    if distance >= DRIVE_MIN_KM and energy_kwh * 1000.0 / distance < MIN_PLAUSIBLE_WH_PER_KM:
+        energy_kwh = 0.0
     soc_from_energy = (energy_kwh / capacity_kwh * 100.0) if capacity_kwh else 0.0
     soc_eff = max(soc_used, soc_from_energy)
     return {
@@ -160,7 +173,7 @@ def live_trip(
         "soc_used": round(soc_used, 1),
         "km_per_soc": round(distance / soc_eff, 1) if soc_eff >= 0.2 and distance else None,
         "energy_kwh": round(energy_kwh, 2),
-        "wh_per_km": round(energy_kwh * 1000.0 / distance) if distance >= DRIVE_MIN_KM else None,
+        "wh_per_km": round(energy_kwh * 1000.0 / distance) if energy_kwh > 0 and distance >= DRIVE_MIN_KM else None,
     }
 
 
@@ -240,7 +253,12 @@ def process_snapshot(
             **open_trip,
             "max_speed": max(open_trip.get("max_speed", 0.0), cur.get("speed_kmh") or 0.0),
         }
-        if is_powered_down(cur):
+        # Close on power-down OR the moment charging starts: you can't charge
+        # mid-drive, so charging is a definitive end-of-trip. Without this a
+        # drive → plug-in → drive sequence merges into one trip, and the charge
+        # refills the pack so the net range delta (energy) comes out far too
+        # low while the odometer distance is inflated.
+        if is_powered_down(cur) or cur.get("charging"):
             d = _drive_from(open_trip, cur, capacity_kwh, open_trip.get("max_speed", 0.0))
             if d:
                 drives.append(d)

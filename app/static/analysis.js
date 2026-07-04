@@ -35,6 +35,13 @@
     return [...map.entries()].sort((a, b) => b[1] - a[1]).slice(0, n);
   }
   function whPerKm(d) { return d.distance_km > 0 ? (d.energy_used_kwh * 1000.0) / d.distance_km : 0.0; }
+  // A real drive can't average below 40 Wh/km — a lower figure means the range
+  // reading was refilled mid-trip; exclude it from efficiency. Mirror of
+  // app/analysis has_valid_energy.
+  const MIN_PLAUSIBLE_WH_PER_KM = 40.0;
+  function hasValidEnergy(d) {
+    return d.energy_used_kwh > 0 && whPerKm(d) >= MIN_PLAUSIBLE_WH_PER_KM;
+  }
 
   // ISO week + year (matches Python isocalendar()).
   function isoWeek(date) {
@@ -137,7 +144,7 @@
     // Efficiency-bearing drives only (energy > 0) — a missing range reading
     // logs 0 kWh; including its distance would understate Wh/km. Mirror of
     // app/analysis/driving.py. Distance/duration/counts still use every drive.
-    const effDrives = drives.filter((d) => d.distance_km > 0 && d.energy_used_kwh > 0);
+    const effDrives = drives.filter((d) => d.distance_km > 0 && hasValidEnergy(d));
     const effs = effDrives.map(whPerKm);
     const effKm = effDrives.reduce((a, d) => a + d.distance_km, 0);
     const effKwh = effDrives.reduce((a, d) => a + d.energy_used_kwh, 0);
@@ -209,8 +216,8 @@
           distance_km: round(d.distance_km, 1),
           duration_min: Math.round(d.duration_min),
           avg_speed_kmh: Math.round(d.avg_speed_kmh || 0),
-          wh_per_km: d.energy_used_kwh > 0 ? Math.round(whPerKm(d)) : null,
-          eco_score: d.energy_used_kwh > 0 ? ecoScore(whPerKm(d), rated) : null,
+          wh_per_km: hasValidEnergy(d) ? Math.round(whPerKm(d)) : null,
+          eco_score: hasValidEnergy(d) ? ecoScore(whPerKm(d), rated) : null,
           conditions: tripConditions(d),
           route: d.start_location && d.end_location
             ? `${d.start_location} → ${d.end_location}` : "",
@@ -297,7 +304,7 @@
   function analyzeEfficiency(drives, rated) {
     // Only trips with real energy data — a missing range reading logs 0 kWh
     // and would drag the average to a meaningless 0 Wh/km.
-    const dr = drives.filter((d) => d.distance_km > 0 && d.energy_used_kwh > 0);
+    const dr = drives.filter((d) => d.distance_km > 0 && hasValidEnergy(d));
     if (!dr.length) return { available: false, rated_wh_per_km: rated,
       note: "No energy data yet — efficiency needs a synced drive with battery range readings." };
     const effs = dr.map(whPerKm);

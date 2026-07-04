@@ -5,7 +5,7 @@ from collections import Counter, defaultdict
 from typing import Any
 
 from ..models import Drive
-from . import linregress, mean, percentile
+from . import has_valid_energy, linregress, mean, percentile
 
 
 def _speed_bucket(speed: float) -> str:
@@ -137,7 +137,7 @@ def analyze(drives: list[Drive], rated_wh_per_km: float = 150.0,
     # logs 0 kWh. Including its distance (but no energy) would understate Wh/km
     # and inflate the eco score, so every efficiency/behaviour figure below is
     # computed from these — while distance/duration/counts use every drive.
-    eff_drives = [d for d in drives if d.distance_km > 0 and d.energy_used_kwh > 0]
+    eff_drives = [d for d in drives if d.distance_km > 0 and has_valid_energy(d)]
     effs = [d.wh_per_km for d in eff_drives]
     eff_distance = sum(d.distance_km for d in eff_drives)
     eff_energy = sum(d.energy_used_kwh for d in eff_drives)
@@ -219,8 +219,8 @@ def analyze(drives: list[Drive], rated_wh_per_km: float = 150.0,
                 "distance_km": round(d.distance_km, 1),
                 "duration_min": round(d.duration_min),
                 "avg_speed_kmh": round(d.avg_speed_kmh),
-                "wh_per_km": round(d.wh_per_km) if d.energy_used_kwh > 0 else None,
-                "eco_score": eco_score(d.wh_per_km, rated_wh_per_km) if d.energy_used_kwh > 0 else None,
+                "wh_per_km": round(d.wh_per_km) if has_valid_energy(d) else None,
+                "eco_score": eco_score(d.wh_per_km, rated_wh_per_km) if has_valid_energy(d) else None,
                 "conditions": _trip_conditions(d),
                 "route": f"{d.start_location} → {d.end_location}"
                 if d.start_location and d.end_location else "",

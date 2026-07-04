@@ -5,7 +5,7 @@ from collections import defaultdict
 from typing import Any
 
 from ..models import Drive
-from . import linregress, mean
+from . import has_valid_energy, linregress, mean
 
 
 def _temp_bucket(temp: float) -> str:
@@ -26,9 +26,9 @@ def analyze(drives: list[Drive], rated_wh_per_km: float) -> dict[str, Any]:
         return {"available": False}
 
     # Only trips with real energy data feed efficiency — a trip whose range
-    # reading was missing logs 0 kWh, which would otherwise drag the average
-    # to a meaningless 0 Wh/km.
-    drives = [d for d in drives if d.energy_used_kwh > 0]
+    # reading was missing logs 0 kWh, and a contaminated one (< 40 Wh/km) is
+    # excluded too, so neither drags the average to a meaningless value.
+    drives = [d for d in drives if has_valid_energy(d)]
     if not drives:
         return {"available": False, "rated_wh_per_km": rated_wh_per_km,
                 "note": "No energy data yet — efficiency needs a synced drive "
