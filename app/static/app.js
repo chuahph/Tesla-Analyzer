@@ -119,8 +119,11 @@ function renderKpis(d) {
       `${fmt(chg.total_sessions)} sessions`, "violet"));
     cards.push(kpiCard("Charging Cost", cur + " " + fmt(chg.total_cost),
       `${cur} ${fmt(chg.avg_cost_per_kwh, 2)}/kWh avg`, "teal"));
-    cards.push(kpiCard("DC Fast Charging", fmt(chg.dc_energy_share_pct, 0) + "%",
-      `of energy · ${fmt(chg.full_charge_share_pct, 0)}% to 100%`, "red"));
+    // AC vs DC split — both shares in one box (AC was previously hidden).
+    const dcShare = chg.dc_energy_share_pct;
+    const acShare = Math.max(0, Math.round(100 - dcShare));
+    cards.push(kpiCard("AC vs DC Energy", `${acShare}% AC · ${fmt(dcShare, 0)}% DC`,
+      `${fmt(chg.ac_energy_kwh, 0)} kWh AC · ${fmt(chg.dc_energy_kwh, 0)} kWh DC`, "red"));
   }
   if (!cards.length) {
     // The window is genuinely empty (e.g. "Since charge" right after charging)
@@ -302,8 +305,11 @@ function renderLists(d) {
     routes || '<li class="empty">No repeated routes yet</li>';
 
   const locs = (d.charging.top_locations || [])
-    .map(([l, c, kwh]) => `<li><span>${l}</span>` +
-      `<span class="count">${kwh != null ? fmt(kwh, 1) + " kWh · " : ""}${c}×</span></li>`).join("");
+    .map(([l, c, kwh, last]) => {
+      const when = last ? `<span class="loc-when">last ${tripWhen(last)}</span>` : "";
+      return `<li class="loc"><span class="loc-name">${l}${when}</span>` +
+        `<span class="count">${kwh != null ? fmt(kwh, 1) + " kWh · " : ""}${c}×</span></li>`;
+    }).join("");
   // "Since charge" / "Current drive" windows start after the last charge, so
   // they never contain a charging session — say so instead of looking broken.
   const noChargeMsg = /charge|drive/.test(d.window_label || "")

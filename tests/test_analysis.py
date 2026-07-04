@@ -79,13 +79,15 @@ def test_charge_location_inferred_from_nearby_trip():
                     duration_min=35, start_soc=55, end_soc=80, energy_added_kwh=18.0,
                     charge_type="DC", max_power_kw=120, location="", cost=16.2, outside_temp_c=34)
     r = analyze([charge], [drive])
-    # [name, count, kWh] — inferred place + charger type + energy delivered.
-    assert r["top_locations"] == [["Juru · DC", 1, 18.0]]
+    # [name, count, kWh, last_time] — place + type + energy + most recent charge.
+    row = r["top_locations"][0]
+    assert row[:3] == ["Juru · DC", 1, 18.0]
+    assert row[3] == "2026-07-04T16:20"                # sequence timestamp
     # Without any nearby drive it falls back to the charger type.
-    assert analyze([charge], [])["top_locations"] == [["DC fast charger", 1, 18.0]]
+    assert analyze([charge], [])["top_locations"][0][:3] == ["DC fast charger", 1, 18.0]
     # A real named place with a comma is kept (not mistaken for coordinates).
     charge.location = "Bayan Mutiara, George Town"
-    assert analyze([charge], [])["top_locations"] == [["Bayan Mutiara, George Town · DC", 1, 18.0]]
+    assert analyze([charge], [])["top_locations"][0][:3] == ["Bayan Mutiara, George Town · DC", 1, 18.0]
 
 
 def test_km_per_soc_from_net_drop_on_short_trips():

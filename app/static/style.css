@@ -276,6 +276,10 @@ canvas { max-height: 260px; }
 .plain-list li:last-child { border-bottom: none; }
 .plain-list .count { color: var(--muted); font-variant-numeric: tabular-nums; }
 .plain-list li.empty { color: var(--muted); }
+/* Charging location: place on top, its most recent time muted below. */
+.plain-list li.loc { align-items: flex-start; }
+.loc-name { display: flex; flex-direction: column; gap: 1px; }
+.loc-when { color: var(--muted); font-size: 11.5px; font-variant-numeric: tabular-nums; }
 /* Recent trips: route on the first line, the numbers on a muted second line —
    avoids the awkward mid-route wrapping of a single-line row. */
 .plain-list li.trip { flex-direction: column; align-items: flex-start; gap: 2px; }

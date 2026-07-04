@@ -69,12 +69,18 @@ def analyze(charges: list[Charge], drives: list[Drive] | None = None) -> dict[st
             else ("DC fast charger" if c.charge_type == "DC" else "AC / home charger")
 
     by_location = Counter(_loc(c) for c in charges)
-    # Energy delivered at each spot, so the card can show "12.4 kWh · 3×".
+    # Energy delivered and the most recent charge time at each spot, so the card
+    # can show "12.4 kWh · 3× · 04 Jul 16:20" and the sequence is clear.
     loc_energy: dict[str, float] = defaultdict(float)
+    loc_last: dict[str, Any] = {}
     for c in charges:
-        loc_energy[_loc(c)] += c.energy_added_kwh
+        name = _loc(c)
+        loc_energy[name] += c.energy_added_kwh
+        if name not in loc_last or c.start_time > loc_last[name]:
+            loc_last[name] = c.start_time
     top_locations = [
-        [name, count, round(loc_energy[name], 1)]
+        [name, count, round(loc_energy[name], 1),
+         loc_last[name].isoformat(timespec="minutes") if loc_last.get(name) else None]
         for name, count in by_location.most_common(5)
     ]
 

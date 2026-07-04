@@ -264,13 +264,14 @@
       return place ? `${place} · ${c.charge_type}`
         : (c.charge_type === "DC" ? "DC fast charger" : "AC / home charger");
     };
-    const locEnergy = new Map();
+    const locEnergy = new Map(), locLast = new Map();
     charges.forEach((c) => {
       const h = new Date(c.start_time).getHours();
       byHour.set(h, (byHour.get(h) || 0) + 1);
       const l = locOf(c);
       byLoc.set(l, (byLoc.get(l) || 0) + 1);
       locEnergy.set(l, (locEnergy.get(l) || 0) + c.energy_added_kwh);
+      if (!locLast.has(l) || c.start_time > locLast.get(l)) locLast.set(l, c.start_time);
     });
 
     const soc = {}; [...targets.keys()].sort((a, b) => a - b).forEach((k) => soc[k] = targets.get(k));
@@ -294,9 +295,10 @@
       avg_end_soc: round(mean(charges.filter((c) => c.end_soc > 0).map((c) => c.end_soc)), 0),
       end_soc_targets: soc,
       charges_by_hour: cbh,
-      // [name, count, kWh] — energy delivered per spot.
+      // [name, count, kWh, lastTime] — energy + most recent charge per spot.
       top_locations: counterTop(byLoc, 5)
-        .map(([name, count]) => [name, count, round(locEnergy.get(name) || 0, 1)]),
+        .map(([name, count]) => [name, count, round(locEnergy.get(name) || 0, 1),
+          locLast.get(name) || null]),
     };
   }
 
