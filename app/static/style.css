@@ -458,14 +458,11 @@ footer { padding: 18px 28px; color: var(--muted); font-size: 12px; border-top: 1
   header { padding: calc(10px + env(safe-area-inset-top)) 14px 10px; gap: 8px; }
   header h1 { font-size: 15px; line-height: 1.15; }
   /* iPhone Pro/Pro Max (402/440pt): brand left, compact meta box top-right —
-     sharing the first row. Two lines only: title + a single small car line
-     (VIN/details ellipsised if they overrun; full details live in the "!" panel). */
+     sharing the first row. Up to 3 lines: title + the full car line (name,
+     year/model/badge/colour/wheel, VIN) wrapping to two lines if needed. */
   .brand { flex: 1 1 0; min-width: 0; gap: 8px; }
   .logo { font-size: 20px; }
-  #subtitle {
-    font-size: 9.5px; line-height: 1.3; margin-top: 1px;
-    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
-  }
+  #subtitle { font-size: 10px; line-height: 1.3; margin-top: 1px; }
   /* Match the box height to the car-description block on the left by
      stretching to the row's height; centre the two clock lines within it. */
   .meta-box {
