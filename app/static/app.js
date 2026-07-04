@@ -491,9 +491,12 @@ async function load() {
     const realVin = v.vin && !/^(DEMO|IMPORT|LINKED)/.test(v.vin) ? `VIN ${v.vin}` : null;
     // Compact one-line description: name · year model badge · VIN. Colour and
     // wheel live in the battery "!" panel, so they're dropped here to fit.
-    // Full description (colour + wheel included); wraps to up to 3 lines.
-    // Internal wheel codes shown by marketing name (Helix19 -> Nova 19″).
-    const trimTxt = (v.trim || "").split(/\s+/).map(prettyWheel).join(" ");
+    // Keep the badge and wheel (wheel drives the battery reference); drop the
+    // paint colour so the VIN fits in two lines. Wheel shown by marketing name
+    // (Helix19 -> Nova 19″). Full colour is in the battery "!" panel.
+    const trimTxt = (v.trim || "").split(/\s+/)
+      .filter((t) => /^P?\d+D?$/i.test(t) || /(1[89]|2[012])/.test(t))
+      .map(prettyWheel).join(" ");
     document.getElementById("subtitle").textContent =
       [v.name, [v.year, v.model, trimTxt].filter(Boolean).join(" "), realVin]
         .filter(Boolean).join(" · ");
