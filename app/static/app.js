@@ -117,13 +117,11 @@ function renderKpis(d) {
   if (chg.available) {
     cards.push(kpiCard("Energy Charged", fmt(chg.total_energy_kwh) + " kWh",
       `${fmt(chg.total_sessions)} sessions`, "violet"));
-    cards.push(kpiCard("Charging Cost", cur + " " + fmt(chg.total_cost),
-      `${cur} ${fmt(chg.avg_cost_per_kwh, 2)}/kWh avg`, "teal"));
-    // AC vs DC split — both shares in one box (AC was previously hidden).
+    // AC vs DC split — compact single-line value so every KPI box aligns.
     const dcShare = chg.dc_energy_share_pct;
     const acShare = Math.max(0, Math.round(100 - dcShare));
-    cards.push(kpiCard("AC vs DC Energy", `${acShare}% AC · ${fmt(dcShare, 0)}% DC`,
-      `${fmt(chg.ac_energy_kwh, 0)} kWh AC · ${fmt(chg.dc_energy_kwh, 0)} kWh DC`, "red"));
+    cards.push(kpiCard("AC / DC Energy", `${acShare} / ${fmt(dcShare, 0)}%`,
+      "AC / DC energy split", "red"));
   }
   if (!cards.length) {
     // The window is genuinely empty (e.g. "Since charge" right after charging)
