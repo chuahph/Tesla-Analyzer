@@ -113,6 +113,13 @@ def test_export_csv_round_trips_through_importer():
         summary = client.get("/api/summary?days=730").json()
         assert len(drives) == summary["driving"]["total_drives"]
         assert len(charges) == summary["charging"]["total_sessions"]
+        # Windowed export contains a strict subset and labels the filename.
+        resp7 = client.get("/api/export/csv?days=7")
+        d7, c7 = parse_upload("export7.zip", resp7.content)
+        assert len(d7) < len(drives)
+        assert "7d" in resp7.headers["content-disposition"]
+        respsc = client.get("/api/export/csv?since_charge=1")
+        assert "since-charge" in respsc.headers["content-disposition"]
 
 
 def test_no_passcode_means_open():

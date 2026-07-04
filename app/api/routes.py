@@ -390,8 +390,16 @@ def export_data(
 
 
 @router.get("/export/csv")
-def export_csv(session: Session = Depends(get_session)):
-    """Download all drives & charges as a ZIP of CSVs (re-importable)."""
+def export_csv(
+    days: int = Query(3650, ge=1, le=3650),
+    since_charge: bool = Query(False),
+    session: Session = Depends(get_session),
+):
+    """Download drives & charges as a ZIP of CSVs (re-importable).
+
+    Defaults to everything; pass ``days`` or ``since_charge`` to export only
+    the currently viewed window.
+    """
     import csv
     import io
     import zipfile
@@ -399,7 +407,18 @@ def export_csv(session: Session = Depends(get_session)):
     from fastapi.responses import Response
 
     vehicle = _first_vehicle(session)
-    drives, charges = _window(session, vehicle.id, 3650)
+    since = None
+    label = "all"
+    if since_charge:
+        last_end = session.scalar(
+            select(func.max(Charge.end_time)).where(Charge.vehicle_id == vehicle.id)
+        )
+        if last_end is not None:
+            since = last_end
+            label = "since-charge"
+    elif days < 3650:
+        label = f"{days}d"
+    drives, charges = _window(session, vehicle.id, days, since=since)
 
     def sheet(headers, rows):
         buf = io.StringIO()
@@ -431,7 +450,7 @@ def export_csv(session: Session = Depends(get_session)):
     with zipfile.ZipFile(zbuf, "w", zipfile.ZIP_DEFLATED) as z:
         z.writestr("drives.csv", drives_csv)
         z.writestr("charges.csv", charges_csv)
-    name = f"tesla-analyzer-{vehicle.vin[-6:]}.zip"
+    name = f"tesla-analyzer-{vehicle.vin[-6:]}-{label}.zip"
     return Response(
         zbuf.getvalue(),
         media_type="application/zip",

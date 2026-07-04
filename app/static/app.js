@@ -590,22 +590,50 @@ function csvOf(rows, headers) {
     rows.map((r) => headers.map((h) => esc(r[h])).join(",")).join("\n") + "\n";
 }
 async function exportCsv() {
-  if (!STATIC_MODE) { window.location.href = "/api/export/csv"; return; }
+  // Ask which scope: OK = everything, Cancel = only the current window.
+  const rawRange = document.getElementById("range").value;
+  const sinceCharge = rawRange === "charge";
+  const windowTxt = sinceCharge ? "since last charge" : `last ${rawRange} day(s)`;
+  const all = confirm(
+    `Export ALL data?\n\nOK — everything\nCancel — current window only (${windowTxt})`
+  );
+
+  if (!STATIC_MODE) {
+    const q = all ? "" : (sinceCharge ? "?since_charge=1" : `?days=${rawRange}`);
+    window.location.href = "/api/export/csv" + q;
+    return;
+  }
+
   // Static/PWA: build the same ZIP in the browser from the local dataset.
   const ds = importedDataset() || (await demoDataset());
+  let drives = ds.drives || [];
+  let charges = ds.charges || [];
+  if (!all) {
+    let since = 0;
+    if (sinceCharge) {
+      const ends = charges.map((c) => new Date(c.end_time || c.start_time).getTime())
+        .filter(isFinite);
+      since = ends.length ? Math.max(...ends) : 0;
+    } else {
+      since = Date.now() - (+rawRange) * 86400000;
+    }
+    drives = drives.filter((d) => new Date(d.start_time).getTime() >= since);
+    charges = charges.filter((c) => new Date(c.start_time).getTime() >= since);
+  }
   const zip = new JSZip();
-  zip.file("drives.csv", csvOf(ds.drives || [], [
+  zip.file("drives.csv", csvOf(drives, [
     "start_time", "end_time", "distance_km", "duration_min", "start_soc",
     "end_soc", "energy_used_kwh", "avg_speed_kmh", "max_speed_kmh",
     "outside_temp_c", "start_location", "end_location"]));
-  zip.file("charges.csv", csvOf(ds.charges || [], [
+  zip.file("charges.csv", csvOf(charges, [
     "start_time", "end_time", "duration_min", "start_soc", "end_soc",
     "energy_added_kwh", "charge_type", "max_power_kw", "location",
     "cost", "outside_temp_c"]));
   const blob = await zip.generateAsync({ type: "blob" });
   const a = document.createElement("a");
   a.href = URL.createObjectURL(blob);
-  a.download = "tesla-analyzer-export.zip";
+  a.download = all ? "tesla-analyzer-all.zip"
+    : `tesla-analyzer-${sinceCharge ? "since-charge" : rawRange + "d"}.zip`;
   a.click();
   setTimeout(() => URL.revokeObjectURL(a.href), 5000);
 }
