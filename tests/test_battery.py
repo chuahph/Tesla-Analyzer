@@ -64,3 +64,11 @@ def test_new_range_lookup_by_badge():
     assert new_range_for("Model Y", "74D") == 531.0
     assert new_range_for("Model 3", "") is None
     assert new_range_for("Tesla", "unknown") is None
+
+
+def test_new_range_19in_nova_wheels():
+    # 2024 Model 3 Highland LR AWD on 19" Nova wheels: EPA 305 mi = 491 km.
+    assert new_range_for("Model 3", "74D QUICKSILVER Nova19") == 491.0
+    assert new_range_for("Model 3", "74D Nova19DarkTinted") == 491.0
+    # 18" Photon (or unknown wheels) keeps the 341 mi / 549 km figure.
+    assert new_range_for("Model 3", "74D QUICKSILVER Photon18") == 549.0

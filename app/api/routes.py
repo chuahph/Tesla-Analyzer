@@ -325,6 +325,12 @@ def sync_now(session: Session = Depends(get_session)):
             (cfg.get("exterior_color") or ""),
         ]
         vehicle.trim = " ".join(b for b in trim_bits if b)
+    # The wheel type decides the factory range figure (e.g. 19" Nova vs 18"
+    # Photon on a 2024 Model 3 LR) — append it once so battery health can
+    # pick the right when-new reference.
+    wheel = cfg.get("wheel_type") or ""
+    if wheel and wheel.upper() not in vehicle.trim.upper():
+        vehicle.trim = f"{vehicle.trim} {wheel}".strip()[:60]
     if data.get("display_name") and vehicle.name in ("My Tesla", ""):
         vehicle.name = data["display_name"]
 
