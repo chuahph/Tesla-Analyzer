@@ -642,7 +642,9 @@ async function syncNow() {
         stopped: "🚗 Trip in progress — stopped briefly",
         parked: "🅿️ Parked",
       }[body.status] || body.status;
-      setSyncStatus(`🔋 ${Math.round(body.soc)}%`, `${statusTxt}${extra}`, "ok");
+      const noLoc = body.location_access === false
+        ? " · 📍 no location access — sign in with Tesla again" : "";
+      setSyncStatus(`🔋 ${Math.round(body.soc)}%`, `${statusTxt}${extra}${noLoc}`, "ok");
       // Refresh the dashboard when something was logged, or live while a trip
       // is running so the "Current drive" window tracks the car.
       if (l.drives || l.charges || body.trip_in_progress) load();

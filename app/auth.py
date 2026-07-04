@@ -33,6 +33,9 @@ def authorize_url(redirect_uri: str, state: str | None = None) -> tuple[str, str
         "redirect_uri": redirect_uri,
         "scope": s.tesla_oauth_scope,
         "state": state,
+        # Without this Tesla silently reuses the user's previous consent, so a
+        # newly added scope (e.g. vehicle_location) is never actually granted.
+        "prompt_missing_scopes": "true",
     }
     return f"{AUTHORIZE_URL}?{urlencode(params)}", state
 

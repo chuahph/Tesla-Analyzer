@@ -385,6 +385,9 @@ def sync_now(session: Session = Depends(get_session)):
         "odo_km": round(snap["odo_km"], 1),
         "speed_kmh": round(snap.get("speed_kmh") or 0.0),
         "trip_in_progress": bool(open_trip),
+        # Tells the dashboard whether the token really has location access —
+        # the 403 fallback makes a missing scope otherwise invisible.
+        "location_access": snap.get("lat") is not None,
         "logged": {"drives": len(drives), "charges": len(charges)},
     }
 
