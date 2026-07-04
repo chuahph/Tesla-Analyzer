@@ -54,6 +54,7 @@ def snapshot_from_vehicle_data(data: dict[str, Any]) -> dict[str, Any]:
         "shift": ds.get("shift_state") or "P",
         "speed_kmh": float(ds.get("speed") or 0.0) * MILES_TO_KM,
         "user_present": bool(vs.get("is_user_present")),
+        "locked": bool(vs.get("locked")),
         "lat": ds.get("latitude"),
         "lon": ds.get("longitude"),
     }
@@ -64,14 +65,16 @@ def is_driving(s: dict[str, Any]) -> bool:
 
 
 def is_powered_down(s: dict[str, Any]) -> bool:
-    """Trip boundary: parked AND the driver has left (car powered off).
+    """Trip boundary: parked AND done driving.
 
-    A brief stop with the driver still inside keeps the trip open, so one
-    errand run with short stops logs as a single power-on-to-power-down trip.
-    Snapshots without ``is_user_present`` fall back to plain "in P" so older
-    stored state keeps working.
+    "Done" means the driver left the cabin (no user present) OR the car is
+    locked — locking is the definitive end-of-drive signal and closes the
+    trip even if presence detection lags. A brief unlocked stop with the
+    driver inside keeps the trip open, so one errand run with short stops
+    logs as a single power-on-to-power-down trip. Snapshots without
+    ``is_user_present`` fall back to plain "in P" so older state keeps working.
     """
-    return not is_driving(s) and not s.get("user_present")
+    return not is_driving(s) and (not s.get("user_present") or bool(s.get("locked")))
 
 
 def _coords(s: dict[str, Any] | None) -> str:

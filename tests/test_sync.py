@@ -5,12 +5,12 @@ T0 = 1_760_000_000.0  # seconds epoch
 
 
 def snap(ts, odo_km, soc, shift="P", speed=0.0, charging=False, kw=0.0,
-         fast=False, present=False, lat=None, lon=None):
+         fast=False, present=False, locked=False, lat=None, lon=None):
     return {
         "ts": ts, "odo_km": odo_km, "soc": soc, "shift": shift,
         "speed_kmh": speed, "charging": charging, "charger_kw": kw,
         "fast": fast, "out_temp": 28.0, "user_present": present,
-        "lat": lat, "lon": lon,
+        "locked": locked, "lat": lat, "lon": lon,
     }
 
 
@@ -79,6 +79,19 @@ def test_trip_survives_brief_stop_and_closes_on_power_down():
     assert drive["avg_speed_kmh"] == 37.5        # 25 km over 40 min
     assert drive["start_location"] == "3.1000, 101.6000"
     assert drive["end_location"] == "3.1500, 101.7100"
+
+
+def test_locked_car_ends_the_trip_even_with_presence_lag():
+    """Parked + locked = drive over, even if presence detection still says yes."""
+    s1 = snap(T0, 10_000.0, 80)
+    s2 = snap(T0 + 600, 10_010.0, 77, shift="D", speed=70, present=True)
+    s3 = snap(T0 + 1200, 10_012.0, 76, present=True, locked=True)  # locked up
+
+    _, _, trip, _ = step(s1, s2)
+    assert trip is not None
+    d, _, trip, _ = step(s2, s3, trip)
+    assert trip is None and len(d) == 1
+    assert d[0]["distance_km"] == 12.0
 
 
 def test_snapshot_parses_user_present_and_position():
