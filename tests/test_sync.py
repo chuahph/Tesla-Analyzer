@@ -143,6 +143,24 @@ def test_charge_stays_open_until_it_stops():
     assert chg["duration_min"] == 60.0
 
 
+def test_max_speed_never_below_average():
+    """A drive with no mid-drive snapshot must not report max speed 0."""
+    s1 = snap(T0, 10_000.0, 80)                    # parked
+    s2 = snap(T0 + 600, 10_001.0, 80, shift="D")   # in gear, speed not seen
+    s3 = snap(T0 + 1800, 10_020.0, 76, locked=True)  # already parked & locked
+
+    _, _, trip, _ = step(s1, s2)
+    d, _, trip, _ = step(s2, s3, trip)
+    (drive,) = d
+    assert drive["avg_speed_kmh"] == 40.0          # 20 km over 30 min
+    assert drive["max_speed_kmh"] == 40.0          # floored at the average
+
+    from app.sync import live_trip
+    lt = live_trip({"ts": T0, "odo_km": 10_000.0, "soc": 80},
+                   snap(T0 + 1800, 10_020.0, 76, shift="D"))
+    assert lt["max_speed_kmh"] == 40.0             # avg floors the live max too
+
+
 def test_gap_fallback_logs_merged_sessions():
     """Everything missed between two parked snapshots still gets logged."""
     prev = snap(T0, 10_000.0, 80)
