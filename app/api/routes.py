@@ -656,7 +656,7 @@ def summary(
 
     driving = driving_analysis.analyze(
         drives, settings.rated_wh_per_km, vehicle.battery_capacity_kwh)
-    charging = charging_analysis.analyze(charges)
+    charging = charging_analysis.analyze(charges, drives)
     efficiency = efficiency_analysis.analyze(drives, settings.rated_wh_per_km)
 
     # Battery health uses the full reading history, not the display window.
