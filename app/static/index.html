@@ -32,11 +32,9 @@
       <p id="clock" class="clock"></p>
       <p id="build-info" class="clock build"></p>
     </div>
+    <!-- One line: Sync · Window · badge. Data actions live at the bottom. -->
     <div class="controls">
-      <button id="btn-import" class="btn">📁 Load Tesla Data</button>
-      <button id="btn-link" class="btn btn-accent">🔗 Link Tesla Account</button>
       <button id="btn-sync" class="btn hidden">⟳ Sync</button>
-      <button id="btn-export" class="btn" title="Download all data as CSV">⬇ CSV</button>
       <label for="range">Window</label>
       <select id="range">
         <option value="drive" selected>Current drive</option>
@@ -200,6 +198,13 @@
     <section class="card full">
       <h2>💡 Recommendations to improve efficiency &amp; battery health</h2>
       <div id="recommendations"></div>
+    </section>
+
+    <!-- Data actions: used rarely, so they sit at the end of the page. -->
+    <section class="bottom-actions">
+      <button id="btn-import" class="btn">📁 Load Tesla Data</button>
+      <button id="btn-link" class="btn btn-accent">🔗 Link Tesla Account</button>
+      <button id="btn-export" class="btn" title="Download all data as CSV">⬇ CSV</button>
     </section>
   </main>
 
