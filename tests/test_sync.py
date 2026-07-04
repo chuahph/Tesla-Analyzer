@@ -6,12 +6,13 @@ T0 = 1_760_000_000.0  # seconds epoch
 
 def snap(ts, odo_km, soc, shift="P", speed=0.0, charging=False, kw=0.0,
          fast=False, present=False, locked=False, lat=None, lon=None,
-         range_km=None):
+         range_km=None, energy_added=0.0):
     return {
         "ts": ts, "odo_km": odo_km, "soc": soc, "shift": shift,
         "speed_kmh": speed, "charging": charging, "charger_kw": kw,
         "fast": fast, "out_temp": 28.0, "user_present": present,
         "locked": locked, "lat": lat, "lon": lon, "range_km": range_km,
+        "energy_added_kwh": energy_added,
     }
 
 
@@ -200,6 +201,23 @@ def test_gap_fallback_logs_merged_sessions():
     assert d[0]["distance_km"] == 30.0
     assert c[0]["energy_added_kwh"] == 3.0       # +5% of 60 kWh
     assert trip is None and charge is None
+
+
+def test_charge_uses_teslas_measured_energy():
+    """When Tesla reports charge_energy_added, use it instead of estimating."""
+    c1 = snap(T0, 10_000.0, 60)
+    c2 = snap(T0 + 600, 10_000.0, 65, charging=True, kw=11, energy_added=3.2)
+    c3 = snap(T0 + 1800, 10_000.0, 74, charging=True, kw=11, energy_added=11.9)
+    c4 = snap(T0 + 3600, 10_000.0, 78, energy_added=15.4)  # meter at session end
+
+    d, c, trip, charge = step(None, c1)
+    d, c, trip, charge = step(c1, c2, charge=charge)   # opens; baseline 3.2
+    d, c, trip, charge = step(c2, c3, charge=charge)
+    d, c, trip, charge = step(c3, c4, charge=charge)
+    (chg,) = c
+    # Measured: 15.4 − 3.2 = 12.2 kWh (not the ~10.8 the SoC estimate would give).
+    assert abs(chg["energy_added_kwh"] - 12.2) < 1e-6
+    assert abs(chg["cost"] - 12.2 * 0.90) < 1e-6
 
 
 def test_fast_charge_flag_makes_dc():
