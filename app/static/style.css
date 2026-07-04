@@ -122,7 +122,11 @@ header {
 header h1 { margin: 0; font-size: 20px; letter-spacing: .3px; }
 #subtitle { margin: 2px 0 0; color: var(--muted); font-size: 13px; }
 
-.controls { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; justify-content: flex-end; }
+.controls { display: flex; align-items: center; gap: 10px; flex-wrap: nowrap; justify-content: flex-end; }
+
+/* Rarely used data actions parked at the bottom of the page. */
+.bottom-actions { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 4px; }
+.bottom-actions .btn { flex: 1 1 auto; }
 @media (min-width: 641px) { #sync-status { text-align: right; } }
 .controls label { color: var(--muted); font-size: 13px; }
 select {
@@ -367,14 +371,16 @@ footer { padding: 18px 28px; color: var(--muted); font-size: 12px; border-top: 1
   }
   .meta-box .clock { font-size: 10px; white-space: normal; }
   .meta-box .clock.build { font-size: 9px; }
-  .controls { width: 100%; flex-wrap: wrap; gap: 6px; }
-  .controls .btn { flex: 1 1 auto; padding: 8px 10px; font-size: 12.5px; }
+  /* Single line: Sync + Window select + badge. */
+  .controls { width: 100%; flex-wrap: nowrap; gap: 6px; }
+  .controls .btn { padding: 8px 10px; font-size: 12.5px; }
   .controls label { display: none; }   /* the select explains itself */
-  /* Row 1: the two data buttons (40% basis forces the wrap after them).
-     Row 2: Sync + Window + badge together. Row 3: the status remark. */
-  .controls #btn-import, .controls #btn-link { flex: 1 1 42%; }
-  .controls #btn-sync { flex: 0 1 auto; }
+  .controls #btn-sync { flex: 0 0 auto; }
   .controls #range { flex: 1 1 auto; min-width: 0; }
+  .bottom-actions { gap: 6px; }
+  .bottom-actions .btn { padding: 8px 10px; font-size: 12.5px; }
+  .bottom-actions #btn-import, .bottom-actions #btn-link { flex: 1 1 42%; }
+  .bottom-actions #btn-export { flex: 1 1 100%; }
   main { padding: 12px 12px 40px; }
   .card-grid { grid-template-columns: 1fr; gap: 10px; margin-bottom: 12px; }
   .kpi-grid { grid-template-columns: repeat(2, 1fr); gap: 8px; margin-bottom: 12px; }
