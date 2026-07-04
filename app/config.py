@@ -40,6 +40,9 @@ class Settings(BaseSettings):
     energy_price_per_kwh: float = 0.90
     currency: str = "RM"
     rated_wh_per_km: float = 150.0
+    # When-new full range (km) used as the battery-health 100% reference.
+    # 0 = auto-detect from the car's variant badge (e.g. 74D -> 549 km).
+    battery_new_range_km: float = 0.0
 
     @property
     def demo_mode(self) -> bool:

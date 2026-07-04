@@ -260,11 +260,13 @@ function renderBattery(d) {
       `${chg.full_charge_share_pct}% to 100% · DC ${chg.dc_energy_share_pct}% of energy</div>`
     : "";
   const healthCls = b.health_pct >= 90 ? "" : b.health_pct >= 80 ? " warn" : " bad";
+  const ref = b.reference === "factory spec"
+    ? `when-new spec ${b.reference_km} km`
+    : `best seen ${b.baseline_full_range_km} km`;
   body.innerHTML = `
     <div class="bat-health${healthCls}">${b.health_pct}%</div>
     <div class="bat-line">Estimated full range <strong>${b.est_full_range_km} km</strong>
-      · best seen ${b.baseline_full_range_km} km
-      (${b.degradation_pct}% degradation)</div>
+      vs ${ref} (${b.degradation_pct}% degradation)</div>
     <div class="bat-line">Based on ${b.n_readings} readings · avg SoC ${b.avg_soc}% · lowest seen ${b.min_soc_seen}%</div>
     ${habits}`;
 }

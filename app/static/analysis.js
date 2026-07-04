@@ -255,7 +255,23 @@
   }
 
   // --- battery health (mirror app/analysis/battery.py) ---
-  function analyzeBattery(readings) {
+  // Factory rated range at 100% when new (km, EPA scale) by variant badge.
+  // Keep P-badges first — first match wins.
+  const NEW_RANGE_KM = [
+    ["MODEL 3", "P74D", 476], ["MODEL 3", "74D", 549], ["MODEL 3", "74", 549],
+    ["MODEL 3", "50", 438],
+    ["MODEL Y", "P74D", 459], ["MODEL Y", "74D", 531], ["MODEL Y", "50", 418],
+  ];
+  function newRangeFor(model, trim) {
+    const text = `${model || ""} ${trim || ""}`.toUpperCase();
+    const tokens = new Set(text.split(/[^A-Z0-9]+/));
+    for (const [m, badge, km] of NEW_RANGE_KM) {
+      if (text.includes(m) && tokens.has(badge)) return km;
+    }
+    return null;
+  }
+
+  function analyzeBattery(readings, newRangeKm) {
     const proj = (readings || [])
       .filter((r) => (r.soc || 0) >= 20 && (r.range_km || 0) > 0)
       .map((r) => ({ soc: r.soc, p: r.range_km / (r.soc / 100) }));
@@ -265,15 +281,24 @@
     }
     const values = proj.map((x) => x.p);
     const baseline = percentile(values, 0.95);
-    const current = mean(values.slice(-10));
-    const degradation = baseline ? Math.max(0, 100 * (baseline - current) / baseline) : 0;
+    const current = percentile(values.slice(-10), 0.5); // median resists outliers
+    // Prefer the factory when-new figure as the 100% mark when it matches the
+    // scale of this car's readings (see app/analysis/battery.py).
+    let referenceKm = baseline, reference = "best seen";
+    if (newRangeKm && baseline <= newRangeKm * 1.03) {
+      referenceKm = newRangeKm; reference = "factory spec";
+    }
+    const degradation = referenceKm ? Math.max(0, 100 * (referenceKm - current) / referenceKm) : 0;
     const socs = proj.map((x) => x.soc);
     return {
       available: true, n_readings: proj.length,
-      health_pct: round(100 - degradation, 1),
+      health_pct: round(Math.min(100, 100 - degradation), 1),
       degradation_pct: round(degradation, 1),
       est_full_range_km: round(current, 0),
       baseline_full_range_km: round(baseline, 0),
+      reference_km: round(referenceKm, 0),
+      reference,
+      new_range_km: newRangeKm ? round(newRangeKm, 0) : null,
       min_soc_seen: round(Math.min(...socs), 0),
       avg_soc: round(mean(socs), 0),
     };
@@ -413,7 +438,9 @@
     const driving = analyzeDriving(drives);
     const charging = analyzeCharging(charges);
     const efficiency = analyzeEfficiency(drives, rated);
-    const battery = analyzeBattery(dataset.battery_readings || []);
+    const v = dataset.vehicle || {};
+    const battery = analyzeBattery(
+      dataset.battery_readings || [], newRangeFor(v.model, v.trim));
     const recommendations = buildRecommendations(driving, charging, efficiency, price, currency, battery);
 
     return {
