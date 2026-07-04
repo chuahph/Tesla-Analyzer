@@ -489,11 +489,11 @@ async function load() {
 
     const v = d.vehicle;
     const realVin = v.vin && !/^(DEMO|IMPORT|LINKED)/.test(v.vin) ? `VIN ${v.vin}` : null;
-    // Model year (decoded from the VIN by the server) leads the description;
-    // internal wheel codes are shown by their marketing names (Helix19 -> Nova 19″).
-    const trimTxt = (v.trim || "").split(/\s+/).map(prettyWheel).join(" ");
+    // Compact one-line description: name · year model badge · VIN. Colour and
+    // wheel live in the battery "!" panel, so they're dropped here to fit.
+    const badge = ((v.trim || "").match(/\b(P?\d+D?)\b/) || [])[1] || "";
     document.getElementById("subtitle").textContent =
-      [v.name, [v.year, v.model, trimTxt].filter(Boolean).join(" "), realVin]
+      [v.name, [v.year, v.model, badge].filter(Boolean).join(" "), realVin]
         .filter(Boolean).join(" · ");
 
     lastData = d;
