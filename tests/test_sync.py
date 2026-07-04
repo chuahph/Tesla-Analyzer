@@ -215,6 +215,22 @@ def test_gap_fallback_logs_merged_sessions():
     assert trip is None and charge is None
 
 
+def test_implied_capacity_from_measured_charge():
+    from app.sync import implied_capacity_kwh
+
+    # Tesla measured 18.5 kWh for a 55->80% (25%) charge => 74 kWh usable.
+    c = {"energy_measured": True, "start_soc": 55, "end_soc": 80, "energy_added_kwh": 18.5}
+    assert implied_capacity_kwh(c) == 74.0
+    # SoC-estimate charges are ignored (calibrating from them is circular).
+    assert implied_capacity_kwh({**c, "energy_measured": False}) is None
+    # Small gains are too quantised to trust.
+    assert implied_capacity_kwh({"energy_measured": True, "start_soc": 70,
+                                 "end_soc": 78, "energy_added_kwh": 6.0}) is None
+    # Implausible results are clamped out (e.g. a metering glitch).
+    assert implied_capacity_kwh({"energy_measured": True, "start_soc": 20,
+                                 "end_soc": 80, "energy_added_kwh": 90.0}) is None
+
+
 def test_charge_records_location():
     """A charge session picks up the car's position (for the locations card)."""
     c1 = snap(T0, 10_000.0, 60)
