@@ -64,6 +64,22 @@ def test_eco_score_grades_efficiency():
     assert score_grade(58) == "C" and score_grade(45) == "D" and score_grade(20) == "E"
 
 
+def test_charging_locations_sorted_latest_first():
+    from datetime import datetime
+
+    from app.analysis.charging import analyze
+    from app.models import Charge
+
+    def chg(day, place):
+        return Charge(start_time=datetime(2026, 7, day, 10, 0),
+                      end_time=datetime(2026, 7, day, 11, 0), duration_min=60,
+                      start_soc=40, end_soc=70, energy_added_kwh=20, charge_type="AC",
+                      max_power_kw=11, location=place, cost=18, outside_temp_c=30)
+    charges = [chg(1, "Home"), chg(5, "Office"), chg(3, "Mall")]
+    names = [row[0] for row in analyze(charges)["top_locations"]]
+    assert names == ["Office · AC", "Mall · AC", "Home · AC"]  # 5 Jul, 3 Jul, 1 Jul
+
+
 def test_charge_location_inferred_from_nearby_trip():
     from datetime import datetime
 

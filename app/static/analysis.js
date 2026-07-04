@@ -295,9 +295,11 @@
       avg_end_soc: round(mean(charges.filter((c) => c.end_soc > 0).map((c) => c.end_soc)), 0),
       end_soc_targets: soc,
       charges_by_hour: cbh,
-      // [name, count, kWh, lastTime] — energy + most recent charge per spot.
-      top_locations: counterTop(byLoc, 5)
-        .map(([name, count]) => [name, count, round(locEnergy.get(name) || 0, 1),
+      // [name, count, kWh, lastTime] — most recently charged spot first.
+      top_locations: [...byLoc.keys()]
+        .sort((a, b) => (locLast.get(b) || "").localeCompare(locLast.get(a) || ""))
+        .slice(0, 5)
+        .map((name) => [name, byLoc.get(name), round(locEnergy.get(name) || 0, 1),
           locLast.get(name) || null]),
     };
   }
