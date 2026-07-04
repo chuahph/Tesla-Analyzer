@@ -43,5 +43,16 @@ class TeslaClient:
             return resp.json().get("response", [])
 
     def vehicle_data(self, vehicle_id: str | int) -> dict[str, Any]:
-        """Full snapshot: charge_state, drive_state, climate_state, vehicle_state."""
-        return self._get(f"/api/1/vehicles/{vehicle_id}/vehicle_data")
+        """Full snapshot: charge_state, drive_state, climate_state, vehicle_state.
+
+        The Fleet API omits GPS/speed/shift unless ``location_data`` is asked
+        for explicitly — without it a moving car looks parked. The Owner API
+        ignores the extra query parameter, so this is safe for both.
+        """
+        endpoints = (
+            "charge_state%3Bclimate_state%3Bdrive_state%3Blocation_data"
+            "%3Bvehicle_config%3Bvehicle_state"
+        )
+        return self._get(
+            f"/api/1/vehicles/{vehicle_id}/vehicle_data?endpoints={endpoints}"
+        )

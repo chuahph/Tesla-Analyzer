@@ -39,7 +39,8 @@
       <button id="btn-export" class="btn" title="Download all data as CSV">⬇ CSV</button>
       <label for="range">Window</label>
       <select id="range">
-        <option value="charge" selected>Since charge</option>
+        <option value="drive" selected>Current drive</option>
+        <option value="charge">Since charge</option>
         <option value="1">1 day</option>
         <option value="7">7 days</option>
         <option value="30">30 days</option>
@@ -157,45 +158,45 @@
         <div id="battery-body"></div>
       </div>
       <div class="card">
-        <h2>Efficiency vs Temperature</h2>
+        <h2>🌡️ Efficiency vs Temperature</h2>
         <canvas id="effTempChart"></canvas>
       </div>
       <div class="card">
-        <h2>Weekly Efficiency Trend</h2>
+        <h2>📈 Weekly Efficiency Trend</h2>
         <canvas id="effTrendChart"></canvas>
       </div>
       <div class="card">
-        <h2>Distance by Speed Band</h2>
+        <h2>🛣️ Distance by Speed Band</h2>
         <canvas id="speedBandChart"></canvas>
       </div>
       <div class="card">
-        <h2>Trips by Hour of Day</h2>
+        <h2>🕒 Trips by Hour of Day</h2>
         <canvas id="tripsHourChart"></canvas>
       </div>
       <div class="card">
-        <h2>Charging: AC vs DC Energy</h2>
+        <h2>⚡ Charging: AC vs DC Energy</h2>
         <canvas id="acdcChart"></canvas>
       </div>
       <div class="card">
-        <h2>Charge Target (End SoC)</h2>
+        <h2>🎯 Charge Target (End SoC)</h2>
         <canvas id="socTargetChart"></canvas>
       </div>
       <div class="card">
-        <h2>Recent Trips</h2>
+        <h2>🧭 Recent Trips</h2>
         <ul id="recentTrips" class="plain-list"></ul>
       </div>
       <div class="card">
-        <h2>Top Routes</h2>
+        <h2>🔁 Top Routes</h2>
         <ul id="topRoutes" class="plain-list"></ul>
       </div>
       <div class="card">
-        <h2>Charging Locations</h2>
+        <h2>📍 Charging Locations</h2>
         <ul id="topLocations" class="plain-list"></ul>
       </div>
     </section>
 
     <section class="card full">
-      <h2>Recommendations to improve efficiency &amp; battery health</h2>
+      <h2>💡 Recommendations to improve efficiency &amp; battery health</h2>
       <div id="recommendations"></div>
     </section>
   </main>

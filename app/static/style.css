@@ -8,6 +8,8 @@
   --accent-2: #3b82f6;
   --green: #22c55e;
   --amber: #f59e0b;
+  --violet: #a78bfa;
+  --teal: #2dd4bf;
   --border: #262b34;
 }
 
@@ -66,6 +68,8 @@ header {
 
 /* Battery health card */
 .bat-health { font-size: 40px; font-weight: 800; color: var(--green); margin: 4px 0 10px; }
+.bat-health.warn { color: var(--amber); }
+.bat-health.bad { color: #ff6b70; }
 .bat-line { color: var(--muted); font-size: 13px; line-height: 1.6; }
 .bat-line strong { color: var(--text); }
 .bat-note { color: var(--muted); font-size: 13px; line-height: 1.6; margin: 6px 0; }
@@ -113,15 +117,23 @@ main { padding: 24px 28px 60px; max-width: 1280px; margin: 0 auto; }
   margin-bottom: 18px;
 }
 .kpi {
-  background: var(--panel);
+  background: linear-gradient(180deg, #1a1f28, var(--panel));
   border: 1px solid var(--border);
   border-radius: 12px;
   padding: 16px 18px;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, .3);
 }
+/* A coloured rail per KPI makes the row scannable at a glance. */
+.kpi.tone-blue   { border-left: 3px solid var(--accent-2); }
+.kpi.tone-green  { border-left: 3px solid var(--green); }
+.kpi.tone-amber  { border-left: 3px solid var(--amber); }
+.kpi.tone-violet { border-left: 3px solid var(--violet); }
+.kpi.tone-teal   { border-left: 3px solid var(--teal); }
+.kpi.tone-red    { border-left: 3px solid var(--accent); }
 .kpi .label { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: .5px; }
 .kpi-empty { grid-column: 1 / -1; }
 .kpi-empty .sub { margin-top: 6px; line-height: 1.5; }
-.kpi .value { font-size: 26px; font-weight: 700; margin-top: 6px; }
+.kpi .value { font-size: 26px; font-weight: 700; margin-top: 6px; font-variant-numeric: tabular-nums; }
 .kpi .sub { color: var(--muted); font-size: 12px; margin-top: 4px; }
 
 .card-grid {
@@ -138,9 +150,14 @@ main { padding: 24px 28px 60px; max-width: 1280px; margin: 0 auto; }
   border: 1px solid var(--border);
   border-radius: 12px;
   padding: 18px 20px;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, .3);
 }
 .card.full { grid-column: 1 / -1; }
-.card h2 { margin: 0 0 14px; font-size: 15px; font-weight: 600; }
+/* A hairline under each title separates it from the content below. */
+.card h2 {
+  margin: 0 0 14px; font-size: 15px; font-weight: 600;
+  padding-bottom: 10px; border-bottom: 1px solid var(--border);
+}
 canvas { max-height: 260px; }
 
 .plain-list { list-style: none; margin: 0; padding: 0; }
@@ -149,7 +166,13 @@ canvas { max-height: 260px; }
   padding: 8px 0; border-bottom: 1px solid var(--border); font-size: 14px;
 }
 .plain-list li:last-child { border-bottom: none; }
-.plain-list .count { color: var(--muted); }
+.plain-list .count { color: var(--muted); font-variant-numeric: tabular-nums; }
+.plain-list li.empty { color: var(--muted); }
+/* Recent trips: route on the first line, the numbers on a muted second line —
+   avoids the awkward mid-route wrapping of a single-line row. */
+.plain-list li.trip { flex-direction: column; align-items: flex-start; gap: 2px; }
+.trip-route { font-weight: 600; font-size: 13.5px; }
+.trip-meta { color: var(--muted); font-size: 12.5px; font-variant-numeric: tabular-nums; }
 
 #recommendations { display: flex; flex-direction: column; gap: 12px; }
 .rec {
