@@ -792,6 +792,46 @@ async function exportCsv() {
 const exportBtn = document.getElementById("btn-export");
 if (exportBtn) exportBtn.addEventListener("click", exportCsv);
 
+// Pull-to-refresh: drag down from the top of the page and release to reload
+// the app (fresh data AND the newest deployed version, thanks to the
+// network-first service worker). iOS standalone PWAs have no native one.
+(function setupPullToRefresh() {
+  if (!("ontouchstart" in window)) return;
+  const el = document.createElement("div");
+  el.id = "ptr";
+  el.textContent = "↓ Pull down to refresh";
+  document.body.appendChild(el);
+  const THRESHOLD = 80;
+  let startY = null, armed = false;
+  window.addEventListener("touchstart", (e) => {
+    const modalOpen = document.querySelector(".modal:not(.hidden)");
+    startY = (!modalOpen && window.scrollY <= 0) ? e.touches[0].clientY : null;
+    armed = false;
+  }, { passive: true });
+  window.addEventListener("touchmove", (e) => {
+    if (startY === null) return;
+    const dy = e.touches[0].clientY - startY;
+    if (dy > 20) {
+      el.classList.add("show");
+      armed = dy >= THRESHOLD;
+      el.textContent = armed ? "↻ Release to refresh" : "↓ Pull down to refresh";
+    } else {
+      el.classList.remove("show");
+      armed = false;
+    }
+  }, { passive: true });
+  window.addEventListener("touchend", () => {
+    if (startY !== null && armed) {
+      el.textContent = "Refreshing…";
+      window.location.reload();
+    } else {
+      el.classList.remove("show");
+    }
+    startY = null;
+    armed = false;
+  });
+})();
+
 // Register the service worker so the app installs and works offline on iOS.
 // Self-hosted serves it at /sw.js (root scope); the static Pages build serves
 // it next to index.html (relative scope under the project subpath).
