@@ -456,22 +456,26 @@ footer { padding: 18px 28px; color: var(--muted); font-size: 12px; border-top: 1
 /* --- Mobile / iPhone layout --- */
 @media (max-width: 640px) {
   header { padding: calc(10px + env(safe-area-inset-top)) 14px 10px; gap: 8px; }
+  /* iPhone Pro/Pro Max (402/440pt): app name on line 1, then the full car
+     details grouped into two lines. The meta box matches this height. */
   header h1 { font-size: 15px; line-height: 1.15; }
-  /* iPhone Pro/Pro Max (402/440pt): brand left, compact meta box top-right —
-     sharing the first row. Up to 3 lines: title + the full car line (name,
-     year/model/badge/colour/wheel, VIN) wrapping to two lines if needed. */
   .brand { flex: 1 1 0; min-width: 0; gap: 8px; }
-  .logo { font-size: 20px; }
-  #subtitle { font-size: 10px; line-height: 1.3; margin-top: 1px; }
+  .logo { font-size: 22px; }
+  /* Car details capped at two lines (ellipsis if they'd overrun). */
+  #subtitle {
+    font-size: 10px; line-height: 1.35; margin-top: 1px;
+    display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
+    overflow: hidden;
+  }
   /* Match the box height to the car-description block on the left by
      stretching to the row's height; centre the two clock lines within it. */
   .meta-box {
     position: static; margin-left: auto; align-self: stretch;
-    text-align: right; padding: 4px 8px; max-width: 172px; flex: 0 0 auto;
+    text-align: right; padding: 2px 8px; max-width: 172px; flex: 0 0 auto;
     display: flex; flex-direction: column; justify-content: center;
   }
-  .meta-box .clock { font-size: 10px; white-space: normal; }
-  .meta-box .clock.build { font-size: 9px; }
+  .meta-box .clock { font-size: 9.5px; line-height: 1.35; white-space: normal; }
+  .meta-box .clock.build { font-size: 8.5px; }
   /* Single line: Sync + Window select + badge — all one compact height. */
   .controls { width: 100%; flex-wrap: nowrap; gap: 6px; }
   .controls .btn { padding: 0 10px; font-size: 12.5px; }
