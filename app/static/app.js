@@ -491,9 +491,9 @@ async function load() {
     const realVin = v.vin && !/^(DEMO|IMPORT|LINKED)/.test(v.vin) ? `VIN ${v.vin}` : null;
     // Compact one-line description: name · year model badge · VIN. Colour and
     // wheel live in the battery "!" panel, so they're dropped here to fit.
-    const badge = ((v.trim || "").match(/\b(P?\d+D?)\b/) || [])[1] || "";
+    const trimBadge = ((v.trim || "").match(/\b(P?\d+D?)\b/) || [])[1] || "";
     document.getElementById("subtitle").textContent =
-      [v.name, [v.year, v.model, badge].filter(Boolean).join(" "), realVin]
+      [v.name, [v.year, v.model, trimBadge].filter(Boolean).join(" "), realVin]
         .filter(Boolean).join(" · ");
 
     lastData = d;
