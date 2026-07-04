@@ -405,6 +405,14 @@ def sync_now(wake: bool = Query(False), session: Session = Depends(get_session))
         d["end_location"] = _place(d["end_location"])
         session.add(Drive(vehicle_id=vehicle.id, **d))
     for c in charges:
+        # Calibrate usable pack capacity from Tesla's measured charge energy so
+        # driving Wh/km tracks the real (aging) pack. Heavily smoothed and
+        # clamped so one noisy reading can't swing the numbers.
+        cap = sync_mod.implied_capacity_kwh(c)
+        c.pop("energy_measured", None)  # transient flag, not a DB column
+        if cap:
+            old = vehicle.battery_capacity_kwh or 75.0
+            vehicle.battery_capacity_kwh = round(0.8 * old + 0.2 * cap, 1)
         # Name the charging spot (best effort) so it reads "Bangsar" not coords.
         c["location"] = _place(c.get("location", ""))
         session.add(Charge(vehicle_id=vehicle.id, **c))

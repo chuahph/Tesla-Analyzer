@@ -175,6 +175,7 @@ def _charge_from(start: dict, cur: dict, capacity_kwh: float, price_per_kwh: flo
     measured = (cur.get("energy_added_kwh") or 0.0) - (start.get("energy_added_kwh") or 0.0)
     energy = measured if measured > 0 else _energy_kwh(cur, start, capacity_kwh)
     dc = bool(start.get("fast") or cur.get("fast"))
+    energy_measured = measured > 0
     # Where the car was charging: GPS coords (named later in the API layer).
     # Without location access, fall back to the charger type so the Charging
     # Locations card still groups sessions meaningfully instead of being blank.
@@ -192,7 +193,29 @@ def _charge_from(start: dict, cur: dict, capacity_kwh: float, price_per_kwh: flo
         "location": location,
         "cost": round(energy * price_per_kwh, 2),
         "outside_temp_c": cur["out_temp"],
+        # Transient (not a DB column): whether energy came from Tesla's meter,
+        # so usable capacity can be calibrated only from real measurements.
+        "energy_measured": energy_measured,
     }
+
+
+def implied_capacity_kwh(charge: dict) -> float | None:
+    """Usable pack capacity implied by a Tesla-measured charge (kWh).
+
+    energy_added = SoC-gain-fraction × usable_capacity, so
+    usable_capacity = energy_added / (SoC gain / 100). Only trust a
+    Tesla-*measured* charge (calibrating from the SoC estimate would be
+    circular) with a decent gain (limits integer-SoC quantisation), and
+    clamp to a sane pack range so a bad reading can't corrupt Wh/km.
+    """
+    if not charge.get("energy_measured"):
+        return None
+    gain = (charge.get("end_soc") or 0) - (charge.get("start_soc") or 0)
+    energy = charge.get("energy_added_kwh") or 0.0
+    if gain < 15 or energy <= 0:
+        return None
+    cap = energy / (gain / 100.0)
+    return round(cap, 1) if 45.0 <= cap <= 95.0 else None
 
 
 def process_snapshot(
