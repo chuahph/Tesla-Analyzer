@@ -241,19 +241,25 @@
     charges.forEach((c) => { const k = Math.round(c.end_soc / 5) * 5; targets.set(k, (targets.get(k) || 0) + 1); });
     const full = charges.filter((c) => c.end_soc >= 99).length;
     const byHour = new Map(), byLoc = new Map();
-    // Named GPS place > inferred-from-trip > raw coords > charger type.
-    const locOf = (c) => {
-      if (c.location && !/,/.test(c.location)) return c.location;
+    // Named GPS place > inferred-from-trip > raw coords; then tag with AC/DC.
+    const placeOf = (c) => {
+      if (c.location && /[a-z]/i.test(c.location)) return c.location; // named place
       const inferred = inferChargeLocation(c, drives);
       if (inferred) return inferred;
-      if (c.location) return c.location;
-      return c.charge_type === "DC" ? "DC fast charger" : "AC / home charger";
+      return c.location || "";  // raw coords or nothing
     };
+    const locOf = (c) => {
+      const place = placeOf(c);
+      return place ? `${place} · ${c.charge_type}`
+        : (c.charge_type === "DC" ? "DC fast charger" : "AC / home charger");
+    };
+    const locEnergy = new Map();
     charges.forEach((c) => {
       const h = new Date(c.start_time).getHours();
       byHour.set(h, (byHour.get(h) || 0) + 1);
       const l = locOf(c);
       byLoc.set(l, (byLoc.get(l) || 0) + 1);
+      locEnergy.set(l, (locEnergy.get(l) || 0) + c.energy_added_kwh);
     });
 
     const soc = {}; [...targets.keys()].sort((a, b) => a - b).forEach((k) => soc[k] = targets.get(k));
@@ -277,7 +283,9 @@
       avg_end_soc: round(mean(charges.filter((c) => c.end_soc > 0).map((c) => c.end_soc)), 0),
       end_soc_targets: soc,
       charges_by_hour: cbh,
-      top_locations: counterTop(byLoc, 5),
+      // [name, count, kWh] — energy delivered per spot.
+      top_locations: counterTop(byLoc, 5)
+        .map(([name, count]) => [name, count, round(locEnergy.get(name) || 0, 1)]),
     };
   }
 
