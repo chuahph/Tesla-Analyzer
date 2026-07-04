@@ -49,6 +49,9 @@ def snapshot_from_vehicle_data(data: dict[str, Any]) -> dict[str, Any]:
         "range_km": float(cs.get("battery_range") or 0.0) * MILES_TO_KM,
         "charging": cs.get("charging_state") == "Charging",
         "charger_kw": float(cs.get("charger_power") or 0.0),
+        # Tesla's own measured energy added this session (kWh) — accumulates
+        # while charging, resets per session. More accurate than a SoC estimate.
+        "energy_added_kwh": float(cs.get("charge_energy_added") or 0.0),
         "fast": bool(cs.get("fast_charger_present")),
         "out_temp": float(temp) if temp is not None else 20.0,
         "shift": ds.get("shift_state") or "P",
@@ -162,7 +165,11 @@ def _charge_from(start: dict, cur: dict, capacity_kwh: float, price_per_kwh: flo
     if gain < CHARGE_MIN_PCT:
         return None
     dt_min = max((cur["ts"] - start["ts"]) / 60.0, 0.0)
-    energy = _energy_kwh(cur, start, capacity_kwh)  # reversed = energy gained
+    # Prefer Tesla's own measured energy for the session (charge_energy_added,
+    # which accumulates during charging). Fall back to the range/SoC estimate
+    # when the meter isn't available (e.g. a session missed between snapshots).
+    measured = (cur.get("energy_added_kwh") or 0.0) - (start.get("energy_added_kwh") or 0.0)
+    energy = measured if measured > 0 else _energy_kwh(cur, start, capacity_kwh)
     dc = bool(start.get("fast") or cur.get("fast"))
     return {
         "start_time": _dt(start["ts"]),
@@ -241,16 +248,23 @@ def process_snapshot(
             "ts": base["ts"],
             "soc": base["soc"],
             "range_km": base.get("range_km"),
+            # Baseline for the measured meter is THIS (first charging) snapshot,
+            # not prev — Tesla resets charge_energy_added to ~0 at plug-in, and
+            # prev's value is stale from a previous session.
+            "energy_added_kwh": cur.get("energy_added_kwh") or 0.0,
             "max_kw": cur.get("charger_kw") or 0.0,
             "fast": bool(cur.get("fast")),
         }
     elif prev:
-        # A whole charge happened between snapshots.
+        # A whole charge happened between snapshots — the session meter is
+        # unreliable across the gap, so match cur's value to force the
+        # range/SoC estimate instead of a spurious measured delta.
         c = _charge_from(
             {
                 "ts": prev["ts"],
                 "soc": prev["soc"],
                 "range_km": prev.get("range_km"),
+                "energy_added_kwh": cur.get("energy_added_kwh") or 0.0,
                 "max_kw": prev.get("charger_kw", 0.0),
                 "fast": prev.get("fast"),
             },
