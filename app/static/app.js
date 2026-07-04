@@ -27,6 +27,52 @@ function kpiCard(label, value, sub, tone) {
     <div class="value">${value}</div><div class="sub">${sub || ""}</div></div>`;
 }
 
+// Colour band for a 0-100 driving score.
+function scoreTone(s) {
+  return s >= 85 ? "green" : s >= 70 ? "blue" : s >= 55 ? "amber" : "red";
+}
+
+// Prominent window driving score at the top, with an info popover explaining
+// how it's computed.
+function renderScore(d) {
+  const el = document.getElementById("score-banner");
+  if (!el) return;
+  const drv = d.driving || {};
+  if (!drv.available || drv.eco_score === undefined) { el.style.display = "none"; return; }
+  el.style.display = "";
+  const s = drv.eco_score, grade = drv.eco_grade;
+  const rated = (d.efficiency && d.efficiency.rated_wh_per_km) || 150;
+  const info = `How the driving score works:<br>` +
+    `It grades this window's efficiency (<strong>${drv.avg_efficiency_wh_per_km} Wh/km</strong>) ` +
+    `against your car's rated <strong>${rated} Wh/km</strong>.<br>` +
+    `• ~15% under rated → 100 &nbsp; • exactly rated → 85<br>` +
+    `• about −1 point per 1% over rated<br>` +
+    `Grades: A ≥85 · B ≥70 · C ≥55 · D ≥40 · E below. ` +
+    `Lower Wh/km (gentler speed, smoother acceleration, less climate use) lifts it.`;
+  el.className = `score-banner tone-${scoreTone(s)}`;
+  el.innerHTML =
+    `<div class="score-ring">${s}<span>/100</span></div>` +
+    `<div class="score-text">` +
+    `<div class="score-grade">Driving score: grade ${grade}` +
+    `<button class="info-btn" data-info="score-info">!</button></div>` +
+    `<div class="score-sub">${drv.avg_efficiency_wh_per_km} Wh/km this ${d.window_label || "window"} · ` +
+    `${drv.total_distance_km} km over ${drv.total_drives} drives</div>` +
+    `<div id="score-info" class="info-pop hidden">${info}</div>` +
+    `</div>`;
+  wireInfoButtons(el);
+}
+
+// Wire every ".info-btn[data-info]" inside a container to toggle its popover.
+function wireInfoButtons(root) {
+  root.querySelectorAll(".info-btn[data-info]").forEach((btn) => {
+    btn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      const pop = document.getElementById(btn.dataset.info);
+      if (pop) pop.classList.toggle("hidden");
+    });
+  });
+}
+
 function renderKpis(d) {
   const drv = d.driving, chg = d.charging, eff = d.efficiency, cur = d.currency;
   const cards = [];
@@ -191,19 +237,44 @@ function tripEnd(start, end) {
   return full;
 }
 
+// Plain-language reason for a trip's condition tags, from its own numbers.
+function tripConditionWhy(t) {
+  const avg = t.avg_speed_kmh || 0;
+  const bits = [
+    `Inferred from this trip's own data — average speed ${avg} km/h` +
+    (t.duration_min ? `, ${t.duration_min} min over ${t.distance_km} km` : "") + ".",
+    "Highway cruise = sustained high speed; highway + congestion = high top " +
+    "speed but low average; stop-go = low average with spiky peaks; " +
+    "city = low steady speed. Peak hour (7–9am, 5–7pm) and hot (33°C+) are " +
+    "added as context.",
+  ];
+  return bits.join("<br>");
+}
+
 function renderLists(d) {
+  const rated = (d.efficiency && d.efficiency.rated_wh_per_km) || 150;
   const trips = (d.driving.recent_trips || [])
-    .map((t) => {
+    .map((t, i) => {
       const when = t.end_time
         ? `${tripWhen(t.start_time)} → ${tripEnd(t.start_time, t.end_time)}`
         : tripWhen(t.start_time);
       const speed = t.avg_speed_kmh ? ` · avg ${t.avg_speed_kmh} km/h` : "";
-      return `<li class="trip"><span class="trip-route">${when}${t.route ? "<br>" + t.route : ""}</span>` +
-        `<span class="trip-meta">${t.distance_km} km · ${t.duration_min} min${speed} · ${t.wh_per_km} Wh/km</span></li>`;
+      const score = t.eco_score !== undefined
+        ? `<span class="trip-score tone-${scoreTone(t.eco_score)}">${t.eco_score}</span>` : "";
+      const condId = `cond-why-${i}`;
+      const cond = t.conditions
+        ? `<span class="trip-cond">🚦 ${t.conditions}` +
+          `<button class="info-btn" data-info="${condId}">!</button></span>` +
+          `<span id="${condId}" class="info-pop hidden">${tripConditionWhy(t)}</span>`
+        : "";
+      return `<li class="trip">` +
+        `<span class="trip-head">${score}<span class="trip-route">${when}${t.route ? "<br>" + t.route : ""}</span></span>` +
+        `<span class="trip-meta">${t.distance_km} km · ${t.duration_min} min${speed} · ${t.wh_per_km} Wh/km</span>${cond}</li>`;
     })
     .join("");
-  document.getElementById("recentTrips").innerHTML =
-    trips || '<li class="empty">No trips in this window</li>';
+  const list = document.getElementById("recentTrips");
+  list.innerHTML = trips || '<li class="empty">No trips in this window</li>';
+  wireInfoButtons(list);
 
   const routes = (d.driving.top_routes || [])
     .map(([r, c]) => `<li><span>${r}</span><span class="count">${c}×</span></li>`).join("");
@@ -397,6 +468,7 @@ async function load() {
       [v.name, [v.year, v.model, trimTxt].filter(Boolean).join(" "), realVin]
         .filter(Boolean).join(" · ");
 
+    renderScore(d);
     renderKpis(d);
     renderCharts(d);
     renderBehaviour(d);

@@ -53,6 +53,47 @@ def test_driving_empty():
     assert driving_analysis.analyze([]) == {"available": False}
 
 
+def test_eco_score_grades_efficiency():
+    from app.analysis.driving import eco_score, score_grade
+
+    assert eco_score(150, 150) == 85          # exactly rated
+    assert eco_score(127.5, 150) == 100       # 15% under rated → capped 100
+    assert eco_score(195, 150) == 55          # 30% over rated
+    assert eco_score(0, 150) == 0
+    assert score_grade(90) == "A" and score_grade(72) == "B"
+    assert score_grade(58) == "C" and score_grade(45) == "D" and score_grade(20) == "E"
+
+
+def test_driving_analysis_reports_scores(seeded):
+    drives = seeded.scalars(select(Drive)).all()
+    result = driving_analysis.analyze(list(drives), 150.0)
+    assert 0 <= result["eco_score"] <= 100
+    assert result["eco_grade"] in ("A", "B", "C", "D", "E")
+    assert all("eco_score" in t for t in result["recent_trips"])
+
+
+def test_trip_conditions_infer_character():
+    from datetime import datetime
+
+    from app.analysis.driving import _trip_conditions
+    from app.models import Drive
+
+    def drive(avg, mx, hour=12, temp=25.0):
+        return Drive(
+            start_time=datetime(2026, 7, 4, hour, 0), end_time=datetime(2026, 7, 4, hour, 30),
+            distance_km=20.0, duration_min=30.0, avg_speed_kmh=avg, max_speed_kmh=mx,
+            outside_temp_c=temp,
+        )
+
+    assert _trip_conditions(drive(95, 115)) == "highway cruise"
+    assert _trip_conditions(drive(35, 100)) == "highway + congestion"
+    assert _trip_conditions(drive(20, 60)) == "stop-go traffic"
+    assert _trip_conditions(drive(30, 45)) == "city driving"
+    assert _trip_conditions(drive(55, 70)) == "steady flow"
+    assert "peak hour" in _trip_conditions(drive(30, 45, hour=8))
+    assert "hot 35°C" in _trip_conditions(drive(30, 45, temp=35.0))
+
+
 # --- charging --------------------------------------------------------------
 
 def test_charging_analysis(seeded):

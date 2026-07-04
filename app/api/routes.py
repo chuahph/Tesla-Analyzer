@@ -644,7 +644,7 @@ def summary(
             window_label = "since last charge"
     drives, charges = _window(session, vehicle.id, days, since=since)
 
-    driving = driving_analysis.analyze(drives)
+    driving = driving_analysis.analyze(drives, settings.rated_wh_per_km)
     charging = charging_analysis.analyze(charges)
     efficiency = efficiency_analysis.analyze(drives, settings.rated_wh_per_km)
 

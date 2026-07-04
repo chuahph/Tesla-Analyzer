@@ -92,15 +92,26 @@ header {
 .bat-health { font-size: 40px; font-weight: 800; color: var(--green); margin: 4px 0 10px; }
 .bat-health.warn { color: var(--amber); }
 .bat-health.bad { color: #ff6b70; }
-/* "!" info toggle beside the health number: what does 100% mean for MY car? */
+/* "!" info toggle: a small round button that reveals an explanation popover. */
 .info-btn {
-  width: 22px; height: 22px; margin-left: 8px; padding: 0;
-  vertical-align: 14px;
+  width: 20px; height: 20px; margin-left: 6px; padding: 0;
+  vertical-align: middle;
   border-radius: 50%; border: 1.5px solid var(--amber);
   background: rgba(245, 158, 11, .12); color: var(--amber);
-  font-size: 13px; font-weight: 800; line-height: 1; cursor: pointer;
+  font-size: 12px; font-weight: 800; line-height: 1; cursor: pointer;
+  flex: 0 0 auto;
 }
 .info-btn:hover { background: rgba(245, 158, 11, .25); }
+.bat-health .info-btn { vertical-align: 14px; width: 22px; height: 22px; }
+/* Generic explanation popover (score, trip conditions). */
+.info-pop {
+  background: var(--panel-2); border: 1px solid var(--border);
+  border-left: 3px solid var(--amber); border-radius: 8px;
+  padding: 10px 12px; margin: 8px 0 2px;
+  font-size: 12px; color: var(--muted); line-height: 1.65;
+}
+.info-pop strong { color: var(--text); }
+.info-pop.hidden { display: none; }
 .bat-info {
   background: var(--panel-2); border: 1px solid var(--border);
   border-left: 3px solid var(--amber); border-radius: 8px;
@@ -109,6 +120,44 @@ header {
 }
 .bat-info strong { color: var(--text); }
 .bat-info.hidden { display: none; }
+
+/* Window driving score banner at the top of the dashboard. */
+.score-banner {
+  display: flex; align-items: center; gap: 16px;
+  background: linear-gradient(180deg, #1a1f28, var(--panel));
+  border: 1px solid var(--border); border-left: 4px solid var(--muted);
+  border-radius: 12px; padding: 14px 18px; margin-bottom: 16px;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, .3);
+}
+.score-banner.tone-green  { border-left-color: var(--green); }
+.score-banner.tone-blue   { border-left-color: var(--accent-2); }
+.score-banner.tone-amber  { border-left-color: var(--amber); }
+.score-banner.tone-red    { border-left-color: var(--accent); }
+.score-ring {
+  font-size: 40px; font-weight: 800; line-height: 1;
+  flex: 0 0 auto; font-variant-numeric: tabular-nums;
+}
+.score-ring span { font-size: 15px; font-weight: 600; color: var(--muted); }
+.score-banner.tone-green .score-ring { color: var(--green); }
+.score-banner.tone-blue  .score-ring { color: var(--accent-2); }
+.score-banner.tone-amber .score-ring { color: var(--amber); }
+.score-banner.tone-red   .score-ring { color: #ff6b70; }
+.score-text { flex: 1 1 auto; min-width: 0; }
+.score-grade { font-size: 15px; font-weight: 700; display: flex; align-items: center; }
+.score-sub { color: var(--muted); font-size: 12.5px; margin-top: 3px; }
+
+/* Per-trip score badge + head row. */
+.trip-head { display: flex; align-items: baseline; gap: 8px; width: 100%; }
+.trip-score {
+  flex: 0 0 auto; min-width: 30px; text-align: center;
+  font-size: 13px; font-weight: 800; border-radius: 6px;
+  padding: 1px 6px; font-variant-numeric: tabular-nums;
+}
+.trip-score.tone-green { color: var(--green); background: rgba(34,197,94,.14); }
+.trip-score.tone-blue  { color: #7aa7ff; background: rgba(59,130,246,.14); }
+.trip-score.tone-amber { color: var(--amber); background: rgba(245,158,11,.14); }
+.trip-score.tone-red   { color: #ff6b70; background: rgba(232,33,39,.14); }
+.trip-cond .info-btn { width: 17px; height: 17px; font-size: 10px; margin-left: 4px; }
 .bat-line { color: var(--muted); font-size: 13px; line-height: 1.6; }
 .bat-line strong { color: var(--text); }
 .bat-note { color: var(--muted); font-size: 13px; line-height: 1.6; margin: 6px 0; }
@@ -216,6 +265,13 @@ canvas { max-height: 260px; }
 .plain-list li.trip { flex-direction: column; align-items: flex-start; gap: 2px; }
 .trip-route { font-weight: 600; font-size: 13.5px; }
 .trip-meta { color: var(--muted); font-size: 12.5px; font-variant-numeric: tabular-nums; }
+/* Inferred trip character (highway cruise, stop-go, peak hour, hot …). */
+.trip-cond {
+  display: inline-block; margin-top: 3px;
+  font-size: 11.5px; color: var(--accent-2);
+  background: rgba(59,130,246,.12);
+  border-radius: 6px; padding: 1px 8px;
+}
 
 #recommendations { display: flex; flex-direction: column; gap: 12px; }
 .rec {
@@ -347,12 +403,26 @@ footer { padding: 18px 28px; color: var(--muted); font-size: 12px; border-top: 1
 .status { font-size: 13px; color: var(--muted); }
 .status.ok { color: var(--green); }
 .status.err, .status.warn { color: var(--amber); }
-/* The car status is its own full-width header block — battery on one line,
-   condition/remark on the next. */
-#sync-status { width: 100%; margin: 0; line-height: 1.5; }
-#sync-status span { display: block; }
+/* Car status: a boxed strip under the controls — battery big on the left,
+   the condition/remark to its right, so the live state reads at a glance. */
+#sync-status {
+  width: 100%; margin: 0;
+  display: flex; align-items: center; gap: 12px;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 9px 14px;
+  line-height: 1.4;
+}
 #sync-status span:empty { display: none; }
-#sync-batt { font-weight: 700; }
+#sync-batt {
+  font-weight: 800; font-size: 17px; white-space: nowrap;
+  flex: 0 0 auto; padding-right: 12px;
+  border-right: 1px solid var(--border);
+}
+/* No divider when only the remark is shown (e.g. "Syncing…" before battery). */
+#sync-batt:empty + #sync-cond, #sync-batt:empty { border: 0; padding-left: 0; }
+#sync-cond { flex: 1 1 auto; font-size: 13px; }
 .hidden { display: none; }
 
 /* --- Mobile / iPhone layout --- */
