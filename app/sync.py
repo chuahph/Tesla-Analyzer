@@ -175,6 +175,11 @@ def _charge_from(start: dict, cur: dict, capacity_kwh: float, price_per_kwh: flo
     measured = (cur.get("energy_added_kwh") or 0.0) - (start.get("energy_added_kwh") or 0.0)
     energy = measured if measured > 0 else _energy_kwh(cur, start, capacity_kwh)
     dc = bool(start.get("fast") or cur.get("fast"))
+    # Where the car was charging: GPS coords (named later in the API layer).
+    # Without location access, fall back to the charger type so the Charging
+    # Locations card still groups sessions meaningfully instead of being blank.
+    location = _coords(start) or _coords(cur) or (
+        "DC fast charger" if dc else "AC / home charger")
     return {
         "start_time": _dt(start["ts"]),
         "end_time": _dt(cur["ts"]),
@@ -184,8 +189,7 @@ def _charge_from(start: dict, cur: dict, capacity_kwh: float, price_per_kwh: flo
         "energy_added_kwh": round(energy, 2),
         "charge_type": "DC" if dc else "AC",
         "max_power_kw": max(start.get("max_kw", 0.0), cur.get("charger_kw", 0.0)),
-        # Where the car was charging (coords; named later in the API layer).
-        "location": _coords(start) or _coords(cur),
+        "location": location,
         "cost": round(energy * price_per_kwh, 2),
         "outside_temp_c": cur["out_temp"],
     }
