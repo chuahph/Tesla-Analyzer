@@ -175,6 +175,7 @@ header {
 .logo { font-size: 30px; }
 header h1 { margin: 0; font-size: 20px; letter-spacing: .3px; }
 #subtitle { margin: 2px 0 0; color: var(--muted); font-size: 13px; }
+#subtitle .nowrap { white-space: nowrap; }
 
 .controls { display: flex; align-items: center; gap: 10px; flex-wrap: nowrap; justify-content: flex-end; }
 

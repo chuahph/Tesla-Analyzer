@@ -497,9 +497,17 @@ async function load() {
     const trimTxt = (v.trim || "").split(/\s+/)
       .filter((t) => /^P?\d+D?$/i.test(t) || /(1[89]|2[012])/.test(t))
       .map(prettyWheel).join(" ");
-    document.getElementById("subtitle").textContent =
-      [v.name, [v.year, v.model, trimTxt].filter(Boolean).join(" "), realVin]
-        .filter(Boolean).join(" · ");
+    const sub = document.getElementById("subtitle");
+    sub.textContent = [v.name, [v.year, v.model, trimTxt].filter(Boolean).join(" ")]
+      .filter(Boolean).join(" · ");
+    if (realVin) {
+      // Keep "VIN <number>" together so it wraps onto the last line as a unit.
+      sub.appendChild(document.createTextNode(" · "));
+      const span = document.createElement("span");
+      span.className = "nowrap";
+      span.textContent = realVin;
+      sub.appendChild(span);
+    }
 
     lastData = d;
     renderScore(d);
