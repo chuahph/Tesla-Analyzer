@@ -277,18 +277,36 @@ function renderBattery(d) {
     document.getElementById("batt-info").classList.toggle("hidden"));
 }
 
+// Tesla's API reports wheels by internal engineering names; show the
+// marketing name people actually know (Helix19 -> "Nova 19″").
+const WHEEL_MARKETING = {
+  HELIX: "Nova", NOVA: "Nova", PHOTON: "Photon", PINWHEEL: "Photon",
+  GEMINI: "Gemini", INDUCTION: "Induction", CROSSFLOW: "Crossflow",
+  APOLLO: "Apollo", UBERTURBINE: "Überturbine", STILETTO: "Stiletto",
+};
+function prettyWheel(tok) {
+  const m = String(tok || "").toUpperCase().match(/^([A-Z]+)(1[89]|2[012])/);
+  if (!m) return tok;
+  const name = WHEEL_MARKETING[m[1]]
+    || m[1].charAt(0) + m[1].slice(1).toLowerCase();
+  return `${name} ${m[2]}″`;
+}
+
 // The "!" popover: which car config the 100% reference was derived from.
 function battInfoHtml(d) {
   const b = d.battery, v = d.vehicle || {};
   const realVin = v.vin && !/^(DEMO|IMPORT|LINKED)/.test(v.vin) ? v.vin : null;
   const badge = ((v.trim || "").match(/\b(P?\d+D?)\b/) || [])[1];
   const wheel = (v.trim || "").split(/\s+/).find((t) =>
-    /^(nova|photon|gemini|induction|crossflow|uberturbine|apollo|turbine|helix|arachnid|cyberstream)/i.test(t));
+    /^(nova|photon|pinwheel|gemini|induction|crossflow|uberturbine|apollo|turbine|helix|arachnid|cyberstream)/i.test(t));
   const carLine = [v.year, v.model, badge && `(${badge})`].filter(Boolean).join(" ");
+  const wheelTxt = wheel
+    ? `${prettyWheel(wheel)} <span style="opacity:.7">(reported as ${wheel})</span>`
+    : "not reported yet — tap Sync while the car is awake";
   const rows = [
     realVin ? `VIN: <strong>${realVin}</strong>` : null,
     carLine ? `Car: <strong>${carLine}</strong>` : null,
-    `Wheels: <strong>${wheel || "not reported yet — will appear after a sync"}</strong>`,
+    `Wheels: <strong>${wheelTxt}</strong>`,
     b.new_range_km
       ? `When-new 100% range for this config: <strong>${b.new_range_km} km</strong> (EPA)`
       : "When-new range unknown for this variant — using your best readings instead",
@@ -371,9 +389,11 @@ async function load() {
 
     const v = d.vehicle;
     const realVin = v.vin && !/^(DEMO|IMPORT|LINKED)/.test(v.vin) ? `VIN ${v.vin}` : null;
-    // Model year (decoded from the VIN by the server) leads the description.
+    // Model year (decoded from the VIN by the server) leads the description;
+    // internal wheel codes are shown by their marketing names (Helix19 -> Nova 19″).
+    const trimTxt = (v.trim || "").split(/\s+/).map(prettyWheel).join(" ");
     document.getElementById("subtitle").textContent =
-      [v.name, [v.year, v.model, v.trim].filter(Boolean).join(" "), realVin]
+      [v.name, [v.year, v.model, trimTxt].filter(Boolean).join(" "), realVin]
         .filter(Boolean).join(" · ");
 
     renderKpis(d);
