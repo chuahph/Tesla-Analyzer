@@ -41,6 +41,16 @@ def clear_drives(session) -> int:
     return n
 
 
+def delete_drives(session, ids: list[int]) -> int:
+    """Delete only the trips whose ids are given (charges/battery kept)."""
+    if not ids:
+        return 0
+    n = session.query(Drive).filter(Drive.id.in_(ids)).count()
+    session.execute(delete(Drive).where(Drive.id.in_(ids)))
+    session.commit()
+    return n
+
+
 def replace_with_import(
     session, drives: list[dict], charges: list[dict], *, name: str = "Imported Tesla"
 ) -> dict:

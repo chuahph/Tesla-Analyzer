@@ -159,6 +159,10 @@ header {
 .trip-score.tone-amber { color: var(--amber); background: rgba(245,158,11,.14); }
 .trip-score.tone-red   { color: #ff6b70; background: rgba(232,33,39,.14); }
 .trip-cond .info-btn { width: 17px; height: 17px; font-size: 10px; margin-left: 4px; }
+/* Trip delete tools + per-trip checkbox. */
+.trip-tools { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
+.trip-check { width: 20px; height: 20px; flex: 0 0 auto; accent-color: var(--accent); cursor: pointer; }
+.trip.selectable { cursor: pointer; }
 .bat-line { color: var(--muted); font-size: 13px; line-height: 1.6; }
 .bat-line strong { color: var(--text); }
 .bat-note { color: var(--muted); font-size: 13px; line-height: 1.6; margin: 6px 0; }
@@ -340,7 +344,7 @@ footer { padding: 18px 28px; color: var(--muted); font-size: 12px; border-top: 1
 .btn-danger { color: #ff6b70; border-color: rgba(232, 33, 39, .45); background: transparent; }
 .btn-danger:hover { background: rgba(232, 33, 39, .12); }
 /* Small inline action under a list (e.g. clear trip history). */
-.btn-mini { min-height: 34px; padding: 5px 12px; font-size: 12px; margin-top: 12px; }
+.btn-mini { min-height: 34px; padding: 5px 12px; font-size: 12px; }
 
 /* Modal */
 .modal {
