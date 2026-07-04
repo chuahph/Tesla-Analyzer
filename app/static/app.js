@@ -22,8 +22,8 @@ function makeChart(id, config) {
   charts[id] = new Chart(ctx, config);
 }
 
-function kpiCard(label, value, sub) {
-  return `<div class="kpi"><div class="label">${label}</div>
+function kpiCard(label, value, sub, tone) {
+  return `<div class="kpi${tone ? " tone-" + tone : ""}"><div class="label">${label}</div>
     <div class="value">${value}</div><div class="sub">${sub || ""}</div></div>`;
 }
 
@@ -32,19 +32,19 @@ function renderKpis(d) {
   const cards = [];
   if (drv.available) {
     cards.push(kpiCard("Distance", fmt(drv.total_distance_km) + " km",
-      `${fmt(drv.total_drives)} drives · ${fmt(drv.total_duration_h)} h`));
+      `${fmt(drv.total_drives)} drives · ${fmt(drv.total_duration_h)} h`, "blue"));
     cards.push(kpiCard("Avg Efficiency", fmt(eff.avg_efficiency_wh_per_km) + " Wh/km",
-      `${eff.vs_rated_pct >= 0 ? "+" : ""}${fmt(eff.vs_rated_pct, 1)}% vs rated`));
+      `${eff.vs_rated_pct >= 0 ? "+" : ""}${fmt(eff.vs_rated_pct, 1)}% vs rated`, "green"));
     cards.push(kpiCard("Avg Speed", fmt(drv.avg_speed_kmh) + " km/h",
-      `peak ${fmt(drv.p95_speed_kmh)} km/h (p95)`));
+      `peak ${fmt(drv.p95_speed_kmh)} km/h (p95)`, "amber"));
   }
   if (chg.available) {
     cards.push(kpiCard("Energy Charged", fmt(chg.total_energy_kwh) + " kWh",
-      `${fmt(chg.total_sessions)} sessions`));
+      `${fmt(chg.total_sessions)} sessions`, "violet"));
     cards.push(kpiCard("Charging Cost", cur + " " + fmt(chg.total_cost),
-      `${cur} ${fmt(chg.avg_cost_per_kwh, 2)}/kWh avg`));
+      `${cur} ${fmt(chg.avg_cost_per_kwh, 2)}/kWh avg`, "teal"));
     cards.push(kpiCard("DC Fast Charging", fmt(chg.dc_energy_share_pct, 0) + "%",
-      `of energy · ${fmt(chg.full_charge_share_pct, 0)}% to 100%`));
+      `of energy · ${fmt(chg.full_charge_share_pct, 0)}% to 100%`, "red"));
   }
   if (!cards.length) {
     // The window is genuinely empty (e.g. "Since charge" right after charging)
@@ -63,11 +63,15 @@ function renderKpis(d) {
 function barConfig(labels, data, label, color) {
   return {
     type: "bar",
-    data: { labels, datasets: [{ label, data, backgroundColor: color, borderRadius: 4 }] },
+    data: { labels, datasets: [{ label, data, backgroundColor: color,
+      hoverBackgroundColor: color + "cc", borderRadius: 6, maxBarThickness: 44 }] },
     options: {
       responsive: true, maintainAspectRatio: false,
       plugins: { legend: { display: false } },
-      scales: { x: { grid: { display: false } }, y: { beginAtZero: true } },
+      scales: {
+        x: { grid: { display: false }, border: { display: false } },
+        y: { beginAtZero: true, border: { display: false }, grid: { color: GRID } },
+      },
     },
   };
 }
@@ -99,11 +103,16 @@ function renderCharts(d) {
     makeChart("effTrendChart", {
       type: "line",
       data: { labels: Object.keys(w), datasets: [{
-        label: "Wh/km", data: Object.values(w), borderColor: "#e82127",
-        backgroundColor: "rgba(232,33,39,.1)", fill: true, tension: .3, pointRadius: 2 }] },
+        label: "Wh/km", data: Object.values(w), borderColor: "#e82127", borderWidth: 2,
+        backgroundColor: "rgba(232,33,39,.06)", fill: true, tension: .35,
+        pointRadius: 0, pointHitRadius: 12, pointHoverRadius: 4,
+        pointBackgroundColor: "#e82127" }] },
       options: { responsive: true, maintainAspectRatio: false,
         plugins: { legend: { display: false } },
-        scales: { x: { grid: { display: false }, ticks: { maxTicksLimit: 8 } } } },
+        scales: {
+          x: { grid: { display: false }, border: { display: false }, ticks: { maxTicksLimit: 8 } },
+          y: { border: { display: false }, grid: { color: GRID } },
+        } },
     });
   }
 
@@ -122,9 +131,11 @@ function renderCharts(d) {
       type: "doughnut",
       data: { labels: ["AC (home/dest)", "DC (fast)"],
         datasets: [{ data: [chg.ac_energy_kwh, chg.dc_energy_kwh],
-          backgroundColor: ["#22c55e", "#e82127"] }] },
-      options: { responsive: true, maintainAspectRatio: false,
-        plugins: { legend: { position: "bottom" } } },
+          backgroundColor: ["#22c55e", "#e82127"],
+          borderColor: "#171b22", borderWidth: 3, hoverOffset: 6 }] },
+      options: { responsive: true, maintainAspectRatio: false, cutout: "62%",
+        plugins: { legend: { position: "bottom",
+          labels: { usePointStyle: true, boxWidth: 8, boxHeight: 8, padding: 16 } } } },
     });
 
     const st = chg.end_soc_targets;
@@ -154,18 +165,21 @@ function tripWhen(s) {
 
 function renderLists(d) {
   const trips = (d.driving.recent_trips || [])
-    .map((t) => `<li><span>${tripWhen(t.start_time)}${t.route ? " · " + t.route : ""}</span>` +
-      `<span class="count">${t.distance_km} km · ${t.duration_min} min · ${t.wh_per_km} Wh/km</span></li>`)
+    .map((t) => `<li class="trip"><span class="trip-route">${tripWhen(t.start_time)}${t.route ? " · " + t.route : ""}</span>` +
+      `<span class="trip-meta">${t.distance_km} km · ${t.duration_min} min · ${t.wh_per_km} Wh/km</span></li>`)
     .join("");
-  document.getElementById("recentTrips").innerHTML = trips || "<li>No trips yet</li>";
+  document.getElementById("recentTrips").innerHTML =
+    trips || '<li class="empty">No trips in this window</li>';
 
   const routes = (d.driving.top_routes || [])
     .map(([r, c]) => `<li><span>${r}</span><span class="count">${c}×</span></li>`).join("");
-  document.getElementById("topRoutes").innerHTML = routes || "<li>No data</li>";
+  document.getElementById("topRoutes").innerHTML =
+    routes || '<li class="empty">No repeated routes yet</li>';
 
   const locs = (d.charging.top_locations || [])
     .map(([l, c]) => `<li><span>${l}</span><span class="count">${c}×</span></li>`).join("");
-  document.getElementById("topLocations").innerHTML = locs || "<li>No data</li>";
+  document.getElementById("topLocations").innerHTML =
+    locs || '<li class="empty">No charging sessions in this window</li>';
 }
 
 function renderBehaviour(d) {
@@ -185,8 +199,9 @@ function renderBehaviour(d) {
    .map(([label, share, pen]) =>
      `<div class="bat-line">${label}: <strong>${share}%</strong> of km · +${pen} Wh/km</div>`)
    .join("");
+  const scoreCls = b.score >= 80 ? "" : b.score >= 60 ? " warn" : " bad";
   body.innerHTML = `
-    <div class="bat-health">${b.score}<span style="font-size:20px">/100</span></div>
+    <div class="bat-health${scoreCls}">${b.score}<span style="font-size:20px">/100</span></div>
     <div class="bat-line">Typical driving vs your own best quartile
       (<strong>${Math.round(b.best_quartile_wh_per_km)} Wh/km</strong>)</div>
     ${rows || '<div class="bat-line">No costly habits detected in this window 🎉</div>'}
@@ -211,8 +226,9 @@ function renderBattery(d) {
     ? `<div class="bat-line">Charging habits: avg target ${chg.avg_end_soc}% · ` +
       `${chg.full_charge_share_pct}% to 100% · DC ${chg.dc_energy_share_pct}% of energy</div>`
     : "";
+  const healthCls = b.health_pct >= 90 ? "" : b.health_pct >= 80 ? " warn" : " bad";
   body.innerHTML = `
-    <div class="bat-health">${b.health_pct}%</div>
+    <div class="bat-health${healthCls}">${b.health_pct}%</div>
     <div class="bat-line">Estimated full range <strong>${b.est_full_range_km} km</strong>
       · best seen ${b.baseline_full_range_km} km
       (${b.degradation_pct}% degradation)</div>
