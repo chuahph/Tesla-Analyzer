@@ -64,6 +64,26 @@ def test_eco_score_grades_efficiency():
     assert score_grade(58) == "C" and score_grade(45) == "D" and score_grade(20) == "E"
 
 
+def test_charge_location_inferred_from_nearby_trip():
+    from datetime import datetime
+
+    from app.analysis.charging import analyze
+    from app.models import Charge, Drive
+
+    # A drive ends at "Juru" at 16:16; a charge (no GPS) starts at 16:20.
+    drive = Drive(start_time=datetime(2026, 7, 4, 16, 1), end_time=datetime(2026, 7, 4, 16, 16),
+                  distance_km=7.1, duration_min=15, avg_speed_kmh=28, max_speed_kmh=60,
+                  start_soc=60, end_soc=55, energy_used_kwh=1.0, outside_temp_c=34,
+                  start_location="Seberang Jaya", end_location="Juru")
+    charge = Charge(start_time=datetime(2026, 7, 4, 16, 20), end_time=datetime(2026, 7, 4, 16, 55),
+                    duration_min=35, start_soc=55, end_soc=80, energy_added_kwh=18.0,
+                    charge_type="DC", max_power_kw=120, location="", cost=16.2, outside_temp_c=34)
+    r = analyze([charge], [drive])
+    assert r["top_locations"] == [("Juru", 1)]        # inferred from the trip
+    # Without any nearby drive it falls back to the charger type.
+    assert analyze([charge], [])["top_locations"] == [("DC fast charger", 1)]
+
+
 def test_km_per_soc_from_net_drop_on_short_trips():
     """Several short sub-1% trips still yield km/1% via the net SoC drop."""
     from datetime import datetime

@@ -4,11 +4,27 @@ from __future__ import annotations
 from collections import Counter, defaultdict
 from typing import Any
 
-from ..models import Charge
+from ..models import Charge, Drive
 from . import mean, safe_div
 
 
-def analyze(charges: list[Charge]) -> dict[str, Any]:
+def _infer_location(charge: Charge, drives: list[Drive]) -> str:
+    """Best guess for where a charge happened when it has no GPS of its own.
+
+    A car charges where its last drive ended, so borrow the end location of
+    the drive that finished closest to the charge's start (within 2 hours).
+    """
+    best, best_gap = "", None
+    for d in drives:
+        if not d.end_location:
+            continue
+        gap = abs((charge.start_time - d.end_time).total_seconds())
+        if best_gap is None or gap < best_gap:
+            best, best_gap = d.end_location, gap
+    return best if best_gap is not None and best_gap <= 7200 else ""
+
+
+def analyze(charges: list[Charge], drives: list[Drive] | None = None) -> dict[str, Any]:
     if not charges:
         return {"available": False}
 
@@ -30,10 +46,18 @@ def analyze(charges: list[Charge]) -> dict[str, Any]:
         by_hour[c.start_time.hour] += 1
 
     # Locations. Charges logged without GPS (or before location capture existed)
-    # have no place name — group those by charger type so the card still fills.
+    # have no place name — infer it from the trip that ended nearby, else group
+    # by charger type so the card still fills meaningfully.
+    drives = drives or []
+
     def _loc(c: Charge) -> str:
+        if c.location and "," not in c.location:
+            return c.location  # already a named place
+        inferred = _infer_location(c, drives)
+        if inferred:
+            return inferred
         if c.location:
-            return c.location
+            return c.location  # raw coords — better than nothing
         return "DC fast charger" if c.charge_type == "DC" else "AC / home charger"
 
     by_location = Counter(_loc(c) for c in charges)

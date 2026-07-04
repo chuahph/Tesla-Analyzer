@@ -214,8 +214,21 @@
     };
   }
 
+  // Infer a charge's place from the trip that ended nearest its start (within
+  // 2 h), since a car charges where its last drive ended. Mirror of charging.py.
+  function inferChargeLocation(charge, drives) {
+    let best = "", bestGap = null;
+    const cs = new Date(charge.start_time).getTime();
+    (drives || []).forEach((d) => {
+      if (!d.end_location) return;
+      const gap = Math.abs(cs - new Date(d.end_time).getTime()) / 1000;
+      if (bestGap === null || gap < bestGap) { best = d.end_location; bestGap = gap; }
+    });
+    return (bestGap !== null && bestGap <= 7200) ? best : "";
+  }
+
   // --- charging (mirror app/analysis/charging.py) ---
-  function analyzeCharging(charges) {
+  function analyzeCharging(charges, drives) {
     if (!charges.length) return { available: false };
     const ac = charges.filter((c) => c.charge_type === "AC");
     const dc = charges.filter((c) => c.charge_type === "DC");
@@ -228,9 +241,14 @@
     charges.forEach((c) => { const k = Math.round(c.end_soc / 5) * 5; targets.set(k, (targets.get(k) || 0) + 1); });
     const full = charges.filter((c) => c.end_soc >= 99).length;
     const byHour = new Map(), byLoc = new Map();
-    // Charges without a place name group by charger type so the card fills.
-    const locOf = (c) => c.location
-      || (c.charge_type === "DC" ? "DC fast charger" : "AC / home charger");
+    // Named GPS place > inferred-from-trip > raw coords > charger type.
+    const locOf = (c) => {
+      if (c.location && !/,/.test(c.location)) return c.location;
+      const inferred = inferChargeLocation(c, drives);
+      if (inferred) return inferred;
+      if (c.location) return c.location;
+      return c.charge_type === "DC" ? "DC fast charger" : "AC / home charger";
+    };
     charges.forEach((c) => {
       const h = new Date(c.start_time).getHours();
       byHour.set(h, (byHour.get(h) || 0) + 1);
@@ -521,7 +539,7 @@
 
     const capacity = (dataset.vehicle && dataset.vehicle.battery_capacity_kwh) || 75.0;
     const driving = analyzeDriving(drives, rated, capacity);
-    const charging = analyzeCharging(charges);
+    const charging = analyzeCharging(charges, drives);
     const efficiency = analyzeEfficiency(drives, rated);
     const v = dataset.vehicle || {};
     const battery = analyzeBattery(
