@@ -47,12 +47,20 @@ class TeslaClient:
 
         The Fleet API omits GPS/speed/shift unless ``location_data`` is asked
         for explicitly — without it a moving car looks parked. The Owner API
-        ignores the extra query parameter, so this is safe for both.
+        ignores the extra query parameter, so this is safe for both. Tokens
+        whose Tesla app lacks the "Vehicle Location" scope get 403 for the
+        whole call, so on 403 retry without location data — everything else
+        (trips, battery, charging) keeps working, just without positions.
         """
         endpoints = (
             "charge_state%3Bclimate_state%3Bdrive_state%3Blocation_data"
             "%3Bvehicle_config%3Bvehicle_state"
         )
-        return self._get(
-            f"/api/1/vehicles/{vehicle_id}/vehicle_data?endpoints={endpoints}"
-        )
+        try:
+            return self._get(
+                f"/api/1/vehicles/{vehicle_id}/vehicle_data?endpoints={endpoints}"
+            )
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code != 403:
+                raise
+            return self._get(f"/api/1/vehicles/{vehicle_id}/vehicle_data")
