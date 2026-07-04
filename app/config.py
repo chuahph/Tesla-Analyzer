@@ -23,7 +23,9 @@ class Settings(BaseSettings):
     # the access-token paste flow and demo/import modes do not need these.
     tesla_client_id: str = ""
     tesla_client_secret: str = ""
-    tesla_oauth_scope: str = "openid offline_access vehicle_device_data"
+    # vehicle_location powers trip start/end places and live speed; the sync
+    # degrades gracefully (403 fallback) if the Tesla app doesn't grant it.
+    tesla_oauth_scope: str = "openid offline_access vehicle_device_data vehicle_location"
     tesla_oauth_audience: str = "https://fleet-api.prd.na.vn.cloud.tesla.com"
 
     # Optional passcode protecting the whole app (empty = no login required).
