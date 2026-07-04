@@ -405,6 +405,8 @@ def sync_now(wake: bool = Query(False), session: Session = Depends(get_session))
         d["end_location"] = _place(d["end_location"])
         session.add(Drive(vehicle_id=vehicle.id, **d))
     for c in charges:
+        # Name the charging spot (best effort) so it reads "Bangsar" not coords.
+        c["location"] = _place(c.get("location", ""))
         session.add(Charge(vehicle_id=vehicle.id, **c))
     # Battery-health history: store a reading when the SoC actually moved
     # (avoids piling up identical rows from a parked car).
