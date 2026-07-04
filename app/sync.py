@@ -145,6 +145,10 @@ def live_trip(
     # Current speed and average both bound the max from below.
     observed_max = max(open_trip.get("max_speed", 0.0),
                        snap.get("speed_kmh") or 0.0, avg_speed)
+    # Integer SoC barely ticks on a short live drive, so derive the % used from
+    # the measured energy (fractional range delta) when it's the larger figure.
+    soc_from_energy = (energy_kwh / capacity_kwh * 100.0) if capacity_kwh else 0.0
+    soc_eff = max(soc_used, soc_from_energy)
     return {
         "start_time": _dt(open_trip["ts"]).isoformat(timespec="minutes"),
         "distance_km": round(distance, 1),
@@ -154,7 +158,7 @@ def live_trip(
         "start_soc": open_trip["soc"],
         "soc": snap["soc"],
         "soc_used": round(soc_used, 1),
-        "km_per_soc": round(distance / soc_used, 1) if soc_used >= 1 else None,
+        "km_per_soc": round(distance / soc_eff, 1) if soc_eff >= 0.2 and distance else None,
         "energy_kwh": round(energy_kwh, 2),
         "wh_per_km": round(energy_kwh * 1000.0 / distance) if distance >= DRIVE_MIN_KM else None,
     }

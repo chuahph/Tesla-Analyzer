@@ -124,6 +124,18 @@ def test_live_trip_reports_progress():
     assert live_trip(None, now) is None
 
 
+def test_live_trip_km_per_soc_from_energy_on_short_drive():
+    """A short live drive (integer SoC unchanged) still reports km/1%."""
+    from app.sync import live_trip
+
+    # 6 km, range 400->395.2 km (fractional), SoC still reads 80.
+    trip = {"ts": T0, "odo_km": 10_000.0, "soc": 80, "range_km": 400.0, "max_speed": 55}
+    now = snap(T0 + 600, 10_006.0, 80, shift="D", speed=50, range_km=395.2)
+    lt = live_trip(trip, now, capacity_kwh=75.0)
+    assert lt["soc_used"] == 0.0                    # integer SoC didn't move
+    assert lt["km_per_soc"] is not None and lt["km_per_soc"] > 0  # from energy
+
+
 def test_charge_stays_open_until_it_stops():
     """A charge across snapshots = one entry, no 10-minute fragments."""
     c1 = snap(T0, 10_000.0, 60)
