@@ -20,16 +20,18 @@ MIN_SOC = 20.0       # low-SoC readings project unreliably
 RECENT_N = 10        # recent projections summarised as the "current" estimate
 
 # Factory rated range at 100% when new, in km (EPA figures — the same scale
-# the API's battery_range field uses). Badges are matched as whole tokens in
-# the vehicle's model+trim text; first match wins, so keep P-badges first.
-NEW_RANGE_KM: list[tuple[str, str, float]] = [
-    ("MODEL 3", "P74D", 476.0),  # 2024 Performance (EPA 296 mi)
-    ("MODEL 3", "74D", 549.0),   # 2024 Long Range AWD Highland (EPA 341 mi)
-    ("MODEL 3", "74", 549.0),    # Long Range RWD badge variations
-    ("MODEL 3", "50", 438.0),    # RWD (EPA 272 mi)
-    ("MODEL Y", "P74D", 459.0),  # Performance (EPA 285 mi)
-    ("MODEL Y", "74D", 531.0),   # Long Range AWD (EPA 330 mi)
-    ("MODEL Y", "50", 418.0),    # RWD (EPA 260 mi)
+# the API's battery_range field uses). Each entry needs the model substring
+# plus ALL listed tokens (badge, optionally wheel type) in the model+trim
+# text; first match wins, so keep the most specific entries first.
+NEW_RANGE_KM: list[tuple[str, tuple[str, ...], float]] = [
+    ("MODEL 3", ("P74D",), 476.0),          # 2024 Performance (EPA 296 mi)
+    ("MODEL 3", ("74D", "NOVA19"), 491.0),  # 2024 LR AWD, 19" Nova (EPA 305 mi)
+    ("MODEL 3", ("74D",), 549.0),           # 2024 LR AWD, 18" Photon (EPA 341 mi)
+    ("MODEL 3", ("74",), 549.0),            # Long Range badge variations
+    ("MODEL 3", ("50",), 438.0),            # RWD (EPA 272 mi)
+    ("MODEL Y", ("P74D",), 459.0),          # Performance (EPA 285 mi)
+    ("MODEL Y", ("74D",), 531.0),           # Long Range AWD (EPA 330 mi)
+    ("MODEL Y", ("50",), 418.0),            # RWD (EPA 260 mi)
 ]
 
 
@@ -37,8 +39,13 @@ def new_range_for(model: str, trim: str) -> float | None:
     """Factory new range for this exact variant, if we recognise the badge."""
     text = f"{model or ''} {trim or ''}".upper()
     tokens = set(re.split(r"[^A-Z0-9]+", text))
-    for m, badge, km in NEW_RANGE_KM:
-        if m in text and badge in tokens:
+
+    def has(req: str) -> bool:
+        # Exact token, or token prefix for wheel names ("Nova19DarkTinted").
+        return req in tokens or any(t.startswith(req) for t in tokens if t)
+
+    for m, required, km in NEW_RANGE_KM:
+        if m in text and all(has(r) for r in required):
             return km
     return None
 

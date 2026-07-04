@@ -255,18 +255,22 @@
   }
 
   // --- battery health (mirror app/analysis/battery.py) ---
-  // Factory rated range at 100% when new (km, EPA scale) by variant badge.
-  // Keep P-badges first — first match wins.
+  // Factory rated range at 100% when new (km, EPA scale). Each entry needs
+  // the model substring plus ALL listed tokens (badge, optionally wheel type);
+  // most specific entries first — first match wins.
   const NEW_RANGE_KM = [
-    ["MODEL 3", "P74D", 476], ["MODEL 3", "74D", 549], ["MODEL 3", "74", 549],
-    ["MODEL 3", "50", 438],
-    ["MODEL Y", "P74D", 459], ["MODEL Y", "74D", 531], ["MODEL Y", "50", 418],
+    ["MODEL 3", ["P74D"], 476],
+    ["MODEL 3", ["74D", "NOVA19"], 491],  // 2024 LR AWD on 19" Nova (EPA 305 mi)
+    ["MODEL 3", ["74D"], 549],            // 2024 LR AWD on 18" Photon (EPA 341 mi)
+    ["MODEL 3", ["74"], 549], ["MODEL 3", ["50"], 438],
+    ["MODEL Y", ["P74D"], 459], ["MODEL Y", ["74D"], 531], ["MODEL Y", ["50"], 418],
   ];
   function newRangeFor(model, trim) {
     const text = `${model || ""} ${trim || ""}`.toUpperCase();
-    const tokens = new Set(text.split(/[^A-Z0-9]+/));
-    for (const [m, badge, km] of NEW_RANGE_KM) {
-      if (text.includes(m) && tokens.has(badge)) return km;
+    const tokens = [...new Set(text.split(/[^A-Z0-9]+/))].filter(Boolean);
+    const has = (req) => tokens.some((t) => t === req || t.startsWith(req));
+    for (const [m, required, km] of NEW_RANGE_KM) {
+      if (text.includes(m) && required.every(has)) return km;
     }
     return null;
   }
