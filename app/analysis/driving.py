@@ -138,12 +138,18 @@ def analyze(drives: list[Drive], rated_wh_per_km: float = 150.0,
     total_distance = sum(distances)
     total_duration_h = sum(durations) / 60.0
     total_energy = sum(d.energy_used_kwh for d in drives)
-    # Real-world range yardstick: km per 1% of battery used. Integer SoC doesn't
-    # tick on a short trip, so derive the % from the measured energy (which comes
-    # from the fractional range delta) whenever it's the larger, honest figure.
+    # Real-world range yardstick: km per 1% of battery used. Three sources, in
+    # order of robustness — take the largest so short trips still yield a value:
+    #   • net drop from the first drive's start SoC to the last drive's end SoC
+    #     (best for a "since charge" window: no charging in between, so the
+    #     cumulative battery use shows even when each trip is sub-1%);
+    #   • measured energy ÷ pack capacity (fractional, from the range delta);
+    #   • the sum of per-trip integer SoC deltas.
+    ordered = sorted(drives, key=lambda x: x.start_time)
+    soc_net = max(ordered[0].start_soc - ordered[-1].end_soc, 0.0) if ordered else 0.0
     soc_from_int = sum(max(d.start_soc - d.end_soc, 0.0) for d in drives)
     soc_from_energy = (total_energy / capacity_kwh * 100.0) if capacity_kwh else 0.0
-    soc_used = max(soc_from_int, soc_from_energy)
+    soc_used = max(soc_net, soc_from_int, soc_from_energy)
     km_per_soc = round(total_distance / soc_used, 1) if soc_used >= 0.2 and total_distance else None
 
     # Distribution of distance driven across speed regimes.

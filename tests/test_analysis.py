@@ -64,6 +64,26 @@ def test_eco_score_grades_efficiency():
     assert score_grade(58) == "C" and score_grade(45) == "D" and score_grade(20) == "E"
 
 
+def test_km_per_soc_from_net_drop_on_short_trips():
+    """Several short sub-1% trips still yield km/1% via the net SoC drop."""
+    from datetime import datetime
+
+    from app.analysis.driving import analyze
+    from app.models import Drive
+
+    # Three 3 km trips, each end_soc == start_soc (no integer tick), but the
+    # net battery use across them is 80 -> 77 = 3% over 9 km => 3 km/1%.
+    def d(hour, ssoc, esoc):
+        return Drive(start_time=datetime(2026, 7, 4, hour, 0),
+                     end_time=datetime(2026, 7, 4, hour, 10),
+                     distance_km=3.0, duration_min=10.0, avg_speed_kmh=30,
+                     max_speed_kmh=45, start_soc=ssoc, end_soc=esoc,
+                     energy_used_kwh=0.0, outside_temp_c=30.0)
+    drives = [d(8, 80, 80), d(12, 79, 79), d(18, 78, 77)]
+    r = analyze(drives, 150.0, 75.0)
+    assert r["km_per_soc_pct"] == 3.0
+
+
 def test_driving_analysis_reports_scores(seeded):
     drives = seeded.scalars(select(Drive)).all()
     result = driving_analysis.analyze(list(drives), 150.0)
