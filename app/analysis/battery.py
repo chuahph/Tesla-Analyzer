@@ -24,24 +24,35 @@ RECENT_N = 10        # recent projections summarised as the "current" estimate
 # ALL listed tokens (badge, optionally wheel type) in the model+trim text,
 # and — when given — a model-year window (from the VIN). First match wins,
 # so keep the most specific entries first.
+# "@19" means: any wheel-name token carrying that diameter (Nova19,
+# Nova19DarkTinted, Stiletto19, ...), so unexpected wheel names still match.
 NEW_RANGE_KM: list[tuple[str, tuple[str, ...], tuple[int, int] | None, float]] = [
     # 2024+ Model 3 "Highland"
-    ("MODEL 3", ("P74D",), (2024, 2100), 476.0),          # Performance (296 mi)
-    ("MODEL 3", ("74D", "NOVA19"), (2024, 2100), 491.0),  # LR AWD, 19" Nova (305 mi)
-    ("MODEL 3", ("74D",), (2024, 2100), 549.0),           # LR AWD, 18" Photon (341 mi)
+    ("MODEL 3", ("P74D",), (2024, 2100), 476.0),        # Performance (296 mi)
+    ("MODEL 3", ("74D", "@19"), (2024, 2100), 491.0),   # LR AWD, 19" (305 mi)
+    ("MODEL 3", ("74D",), (2024, 2100), 549.0),         # LR AWD, 18" (341 mi)
     # Pre-Highland Model 3
-    ("MODEL 3", ("P74D",), (2017, 2023), 507.0),          # Performance (315 mi)
-    ("MODEL 3", ("74D",), (2017, 2023), 536.0),           # LR AWD (333 mi)
+    ("MODEL 3", ("P74D",), (2017, 2023), 507.0),        # Performance (315 mi)
+    ("MODEL 3", ("74D",), (2017, 2023), 536.0),         # LR AWD (333 mi)
     # Year-agnostic fallbacks (no VIN year available)
     ("MODEL 3", ("P74D",), None, 476.0),
-    ("MODEL 3", ("74D", "NOVA19"), None, 491.0),
+    ("MODEL 3", ("74D", "@19"), None, 491.0),
     ("MODEL 3", ("74D",), None, 549.0),
     ("MODEL 3", ("74",), None, 549.0),
-    ("MODEL 3", ("50",), None, 438.0),                    # RWD (272 mi)
-    ("MODEL Y", ("P74D",), None, 459.0),                  # Performance (285 mi)
-    ("MODEL Y", ("74D",), None, 531.0),                   # LR AWD (330 mi)
-    ("MODEL Y", ("50",), None, 418.0),                    # RWD (260 mi)
+    ("MODEL 3", ("50",), None, 438.0),                  # RWD (272 mi)
+    ("MODEL Y", ("P74D",), None, 459.0),                # Performance (285 mi)
+    ("MODEL Y", ("74D",), None, 531.0),                 # LR AWD (330 mi)
+    ("MODEL Y", ("50",), None, 418.0),                  # RWD (260 mi)
 ]
+
+
+def _wheel_diameter(tokens: set[str]) -> int | None:
+    """Wheel diameter from a wheel-name token like NOVA19 / PHOTON18DARK."""
+    for t in tokens:
+        m = re.match(r"^[A-Z]+(1[89]|2[012])", t)
+        if m:
+            return int(m.group(1))
+    return None
 
 
 def new_range_for(model: str, trim: str, year: int | None = None) -> float | None:
@@ -54,6 +65,8 @@ def new_range_for(model: str, trim: str, year: int | None = None) -> float | Non
     tokens = set(re.split(r"[^A-Z0-9]+", text))
 
     def has(req: str) -> bool:
+        if req.startswith("@"):
+            return _wheel_diameter(tokens) == int(req[1:])
         # Exact token, or token prefix for wheel names ("Nova19DarkTinted").
         return req in tokens or any(t.startswith(req) for t in tokens if t)
 

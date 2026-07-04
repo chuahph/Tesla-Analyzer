@@ -451,6 +451,9 @@ def sync_now(wake: bool = Query(False), session: Session = Depends(get_session))
         # Tells the dashboard whether the token really has location access —
         # the 403 fallback makes a missing scope otherwise invisible.
         "location_access": snap.get("lat") is not None,
+        # Config the car reported this sync — makes wheel detection auditable.
+        "wheel_type": cfg.get("wheel_type") or None,
+        "trim": vehicle.trim,
         "logged": {"drives": len(drives), "charges": len(charges)},
     }
 
