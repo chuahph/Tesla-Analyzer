@@ -81,7 +81,51 @@ def _behaviour(drives: list[Drive], total_distance: float, total_energy: float,
     }
 
 
-def analyze(drives: list[Drive]) -> dict[str, Any]:
+def eco_score(wh_per_km: float, rated_wh_per_km: float) -> int:
+    """0-100 efficiency grade for a Wh/km figure against the car's rated one.
+
+    Calibrated so ~15% below rated scores 100, exactly rated scores 85, and it
+    falls ~1 point per 1% over rated — a simple, absolute driving grade that
+    works per trip and per window.
+    """
+    if not rated_wh_per_km or wh_per_km <= 0:
+        return 0
+    ratio = wh_per_km / rated_wh_per_km
+    return max(0, min(100, round(100 - (ratio - 0.85) * 100)))
+
+
+def score_grade(score: int) -> str:
+    """A / B / C / D / E band for a 0-100 score."""
+    return "A" if score >= 85 else "B" if score >= 70 else \
+        "C" if score >= 55 else "D" if score >= 40 else "E"
+
+
+def _trip_conditions(d: Drive) -> str:
+    """Route/traffic character inferred from the trip's own signals.
+
+    The speed profile tells the story: high peak with a high average is open
+    highway; high peak with a low average means congestion; a low average
+    with spiky peaks is stop-go traffic. Peak-hour timing and heat are added
+    as context tags.
+    """
+    avg, mx = d.avg_speed_kmh or 0.0, d.max_speed_kmh or 0.0
+    if mx >= 90:
+        base = "highway + congestion" if avg < 50 else "highway cruise"
+    elif avg < 50 and mx > 2.2 * avg > 0:
+        base = "stop-go traffic"
+    elif avg < 40:
+        base = "city driving"
+    else:
+        base = "steady flow"
+    parts = [base]
+    if d.start_time.hour in (7, 8, 17, 18, 19):
+        parts.append("peak hour")
+    if d.outside_temp_c >= 33:
+        parts.append(f"hot {round(d.outside_temp_c)}°C")
+    return " · ".join(parts)
+
+
+def analyze(drives: list[Drive], rated_wh_per_km: float = 150.0) -> dict[str, Any]:
     if not drives:
         return {"available": False}
 
@@ -119,6 +163,10 @@ def analyze(drives: list[Drive]) -> dict[str, Any]:
         [d.avg_speed_kmh for d in drives if d.distance_km > 0], effs
     )
 
+    # Distance-weighted window efficiency, and its absolute driving score.
+    window_eff = round(total_energy * 1000.0 / total_distance, 1) if total_distance else 0.0
+    window_score = eco_score(window_eff, rated_wh_per_km)
+
     return {
         "available": True,
         "total_drives": len(drives),
@@ -139,9 +187,10 @@ def analyze(drives: list[Drive]) -> dict[str, Any]:
         "speed_efficiency_slope_wh_per_kmh": round(speed_slope, 3),
         # Distance-weighted (total energy over total km): one noisy short trip
         # can't skew it the way a plain mean of per-trip ratios does.
-        "avg_efficiency_wh_per_km": round(
-            total_energy * 1000.0 / total_distance, 1
-        ) if total_distance else 0.0,
+        "avg_efficiency_wh_per_km": window_eff,
+        # Absolute driving score for the whole window (efficiency vs rated).
+        "eco_score": window_score,
+        "eco_grade": score_grade(window_score),
         "behaviour": _behaviour(drives, total_distance, total_energy, effs),
         "recent_trips": [
             {
@@ -151,6 +200,8 @@ def analyze(drives: list[Drive]) -> dict[str, Any]:
                 "duration_min": round(d.duration_min),
                 "avg_speed_kmh": round(d.avg_speed_kmh),
                 "wh_per_km": round(d.wh_per_km),
+                "eco_score": eco_score(d.wh_per_km, rated_wh_per_km),
+                "conditions": _trip_conditions(d),
                 "route": f"{d.start_location} → {d.end_location}"
                 if d.start_location and d.end_location else "",
             }

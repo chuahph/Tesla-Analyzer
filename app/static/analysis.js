@@ -102,8 +102,33 @@
     };
   }
 
+  // Route/traffic character from the trip's own signals (mirror driving.py).
+  function tripConditions(d) {
+    const avg = d.avg_speed_kmh || 0, mx = d.max_speed_kmh || 0;
+    let base;
+    if (mx >= 90) base = avg < 50 ? "highway + congestion" : "highway cruise";
+    else if (avg < 50 && mx > 2.2 * avg && avg > 0) base = "stop-go traffic";
+    else if (avg < 40) base = "city driving";
+    else base = "steady flow";
+    const parts = [base];
+    const hour = new Date(d.start_time).getHours();
+    if ([7, 8, 17, 18, 19].includes(hour)) parts.push("peak hour");
+    if ((d.outside_temp_c || 0) >= 33) parts.push(`hot ${Math.round(d.outside_temp_c)}°C`);
+    return parts.join(" · ");
+  }
+
+  // Absolute efficiency grade (mirror driving.py eco_score / score_grade).
+  function ecoScore(whPerKm, rated) {
+    if (!rated || whPerKm <= 0) return 0;
+    return Math.max(0, Math.min(100, Math.round(100 - (whPerKm / rated - 0.85) * 100)));
+  }
+  function scoreGrade(s) {
+    return s >= 85 ? "A" : s >= 70 ? "B" : s >= 55 ? "C" : s >= 40 ? "D" : "E";
+  }
+
   // --- driving (mirror app/analysis/driving.py) ---
-  function analyzeDriving(drives) {
+  function analyzeDriving(drives, rated) {
+    rated = rated || RATED_WH_PER_KM;
     if (!drives.length) return { available: false };
     const dist = drives.map((d) => d.distance_km);
     const dur = drives.map((d) => d.duration_min);
@@ -133,6 +158,11 @@
     const tbh = {}; for (let h = 0; h < 24; h++) tbh[String(h)] = byHour.get(h) || 0;
     const tbw = {}; for (let i = 0; i < 7; i++) tbw[WEEKDAYS[i]] = byWd.get(i) || 0;
 
+    const totKm = dist.reduce((a, b) => a + b, 0);
+    const totKwh = drives.reduce((a, d) => a + d.energy_used_kwh, 0);
+    const windowEff = totKm ? round(totKwh * 1000.0 / totKm, 1) : 0.0;
+    const windowScore = ecoScore(windowEff, rated);
+
     return {
       available: true,
       total_drives: drives.length,
@@ -152,11 +182,9 @@
       top_routes: counterTop(routes, 5),
       speed_efficiency_slope_wh_per_kmh: round(slope, 3),
       // Distance-weighted (total energy / total km) — see driving.py.
-      avg_efficiency_wh_per_km: (() => {
-        const km = dist.reduce((a, b) => a + b, 0);
-        const kwh = drives.reduce((a, d) => a + d.energy_used_kwh, 0);
-        return km ? round(kwh * 1000.0 / km, 1) : 0.0;
-      })(),
+      avg_efficiency_wh_per_km: windowEff,
+      eco_score: windowScore,
+      eco_grade: scoreGrade(windowScore),
       behaviour: analyzeBehaviour(drives,
         drives.reduce((a, d) => a + d.distance_km, 0),
         drives.reduce((a, d) => a + d.energy_used_kwh, 0), effs),
@@ -170,6 +198,8 @@
           duration_min: Math.round(d.duration_min),
           avg_speed_kmh: Math.round(d.avg_speed_kmh || 0),
           wh_per_km: Math.round(whPerKm(d)),
+          eco_score: ecoScore(whPerKm(d), rated),
+          conditions: tripConditions(d),
           route: d.start_location && d.end_location
             ? `${d.start_location} → ${d.end_location}` : "",
         })),
@@ -474,7 +504,7 @@
     const drives = (dataset.drives || []).filter((d) => new Date(d.start_time).getTime() >= since);
     const charges = (dataset.charges || []).filter((c) => new Date(c.start_time).getTime() >= since);
 
-    const driving = analyzeDriving(drives);
+    const driving = analyzeDriving(drives, rated);
     const charging = analyzeCharging(charges);
     const efficiency = analyzeEfficiency(drives, rated);
     const v = dataset.vehicle || {};
