@@ -70,6 +70,23 @@ header {
 .bat-health { font-size: 40px; font-weight: 800; color: var(--green); margin: 4px 0 10px; }
 .bat-health.warn { color: var(--amber); }
 .bat-health.bad { color: #ff6b70; }
+/* "!" info toggle beside the health number: what does 100% mean for MY car? */
+.info-btn {
+  width: 22px; height: 22px; margin-left: 8px; padding: 0;
+  vertical-align: 14px;
+  border-radius: 50%; border: 1.5px solid var(--amber);
+  background: rgba(245, 158, 11, .12); color: var(--amber);
+  font-size: 13px; font-weight: 800; line-height: 1; cursor: pointer;
+}
+.info-btn:hover { background: rgba(245, 158, 11, .25); }
+.bat-info {
+  background: var(--panel-2); border: 1px solid var(--border);
+  border-left: 3px solid var(--amber); border-radius: 8px;
+  padding: 10px 12px; margin: 0 0 10px;
+  font-size: 12.5px; color: var(--muted); line-height: 1.7;
+}
+.bat-info strong { color: var(--text); }
+.bat-info.hidden { display: none; }
 .bat-line { color: var(--muted); font-size: 13px; line-height: 1.6; }
 .bat-line strong { color: var(--text); }
 .bat-note { color: var(--muted); font-size: 13px; line-height: 1.6; margin: 6px 0; }

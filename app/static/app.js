@@ -264,11 +264,39 @@ function renderBattery(d) {
     ? `when-new spec ${b.reference_km} km`
     : `best seen ${b.baseline_full_range_km} km`;
   body.innerHTML = `
-    <div class="bat-health${healthCls}">${b.health_pct}%</div>
+    <div class="bat-health${healthCls}">${b.health_pct}%
+      <button id="batt-info-btn" class="info-btn"
+        title="How is the 100% reference chosen?">!</button></div>
+    <div id="batt-info" class="bat-info hidden">${battInfoHtml(d)}</div>
     <div class="bat-line">Estimated full range <strong>${b.est_full_range_km} km</strong>
       vs ${ref} (${b.degradation_pct}% degradation)</div>
     <div class="bat-line">Based on ${b.n_readings} readings · avg SoC ${b.avg_soc}% · lowest seen ${b.min_soc_seen}%</div>
     ${habits}`;
+  const btn = document.getElementById("batt-info-btn");
+  if (btn) btn.addEventListener("click", () =>
+    document.getElementById("batt-info").classList.toggle("hidden"));
+}
+
+// The "!" popover: which car config the 100% reference was derived from.
+function battInfoHtml(d) {
+  const b = d.battery, v = d.vehicle || {};
+  const realVin = v.vin && !/^(DEMO|IMPORT|LINKED)/.test(v.vin) ? v.vin : null;
+  const badge = ((v.trim || "").match(/\b(P?\d+D?)\b/) || [])[1];
+  const wheel = (v.trim || "").split(/\s+/).find((t) =>
+    /^(nova|photon|gemini|induction|crossflow|uberturbine|apollo|turbine|helix|arachnid|cyberstream)/i.test(t));
+  const carLine = [v.year, v.model, badge && `(${badge})`].filter(Boolean).join(" ");
+  const rows = [
+    realVin ? `VIN: <strong>${realVin}</strong>` : null,
+    carLine ? `Car: <strong>${carLine}</strong>` : null,
+    `Wheels: <strong>${wheel || "not reported yet — will appear after a sync"}</strong>`,
+    b.new_range_km
+      ? `When-new 100% range for this config: <strong>${b.new_range_km} km</strong> (EPA)`
+      : "When-new range unknown for this variant — using your best readings instead",
+    b.reference === "factory spec"
+      ? `Health compares recent readings against <strong>${b.reference_km} km</strong>.`
+      : `Reference in use: your best readings (<strong>${b.baseline_full_range_km} km</strong>).`,
+  ];
+  return rows.filter(Boolean).map((r) => `<div>${r}</div>`).join("");
 }
 
 function renderRecommendations(recs) {
