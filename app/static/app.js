@@ -37,12 +37,13 @@ function renderKpis(d) {
       `started ${tripWhen(lt.start_time)} · in progress`, "blue"));
     cards.push(kpiCard("Drive Time", fmt(lt.duration_min) + " min",
       `avg ${fmt(lt.avg_speed_kmh)} km/h · max ${fmt(lt.max_speed_kmh)}`, "amber"));
-    cards.push(kpiCard("Battery Used", fmt(lt.soc_used, 1) + "%",
-      `${fmt(lt.start_soc)}% → ${fmt(lt.soc)}%`, "green"));
-    if (lt.km_per_soc) {
-      cards.push(kpiCard("km / 1% Battery", fmt(lt.km_per_soc, 1) + " km",
-        "this drive", "teal"));
+    if (lt.wh_per_km) {
+      cards.push(kpiCard("Efficiency", fmt(lt.wh_per_km) + " Wh/km",
+        `${fmt(lt.energy_kwh, 1)} kWh this drive`, "green"));
     }
+    cards.push(kpiCard("Battery", fmt(lt.soc_used, 1) + "% used",
+      `${fmt(lt.start_soc)}% → ${fmt(lt.soc)}%` +
+      (lt.km_per_soc ? ` · ${fmt(lt.km_per_soc, 1)} km/1%` : ""), "teal"));
   }
   if (drv.available) {
     cards.push(kpiCard("Distance", fmt(drv.total_distance_km) + " km",

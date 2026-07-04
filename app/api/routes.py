@@ -625,7 +625,7 @@ def summary(
         snap_raw = state.get(session, state.SNAPSHOT_KEY)
         snap = _json.loads(snap_raw) if snap_raw else None
         if open_trip and snap:
-            live = sync_mod.live_trip(open_trip, snap)
+            live = sync_mod.live_trip(open_trip, snap, vehicle.battery_capacity_kwh)
             since = datetime.fromtimestamp(open_trip["ts"], sync_mod.MYT).replace(tzinfo=None)
             window_label = "current drive"
         else:
