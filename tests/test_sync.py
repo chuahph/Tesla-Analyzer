@@ -136,6 +136,35 @@ def test_live_trip_km_per_soc_from_energy_on_short_drive():
     assert lt["km_per_soc"] is not None and lt["km_per_soc"] > 0  # from energy
 
 
+def test_trip_closes_when_charging_starts_not_merging_across_a_charge():
+    """drive -> plug in -> drive must be two trips, not one merged 0-energy trip."""
+    s1 = snap(T0, 10_000.0, 60, range_km=300.0)
+    s2 = snap(T0 + 300, 10_004.0, 59, shift="D", speed=50, present=True, range_km=295.0)
+    s3 = snap(T0 + 900, 10_004.0, 59, charging=True, kw=50, range_km=295.0)  # plugged in
+
+    _, _, trip, _ = step(s1, s2)
+    assert trip is not None
+    d, c, trip, charge = step(s2, s3, trip)
+    # The 4 km drive closes cleanly at plug-in — energy from the pre-charge
+    # range delta, so Wh/km is real (not diluted by the coming charge).
+    assert trip is None and len(d) == 1
+    assert d[0]["distance_km"] == 4.0
+    assert d[0]["energy_used_kwh"] > 0
+
+
+def test_contaminated_low_energy_drive_flagged_unknown():
+    """A drive whose range was refilled mid-trip (Wh/km < 40) logs energy 0."""
+    # 8 km but range only dropped 300.0 -> 299.5 (a charge refilled it): the
+    # implied ~0.12 kWh / 8 km ≈ 15 Wh/km is impossible, so energy -> unknown.
+    from app.sync import _drive_from
+
+    start = snap(T0, 10_000.0, 60, range_km=300.0)
+    end = snap(T0 + 1200, 10_008.0, 60, range_km=299.5)
+    d = _drive_from(start, end, 75.0)
+    assert d["distance_km"] == 8.0
+    assert d["energy_used_kwh"] == 0.0     # flagged unknown, not a wrong 15 Wh/km
+
+
 def test_charge_stays_open_until_it_stops():
     """A charge across snapshots = one entry, no 10-minute fragments."""
     c1 = snap(T0, 10_000.0, 60)
