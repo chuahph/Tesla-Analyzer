@@ -225,10 +225,14 @@
     charges.forEach((c) => { const k = Math.round(c.end_soc / 5) * 5; targets.set(k, (targets.get(k) || 0) + 1); });
     const full = charges.filter((c) => c.end_soc >= 99).length;
     const byHour = new Map(), byLoc = new Map();
+    // Charges without a place name group by charger type so the card fills.
+    const locOf = (c) => c.location
+      || (c.charge_type === "DC" ? "DC fast charger" : "AC / home charger");
     charges.forEach((c) => {
       const h = new Date(c.start_time).getHours();
       byHour.set(h, (byHour.get(h) || 0) + 1);
-      if (c.location) byLoc.set(c.location, (byLoc.get(c.location) || 0) + 1);
+      const l = locOf(c);
+      byLoc.set(l, (byLoc.get(l) || 0) + 1);
     });
 
     const soc = {}; [...targets.keys()].sort((a, b) => a - b).forEach((k) => soc[k] = targets.get(k));

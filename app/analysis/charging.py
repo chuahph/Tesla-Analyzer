@@ -29,8 +29,14 @@ def analyze(charges: list[Charge]) -> dict[str, Any]:
     for c in charges:
         by_hour[c.start_time.hour] += 1
 
-    # Locations.
-    by_location = Counter(c.location for c in charges if c.location)
+    # Locations. Charges logged without GPS (or before location capture existed)
+    # have no place name — group those by charger type so the card still fills.
+    def _loc(c: Charge) -> str:
+        if c.location:
+            return c.location
+        return "DC fast charger" if c.charge_type == "DC" else "AC / home charger"
+
+    by_location = Counter(_loc(c) for c in charges)
 
     return {
         "available": True,
