@@ -101,6 +101,35 @@ def test_summary_since_charge_window():
         settings.app_passcode = old
 
 
+def test_clear_drives_keeps_charges_and_respects_gate():
+    settings = get_settings()
+    old = settings.app_passcode
+    settings.app_passcode = "secret123"
+    try:
+        with TestClient(app) as client:  # startup seeds demo data
+            # Locked without the passcode cookie.
+            assert client.post("/api/data/clear-drives").status_code == 401
+            client.post("/login", data={"passcode": "secret123"})
+            before = client.get("/api/summary?days=730").json()
+            resp = client.post("/api/data/clear-drives")
+            assert resp.status_code == 200
+            assert resp.json()["deleted_drives"] == before["driving"]["total_drives"]
+            after = client.get("/api/summary?days=730").json()
+            assert after["driving"]["available"] is False       # trips gone
+            assert after["charging"]["total_sessions"] == before["charging"]["total_sessions"]
+    finally:
+        settings.app_passcode = old
+        # Re-seed the demo data so later tests see the usual dataset.
+        from app import services
+        from app.database import SessionLocal
+
+        with SessionLocal() as s:
+            services._wipe(s)
+        from app.collector import seed_demo_if_empty
+
+        seed_demo_if_empty()
+
+
 def test_summary_current_drive_falls_back_to_last_drive():
     settings = get_settings()
     old = settings.app_passcode

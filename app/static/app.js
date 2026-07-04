@@ -455,7 +455,29 @@ let pendingFiles = [];
 document.getElementById("btn-import").addEventListener("click", () => {
   openModal("import-modal");
   updateResetButton();
+  // Self-hosted only: the demo/static build has nothing worth wiping.
+  const clearBtn = document.getElementById("clear-trips");
+  if (clearBtn) clearBtn.classList.toggle("hidden", STATIC_MODE);
 });
+
+// Danger zone: wipe the recorded trip history for a clean start.
+const clearTripsBtn = document.getElementById("clear-trips");
+if (clearTripsBtn) {
+  clearTripsBtn.addEventListener("click", async () => {
+    if (!confirm("Delete ALL recorded trips?\n\nCharging history and battery-health " +
+                 "readings are kept. This cannot be undone.")) return;
+    setStatus(importStatus, "Clearing trips…", "");
+    try {
+      const res = await fetch("/api/data/clear-drives", { method: "POST" });
+      const body = await res.json();
+      if (!res.ok) throw new Error(body.detail || "Could not clear trips");
+      setStatus(importStatus, `Deleted ${body.deleted_drives} trip(s).`, "ok");
+      setTimeout(() => { closeModal("import-modal"); load(); }, 700);
+    } catch (e) {
+      setStatus(importStatus, e.message, "err");
+    }
+  });
+}
 
 // "Use demo data" reset (static/PWA mode): clears the imported dataset.
 function updateResetButton() {

@@ -143,6 +143,16 @@ async def import_data(
     return services.replace_with_import(session, drives, charges)
 
 
+@router.post("/data/clear-drives")
+def clear_drives(session: Session = Depends(get_session)):
+    """Wipe the trip history for a clean start (charges/battery data kept).
+
+    Sits behind the passcode gate like every other endpoint.
+    """
+    deleted = services.clear_drives(session)
+    return {"deleted_drives": deleted}
+
+
 # --- Data source: link Tesla account --------------------------------------
 
 

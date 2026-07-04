@@ -28,6 +28,19 @@ def purge_demo(session) -> None:
     session.commit()
 
 
+def clear_drives(session) -> int:
+    """Delete every recorded trip (charges and battery readings are kept).
+
+    Also drops any half-open trip state so the next sync starts a fresh,
+    clean trip instead of closing one anchored in the deleted history.
+    """
+    n = session.query(Drive).count()
+    session.execute(delete(Drive))
+    session.commit()
+    state.put(session, state.OPEN_TRIP_KEY, "")
+    return n
+
+
 def replace_with_import(
     session, drives: list[dict], charges: list[dict], *, name: str = "Imported Tesla"
 ) -> dict:
