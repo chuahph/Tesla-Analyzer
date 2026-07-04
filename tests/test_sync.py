@@ -215,6 +215,18 @@ def test_gap_fallback_logs_merged_sessions():
     assert trip is None and charge is None
 
 
+def test_charge_records_location():
+    """A charge session picks up the car's position (for the locations card)."""
+    c1 = snap(T0, 10_000.0, 60)
+    c2 = snap(T0 + 600, 10_000.0, 65, charging=True, kw=11, lat=3.16, lon=101.71)
+    c3 = snap(T0 + 1800, 10_000.0, 74)
+    d, c, trip, charge = step(None, c1)
+    d, c, trip, charge = step(c1, c2, charge=charge)
+    d, c, trip, charge = step(c2, c3, charge=charge)
+    (chg,) = c
+    assert chg["location"] == "3.1600, 101.7100"
+
+
 def test_charge_uses_teslas_measured_energy():
     """When Tesla reports charge_energy_added, use it instead of estimating."""
     c1 = snap(T0, 10_000.0, 60)

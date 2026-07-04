@@ -184,7 +184,8 @@ def _charge_from(start: dict, cur: dict, capacity_kwh: float, price_per_kwh: flo
         "energy_added_kwh": round(energy, 2),
         "charge_type": "DC" if dc else "AC",
         "max_power_kw": max(start.get("max_kw", 0.0), cur.get("charger_kw", 0.0)),
-        "location": "",
+        # Where the car was charging (coords; named later in the API layer).
+        "location": _coords(start) or _coords(cur),
         "cost": round(energy * price_per_kwh, 2),
         "outside_temp_c": cur["out_temp"],
     }
@@ -258,6 +259,8 @@ def process_snapshot(
             "energy_added_kwh": cur.get("energy_added_kwh") or 0.0,
             "max_kw": cur.get("charger_kw") or 0.0,
             "fast": bool(cur.get("fast")),
+            "lat": cur.get("lat"),
+            "lon": cur.get("lon"),
         }
     elif prev:
         # A whole charge happened between snapshots — the session meter is
@@ -271,6 +274,8 @@ def process_snapshot(
                 "energy_added_kwh": cur.get("energy_added_kwh") or 0.0,
                 "max_kw": prev.get("charger_kw", 0.0),
                 "fast": prev.get("fast"),
+                "lat": prev.get("lat"),
+                "lon": prev.get("lon"),
             },
             cur,
             capacity_kwh,
