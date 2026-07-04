@@ -152,11 +152,14 @@
     const [slope] = linregress(withDist.map((d) => d.avg_speed_kmh), effs);
     const totKm = dist.reduce((a, b) => a + b, 0);
     const totKwh = drives.reduce((a, d) => a + d.energy_used_kwh, 0);
-    // Real-world range yardstick: km per 1% of battery. Integer SoC doesn't
-    // tick on a short trip, so derive the % from measured energy when larger.
+    // Real-world range yardstick: km per 1% of battery. Take the largest of
+    // three sources so short trips still yield a value (see driving.py):
+    // net first→last SoC drop, energy-derived %, and summed per-trip deltas.
+    const ordered = [...drives].sort((a, b) => new Date(a.start_time) - new Date(b.start_time));
+    const socNet = ordered.length ? Math.max((ordered[0].start_soc || 0) - (ordered[ordered.length - 1].end_soc || 0), 0) : 0;
     const socFromInt = drives.reduce((a, d) => a + Math.max((d.start_soc || 0) - (d.end_soc || 0), 0), 0);
     const socFromEnergy = capacity ? (totKwh / capacity * 100.0) : 0;
-    const socUsed = Math.max(socFromInt, socFromEnergy);
+    const socUsed = Math.max(socNet, socFromInt, socFromEnergy);
     const kmPerSoc = (socUsed >= 0.2 && totKm) ? round(totKm / socUsed, 1) : null;
 
     const distBand = {}; [...bySpeed.keys()].sort().forEach((k) => distBand[k] = round(bySpeed.get(k), 1));
