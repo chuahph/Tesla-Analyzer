@@ -16,6 +16,28 @@
 * { box-sizing: border-box; }
 
 html { -webkit-text-size-adjust: 100%; }
+/* Tame the native rubber-band so the custom pull-to-refresh reads cleanly. */
+html, body { overscroll-behavior-y: none; }
+
+/* Pull-to-refresh pill (created by app.js on touch devices). */
+#ptr {
+  position: fixed;
+  top: calc(env(safe-area-inset-top) + 8px);
+  left: 50%;
+  transform: translate(-50%, -64px);
+  transition: transform .2s;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 8px 16px;
+  font-size: 13px;
+  color: var(--muted);
+  z-index: 100;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, .4);
+  pointer-events: none;
+  white-space: nowrap;
+}
+#ptr.show { transform: translate(-50%, 0); }
 
 body {
   margin: 0;
