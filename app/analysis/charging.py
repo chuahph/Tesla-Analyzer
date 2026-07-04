@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from collections import Counter, defaultdict
+from datetime import datetime
 from typing import Any
 
 from ..models import Charge, Drive
@@ -78,10 +79,14 @@ def analyze(charges: list[Charge], drives: list[Drive] | None = None) -> dict[st
         loc_energy[name] += c.energy_added_kwh
         if name not in loc_last or c.start_time > loc_last[name]:
             loc_last[name] = c.start_time
+    # Most recently charged spot first, so the latest session is at the top.
+    ordered_names = sorted(
+        by_location, key=lambda n: loc_last.get(n) or datetime.min, reverse=True
+    )[:5]
     top_locations = [
-        [name, count, round(loc_energy[name], 1),
+        [name, by_location[name], round(loc_energy[name], 1),
          loc_last[name].isoformat(timespec="minutes") if loc_last.get(name) else None]
-        for name, count in by_location.most_common(5)
+        for name in ordered_names
     ]
 
     return {
