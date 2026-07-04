@@ -34,6 +34,14 @@ class TeslaClient:
             resp.raise_for_status()
             return resp.json().get("response", {})
 
+    def wake_up(self, vehicle_id: str | int) -> dict[str, Any]:
+        """Ask a sleeping car to come online (takes a few seconds)."""
+        url = f"{self.base_url}/api/1/vehicles/{vehicle_id}/wake_up"
+        with httpx.Client(timeout=30.0) as client:
+            resp = client.post(url, headers=self._headers())
+            resp.raise_for_status()
+            return resp.json().get("response", {})
+
     def list_vehicles(self) -> list[dict[str, Any]]:
         with httpx.Client(timeout=30.0) as client:
             resp = client.get(
