@@ -84,13 +84,31 @@ def _coords(s: dict[str, Any] | None) -> str:
     return f"{float(s['lat']):.4f}, {float(s['lon']):.4f}"
 
 
+def _energy_kwh(frm: dict, to: dict, capacity_kwh: float) -> float:
+    """Battery energy drawn between two snapshots (kWh).
+
+    battery_level is an integer percent, which quantises a short trip to
+    whole-percent steps (a 0.6% trip reads as 1% — a huge Wh/km error).
+    The rated remaining range is fractional, so prefer its delta scaled
+    through the projected full range; fall back to the SoC delta.
+    """
+    r0 = frm.get("range_km") or 0.0
+    r1 = to.get("range_km") or 0.0
+    soc0 = frm.get("soc") or 0.0
+    if r0 > 0 and r1 > 0 and soc0 >= 5:
+        full = r0 / (soc0 / 100.0)
+        if full > 0:
+            return max(r0 - r1, 0.0) / full * capacity_kwh
+    return max(soc0 - (to.get("soc") or 0.0), 0.0) / 100.0 * capacity_kwh
+
+
 def _drive_from(start: dict, cur: dict, capacity_kwh: float, max_speed: float = 0.0):
     distance = cur["odo_km"] - start["odo_km"]
     if distance < DRIVE_MIN_KM:
         return None
     dt_min = max((cur["ts"] - start["ts"]) / 60.0, 0.0)
     soc_used = max(start["soc"] - cur["soc"], 0.0)
-    energy = soc_used / 100.0 * capacity_kwh
+    energy = _energy_kwh(start, cur, capacity_kwh)
     avg_speed = distance / (dt_min / 60.0) if dt_min else 0.0
     # Speed is only visible in the moment, so a drive with no mid-drive
     # snapshot would record max 0 — the average is the honest floor.
@@ -119,7 +137,7 @@ def live_trip(
     distance = max(snap["odo_km"] - open_trip["odo_km"], 0.0)
     dt_min = max((snap["ts"] - open_trip["ts"]) / 60.0, 0.0)
     soc_used = max(open_trip["soc"] - snap["soc"], 0.0)
-    energy_kwh = soc_used / 100.0 * capacity_kwh
+    energy_kwh = _energy_kwh(open_trip, snap, capacity_kwh)
     avg_speed = distance / (dt_min / 60.0) if dt_min else 0.0
     # Current speed and average both bound the max from below.
     observed_max = max(open_trip.get("max_speed", 0.0),
@@ -144,7 +162,7 @@ def _charge_from(start: dict, cur: dict, capacity_kwh: float, price_per_kwh: flo
     if gain < CHARGE_MIN_PCT:
         return None
     dt_min = max((cur["ts"] - start["ts"]) / 60.0, 0.0)
-    energy = gain / 100.0 * capacity_kwh
+    energy = _energy_kwh(cur, start, capacity_kwh)  # reversed = energy gained
     dc = bool(start.get("fast") or cur.get("fast"))
     return {
         "start_time": _dt(start["ts"]),
@@ -194,6 +212,7 @@ def process_snapshot(
             "ts": base["ts"],
             "odo_km": base["odo_km"],
             "soc": base["soc"],
+            "range_km": base.get("range_km"),
             "max_speed": cur.get("speed_kmh") or 0.0,
             "lat": base.get("lat"),
             "lon": base.get("lon"),
@@ -221,6 +240,7 @@ def process_snapshot(
         open_charge = {
             "ts": base["ts"],
             "soc": base["soc"],
+            "range_km": base.get("range_km"),
             "max_kw": cur.get("charger_kw") or 0.0,
             "fast": bool(cur.get("fast")),
         }
@@ -230,6 +250,7 @@ def process_snapshot(
             {
                 "ts": prev["ts"],
                 "soc": prev["soc"],
+                "range_km": prev.get("range_km"),
                 "max_kw": prev.get("charger_kw", 0.0),
                 "fast": prev.get("fast"),
             },

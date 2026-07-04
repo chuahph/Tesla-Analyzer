@@ -151,7 +151,12 @@
       trips_by_weekday: tbw,
       top_routes: counterTop(routes, 5),
       speed_efficiency_slope_wh_per_kmh: round(slope, 3),
-      avg_efficiency_wh_per_km: round(mean(effs), 1),
+      // Distance-weighted (total energy / total km) — see driving.py.
+      avg_efficiency_wh_per_km: (() => {
+        const km = dist.reduce((a, b) => a + b, 0);
+        const kwh = drives.reduce((a, d) => a + d.energy_used_kwh, 0);
+        return km ? round(kwh * 1000.0 / km, 1) : 0.0;
+      })(),
       behaviour: analyzeBehaviour(drives,
         drives.reduce((a, d) => a + d.distance_km, 0),
         drives.reduce((a, d) => a + d.energy_used_kwh, 0), effs),
@@ -240,7 +245,8 @@
 
     return {
       available: true,
-      avg_efficiency_wh_per_km: round(mean(effs), 1),
+      // Distance-weighted: total energy over total km, not a mean of ratios.
+      avg_efficiency_wh_per_km: totalDist ? round(actualEnergy * 1000.0 / totalDist, 1) : 0.0,
       rated_wh_per_km: rated,
       vs_rated_pct: round(overshoot, 1),
       best_efficiency_wh_per_km: round(Math.min(...effs), 1),

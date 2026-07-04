@@ -137,7 +137,11 @@ def analyze(drives: list[Drive]) -> dict[str, Any]:
         "trips_by_weekday": {weekdays[i]: by_weekday.get(i, 0) for i in range(7)},
         "top_routes": routes.most_common(5),
         "speed_efficiency_slope_wh_per_kmh": round(speed_slope, 3),
-        "avg_efficiency_wh_per_km": round(mean(effs), 1),
+        # Distance-weighted (total energy over total km): one noisy short trip
+        # can't skew it the way a plain mean of per-trip ratios does.
+        "avg_efficiency_wh_per_km": round(
+            total_energy * 1000.0 / total_distance, 1
+        ) if total_distance else 0.0,
         "behaviour": _behaviour(drives, total_distance, total_energy, effs),
         "recent_trips": [
             {

@@ -26,7 +26,10 @@ def analyze(drives: list[Drive], rated_wh_per_km: float) -> dict[str, Any]:
         return {"available": False}
 
     effs = [d.wh_per_km for d in drives]
-    avg_eff = mean(effs)
+    # Distance-weighted: total energy over total km, not a mean of ratios.
+    _distance = sum(d.distance_km for d in drives)
+    _energy = sum(d.energy_used_kwh for d in drives)
+    avg_eff = _energy * 1000.0 / _distance if _distance else 0.0
 
     # Efficiency vs outside temperature.
     by_temp: dict[str, list[float]] = defaultdict(list)
