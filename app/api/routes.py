@@ -589,8 +589,14 @@ def summary(
         .order_by(BatteryReading.ts)
         .limit(2000)
     ).all()
+    # 100% reference: explicit override, else the factory figure for this
+    # exact variant (badge in the trim, e.g. "74D" = 2024 M3 LR AWD).
+    spec_km = settings.battery_new_range_km or battery_analysis.new_range_for(
+        vehicle.model, vehicle.trim
+    )
     battery = battery_analysis.analyze(
-        [{"soc": r.soc, "range_km": r.range_km} for r in readings]
+        [{"soc": r.soc, "range_km": r.range_km} for r in readings],
+        new_range_km=spec_km,
     )
 
     recs = recommendations_engine.build(
