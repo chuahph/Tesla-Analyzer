@@ -11,6 +11,7 @@
   --violet: #a78bfa;
   --teal: #2dd4bf;
   --border: #262b34;
+  --control-h: 38px;   /* uniform height for the top-row controls */
 }
 
 * { box-sizing: border-box; }
@@ -176,7 +177,6 @@ header h1 { margin: 0; font-size: 20px; letter-spacing: .3px; }
 /* Rarely used data actions parked at the bottom of the page. */
 .bottom-actions { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 4px; }
 .bottom-actions .btn { flex: 1 1 auto; }
-@media (min-width: 641px) { #sync-status { text-align: right; } }
 .controls label { color: var(--muted); font-size: 13px; }
 select {
   background: var(--panel-2);
@@ -199,6 +199,18 @@ select {
 }
 .badge.demo { color: var(--amber); border-color: var(--amber); }
 .badge.live { color: var(--green); border-color: var(--green); }
+
+/* Standardise every top-row control (Sync, Window, badge) to one compact,
+   equal height so the row reads as a tidy strip. */
+.controls .btn,
+.controls #range,
+.controls .badge {
+  height: var(--control-h);
+  min-height: var(--control-h);
+  padding-top: 0; padding-bottom: 0;
+  display: inline-flex; align-items: center; justify-content: center;
+  box-sizing: border-box;
+}
 
 main { padding: 24px 28px 60px; max-width: 1280px; margin: 0 auto; }
 
@@ -403,21 +415,23 @@ footer { padding: 18px 28px; color: var(--muted); font-size: 12px; border-top: 1
 .status { font-size: 13px; color: var(--muted); }
 .status.ok { color: var(--green); }
 .status.err, .status.warn { color: var(--amber); }
-/* Car status: a boxed strip under the controls — battery big on the left,
-   the condition/remark to its right, so the live state reads at a glance. */
+/* Car status: a compact boxed strip under the controls — battery on the left,
+   the condition/remark to its right, so the live state reads at a glance.
+   Same visual height rhythm as the control row above it. */
 #sync-status {
   width: 100%; margin: 0;
-  display: flex; align-items: center; gap: 12px;
+  min-height: var(--control-h);
+  display: flex; align-items: center; gap: 10px;
   background: var(--panel-2);
   border: 1px solid var(--border);
-  border-radius: 10px;
-  padding: 9px 14px;
-  line-height: 1.4;
+  border-radius: 8px;
+  padding: 4px 12px;
+  line-height: 1.35;
 }
 #sync-status span:empty { display: none; }
 #sync-batt {
-  font-weight: 800; font-size: 17px; white-space: nowrap;
-  flex: 0 0 auto; padding-right: 12px;
+  font-weight: 800; font-size: 14px; white-space: nowrap;
+  flex: 0 0 auto; padding-right: 10px;
   border-right: 1px solid var(--border);
 }
 /* No divider when only the remark is shown (e.g. "Syncing…" before battery). */
@@ -441,9 +455,9 @@ footer { padding: 18px 28px; color: var(--muted); font-size: 12px; border-top: 1
   }
   .meta-box .clock { font-size: 10px; white-space: normal; }
   .meta-box .clock.build { font-size: 9px; }
-  /* Single line: Sync + Window select + badge. */
+  /* Single line: Sync + Window select + badge — all one compact height. */
   .controls { width: 100%; flex-wrap: nowrap; gap: 6px; }
-  .controls .btn { padding: 8px 10px; font-size: 12.5px; }
+  .controls .btn { padding: 0 10px; font-size: 12.5px; }
   .controls label { display: none; }   /* the select explains itself */
   .controls #btn-sync { flex: 0 0 auto; }
   .controls #range { flex: 1 1 auto; min-width: 0; }
