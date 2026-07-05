@@ -39,10 +39,16 @@ function renderScore(d) {
   const el = document.getElementById("score-banner");
   if (!el) return;
   const drv = d.driving || {};
-  // Hide the score when efficiency is unknown (no energy data) — a 0 would
-  // wrongly read as "grade E".
-  if (!drv.available || drv.eco_score == null) { el.style.display = "none"; return; }
+  const sep = document.getElementById("sep-score");
+  // Hide the score (and its separator) when efficiency is unknown (no energy
+  // data) — a 0 would wrongly read as "grade E".
+  if (!drv.available || drv.eco_score == null) {
+    el.style.display = "none";
+    if (sep) sep.style.display = "none";
+    return;
+  }
   el.style.display = "";
+  if (sep) sep.style.display = "";
   const s = drv.eco_score, grade = drv.eco_grade;
   const rated = (d.efficiency && d.efficiency.rated_wh_per_km) || 150;
   const info = `How the driving score works:<br>` +
