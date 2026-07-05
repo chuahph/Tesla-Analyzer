@@ -178,6 +178,100 @@ def test_sync_returns_clean_503_on_network_error(monkeypatch):
         _reset_to_demo()
 
 
+class _SyncClient:
+    """A parked, online car for driving /api/sync — configurable odometer."""
+    VIN = "VINAAAAAAAAAAAAAA"
+    ODO_KM = 10030.0
+
+    def __init__(self, **_):
+        pass
+
+    def list_vehicles(self):
+        return [{"vin": self.VIN, "id_s": "1", "id": 1, "state": "online"}]
+
+    def wake_up(self, vid):
+        return True
+
+    def vehicle_data(self, vid):
+        return {
+            "vin": self.VIN,
+            "display_name": "Highland",
+            "drive_state": {"timestamp": 1_760_500_000_000, "shift_state": "P", "speed": None},
+            "charge_state": {"battery_level": 74, "battery_range": 370.0 / 1.60934,
+                             "charging_state": "Disconnected"},
+            "climate_state": {"outside_temp": 30},
+            "vehicle_state": {"odometer": ODO_KM_TO_MI(_SyncClient.ODO_KM),
+                              "is_user_present": False, "locked": True},
+            "vehicle_config": {"car_type": "model3"},
+        }
+
+
+def ODO_KM_TO_MI(km):
+    return km / 1.60934
+
+
+def _mk_snap(ts, odo_km, soc, range_km):
+    """A complete snapshot dict (all fields _drive_from reads), like the collector."""
+    from app.sync import snapshot_from_vehicle_data
+
+    return snapshot_from_vehicle_data({
+        "drive_state": {"timestamp": int(ts * 1000), "shift_state": "P"},
+        "charge_state": {"battery_level": soc, "battery_range": range_km / 1.60934,
+                         "charging_state": "Disconnected"},
+        "climate_state": {"outside_temp": 30},
+        "vehicle_state": {"odometer": odo_km / 1.60934, "is_user_present": False, "locked": True},
+    })
+
+
+def test_sync_recovers_drive_missed_at_multicar_upgrade(monkeypatch):
+    """A drive taken around the pre-VIN → per-VIN upgrade must not be dropped.
+
+    Reproduces the field bug: the legacy global snapshot held the pre-drive
+    odometer, the new scoped snapshot the post-drive odometer, and the drive
+    between them was never logged. The migration reconstructs it.
+    """
+    import json
+
+    from app import services, state
+    from app.models import Drive
+
+    settings = get_settings()
+    old = settings.app_passcode
+    settings.app_passcode = ""
+    try:
+        monkeypatch.setattr("app.tesla_client.TeslaClient", _FakeClient)
+        with SessionLocal() as s:
+            services.link_with_token(s, "tok")
+            vin = "VINAAAAAAAAAAAAAA"
+            state.put(s, state.ACTIVE_VIN_KEY, vin)
+            state.put(s, state.LINKED_VIN_KEY, vin)
+            # Legacy global snapshot (pre-drive) + scoped snapshot (post-drive),
+            # built like real snapshots so they carry every field _drive_from reads.
+            legacy = _mk_snap(1_760_490_000.0, 10000.0, 82, 400.0)
+            scoped = _mk_snap(1_760_499_000.0, 10030.0, 74, 370.0)
+            state.put(s, state.SNAPSHOT_KEY, json.dumps(legacy))            # global
+            state.put(s, state.scoped(state.SNAPSHOT_KEY, vin), json.dumps(scoped))
+            vid = s.query(Vehicle).filter(Vehicle.vin == vin).first().id
+
+        monkeypatch.setattr("app.tesla_client.TeslaClient", _SyncClient)
+        with TestClient(app) as client:
+            resp = client.post("/api/sync")
+            assert resp.status_code == 200
+            assert resp.json()["logged"]["drives"] == 1     # the missed drive recovered
+
+        with SessionLocal() as s:
+            drives = s.query(Drive).filter(Drive.vehicle_id == vid).all()
+            assert len(drives) == 1
+            assert abs(drives[0].distance_km - 30.0) < 0.1   # 10000 -> 10030 km
+            # Sensible reconstructed duration (not a multi-hour sleep gap).
+            assert 0 < drives[0].duration_min < 120
+            # Legacy global keys are consumed so it never double-logs.
+            assert state.get(s, state.SNAPSHOT_KEY) == ""
+    finally:
+        settings.app_passcode = old
+        _reset_to_demo()
+
+
 def test_single_car_summary_has_no_garage_picker():
     """A one-car (demo) dashboard exposes no garage, so no picker shows."""
     settings = get_settings()
