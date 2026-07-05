@@ -4,6 +4,7 @@ from __future__ import annotations
 from collections import Counter, defaultdict
 from typing import Any
 
+from .. import sync as sync_mod
 from ..models import Drive
 from . import has_valid_energy, linregress, mean, percentile
 
@@ -222,6 +223,11 @@ def analyze(drives: list[Drive], rated_wh_per_km: float = 150.0,
                 "avg_speed_kmh": round(d.avg_speed_kmh),
                 "max_speed_kmh": round(d.max_speed_kmh),
                 "wh_per_km": round(d.wh_per_km) if has_valid_energy(d) else None,
+                "driving_wh_per_km": (
+                    sync_mod.driving_wh_per_km(
+                        d.energy_used_kwh, d.distance_km, d.duration_min, d.outside_temp_c)
+                    if has_valid_energy(d) else None
+                ),
                 "eco_score": eco_score(d.wh_per_km, rated_wh_per_km) if has_valid_energy(d) else None,
                 "conditions": _trip_conditions(d),
                 "route": f"{d.start_location} → {d.end_location}"

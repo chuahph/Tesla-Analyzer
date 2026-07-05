@@ -340,6 +340,26 @@ def test_fast_charge_flag_makes_dc():
     assert c[0]["max_power_kw"] == 150
 
 
+def test_driving_wh_per_km_removes_idle_load():
+    from app.sync import driving_wh_per_km
+
+    # The reported field case: 3.2 km over 18 min in 33°C traffic drew 0.81 kWh
+    # total (253 Wh/km). Stripping the idle/AC load brings it near Tesla's ~150.
+    est = driving_wh_per_km(0.81, 3.2, 18, 33)
+    assert 130 <= est <= 190          # ballpark of Tesla's 149.5, not 253
+    assert est < 253
+
+    # Steady highway (little idle): the estimate must not inflate efficiency —
+    # it should stay essentially the plain figure.
+    hw = driving_wh_per_km(5.0, 33.0, 22, 25)   # 33 km at ~90 km/h, ~151 Wh/km
+    plain = round(5.0 * 1000.0 / 33.0)
+    assert hw == plain
+
+    # Degenerate inputs return None.
+    assert driving_wh_per_km(0, 5, 10, 25) is None
+    assert driving_wh_per_km(1.0, 0, 10, 25) is None
+
+
 def test_no_change_logs_nothing():
     prev = snap(T0, 10_000.0, 80)
     cur = snap(T0 + 600, 10_000.0, 80)
