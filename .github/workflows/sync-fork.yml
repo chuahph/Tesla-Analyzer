@@ -1,0 +1,31 @@
+name: Sync fork with upstream
+
+# Keeps a FORK of this repo automatically up to date with the original
+# ("upstream"). Once you fork and enable Actions on your fork, this runs on a
+# schedule and fast-forwards your default branch to the latest upstream commit
+# — and because Render is connected to your fork, it then auto-redeploys.
+#
+# It is a no-op on the original repository (guarded by `repository.fork`), so it
+# only ever does anything inside a fork.
+
+on:
+  schedule:
+    - cron: "17 * * * *" # hourly (offset minute to avoid the top-of-hour rush)
+  workflow_dispatch: {} # lets you also trigger a sync by hand from the Actions tab
+
+permissions:
+  contents: write
+
+jobs:
+  sync:
+    # Only run inside a fork — never in the source repository.
+    if: github.event.repository.fork == true
+    runs-on: ubuntu-latest
+    steps:
+      - name: Fast-forward the default branch from upstream
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        # `gh repo sync` calls GitHub's merge-upstream API to pull the parent
+        # repo's commits into this fork's default branch. It fast-forwards only,
+        # so it never clobbers local changes (a plain fork has none).
+        run: gh repo sync "${{ github.repository }}"
