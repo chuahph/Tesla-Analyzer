@@ -245,7 +245,7 @@ function renderKpis(d) {
     // Efficiency is unknown when the drive logged no energy (range gap).
     if (eff.available && eff.avg_efficiency_wh_per_km) {
       cards.push(kpiCard("Avg Efficiency", fmt(eff.avg_efficiency_wh_per_km) + " Wh/km",
-        `${eff.vs_rated_pct >= 0 ? "+" : ""}${fmt(eff.vs_rated_pct, 1)}% vs rated`, "green"));
+        `${fmt(drv.total_energy_kwh, 1)} kWh used · ${eff.vs_rated_pct >= 0 ? "+" : ""}${fmt(eff.vs_rated_pct, 1)}% vs rated`, "green"));
     } else {
       cards.push(kpiCard("Avg Efficiency", "—",
         "waiting on range data from a synced drive", "green"));
@@ -437,6 +437,7 @@ function renderLists(d) {
       const drv = (t.driving_wh_per_km != null && t.wh_per_km != null
         && t.driving_wh_per_km < t.wh_per_km - 3)
         ? ` · drive ≈${t.driving_wh_per_km}` : "";
+      const kwh = t.energy_kwh != null ? ` · ${t.energy_kwh} kWh` : "";
       const whkm = t.wh_per_km != null ? ` · ${t.wh_per_km} Wh/km${drv}` : "";
       // In select mode, a checkbox precedes each trip (self-hosted only).
       const check = tripSelectMode && t.id != null
@@ -449,7 +450,7 @@ function renderLists(d) {
         : "";
       return `<li class="trip${tripSelectMode ? " selectable" : ""}">` +
         `<span class="trip-head">${check}${score}<span class="trip-route">${when}${t.route ? "<br>" + t.route : ""}</span></span>` +
-        `<span class="trip-meta">${t.distance_km} km · ${t.duration_min} min${speed}${whkm}</span>${cond}</li>`;
+        `<span class="trip-meta">${t.distance_km} km · ${t.duration_min} min${speed}${kwh}${whkm}</span>${cond}</li>`;
     })
     .join("");
   const list = document.getElementById("recentTrips");
