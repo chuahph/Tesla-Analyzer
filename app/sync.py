@@ -22,10 +22,16 @@ from typing import Any
 MILES_TO_KM = 1.60934
 DRIVE_MIN_KM = 0.5   # ignore odometer jitter below this
 CHARGE_MIN_PCT = 0.5  # ignore SoC jitter below this
-# A blind gap this long *while a trip is open* means the car parked and fell
-# asleep in between (a moving car keeps getting polled at the cron interval, and
-# a sleeping car is unreadable). Treat it as a power-down that split two drives.
+# A trip ends when the car stops moving — not only when it powers down. If the
+# driver stays aboard (A/C running) the car may sit parked for a long time, and
+# that idle time must not be counted as drive time/energy. PARK_END_MIN is how
+# long the car may sit still (shift P) before the trip is closed at the point it
+# stopped. PARK_GAP_MIN is the blind-gap equivalent (the car slept, unpolled).
+# PARK_SPEED_KMH: below this implied speed across a gap the car was parked, not
+# driving through it (so a continuous drive with a missed poll isn't split).
+PARK_END_MIN = 15.0
 PARK_GAP_MIN = 20.0
+PARK_SPEED_KMH = 15.0
 MYT = timezone(timedelta(hours=8))  # Malaysia has no DST
 
 
@@ -301,33 +307,43 @@ def process_snapshot(
     drives: list[dict] = []
     charges: list[dict] = []
 
-    # --- Trips: open on power-on/in-gear, close on power-down --------------
+    # --- Trips: open on power-on/in-gear, close when the car stops ---------
     if open_trip:
         open_trip = {
             **open_trip,
             "max_speed": max(open_trip.get("max_speed", 0.0), cur.get("speed_kmh") or 0.0),
         }
-        # Close on power-down OR the moment charging starts: you can't charge
-        # mid-drive, so charging is a definitive end-of-trip. Without this a
-        # drive → plug-in → drive sequence merges into one trip, and the charge
-        # refills the pack so the net range delta (energy) comes out far too
-        # low while the odometer distance is inflated.
         gap_min = ((cur["ts"] - prev["ts"]) / 60.0) if prev else 0.0
-        if is_powered_down(cur) or cur.get("charging"):
-            d = _drive_from(open_trip, cur, capacity_kwh, open_trip.get("max_speed", 0.0))
-            if d:
-                drives.append(d)
-            open_trip = None
-        elif prev and gap_min >= PARK_GAP_MIN and is_driving(cur):
-            # The poller went blind for a long stretch mid-trip: the car parked
-            # and slept (a sleeping car can't be read, so we never saw the
-            # power-down), then a new drive started. Close the first drive at the
-            # last seen point and open a fresh one — so two drives that straddle
-            # a nap aren't merged into one.
+        moved = cur["odo_km"] - (prev["odo_km"] if prev else cur["odo_km"])
+        implied = (moved / (gap_min / 60.0)) if gap_min > 0 else 0.0
+
+        if is_driving(cur) and prev and gap_min >= PARK_GAP_MIN and implied < PARK_SPEED_KMH:
+            # Blind gap with little movement: the car parked and slept (unpolled),
+            # then a new drive began. Close the first drive at the last seen point
+            # and start a fresh one — two drives across a nap aren't one trip.
             d = _drive_from(open_trip, prev, capacity_kwh, open_trip.get("max_speed", 0.0))
             if d:
                 drives.append(d)
             open_trip = _open_trip_at(cur, cur)
+        elif is_driving(cur):
+            open_trip["stop_at"] = None   # moving — cancel any pending stop point
+        else:
+            # Parked (not driving). Remember when it first stopped, and end the
+            # trip *at that point* — so trailing idle (driver aboard, A/C on) is
+            # never counted — once it's clearly over: powered down, charging, or
+            # it has sat still past PARK_END_MIN.
+            if not open_trip.get("stop_at"):
+                open_trip["stop_at"] = {
+                    k: cur.get(k) for k in
+                    ("ts", "odo_km", "soc", "range_km", "out_temp", "lat", "lon")
+                }
+            stop_at = open_trip["stop_at"]
+            parked_min = (cur["ts"] - stop_at["ts"]) / 60.0
+            if is_powered_down(cur) or cur.get("charging") or parked_min >= PARK_END_MIN:
+                d = _drive_from(open_trip, stop_at, capacity_kwh, open_trip.get("max_speed", 0.0))
+                if d:
+                    drives.append(d)
+                open_trip = None
     elif is_driving(cur):
         base = prev or cur  # the trip began somewhere after the last snapshot
         open_trip = _open_trip_at(base, cur)

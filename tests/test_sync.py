@@ -67,21 +67,39 @@ def test_two_drives_split_across_an_unseen_nap():
     blind gap between two driving snapshots is treated as that missed stop.
     """
     s1 = snap(T0, 10_000.0, 80)                                  # parked at home
-    s2 = snap(T0 + 300, 10_005.0, 78, shift="D", speed=60)       # drive 1 moving
-    # 25-min blind gap: car parked, locked, slept — no readable snapshots.
-    s3 = snap(T0 + 300 + 1500, 10_012.0, 76, shift="D", speed=55)  # drive 2 moving
-    s4 = snap(T0 + 300 + 1500 + 600, 10_020.0, 74, locked=True)    # drive 2 ends
+    s2 = snap(T0 + 300, 10_005.0, 78, shift="D", speed=60)       # drive 1 moving (5 km)
+    # 25-min blind gap: car parked & slept — odometer unchanged (it didn't move).
+    s3 = snap(T0 + 300 + 1500, 10_005.0, 76, shift="D", speed=40)  # drive 2 resumes
+    s4 = snap(T0 + 300 + 1500 + 600, 10_013.0, 74, locked=True)    # drive 2 ends (8 km)
 
     _, _, trip, _ = step(s1, s2)
     assert trip is not None                       # drive 1 open
     d, _, trip, _ = step(s2, s3, trip)
     assert len(d) == 1                            # drive 1 closed at the last seen point
-    assert d[0]["distance_km"] == 5.0            # 10000 -> 10005 (up to last poll)
+    assert d[0]["distance_km"] == 5.0            # 10000 -> 10005
     assert trip is not None                       # drive 2 now open
-    assert trip["odo_km"] == 10_012.0            # started fresh at the resume snapshot
+    assert trip["odo_km"] == 10_005.0            # started fresh at the resume snapshot
     d, _, trip, _ = step(s3, s4, trip)
     assert trip is None and len(d) == 1          # drive 2 closed on lock
-    assert d[0]["distance_km"] == 8.0            # 10012 -> 10020
+    assert d[0]["distance_km"] == 8.0            # 10005 -> 10013
+
+
+def test_trailing_park_excluded_even_with_driver_aboard():
+    """A ~11 min drive then a long sit with the driver still aboard (A/C on) must
+    log an ~11 min trip — not 30+ — with the parked idle time/energy excluded."""
+    s1 = snap(T0, 10_000.0, 80)
+    s2 = snap(T0 + 660, 10_010.0, 76, shift="D", speed=50, present=True)  # driving, 10 km
+    s3 = snap(T0 + 720, 10_010.0, 76, present=True)          # parked, driver aboard (stop)
+    s4 = snap(T0 + 720 + 1200, 10_010.0, 73, present=True)   # 20 min later, still parked
+
+    _, _, trip, _ = step(s1, s2)
+    assert trip is not None
+    d, _, trip, _ = step(s2, s3, trip)
+    assert d == [] and trip is not None          # brief stop — trip stays open
+    d, _, trip, _ = step(s3, s4, trip)
+    assert trip is None and len(d) == 1          # sat past PARK_END_MIN → closed at the stop
+    assert d[0]["distance_km"] == 10.0
+    assert d[0]["duration_min"] == 12.0          # T0 -> stop(T0+720) = 12 min, not 32
 
 
 def test_trip_survives_brief_stop_and_closes_on_power_down():
