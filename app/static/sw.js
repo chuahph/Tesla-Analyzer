@@ -6,7 +6,7 @@
  *   - navigations & data  -> network-first, fall back to cache when offline
  *   - other assets        -> cache-first, fall back to network
  */
-const CACHE = "tesla-analyzer-v71"; // bump to invalidate cached assets on update
+const CACHE = "tesla-analyzer-v72"; // bump to invalidate cached assets on update
 
 self.addEventListener("install", (event) => {
   self.skipWaiting();

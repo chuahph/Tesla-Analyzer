@@ -242,6 +242,12 @@
                   <code>TESLA_CLIENT_ID</code> / <code>TESLA_CLIENT_SECRET</code>, and let it
                   redeploy.</li>
               </ol>
+              <p class="gs-note gs-note-warn">📝 <strong>Don't see
+                <code>TESLA_CLIENT_ID</code> / <code>TESLA_CLIENT_SECRET</code> in the list?</strong>
+                If you left them blank in Step 2, Render won't have created the rows. Just add them
+                yourself: tap <strong>+ Add Environment Variable</strong>, type the key name exactly
+                (<code>TESLA_CLIENT_ID</code>, then again for <code>TESLA_CLIENT_SECRET</code>),
+                paste each value, and <strong>Save changes</strong> — it redeploys automatically.</p>
               <p class="gs-note">✅ <strong>Public key / domain check is automatic.</strong>
                 Tesla verifies your domain by fetching a key file — this app already serves it
                 at <code>/.well-known/appspecific/com.tesla.3p.public-key.pem</code>, and the

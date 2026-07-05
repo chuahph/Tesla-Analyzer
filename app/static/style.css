@@ -504,6 +504,8 @@ footer { padding: 18px 28px; color: var(--muted); font-size: 12px; border-top: 1
   border-radius: 6px; padding: 8px 10px; margin: 10px 0 0 !important;
   font-size: 12.5px;
 }
+/* Amber variant for a "watch out / you may need to do this manually" note. */
+.gs-note-warn { border-left-color: var(--amber); }
 
 /* Tabs */
 .tabs { display: flex; gap: 6px; margin-bottom: 18px; border-bottom: 1px solid var(--border); }
