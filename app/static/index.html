@@ -376,14 +376,19 @@
             <summary><span class="gs-num">6</span> 🔄 Hands-off logging — recommended</summary>
             <div class="gs-body">
               <p><strong>Why:</strong> because Render sleeps, a small scheduled “ping” keeps
-                your history filling in even when you're not looking at the app.</p>
-              <ol>
-                <li>Open a free scheduler like <strong>cron-job.org</strong>.</li>
-                <li>Create a job that visits
-                  <code>https://ev-drive-analyzer.onrender.com/api/sync?key=YOUR_SYNC_KEY</code>
-                  <strong>every 5 minutes</strong> (use the <code>SYNC_KEY</code> you chose in Step 3).</li>
-                <li>That's it — it wakes the app and records new drives and charges on its own.</li>
-              </ol>
+                your history filling in even when you're not looking at the app. Pick
+                <strong>one</strong> of these:</p>
+              <p class="gs-note gs-note-info">🤖 <strong>All-in-GitHub (recommended).</strong>
+                Your fork already includes a <strong>“Sync car from Tesla”</strong> action that
+                pings every 5 minutes — no third-party site. Enable it once: open your fork's
+                <strong>Actions</strong> tab and enable workflows, then add two repository secrets
+                (<strong>Settings → Secrets and variables → Actions</strong>):
+                <code>RENDER_URL</code> = your Render address, and <code>SYNC_KEY</code> = the
+                same value from your Render environment. Done — it auto-syncs from GitHub.</p>
+              <p class="gs-note">⏰ <strong>Or a free scheduler.</strong> On
+                <strong>cron-job.org</strong>, create a job that visits
+                <code>https://ev-drive-analyzer.onrender.com/api/sync?key=YOUR_SYNC_KEY</code>
+                <strong>every 5 minutes</strong> (use the <code>SYNC_KEY</code> from Step 3).</p>
               <p class="gs-note">🔋 <strong>Every 5 minutes is safe.</strong> A built-in sleep
                 window means that once the car has been idle ~15 min, the app stops actually
                 polling it (the 5-minute pings just keep Render awake), so it <em>won't</em> cause
