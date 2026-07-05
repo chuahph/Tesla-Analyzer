@@ -60,6 +60,30 @@ def test_trip_opens_spans_snapshots_and_closes_on_park():
     assert drive["max_speed_kmh"] == 90
 
 
+def test_two_drives_split_across_an_unseen_nap():
+    """Drive → park+lock+sleep (unpolled) → drive must be TWO trips, not one.
+
+    The poller can't read a sleeping car, so it never sees the power-down; a long
+    blind gap between two driving snapshots is treated as that missed stop.
+    """
+    s1 = snap(T0, 10_000.0, 80)                                  # parked at home
+    s2 = snap(T0 + 300, 10_005.0, 78, shift="D", speed=60)       # drive 1 moving
+    # 25-min blind gap: car parked, locked, slept — no readable snapshots.
+    s3 = snap(T0 + 300 + 1500, 10_012.0, 76, shift="D", speed=55)  # drive 2 moving
+    s4 = snap(T0 + 300 + 1500 + 600, 10_020.0, 74, locked=True)    # drive 2 ends
+
+    _, _, trip, _ = step(s1, s2)
+    assert trip is not None                       # drive 1 open
+    d, _, trip, _ = step(s2, s3, trip)
+    assert len(d) == 1                            # drive 1 closed at the last seen point
+    assert d[0]["distance_km"] == 5.0            # 10000 -> 10005 (up to last poll)
+    assert trip is not None                       # drive 2 now open
+    assert trip["odo_km"] == 10_012.0            # started fresh at the resume snapshot
+    d, _, trip, _ = step(s3, s4, trip)
+    assert trip is None and len(d) == 1          # drive 2 closed on lock
+    assert d[0]["distance_km"] == 8.0            # 10012 -> 10020
+
+
 def test_trip_survives_brief_stop_and_closes_on_power_down():
     """A stop with the driver still inside keeps the trip open; leaving ends it."""
     s1 = snap(T0, 10_000.0, 80, lat=3.10, lon=101.60)
