@@ -346,7 +346,7 @@ def test_driving_wh_per_km_removes_idle_load():
     # The reported field case: 3.2 km over 18 min in 33°C traffic drew 0.81 kWh
     # total (253 Wh/km). Stripping the idle/AC load brings it near Tesla's ~150.
     est = driving_wh_per_km(0.81, 3.2, 18, 33)
-    assert 130 <= est <= 190          # ballpark of Tesla's 149.5, not 253
+    assert 140 <= est <= 165          # right around Tesla's 149.5, not 253
     assert est < 253
 
     # Steady highway (little idle): the estimate must not inflate efficiency —

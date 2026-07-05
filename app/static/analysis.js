@@ -51,7 +51,7 @@
     const movingMin = Math.min((dist / V_MOVE) * 60.0, dur);
     const idleMin = Math.max(dur - movingMin, 0.0);
     const t = (d.outside_temp_c == null) ? 22.0 : d.outside_temp_c;
-    const idleKw = Math.min(0.3 + 0.11 * Math.abs(t - 22.0), 2.5);
+    const idleKw = Math.min(0.35 + 0.12 * Math.abs(t - 22.0), 2.6);
     const drivingKwh = Math.max(energy - (idleMin / 60.0) * idleKw, energy * 0.35);
     return Math.round((drivingKwh * 1000.0) / dist);
   }

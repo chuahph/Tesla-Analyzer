@@ -142,7 +142,9 @@ def driving_wh_per_km(energy_kwh, distance_km, duration_min, out_temp_c=None):
     idle_min = max(duration_min - moving_min, 0.0)
     t = out_temp_c if out_temp_c is not None else 22.0
     # Climate/accessory draw while stopped — higher the further from a mild ~22°C.
-    idle_kw = min(0.3 + 0.11 * abs(t - 22.0), 2.5)
+    # Calibrated to a measured case (3.2 km, 18 min, 33°C: total 253 → driving ~150
+    # Wh/km, matching Tesla's on-screen "Current Drive").
+    idle_kw = min(0.35 + 0.12 * abs(t - 22.0), 2.6)
     driving_kwh = max(energy_kwh - idle_min / 60.0 * idle_kw, energy_kwh * 0.35)
     return round(driving_kwh * 1000.0 / distance_km)
 
