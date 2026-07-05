@@ -249,7 +249,7 @@ function renderKpis(d) {
         "waiting on range data from a synced drive", "green"));
     }
     cards.push(kpiCard("Avg Speed", fmt(drv.avg_speed_kmh) + " km/h",
-      `peak ${fmt(drv.p95_speed_kmh)} km/h (p95)`, "amber"));
+      `max ${fmt(drv.max_speed_kmh)} · peak ${fmt(drv.p95_speed_kmh)} km/h`, "amber"));
     // Always present so the box never "disappears"; "—" until energy data lands.
     cards.push(drv.km_per_soc_pct
       ? kpiCard("km / 1% Battery", fmt(drv.km_per_soc_pct, 1) + " km", "real-world range", "teal")
@@ -423,7 +423,9 @@ function renderLists(d) {
       const when = t.end_time
         ? `${tripWhen(t.start_time)} → ${tripEnd(t.start_time, t.end_time)}`
         : tripWhen(t.start_time);
-      const speed = t.avg_speed_kmh ? ` · avg ${t.avg_speed_kmh} km/h` : "";
+      const speed = t.avg_speed_kmh
+        ? ` · avg ${t.avg_speed_kmh}${t.max_speed_kmh ? " · max " + t.max_speed_kmh : ""} km/h`
+        : "";
       const score = t.eco_score != null
         ? `<span class="trip-score tone-${scoreTone(t.eco_score)}">${t.eco_score}</span>` : "";
       const whkm = t.wh_per_km != null ? ` · ${t.wh_per_km} Wh/km` : "";
