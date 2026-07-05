@@ -15,9 +15,10 @@ from typing import Any
 
 from . import mean, percentile
 
-MIN_READINGS = 5     # below this the estimate is too noisy to show
-MIN_SOC = 20.0       # low-SoC readings project unreliably
-RECENT_N = 10        # recent projections summarised as the "current" estimate
+MIN_READINGS = 5      # below this the estimate is too noisy to show
+MIN_SOC = 20.0        # low-SoC readings project unreliably
+RELIABLE_SOC = 40.0   # rated range is most linear in the mid/high SoC band
+RECENT_N = 12         # recent projections summarised as the "current" estimate
 
 # Factory rated range at 100% when new, in km (EPA figures — the same scale
 # the API's battery_range field uses). Each entry needs the model substring,
@@ -98,7 +99,14 @@ def analyze(
 
     values = [p for _, p in projections]
     baseline_km = percentile(values, 0.95)          # best the pack has shown
-    current_km = percentile(values[-RECENT_N:], 0.5)  # median resists outliers
+
+    # Current estimate: the median of the most recent projections, taken from
+    # the reliable mid/high-SoC band (rated range is least linear near a full or
+    # near-empty pack). Fall back to all projections if too few in that band.
+    reliable = [(r, p) for r, p in projections if r["soc"] >= RELIABLE_SOC]
+    pool = reliable if len(reliable) >= MIN_READINGS else projections
+    recent = pool[-RECENT_N:]
+    current_km = percentile([p for _, p in recent], 0.5)  # median resists outliers
 
     # 100% reference: the factory when-new figure if it plausibly matches the
     # scale of this car's readings; otherwise the measured best. (A region
@@ -115,6 +123,7 @@ def analyze(
     health = min(100.0, 100.0 - degradation)
 
     socs = [r["soc"] for r, _ in projections]
+    recent_socs = [r["soc"] for r, _ in recent]
     return {
         "available": True,
         "n_readings": len(projections),
@@ -123,6 +132,11 @@ def analyze(
         "est_full_range_km": round(current_km, 0),
         "baseline_full_range_km": round(baseline_km, 0),
         "reference_km": round(reference_km, 0),
+        # For the "show the computation" panel:
+        "est_from_n": len(recent),
+        "est_soc_band": (f"{round(min(recent_socs))}–{round(max(recent_socs))}%"
+                         if recent_socs else ""),
+        "reliable_band": len(reliable) >= MIN_READINGS,
         "reference": reference,
         "new_range_km": round(new_range_km, 0) if new_range_km else None,
         "min_soc_seen": round(min(socs), 0),

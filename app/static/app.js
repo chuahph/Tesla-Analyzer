@@ -456,11 +456,20 @@ function battInfoHtml(d) {
     b.new_range_km
       ? `When-new 100% range for this config: <strong>${b.new_range_km} km</strong> (EPA)`
       : "When-new range unknown for this variant — using your best readings instead",
-    b.reference === "factory spec"
-      ? `Health compares recent readings against <strong>${b.reference_km} km</strong>.`
-      : `Reference in use: your best readings (<strong>${b.baseline_full_range_km} km</strong>).`,
   ];
-  return rows.filter(Boolean).map((r) => `<div>${r}</div>`).join("");
+  // Step-by-step computation of the estimate and health.
+  const band = b.est_soc_band ? ` (SoC ${b.est_soc_band}${b.reliable_band ? "" : ", low-SoC fallback"})` : "";
+  const comp = [
+    `<strong>How it's computed</strong>`,
+    `1. Each sync projects full range = <strong>rated range ÷ (SoC ÷ 100)</strong>.`,
+    `2. Estimated full range = <strong>median of the last ${b.est_from_n || 0} projections</strong>${band} = <strong>${b.est_full_range_km} km</strong>.`,
+    `3. 100% reference = ${b.reference === "factory spec"
+      ? `factory when-new <strong>${b.reference_km} km</strong>`
+      : `your best-seen <strong>${b.baseline_full_range_km} km</strong>`}.`,
+    `4. Health = ${b.est_full_range_km} ÷ ${b.reference_km} = <strong>${b.health_pct}%</strong> (${b.degradation_pct}% degradation).`,
+  ];
+  return [...rows.filter(Boolean), `<div class="bat-comp">${comp.join("<br>")}</div>`]
+    .map((r) => (r.startsWith("<div") ? r : `<div>${r}</div>`)).join("");
 }
 
 function renderRecommendations(recs) {

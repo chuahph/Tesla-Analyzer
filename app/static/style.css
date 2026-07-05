@@ -121,6 +121,7 @@ header {
 }
 .bat-info strong { color: var(--text); }
 .bat-info.hidden { display: none; }
+.bat-comp { margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--border); line-height: 1.8; }
 
 /* Window driving score banner at the top of the dashboard. */
 .score-banner {
