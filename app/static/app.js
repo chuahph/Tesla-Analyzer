@@ -845,19 +845,6 @@ importSubmit.addEventListener("click", async () => {
 });
 
 // --- Button 2: link account ---
-// Reveal the "currently linked / unlink" section when a Tesla is connected.
-function showLinkState(mode, name) {
-  const box = document.getElementById("link-current");
-  if (!box) return;
-  const linked = mode === "live";
-  box.classList.toggle("hidden", !linked);
-  if (linked) {
-    document.getElementById("link-current-name").textContent =
-      name ? `Linked to ${name}` : "Tesla account linked";
-    setStatus(document.getElementById("unlink-status"), "", "");
-  }
-}
-
 document.getElementById("btn-link").addEventListener("click", async () => {
   openModal("link-modal");
   if (STATIC_MODE) {
@@ -868,7 +855,7 @@ document.getElementById("btn-link").addEventListener("click", async () => {
     oauthBtn.removeAttribute("href");
     return;
   }
-  // Reflect server OAuth availability + current link state.
+  // Reflect server OAuth availability.
   try {
     const h = await (await fetch("/api/health")).json();
     const unavailable = document.getElementById("oauth-unavailable");
@@ -878,36 +865,8 @@ document.getElementById("btn-link").addEventListener("click", async () => {
       oauthBtn.classList.add("disabled");
       oauthBtn.removeAttribute("href");
     }
-    let carName = "";
-    try {
-      const vs = await (await fetch("/api/vehicles")).json();
-      if (Array.isArray(vs) && vs.length) carName = vs[0].name || vs[0].vin || "";
-    } catch (_) { /* ignore */ }
-    showLinkState(h.mode, carName);
   } catch (_) { /* ignore */ }
 });
-
-// Unlink handlers: disconnect the Tesla, optionally wiping all data back to the
-// default demo state (for handing the app to a new user).
-async function doUnlink(wipe) {
-  const status = document.getElementById("unlink-status");
-  const msg = wipe
-    ? "Erase ALL logged drives & charges and reset this app to the default demo? This cannot be undone."
-    : "Disconnect the linked Tesla account? Your logged history is kept, but the app stops syncing until an account is linked again.";
-  if (!confirm(msg)) return;
-  setStatus(status, "Working…", "");
-  try {
-    const res = await fetch(`/api/unlink?wipe=${wipe ? "true" : "false"}`, { method: "POST" });
-    const body = await res.json();
-    if (!res.ok) throw new Error(body.detail || "Unlink failed");
-    setStatus(status, wipe ? "Reset to default." : "Tesla disconnected.", "ok");
-    setTimeout(() => { closeModal("link-modal"); load(); }, 900);
-  } catch (e) {
-    setStatus(status, e.message, "err");
-  }
-}
-document.getElementById("unlink-keep")?.addEventListener("click", () => doUnlink(false));
-document.getElementById("unlink-wipe")?.addEventListener("click", () => doUnlink(true));
 
 document.querySelectorAll(".tab").forEach((tab) => {
   tab.addEventListener("click", () => {

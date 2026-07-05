@@ -141,24 +141,6 @@
           <button id="link-submit" class="btn btn-accent">Link account</button>
         </div>
       </div>
-
-      <!-- Shown only when a Tesla account is currently linked: lets the owner
-           disconnect and hand over a clean copy, or reset a taken-over app. -->
-      <div id="link-current" class="link-current hidden">
-        <p class="link-current-status">✅ <strong id="link-current-name">Linked</strong></p>
-        <p class="link-current-help">
-          Disconnect this Tesla — useful before handing the app to someone else so
-          they can sign in with <em>their own</em> account. Choose whether to keep or
-          erase the drives and charges already logged.
-        </p>
-        <div class="link-current-actions">
-          <button id="unlink-keep" class="btn btn-danger btn-mini"
-                  title="Sign out of Tesla but keep the logged history">🔌 Unlink · keep data</button>
-          <button id="unlink-wipe" class="btn btn-danger btn-mini"
-                  title="Erase all data and reset to the default demo state">🧹 Reset to default</button>
-        </div>
-        <span id="unlink-status" class="status"></span>
-      </div>
     </div>
   </div>
 
@@ -308,10 +290,7 @@
                 (<code>chuahph.github.io/Tesla-Analyzer</code>) or have them use
                 <strong>📁 Load Tesla Data</strong> with their own Tesla export — both keep their
                 data on their own device, with no access to your car. For their own live
-                analytics, they'd set up their own copy (Steps 1–4). Handing over your
-                <em>own</em> deployment instead? Open <strong>🔗 Link Tesla Account →
-                🧹 Reset to default</strong> first to unlink your car and wipe it back to a
-                clean demo state.</p>
+                analytics, they'd set up their own copy (Steps 1–4).</p>
             </div>
           </details>
         </li>

@@ -37,15 +37,6 @@ def put(session: Session, key: str, value: str) -> None:
     session.commit()
 
 
-def delete(session: Session, *keys: str) -> None:
-    """Remove one or more runtime state keys (e.g. when unlinking an account)."""
-    for key in keys:
-        row = session.get(Setting, key)
-        if row is not None:
-            session.delete(row)
-    session.commit()
-
-
 def active_token(session: Session) -> str:
     """A token linked at runtime takes precedence over the .env token."""
     return get(session, TOKEN_KEY) or get_settings().tesla_access_token
