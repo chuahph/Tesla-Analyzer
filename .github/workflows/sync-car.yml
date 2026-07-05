@@ -1,0 +1,43 @@
+name: Sync car from Tesla
+
+# Hands-off logging without a third-party scheduler: this pings your deployed
+# app's /api/sync on a timer, which wakes the (free-tier, sleeping) Render
+# service and records new drives/charges. It is battery-safe — the app's own
+# sleep-window stops actually polling the car once it's been idle ~15 min.
+#
+# To enable it, add two repository secrets (Settings → Secrets and variables →
+# Actions → New repository secret):
+#   RENDER_URL  e.g. https://ev-drive-analyzer.onrender.com   (no trailing slash)
+#   SYNC_KEY    the same value you set in your Render environment
+# Without both secrets this job simply does nothing, so it's safe in any fork.
+
+on:
+  schedule:
+    - cron: "*/5 * * * *" # every 5 minutes
+  workflow_dispatch: {}   # also runnable by hand from the Actions tab
+
+# Never let two pings overlap (a wake can take ~30 s).
+concurrency:
+  group: sync-car
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ping /api/sync
+        env:
+          RENDER_URL: ${{ secrets.RENDER_URL }}
+          SYNC_KEY: ${{ secrets.SYNC_KEY }}
+        run: |
+          if [ -z "$RENDER_URL" ] || [ -z "$SYNC_KEY" ]; then
+            echo "RENDER_URL / SYNC_KEY not configured — nothing to do."
+            echo "Add them as repository secrets to enable automatic syncing."
+            exit 0
+          fi
+          # Show the response + status but never fail the run on a transient
+          # error (asleep car, cold start, brief Tesla outage) — the next run
+          # picks it up. The secret is masked by Actions and not echoed.
+          resp=$(curl -sS --max-time 150 -w $'\nHTTP %{http_code}' \
+            "${RENDER_URL%/}/api/sync?key=${SYNC_KEY}" || true)
+          echo "$resp"
