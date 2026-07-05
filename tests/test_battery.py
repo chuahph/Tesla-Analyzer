@@ -35,6 +35,19 @@ def test_degraded_pack():
     assert 8 <= r["degradation_pct"] <= 12   # ~10% drop
     assert r["baseline_full_range_km"] == 500
     assert r["est_full_range_km"] == 450
+    # Computation fields for the "how it's computed" panel.
+    assert r["est_from_n"] >= 5
+    assert r["reliable_band"] is True         # all readings at 60% SoC
+
+
+def test_estimate_prefers_reliable_soc_band():
+    # Recent low-SoC noise shouldn't move the estimate: 20 good mid-SoC readings
+    # plus a couple of noisy 22%-SoC ones at the end.
+    good = [mk(60, 490) for _ in range(20)]
+    noisy = [mk(22, 300) for _ in range(2)]   # low SoC, wild projection
+    r = analyze(good + noisy)
+    assert abs(r["est_full_range_km"] - 490) < 5   # noise excluded
+    assert r["reliable_band"] is True
 
 
 def test_factory_spec_anchors_health():

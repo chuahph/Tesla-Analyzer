@@ -406,7 +406,12 @@
     }
     const values = proj.map((x) => x.p);
     const baseline = percentile(values, 0.95);
-    const current = percentile(values.slice(-10), 0.5); // median resists outliers
+    // Current estimate: median of recent projections from the reliable mid/high
+    // SoC band (rated range is least linear near full/empty). Mirror battery.py.
+    const reliable = proj.filter((x) => x.soc >= 40);
+    const pool = reliable.length >= 5 ? reliable : proj;
+    const recent = pool.slice(-12);
+    const current = percentile(recent.map((x) => x.p), 0.5);
     // Prefer the factory when-new figure as the 100% mark when it matches the
     // scale of this car's readings (see app/analysis/battery.py).
     let referenceKm = baseline, reference = "best seen";
@@ -415,6 +420,7 @@
     }
     const degradation = referenceKm ? Math.max(0, 100 * (referenceKm - current) / referenceKm) : 0;
     const socs = proj.map((x) => x.soc);
+    const recentSocs = recent.map((x) => x.soc);
     return {
       available: true, n_readings: proj.length,
       health_pct: round(Math.min(100, 100 - degradation), 1),
@@ -426,6 +432,9 @@
       new_range_km: newRangeKm ? round(newRangeKm, 0) : null,
       min_soc_seen: round(Math.min(...socs), 0),
       avg_soc: round(mean(socs), 0),
+      est_from_n: recent.length,
+      est_soc_band: recentSocs.length ? `${Math.round(Math.min(...recentSocs))}–${Math.round(Math.max(...recentSocs))}%` : "",
+      reliable_band: reliable.length >= 5,
     };
   }
 
