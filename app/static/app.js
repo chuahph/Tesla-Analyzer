@@ -696,6 +696,11 @@ document.getElementById("btn-import").addEventListener("click", () => {
   updateResetButton();
 });
 
+// Setup guide: step-by-step for a brand-new user (Neon → Render → Tesla dev
+// account → link → auto-sync → install). Pure static content, works offline.
+document.getElementById("btn-guide")?.addEventListener("click", () =>
+  openModal("setup-modal"));
+
 // Trip tools (self-hosted only): select individual trips to delete, or clear
 // all. "Select" reveals a checkbox on each trip; "Delete selected" removes the
 // ticked ones. Charging history and battery-health readings are always kept.
