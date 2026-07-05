@@ -343,17 +343,22 @@ def test_fast_charge_flag_makes_dc():
 def test_driving_wh_per_km_removes_idle_load():
     from app.sync import driving_wh_per_km
 
-    # The reported field case: 3.2 km over 18 min in 33°C traffic drew 0.81 kWh
-    # total (253 Wh/km). Stripping the idle/AC load brings it near Tesla's ~150.
-    est = driving_wh_per_km(0.81, 3.2, 18, 33)
-    assert 140 <= est <= 165          # right around Tesla's 149.5, not 253
+    # Stop-go case (peak well above the average → real idle): 3.2 km / 18 min in
+    # 33°C, 0.81 kWh total (253 Wh/km), avg 11 but peaked ~43 km/h. Stripping the
+    # idle/AC load brings it near Tesla's ~150.
+    est = driving_wh_per_km(0.81, 3.2, 18, 33, avg_speed_kmh=11, max_speed_kmh=43)
+    assert 135 <= est <= 175          # around Tesla's 149.5, not 253
     assert est < 253
 
-    # Steady highway (little idle): the estimate must not inflate efficiency —
-    # it should stay essentially the plain figure.
-    hw = driving_wh_per_km(5.0, 33.0, 22, 25)   # 33 km at ~90 km/h, ~151 Wh/km
-    plain = round(5.0 * 1000.0 / 33.0)
-    assert hw == plain
+    # Steady crawl (no peak above the average → NO idle): a slow but continuous
+    # trip must NOT be trimmed — driving == total.
+    total = round(0.81 * 1000.0 / 3.2)
+    steady = driving_wh_per_km(0.81, 3.2, 18, 33, avg_speed_kmh=11, max_speed_kmh=12)
+    assert steady == total
+
+    # Steady highway (no idle): unchanged, never inflated.
+    hw = driving_wh_per_km(5.0, 33.0, 22, 25, avg_speed_kmh=90, max_speed_kmh=110)
+    assert hw == round(5.0 * 1000.0 / 33.0)
 
     # Degenerate inputs return None.
     assert driving_wh_per_km(0, 5, 10, 25) is None

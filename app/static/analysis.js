@@ -47,12 +47,15 @@
   function drivingWhPerKm(d) {
     const energy = d.energy_used_kwh, dist = d.distance_km, dur = d.duration_min;
     if (!energy || energy <= 0 || dist <= 0 || !dur || dur <= 0) return null;
-    const V_MOVE = 30.0;
-    const movingMin = Math.min((dist / V_MOVE) * 60.0, dur);
-    const idleMin = Math.max(dur - movingMin, 0.0);
+    const avg = (d.avg_speed_kmh && d.avg_speed_kmh > 0) ? d.avg_speed_kmh : dist / (dur / 60.0);
+    const mx = d.max_speed_kmh || 0.0;
+    // Idle only when a higher peak was actually seen; a steady crawl has none.
+    const vMoving = (mx > avg + 5) ? Math.max(avg, 0.65 * mx) : avg;
+    const idleFrac = vMoving > 0 ? Math.max(0.0, 1.0 - avg / vMoving) : 0.0;
+    const idleMin = dur * idleFrac;
     const t = (d.outside_temp_c == null) ? 22.0 : d.outside_temp_c;
     const idleKw = Math.min(0.35 + 0.12 * Math.abs(t - 22.0), 2.6);
-    const drivingKwh = Math.max(energy - (idleMin / 60.0) * idleKw, energy * 0.35);
+    const drivingKwh = Math.max(energy - (idleMin / 60.0) * idleKw, energy * 0.5);
     return Math.round((drivingKwh * 1000.0) / dist);
   }
 

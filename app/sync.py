@@ -125,27 +125,35 @@ def _energy_kwh(frm: dict, to: dict, capacity_kwh: float) -> float:
 MIN_PLAUSIBLE_WH_PER_KM = 40.0  # below this over a whole trip = contaminated data
 
 
-def driving_wh_per_km(energy_kwh, distance_km, duration_min, out_temp_c=None):
+def driving_wh_per_km(energy_kwh, distance_km, duration_min, out_temp_c=None,
+                      avg_speed_kmh=None, max_speed_kmh=None):
     """Estimate the *driving-only* Wh/km by removing modeled idle/climate load.
 
-    Our trips span power-on to power-down, so in slow/stopped traffic (esp. with
-    A/C in the heat) they capture idle energy that Tesla's "Current Drive" figure
-    excludes. This subtracts an estimate of that idle load so the number is
-    comparable to the car's screen. It's an approximation (the car isn't polled
-    continuously) and degrades to the plain figure when there's little idle time
-    (e.g. steady highway), so it never *inflates* efficiency.
+    Our trips span power-on to power-down, so genuine stop-go traffic (the car
+    sped up, then sat stopped with A/C in the heat) captures idle energy that
+    Tesla's "Current Drive" excludes. This subtracts an estimate of it so the
+    number is comparable to the car's screen.
+
+    Idle is only inferred when we actually observed a peak speed meaningfully
+    above the trip average — i.e. the car really did go faster and therefore
+    must have been stopped for the rest. A slow-but-*continuous* crawl (low
+    average, no higher peak) is treated as real driving with no idle, so the
+    figure isn't wrongly trimmed. It never inflates efficiency.
     """
     if not energy_kwh or energy_kwh <= 0 or distance_km <= 0 or duration_min <= 0:
         return None
-    V_MOVE = 30.0  # nominal urban moving speed between stops (km/h)
-    moving_min = min(distance_km / V_MOVE * 60.0, duration_min)
-    idle_min = max(duration_min - moving_min, 0.0)
+    avg = avg_speed_kmh if avg_speed_kmh and avg_speed_kmh > 0 else distance_km / (duration_min / 60.0)
+    mx = max_speed_kmh or 0.0
+    # Average speed while actually moving. Only assume the car went faster than
+    # its trip average — meaning some time was spent stopped — when a higher peak
+    # was actually seen; otherwise it moved steadily and there's no idle.
+    v_moving = max(avg, 0.65 * mx) if mx > avg + 5 else avg
+    idle_frac = max(0.0, 1.0 - avg / v_moving) if v_moving > 0 else 0.0
+    idle_min = duration_min * idle_frac
     t = out_temp_c if out_temp_c is not None else 22.0
     # Climate/accessory draw while stopped — higher the further from a mild ~22°C.
-    # Calibrated to a measured case (3.2 km, 18 min, 33°C: total 253 → driving ~150
-    # Wh/km, matching Tesla's on-screen "Current Drive").
     idle_kw = min(0.35 + 0.12 * abs(t - 22.0), 2.6)
-    driving_kwh = max(energy_kwh - idle_min / 60.0 * idle_kw, energy_kwh * 0.35)
+    driving_kwh = max(energy_kwh - idle_min / 60.0 * idle_kw, energy_kwh * 0.5)
     return round(driving_kwh * 1000.0 / distance_km)
 
 
@@ -216,7 +224,8 @@ def live_trip(
         "energy_kwh": round(energy_kwh, 2),
         "wh_per_km": round(energy_kwh * 1000.0 / distance) if energy_kwh > 0 and distance >= DRIVE_MIN_KM else None,
         "driving_wh_per_km": (
-            driving_wh_per_km(energy_kwh, distance, dt_min, snap.get("out_temp"))
+            driving_wh_per_km(energy_kwh, distance, dt_min, snap.get("out_temp"),
+                              avg_speed, observed_max)
             if energy_kwh > 0 and distance >= DRIVE_MIN_KM else None
         ),
     }
