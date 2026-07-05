@@ -19,23 +19,54 @@
   <!-- Chart.js is vendored locally so the dashboard works fully offline. -->
   <script src="/static/vendor/chart.umd.js"></script>
 </head>
-<body>
+<body class="view-home">
+  <!-- Landing / garage page shown on first load: app identity + version, then a
+       card per linked car. Selecting a car opens its dashboard; a car dashboard
+       has a "← Main" link back here. -->
+  <div id="home-view">
+    <div class="home-inner">
+      <div class="home-hero">
+        <span class="home-logo">⚡</span>
+        <h1 class="home-title">Tesla Analyzer</h1>
+        <p class="home-tagline">Driving · Usage · Charging analytics</p>
+        <div class="home-meta" aria-label="Mode and current time (Malaysia time)">
+          <span id="home-badge" class="badge">…</span>
+          <p id="clock" class="clock"></p>
+        </div>
+      </div>
+
+      <div class="home-cars-wrap">
+        <h2 class="home-h2">Select a car</h2>
+        <div id="home-cars" class="home-cars"></div>
+      </div>
+
+      <div class="home-actions">
+        <button id="btn-link" class="btn btn-accent">🔗 Link Tesla Account</button>
+        <button id="btn-unlink" class="btn hidden"
+                title="Disconnect this Tesla so you can link a different account">🔌 Unlink / switch account</button>
+        <button id="btn-import" class="btn">📁 Load Tesla Data</button>
+        <button id="btn-guide" class="btn">❓ Setup Guide</button>
+      </div>
+
+      <!-- App build / config version, parked at the foot of the garage page. -->
+      <div class="home-foot">
+        <p id="build-info" class="clock build"></p>
+        <p class="home-foot-app">Tesla Analyzer</p>
+      </div>
+    </div>
+  </div>
+
   <header>
     <div class="brand">
       <span class="logo">⚡</span>
       <div>
         <h1>Tesla Analyzer</h1>
         <p id="subtitle">Driving · Usage · Charging analytics</p>
-        <!-- Shown only when more than one car is linked (multi-car account). -->
-        <select id="car-picker" class="car-picker hidden" aria-label="Switch car"></select>
         <div id="car-info" class="info-pop hidden"></div>
       </div>
     </div>
-    <div class="meta-box" aria-label="Current time and app build (Malaysia time)">
-      <p id="clock" class="clock"></p>
-      <p id="build-info" class="clock build"></p>
-    </div>
-    <!-- One line: Sync · Window · badge. Data actions live at the bottom. -->
+    <button id="btn-home" class="btn btn-home" title="Back to car selection">← Main</button>
+    <!-- One line: Sync · Window · badge. Data actions live on the main page. -->
     <div class="controls">
       <button id="btn-sync" class="btn hidden">⟳ Sync</button>
       <label for="range">Window</label>
@@ -460,12 +491,9 @@
       </div>
     </section>
 
-    <!-- Data actions: used rarely, so they sit at the end of the page. -->
+    <!-- Per-car export lives with the car; account actions are on the main page. -->
     <section class="bottom-actions">
-      <button id="btn-import" class="btn">📁 Load Tesla Data</button>
-      <button id="btn-link" class="btn btn-accent">🔗 Link Tesla Account</button>
-      <button id="btn-export" class="btn" title="Download all data as CSV">⬇ CSV</button>
-      <button id="btn-guide" class="btn" title="First-time setup: link your real Tesla">❓ Setup Guide</button>
+      <button id="btn-export" class="btn" title="Download this car's data as CSV">⬇ Export CSV</button>
     </section>
   </main>
 

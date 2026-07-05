@@ -548,6 +548,13 @@ def list_vehicles(session: Session = Depends(get_session)):
     return session.scalars(select(Vehicle).order_by(Vehicle.id)).all()
 
 
+@router.post("/unlink")
+def unlink_account(session: Session = Depends(get_session)):
+    """Disconnect the linked Tesla account so a different one can be linked
+    (keeps the logged history)."""
+    return services.unlink(session)
+
+
 @router.post("/active-vehicle")
 def set_active_vehicle(payload: dict = Body(...), session: Session = Depends(get_session)):
     """Pick which linked car the dashboard follows (multi-car accounts)."""

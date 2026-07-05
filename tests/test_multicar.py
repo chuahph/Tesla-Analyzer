@@ -121,6 +121,34 @@ def test_active_vehicle_switch_endpoint(monkeypatch):
         _reset_to_demo()
 
 
+def test_unlink_clears_account_but_keeps_history(monkeypatch):
+    from app import services, state
+
+    settings = get_settings()
+    old = settings.app_passcode
+    settings.app_passcode = ""
+    monkeypatch.setattr("app.tesla_client.TeslaClient", _FakeClient)
+    try:
+        with SessionLocal() as s:
+            services.link_with_token(s, "tok")
+            state.put(s, state.scoped(state.SNAPSHOT_KEY, "VINAAAAAAAAAAAAAA"), "{}")
+        with TestClient(app) as client:
+            assert client.get("/api/health").json()["mode"] == "live"
+            resp = client.post("/api/unlink")
+            assert resp.status_code == 200
+            assert resp.json() == {"status": "unlinked"}
+        with SessionLocal() as s:
+            assert state.active_token(s) == ""          # token gone
+            assert not state.is_live(s)                 # no longer live
+            # Per-VIN scoped state is cleared too.
+            assert state.get(s, state.scoped(state.SNAPSHOT_KEY, "VINAAAAAAAAAAAAAA")) == ""
+            # Cars remain as history.
+            assert s.query(Vehicle).count() >= 2
+    finally:
+        settings.app_passcode = old
+        _reset_to_demo()
+
+
 def test_single_car_summary_has_no_garage_picker():
     """A one-car (demo) dashboard exposes no garage, so no picker shows."""
     settings = get_settings()

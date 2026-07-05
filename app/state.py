@@ -38,6 +38,30 @@ def put(session: Session, key: str, value: str) -> None:
     session.commit()
 
 
+def delete(session: Session, *keys: str) -> None:
+    """Remove one or more runtime state keys (e.g. when unlinking an account)."""
+    for key in keys:
+        row = session.get(Setting, key)
+        if row is not None:
+            session.delete(row)
+    session.commit()
+
+
+def delete_scoped(session: Session, *base_keys: str) -> None:
+    """Remove every per-VIN variant of the given base keys (e.g. all the
+    ``last_snapshot::<vin>`` rows) so no stale per-car state lingers after unlink."""
+    from sqlalchemy import or_
+
+    if not base_keys:
+        return
+    rows = session.query(Setting).filter(
+        or_(*[Setting.key.like(f"{b}::%") for b in base_keys])
+    ).all()
+    for row in rows:
+        session.delete(row)
+    session.commit()
+
+
 def scoped(base_key: str, vin: str) -> str:
     """Per-car state key namespaced by VIN, so each linked car keeps its own
     snapshot / open-trip / open-charge without clobbering the others. Falls back
