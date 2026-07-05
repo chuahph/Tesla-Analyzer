@@ -492,6 +492,18 @@ def refresh_link(session: Session = Depends(get_session)):
     return {"status": "refreshed"}
 
 
+@router.post("/unlink")
+def unlink_account(
+    wipe: bool = Query(False), session: Session = Depends(get_session)
+):
+    """Disconnect the linked Tesla account and return the app to its default.
+
+    ``wipe=false`` keeps the logged history but stops talking to the car;
+    ``wipe=true`` clears all data and reseeds demo — a raw default for a new user.
+    """
+    return services.unlink(session, wipe=wipe)
+
+
 @router.get("/vehicles", response_model=list[VehicleOut])
 def list_vehicles(session: Session = Depends(get_session)):
     return session.scalars(select(Vehicle).order_by(Vehicle.id)).all()
