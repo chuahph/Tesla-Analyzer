@@ -232,6 +232,7 @@
           avg_speed_kmh: Math.round(d.avg_speed_kmh || 0),
           max_speed_kmh: Math.round(d.max_speed_kmh || 0),
           wh_per_km: hasValidEnergy(d) ? Math.round(whPerKm(d)) : null,
+          energy_kwh: hasValidEnergy(d) ? round(d.energy_used_kwh, 2) : null,
           driving_wh_per_km: hasValidEnergy(d) ? drivingWhPerKm(d) : null,
           eco_score: hasValidEnergy(d) ? ecoScore(whPerKm(d), rated) : null,
           conditions: tripConditions(d),

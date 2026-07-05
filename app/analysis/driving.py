@@ -223,6 +223,7 @@ def analyze(drives: list[Drive], rated_wh_per_km: float = 150.0,
                 "avg_speed_kmh": round(d.avg_speed_kmh),
                 "max_speed_kmh": round(d.max_speed_kmh),
                 "wh_per_km": round(d.wh_per_km) if has_valid_energy(d) else None,
+                "energy_kwh": round(d.energy_used_kwh, 2) if has_valid_energy(d) else None,
                 "driving_wh_per_km": (
                     sync_mod.driving_wh_per_km(
                         d.energy_used_kwh, d.distance_km, d.duration_min, d.outside_temp_c)
