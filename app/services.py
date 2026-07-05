@@ -81,6 +81,31 @@ def replace_with_import(
     }
 
 
+def unlink(session) -> dict:
+    """Disconnect the currently-linked Tesla account so a different one can be
+    linked. The logged history is kept (marked as imported); the token and all
+    live-session state — including every car's per-VIN snapshot — are cleared."""
+    state.delete(
+        session,
+        state.TOKEN_KEY,
+        state.REFRESH_KEY,
+        state.BASE_URL_KEY,
+        state.ACTIVE_VIN_KEY,
+        state.LINKED_VIN_KEY,
+        state.SNAPSHOT_KEY,
+        state.OPEN_TRIP_KEY,
+        state.OPEN_CHARGE_KEY,
+        state.LAST_ACTIVE_KEY,
+        state.SUSPEND_KEY,
+    )
+    state.delete_scoped(
+        session, state.SNAPSHOT_KEY, state.OPEN_TRIP_KEY, state.OPEN_CHARGE_KEY
+    )
+    # Keep the history visible, but out of "live" mode until a car is linked again.
+    state.put(session, state.SOURCE_KEY, "imported")
+    return {"status": "unlinked"}
+
+
 def link_with_token(
     session, access_token: str, refresh_token: str = "", base_url: str | None = None
 ) -> dict:

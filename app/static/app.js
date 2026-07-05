@@ -71,35 +71,106 @@ function renderScore(d) {
   wireInfoButtons(el);
 }
 
-// Car picker: shown only when a multi-car account is linked, so you can switch
-// which car the whole dashboard follows.
-function renderCarPicker(garage, activeVin) {
-  const sel = document.getElementById("car-picker");
-  if (!sel) return;
-  garage = garage || [];
-  if (garage.length < 2) { sel.classList.add("hidden"); return; }
-  sel.innerHTML = "";
-  for (const c of garage) {
-    const o = document.createElement("option");
-    o.value = c.vin;
-    const last4 = (c.vin || "").slice(-4);
-    o.textContent = (c.name || c.model || "Car") + (last4 ? ` · ${last4}` : "");
-    if (c.vin === activeVin) o.selected = true;
-    sel.appendChild(o);
-  }
-  sel.classList.remove("hidden");
+// --- Home (garage) page: pick a car, then open its dashboard --------------
+function showHome() {
+  document.body.classList.add("view-home");
+  renderHome();
+}
+function showCar() {
+  document.body.classList.remove("view-home");
+  window.scrollTo(0, 0);
 }
 
-document.getElementById("car-picker")?.addEventListener("change", async (e) => {
-  const vin = e.target.value;
+// Enter a car's dashboard. On the backend, set it as the active car first so the
+// whole dashboard follows it; in the static demo there's only one car to show.
+async function openCar(vin) {
+  if (!STATIC_MODE && vin) {
+    try {
+      await fetch("/api/active-vehicle", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ vin }),
+      });
+    } catch (_) { /* ignore; load() reflects the active car anyway */ }
+  }
+  showCar();
+  await load();
+}
+
+function carCard(car) {
+  const btn = document.createElement("button");
+  btn.className = "car-card";
+  const ico = document.createElement("span");
+  ico.className = "car-card-ico";
+  ico.textContent = "🚗";
+  const main = document.createElement("span");
+  main.className = "car-card-main";
+  const name = document.createElement("span");
+  name.className = "car-card-name";
+  name.textContent = car.name || "My Tesla";
+  const sub = document.createElement("span");
+  sub.className = "car-card-sub";
+  const last4 = (car.vin || "").slice(-4);
+  const realVin = car.vin && !/^(DEMO|IMPORT|LINKED)/.test(car.vin);
+  sub.textContent = [car.model, realVin && last4 ? "VIN …" + last4 : ""]
+    .filter(Boolean).join(" · ") || "Tap to view analytics";
+  main.append(name, sub);
+  const go = document.createElement("span");
+  go.className = "car-card-go";
+  go.textContent = "›";
+  btn.append(ico, main, go);
+  btn.addEventListener("click", () => openCar(car.vin));
+  return btn;
+}
+
+// Populate the landing page: app version/clock (handled by the clock/build
+// tickers) plus a card per car, and reveal Unlink only when a car is linked.
+async function renderHome() {
+  const cars = document.getElementById("home-cars");
+  let list = [], mode = "demo";
+  if (STATIC_MODE) {
+    const ds = importedDataset() || (await demoDataset());
+    mode = ds.source === "imported" ? "imported" : "demo";
+    list = [{ vin: "", name: mode === "imported" ? "Imported data" : "Demo car", model: "" }];
+  } else {
+    try {
+      const health = await (await fetch("/api/health")).json();
+      mode = health.mode;
+      setBuildInfo(health.build);
+      const vs = await (await fetch("/api/vehicles")).json();
+      const real = (vs || []).filter((v) => !/^(DEMO|IMPORT)/.test(v.vin));
+      list = (mode === "live" && real.length) ? real : (vs || []);
+    } catch (_) { list = []; }
+  }
+  const badge = document.getElementById("home-badge");
+  if (badge) { badge.textContent = mode; badge.className = "badge " + mode; }
+  document.getElementById("btn-unlink")?.classList.toggle("hidden", mode !== "live");
+
+  cars.innerHTML = "";
+  if (!list.length) {
+    const p = document.createElement("p");
+    p.className = "home-empty";
+    p.textContent = "No car yet — link your Tesla account or load a data export below to begin.";
+    cars.appendChild(p);
+    return;
+  }
+  for (const c of list) cars.appendChild(carCard(c));
+}
+
+document.getElementById("btn-home")?.addEventListener("click", showHome);
+
+// Unlink: disconnect the current Tesla so a different account can be linked
+// (the logged history is kept). Returns to the home page afterwards.
+document.getElementById("btn-unlink")?.addEventListener("click", async () => {
+  if (!confirm(
+    "Disconnect the current Tesla account?\n\nYour logged drives and charges are " +
+    "kept. You can then sign in with a different Tesla account.")) return;
   try {
-    await fetch("/api/active-vehicle", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ vin }),
-    });
-  } catch (_) { /* ignore; reload reflects the current active car anyway */ }
-  load();
+    const r = await fetch("/api/unlink", { method: "POST" });
+    if (!r.ok) throw new Error(await r.text());
+  } catch (e) { alert("Unlink failed: " + e.message); return; }
+  window._syncedOnce = false;
+  renderHome();
 });
 
 // Full car-info panel (opened by the "!" after the VIN in the header).
@@ -609,7 +680,6 @@ async function load() {
       sub.appendChild(span);
     }
     fillCarInfo(d.vehicle);
-    renderCarPicker(d.garage, d.active_vin);
 
     lastData = d;
     renderScore(d);
@@ -821,7 +891,7 @@ if (resetBtn) {
     localStorage.removeItem(STORE_KEY);
     setStatus(importStatus, "Reverted to demo data.", "ok");
     updateResetButton();
-    setTimeout(() => { closeModal("import-modal"); load(); }, 600);
+    setTimeout(() => { closeModal("import-modal"); showHome(); }, 600);
   });
 }
 
@@ -869,7 +939,7 @@ importSubmit.addEventListener("click", async () => {
       drivesN = body.imported_drives; chargesN = body.imported_charges;
     }
     setStatus(importStatus, `Imported ${drivesN} drives & ${chargesN} charges.`, "ok");
-    setTimeout(() => { closeModal("import-modal"); load(); }, 800);
+    setTimeout(() => { closeModal("import-modal"); showHome(); }, 800);
   } catch (e) {
     setStatus(importStatus, e.message, "err");
     importSubmit.disabled = false;
@@ -929,7 +999,7 @@ document.getElementById("link-submit").addEventListener("click", async () => {
     if (!res.ok) throw new Error(body.detail || "Linking failed");
     const names = (body.vehicles || []).map((v) => v.name || v.vin).join(", ");
     setStatus(status, `Linked: ${names || "account"}.`, "ok");
-    setTimeout(() => { closeModal("link-modal"); load(); }, 900);
+    setTimeout(() => { closeModal("link-modal"); showHome(); }, 900);
   } catch (e) {
     setStatus(status, e.message, "err");
   }
@@ -1119,4 +1189,5 @@ if ("serviceWorker" in navigator) {
 // Wire the static chart "!" explainers once (dynamic panels wire themselves).
 wireInfoButtons(document);
 
-load();
+// First load lands on the home (garage) page for car selection.
+showHome();
