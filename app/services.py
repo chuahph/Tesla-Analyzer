@@ -95,21 +95,30 @@ def link_with_token(
     if not vehicles:
         raise ValueError("Token is valid but no vehicles are associated with this account.")
 
-    # Real data replaces the seeded sample; the dashboard follows this vehicle.
+    # Real data replaces the seeded sample; the dashboard follows a linked car.
     purge_demo(session)
 
-    v = vehicles[0]
-    vin = v.get("vin", "LINKED-UNKNOWN")
-    state.put(session, state.LINKED_VIN_KEY, vin)
-    existing = session.query(Vehicle).filter(Vehicle.vin == vin).first()
-    if existing is None:
-        existing = Vehicle(
-            vin=vin,
-            name=v.get("display_name") or "My Tesla",
-            model="Tesla",
-        )
-        session.add(existing)
-        session.commit()
+    # Register EVERY car on the account (not just the first) so a multi-car
+    # account can switch between them from the dashboard's car picker.
+    account_vins = []
+    for i, v in enumerate(vehicles):
+        vin = v.get("vin") or f"LINKED-{i}"
+        account_vins.append(vin)
+        existing = session.query(Vehicle).filter(Vehicle.vin == vin).first()
+        if existing is None:
+            session.add(Vehicle(
+                vin=vin,
+                name=v.get("display_name") or "My Tesla",
+                model="Tesla",
+            ))
+    session.commit()
+
+    # Keep the currently-active car if it's still on the account; else default
+    # to the first. LINKED_VIN mirrors it for older single-car code paths.
+    prev_active = state.get(session, state.ACTIVE_VIN_KEY)
+    active = prev_active if prev_active in account_vins else account_vins[0]
+    state.put(session, state.ACTIVE_VIN_KEY, active)
+    state.put(session, state.LINKED_VIN_KEY, active)
 
     state.put(session, state.TOKEN_KEY, access_token)
     if refresh_token:
