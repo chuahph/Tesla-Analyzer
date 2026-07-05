@@ -232,9 +232,8 @@
                       <code>https://ev-drive-analyzer.onrender.com</code></li>
                     <li><strong>Redirect / Callback URI:</strong>
                       <code>https://ev-drive-analyzer.onrender.com/api/link/oauth/callback</code></li>
-                    <li><strong>Scopes:</strong> Vehicle Information &amp; Vehicle Data
-                      (<code>openid</code>, <code>offline_access</code>,
-                      <code>vehicle_device_data</code>).</li>
+                    <li><strong>Scopes</strong> — tick these permissions (see the note below
+                      for what each one does).</li>
                   </ul>
                 </li>
                 <li>Copy the <strong>Client ID</strong> and <strong>Client Secret</strong>. In
@@ -242,6 +241,22 @@
                   <code>TESLA_CLIENT_ID</code> / <code>TESLA_CLIENT_SECRET</code>, and let it
                   redeploy.</li>
               </ol>
+              <p class="gs-note gs-note-info">🔓 <strong>Which scopes to tick.</strong>
+                In the developer portal's permission list, enable these — they're what the app
+                actually uses:</p>
+              <ul class="gs-scopes">
+                <li><strong>Vehicle Information</strong> <span class="gs-code">vehicle_device_data</span>
+                  — <em>required.</em> Reads drives, battery level, range and charge data — the core
+                  of every chart and KPI.</li>
+                <li><strong>Vehicle Location</strong> <span class="gs-code">vehicle_location</span>
+                  — <em>recommended.</em> Gives trip start/end places and live speed. Skip it and
+                  the app still works, but locations show as blank/coordinates.</li>
+                <li><strong>Vehicle Commands</strong> <span class="gs-code">vehicle_cmds</span>
+                  — <em>recommended.</em> Lets <strong>⟳ Sync</strong> gently wake a sleeping car so
+                  it can report fresh data. Without it, sync only sees the car when it's already awake.</li>
+                <li>You can leave the rest <strong>off</strong> — Vehicle Charging Management, Energy
+                  Products, Profile Information, etc. are not used.</li>
+              </ul>
               <p class="gs-note gs-note-warn">📝 <strong>Don't see
                 <code>TESLA_CLIENT_ID</code> / <code>TESLA_CLIENT_SECRET</code> in the list?</strong>
                 If you left them blank in Step 2, Render won't have created the rows. Just add them
