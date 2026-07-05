@@ -22,6 +22,10 @@ from typing import Any
 MILES_TO_KM = 1.60934
 DRIVE_MIN_KM = 0.5   # ignore odometer jitter below this
 CHARGE_MIN_PCT = 0.5  # ignore SoC jitter below this
+# A blind gap this long *while a trip is open* means the car parked and fell
+# asleep in between (a moving car keeps getting polled at the cron interval, and
+# a sleeping car is unreadable). Treat it as a power-down that split two drives.
+PARK_GAP_MIN = 20.0
 MYT = timezone(timedelta(hours=8))  # Malaysia has no DST
 
 
@@ -65,6 +69,19 @@ def snapshot_from_vehicle_data(data: dict[str, Any]) -> dict[str, Any]:
 
 def is_driving(s: dict[str, Any]) -> bool:
     return (s.get("shift") or "P") != "P" or (s.get("speed_kmh") or 0.0) > 0
+
+
+def _open_trip_at(base: dict[str, Any], cur: dict[str, Any]) -> dict[str, Any]:
+    """Start a fresh open-trip anchored at ``base`` (the snapshot it began from)."""
+    return {
+        "ts": base["ts"],
+        "odo_km": base["odo_km"],
+        "soc": base["soc"],
+        "range_km": base.get("range_km"),
+        "max_speed": cur.get("speed_kmh") or 0.0,
+        "lat": base.get("lat"),
+        "lon": base.get("lon"),
+    }
 
 
 def is_powered_down(s: dict[str, Any]) -> bool:
@@ -258,22 +275,25 @@ def process_snapshot(
         # drive → plug-in → drive sequence merges into one trip, and the charge
         # refills the pack so the net range delta (energy) comes out far too
         # low while the odometer distance is inflated.
+        gap_min = ((cur["ts"] - prev["ts"]) / 60.0) if prev else 0.0
         if is_powered_down(cur) or cur.get("charging"):
             d = _drive_from(open_trip, cur, capacity_kwh, open_trip.get("max_speed", 0.0))
             if d:
                 drives.append(d)
             open_trip = None
+        elif prev and gap_min >= PARK_GAP_MIN and is_driving(cur):
+            # The poller went blind for a long stretch mid-trip: the car parked
+            # and slept (a sleeping car can't be read, so we never saw the
+            # power-down), then a new drive started. Close the first drive at the
+            # last seen point and open a fresh one — so two drives that straddle
+            # a nap aren't merged into one.
+            d = _drive_from(open_trip, prev, capacity_kwh, open_trip.get("max_speed", 0.0))
+            if d:
+                drives.append(d)
+            open_trip = _open_trip_at(cur, cur)
     elif is_driving(cur):
         base = prev or cur  # the trip began somewhere after the last snapshot
-        open_trip = {
-            "ts": base["ts"],
-            "odo_km": base["odo_km"],
-            "soc": base["soc"],
-            "range_km": base.get("range_km"),
-            "max_speed": cur.get("speed_kmh") or 0.0,
-            "lat": base.get("lat"),
-            "lon": base.get("lon"),
-        }
+        open_trip = _open_trip_at(base, cur)
     elif prev:
         # A whole drive happened between snapshots (asleep / cron gap).
         d = _drive_from(prev, cur, capacity_kwh)
