@@ -180,27 +180,61 @@
         <ul id="topLocations" class="plain-list"></ul>
       </div>
       <div class="card">
-        <h2>🌡️ Efficiency vs Temperature</h2>
+        <h2>🌡️ Efficiency vs Temperature
+          <button class="info-btn" data-info="info-efftemp">!</button></h2>
+        <div id="info-efftemp" class="info-pop hidden">
+          Average <strong>Wh/km grouped by the outside temperature</strong> during each drive
+          (10°C bands). Shows how weather drives consumption — cold raises it (cabin/battery
+          heating) and high heat raises it too (A/C). Each bar is the mean Wh/km of that band's drives.
+        </div>
         <canvas id="effTempChart"></canvas>
       </div>
       <div class="card">
-        <h2>📈 Weekly Efficiency Trend</h2>
+        <h2>📈 Weekly Efficiency Trend
+          <button class="info-btn" data-info="info-efftrend">!</button></h2>
+        <div id="info-efftrend" class="info-pop hidden">
+          Your <strong>average Wh/km per ISO week</strong> across the window — the mean of each
+          week's drives. Reveals seasonal drift and whether your efficiency is improving over time.
+        </div>
         <canvas id="effTrendChart"></canvas>
       </div>
       <div class="card">
-        <h2>🛣️ Distance by Speed Band</h2>
+        <h2>🛣️ Distance by Speed Band
+          <button class="info-btn" data-info="info-speedband">!</button></h2>
+        <div id="info-speedband" class="info-pop hidden">
+          Total <strong>km driven grouped by each trip's average speed</strong> — City (&lt;30),
+          Urban (30–60), Rural (60–90), Highway (90+ km/h). Shows where your mileage happens;
+          highway km cost the most energy per km (aerodynamic drag rises with speed²).
+        </div>
         <canvas id="speedBandChart"></canvas>
       </div>
       <div class="card">
-        <h2>🕒 Trips by Hour of Day</h2>
+        <h2>🕒 Trips by Hour of Day
+          <button class="info-btn" data-info="info-tripshour">!</button></h2>
+        <div id="info-tripshour" class="info-pop hidden">
+          <strong>Number of trips that started in each hour</strong> (0–23, Malaysia time).
+          Reveals your commute rhythm and how much driving falls in peak-hour traffic.
+        </div>
         <canvas id="tripsHourChart"></canvas>
       </div>
       <div class="card">
-        <h2>⚡ Charging: AC vs DC Energy</h2>
+        <h2>⚡ Charging: AC vs DC Energy
+          <button class="info-btn" data-info="info-acdc">!</button></h2>
+        <div id="info-acdc" class="info-pop hidden">
+          Share of <strong>total kWh added by AC</strong> (home / destination) <strong>vs DC</strong>
+          (Supercharger / fast). DC is quick but adds heat and cell stress and usually costs more
+          per kWh — a lower DC share is gentler on the pack and your wallet.
+        </div>
         <canvas id="acdcChart"></canvas>
       </div>
       <div class="card">
-        <h2>🎯 Charge Target (End SoC)</h2>
+        <h2>🎯 Charge Target (End SoC)
+          <button class="info-btn" data-info="info-soctarget">!</button></h2>
+        <div id="info-soctarget" class="info-pop hidden">
+          How often each <strong>end-of-charge battery level</strong> is used (rounded to 5%).
+          Frequent charges to 100% accelerate degradation; keeping daily charges to 80–90% and only
+          topping to 100% before long trips extends pack life.
+        </div>
         <canvas id="socTargetChart"></canvas>
       </div>
       <div class="card full">

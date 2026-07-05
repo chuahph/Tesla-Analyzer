@@ -170,17 +170,24 @@ function renderKpis(d) {
   document.getElementById("kpis").innerHTML = cards.join("");
 }
 
-function barConfig(labels, data, label, color) {
+function barConfig(labels, data, label, color, unit) {
+  unit = unit || label;
   return {
     type: "bar",
     data: { labels, datasets: [{ label, data, backgroundColor: color,
       hoverBackgroundColor: color + "cc", borderRadius: 6, maxBarThickness: 44 }] },
     options: {
       responsive: true, maintainAspectRatio: false,
-      plugins: { legend: { display: false } },
+      plugins: {
+        legend: { display: false },
+        tooltip: { callbacks: {
+          label: (c) => ` ${fmt(c.parsed.y, 1)} ${unit}`,
+        } },
+      },
       scales: {
         x: { grid: { display: false }, border: { display: false } },
-        y: { beginAtZero: true, border: { display: false }, grid: { color: GRID } },
+        y: { beginAtZero: true, border: { display: false }, grid: { color: GRID },
+          ticks: { maxTicksLimit: 6 } },
       },
     },
   };
@@ -218,10 +225,11 @@ function renderCharts(d) {
         pointRadius: 0, pointHitRadius: 12, pointHoverRadius: 4,
         pointBackgroundColor: "#e82127" }] },
       options: { responsive: true, maintainAspectRatio: false,
-        plugins: { legend: { display: false } },
+        plugins: { legend: { display: false },
+          tooltip: { callbacks: { label: (c) => ` ${fmt(c.parsed.y, 0)} Wh/km` } } },
         scales: {
           x: { grid: { display: false }, border: { display: false }, ticks: { maxTicksLimit: 8 } },
-          y: { border: { display: false }, grid: { color: GRID } },
+          y: { border: { display: false }, grid: { color: GRID }, ticks: { maxTicksLimit: 6 } },
         } },
     });
   }
@@ -229,14 +237,15 @@ function renderCharts(d) {
   if (drv.available) {
     const sb = drv.distance_by_speed_band;
     makeChart("speedBandChart", barConfig(Object.keys(sb), Object.values(sb),
-      "km", "#22c55e"));
+      "km", "#22c55e", "km"));
 
     const th = drv.trips_by_hour;
     makeChart("tripsHourChart", barConfig(Object.keys(th).map(h => h + "h"),
-      Object.values(th), "trips", "#f59e0b"));
+      Object.values(th), "trips", "#f59e0b", "trips"));
   }
 
   if (chg.available) {
+    const acdcTotal = (chg.ac_energy_kwh || 0) + (chg.dc_energy_kwh || 0);
     makeChart("acdcChart", {
       type: "doughnut",
       data: { labels: ["AC (home/dest)", "DC (fast)"],
@@ -245,7 +254,9 @@ function renderCharts(d) {
           borderColor: "#171b22", borderWidth: 3, hoverOffset: 6 }] },
       options: { responsive: true, maintainAspectRatio: false, cutout: "62%",
         plugins: { legend: { position: "bottom",
-          labels: { usePointStyle: true, boxWidth: 8, boxHeight: 8, padding: 16 } } } },
+          labels: { usePointStyle: true, boxWidth: 8, boxHeight: 8, padding: 16 } },
+          tooltip: { callbacks: { label: (c) =>
+            ` ${fmt(c.parsed, 0)} kWh (${acdcTotal ? Math.round(100 * c.parsed / acdcTotal) : 0}%)` } } } },
     });
 
     const st = chg.end_soc_targets;
@@ -253,7 +264,7 @@ function renderCharts(d) {
     showCard("socTargetChart", hasSoc);
     if (hasSoc) {
       makeChart("socTargetChart", barConfig(Object.keys(st).map(s => s + "%"),
-        Object.values(st), "sessions", "#3b82f6"));
+        Object.values(st), "sessions", "#3b82f6", "sessions"));
     }
   } else {
     showCard("socTargetChart", false);
@@ -1052,5 +1063,8 @@ if ("serviceWorker" in navigator) {
     navigator.serviceWorker.register(swUrl).catch(() => {})
   );
 }
+
+// Wire the static chart "!" explainers once (dynamic panels wire themselves).
+wireInfoButtons(document);
 
 load();
