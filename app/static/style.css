@@ -174,18 +174,14 @@ header {
 .bat-line strong { color: var(--text); }
 .bat-note { color: var(--muted); font-size: 13px; line-height: 1.6; margin: 6px 0; }
 
-.brand { display: flex; align-items: center; gap: 14px; }
-/* Reserve the top-right corner for the "← Main" back button on wide screens. */
-@media (min-width: 641px) {
-  header { padding-right: 130px; }
-}
-/* "← Main" back button, pinned to the header's top-right (where the clock was). */
+/* Brand grows to fill the row (min-width:0 lets the VIN subtitle ellipsis
+   instead of pushing under the back button). */
+.brand { display: flex; align-items: center; gap: 14px; flex: 1 1 auto; min-width: 0; }
+/* "← Main" back button: normal-flow item at the top-right of the header, so it
+   never overlaps the car subtitle or the controls row below it. */
 .btn-home {
-  position: absolute;
-  top: calc(12px + env(safe-area-inset-top));
-  right: max(14px, env(safe-area-inset-right));
-  min-height: 34px; padding: 6px 12px; font-size: 13px;
-  z-index: 5;
+  flex: 0 0 auto; align-self: flex-start;
+  min-height: 34px; padding: 6px 12px; font-size: 13px; white-space: nowrap;
 }
 .logo { font-size: 30px; }
 header h1 { margin: 0; font-size: 20px; letter-spacing: .3px; }
