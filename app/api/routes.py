@@ -416,6 +416,9 @@ def sync_now(wake: bool = Query(False), session: Session = Depends(get_session))
             vehicles = make_client(token).list_vehicles()
         else:
             raise HTTPException(exc.response.status_code, f"Tesla error: {exc}") from exc
+    except httpx.RequestError as exc:
+        # Network/timeout reaching Tesla — return a clean 503, never a 500.
+        raise HTTPException(503, "Couldn't reach Tesla right now — try again in a moment.") from exc
     if not vehicles:
         raise HTTPException(404, "No vehicles on this Tesla account.")
 
@@ -463,12 +466,14 @@ def sync_now(wake: bool = Query(False), session: Session = Depends(get_session))
                 client = make_client(token)
                 try:
                     data = client.vehicle_data(vid)
-                except httpx.HTTPStatusError:
+                except (httpx.HTTPStatusError, httpx.RequestError):
                     continue
             elif code == 408:
                 continue  # fell asleep between the list and the read
             else:
                 raise HTTPException(code, f"Tesla error: {exc}") from exc
+        except httpx.RequestError:
+            continue  # transient network error for this car — skip it this round
 
         if not purged:
             services.purge_demo(session)  # retire the seeded sample on first real data

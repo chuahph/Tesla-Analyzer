@@ -149,6 +149,35 @@ def test_unlink_clears_account_but_keeps_history(monkeypatch):
         _reset_to_demo()
 
 
+def test_sync_returns_clean_503_on_network_error(monkeypatch):
+    import httpx
+
+    from app import services, state
+
+    settings = get_settings()
+    old = settings.app_passcode
+    settings.app_passcode = ""
+
+    class _Unreachable(_FakeClient):
+        def list_vehicles(self):
+            raise httpx.ConnectError("boom")
+
+    monkeypatch.setattr("app.tesla_client.TeslaClient", _FakeClient)
+    try:
+        with SessionLocal() as s:
+            services.link_with_token(s, "tok")
+        # Now make the Tesla API unreachable during sync.
+        monkeypatch.setattr("app.tesla_client.TeslaClient", _Unreachable)
+        with TestClient(app) as client:
+            resp = client.post("/api/sync")
+            # A network error must be a clean 503 (JSON), never an unhandled 500.
+            assert resp.status_code == 503
+            assert "reach Tesla" in resp.json()["detail"]
+    finally:
+        settings.app_passcode = old
+        _reset_to_demo()
+
+
 def test_single_car_summary_has_no_garage_picker():
     """A one-car (demo) dashboard exposes no garage, so no picker shows."""
     settings = get_settings()

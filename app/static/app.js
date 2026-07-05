@@ -1027,8 +1027,11 @@ async function syncNow(wake) {
   setSyncStatus("", wake ? "Waking car & syncing… (can take ~30 s)" : "Syncing…", "");
   try {
     const res = await fetch(`/api/sync${wake ? "?wake=1" : ""}`, { method: "POST" });
-    const body = await res.json();
-    if (!res.ok) throw new Error(body.detail || "Sync failed");
+    // Parse defensively: a proxy/5xx can return non-JSON, which must not surface
+    // as a scary "Unexpected token" error.
+    let body = {};
+    try { body = await res.json(); } catch (_) { body = {}; }
+    if (!res.ok) throw new Error(body.detail || `Sync unavailable (${res.status}) — try again shortly`);
     if (body.status === "asleep") {
       const batt = body.last && body.last.soc
         ? `🔋 ${Math.round(body.last.soc)}% (last known)` : "";
