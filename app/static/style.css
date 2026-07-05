@@ -506,6 +506,19 @@ footer { padding: 18px 28px; color: var(--muted); font-size: 12px; border-top: 1
 }
 /* Amber variant for a "watch out / you may need to do this manually" note. */
 .gs-note-warn { border-left-color: var(--amber); }
+/* Blue variant for an informational aside. */
+.gs-note-info { border-left-color: var(--accent-2); }
+/* Scopes checklist: each permission with its API name and what it powers. */
+.gs-scopes { margin: 6px 0 0 !important; padding-left: 20px; }
+.gs-scopes li { margin: 7px 0; line-height: 1.55; }
+.gs-scopes strong { color: var(--text); }
+.gs-scopes em { color: var(--muted); font-style: normal; font-weight: 600; }
+/* Inline API scope name chip (e.g. vehicle_location). */
+.gs-code {
+  background: var(--bg); border: 1px solid var(--border); border-radius: 5px;
+  padding: 1px 5px; font-size: 11px; font-family: ui-monospace, Menlo, monospace;
+  color: var(--teal); white-space: nowrap;
+}
 
 /* Tabs */
 .tabs { display: flex; gap: 6px; margin-bottom: 18px; border-bottom: 1px solid var(--border); }
