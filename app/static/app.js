@@ -226,7 +226,7 @@ function renderKpis(d) {
     cards.push(kpiCard("Current Drive", fmt(lt.distance_km, 1) + " km",
       `started ${tripWhen(lt.start_time)} · in progress`, "blue"));
     cards.push(kpiCard("Drive Time", fmt(lt.duration_min) + " min",
-      `avg ${fmt(lt.avg_speed_kmh)} km/h · max ${fmt(lt.max_speed_kmh)}`, "amber"));
+      `avg ${fmt(lt.avg_speed_kmh)}${lt.max_speed_kmh > lt.avg_speed_kmh ? " · max " + fmt(lt.max_speed_kmh) : ""} km/h`, "amber"));
     if (lt.wh_per_km) {
       cards.push(kpiCard("Efficiency", fmt(lt.wh_per_km) + " Wh/km",
         `${fmt(lt.energy_kwh, 1)} kWh this drive`, "green"));
@@ -423,8 +423,10 @@ function renderLists(d) {
       const when = t.end_time
         ? `${tripWhen(t.start_time)} → ${tripEnd(t.start_time, t.end_time)}`
         : tripWhen(t.start_time);
+      // Only show "max" when a live mid-drive reading actually beat the average
+      // (otherwise max is just floored to the average and reads as duplicate).
       const speed = t.avg_speed_kmh
-        ? ` · avg ${t.avg_speed_kmh}${t.max_speed_kmh ? " · max " + t.max_speed_kmh : ""} km/h`
+        ? ` · avg ${t.avg_speed_kmh}${t.max_speed_kmh > t.avg_speed_kmh ? " · max " + t.max_speed_kmh : ""} km/h`
         : "";
       const score = t.eco_score != null
         ? `<span class="trip-score tone-${scoreTone(t.eco_score)}">${t.eco_score}</span>` : "";
