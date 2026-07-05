@@ -251,12 +251,18 @@ def oauth_callback(
     return RedirectResponse(f"/?linked={result['source']}")
 
 
-def _process_vehicle(session: Session, data: dict, v_summary: dict, settings) -> tuple:
+def _process_vehicle(
+    session: Session, data: dict, v_summary: dict, settings, migrate_legacy: bool = False
+) -> tuple:
     """Log drives/charges for one car from its vehicle_data snapshot.
 
     Snapshot / open-trip / open-charge state is namespaced by VIN, so each car
     on the account advances its own independent session state machine. Returns
     ``(vehicle, snapshot, n_drives, n_charges, open_trip)``.
+
+    ``migrate_legacy`` (set for the active car) folds in the pre-multi-car global
+    ``last_snapshot`` state a one time, so a drive taken around the upgrade to
+    per-VIN state isn't dropped.
     """
     import json as _json
 
@@ -295,6 +301,47 @@ def _process_vehicle(session: Session, data: dict, v_summary: dict, settings) ->
     sk = state.scoped(state.SNAPSHOT_KEY, vin)
     tk = state.scoped(state.OPEN_TRIP_KEY, vin)
     ck = state.scoped(state.OPEN_CHARGE_KEY, vin)
+
+    # One-time migration from the pre-multi-car global keys (only the active car
+    # inherits them), so a drive taken around the upgrade isn't lost.
+    recovered: list[dict] = []
+    if migrate_legacy:
+        legacy_snap = state.get(session, state.SNAPSHOT_KEY)  # bare/global key
+        if legacy_snap:
+            if not state.get(session, sk):
+                # Never synced under the scoped key yet — adopt the legacy state so
+                # the normal gap-fallback below logs the missed drive.
+                state.put(session, sk, legacy_snap)
+                if not state.get(session, tk):
+                    state.put(session, tk, state.get(session, state.OPEN_TRIP_KEY) or "")
+                if not state.get(session, ck):
+                    state.put(session, ck, state.get(session, state.OPEN_CHARGE_KEY) or "")
+            else:
+                # Already synced under the scoped key once (the transition drive
+                # slipped through) — reconstruct it from the legacy → scoped gap.
+                try:
+                    legacy = _json.loads(legacy_snap)
+                    scoped = _json.loads(state.get(session, sk))
+                    d = sync_mod._drive_from(legacy, scoped, vehicle.battery_capacity_kwh)
+                    if d:
+                        # The car slept between the two snapshots, so the true drive
+                        # time is unknown; give it a sensible duration from the
+                        # distance (~40 km/h) anchored at the later snapshot, rather
+                        # than the whole multi-hour gap.
+                        dur = max(round(d["distance_km"] / 40.0 * 60.0), 1)
+                        end = sync_mod._dt(scoped["ts"])
+                        d["end_time"] = end
+                        d["start_time"] = end - timedelta(minutes=dur)
+                        d["duration_min"] = float(dur)
+                        d["avg_speed_kmh"] = round(d["distance_km"] / (dur / 60.0), 1)
+                        d["max_speed_kmh"] = max(d["max_speed_kmh"], d["avg_speed_kmh"])
+                        recovered.append(d)
+                except (ValueError, KeyError, TypeError):
+                    pass
+            state.delete(
+                session, state.SNAPSHOT_KEY, state.OPEN_TRIP_KEY, state.OPEN_CHARGE_KEY
+            )
+
     prev_raw = state.get(session, sk)
     prev = _json.loads(prev_raw) if prev_raw else None
     open_trip = _json.loads(state.get(session, tk) or "null")
@@ -304,6 +351,7 @@ def _process_vehicle(session: Session, data: dict, v_summary: dict, settings) ->
         prev, snap, open_trip, open_charge,
         vehicle.battery_capacity_kwh, settings.energy_price_per_kwh,
     )
+    drives = recovered + drives  # include a drive recovered from the upgrade gap
     for d in drives:
         d["start_location"] = _place(d["start_location"])
         d["end_location"] = _place(d["end_location"])
@@ -478,7 +526,9 @@ def sync_now(wake: bool = Query(False), session: Session = Depends(get_session))
         if not purged:
             services.purge_demo(session)  # retire the seeded sample on first real data
             purged = True
-        vehicle, snap, nd, nc, open_trip = _process_vehicle(session, data, vv, settings)
+        vehicle, snap, nd, nc, open_trip = _process_vehicle(
+            session, data, vv, settings, migrate_legacy=(vvin == active_target)
+        )
         total["drives"] += nd
         total["charges"] += nc
         if snap["charging"] or sync_mod.is_driving(snap) or snap.get("user_present"):
