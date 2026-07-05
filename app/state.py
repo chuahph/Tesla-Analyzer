@@ -17,6 +17,7 @@ BASE_URL_KEY = "tesla_api_base_url"
 SOURCE_KEY = "data_source"  # one of: demo | imported | linked
 SNAPSHOT_KEY = "last_snapshot"  # JSON of the last synced vehicle snapshot
 LINKED_VIN_KEY = "linked_vin"  # VIN of the account-linked vehicle
+ACTIVE_VIN_KEY = "active_vin"  # VIN of the car the dashboard shows / the manual sync wakes
 OPEN_TRIP_KEY = "open_trip"  # JSON of a trip in progress (car in gear)
 OPEN_CHARGE_KEY = "open_charge"  # JSON of a charge in progress
 LAST_ACTIVE_KEY = "last_active_ts"  # epoch of the last driving/charging/occupied snapshot
@@ -35,6 +36,18 @@ def put(session: Session, key: str, value: str) -> None:
     else:
         row.value = value
     session.commit()
+
+
+def scoped(base_key: str, vin: str) -> str:
+    """Per-car state key namespaced by VIN, so each linked car keeps its own
+    snapshot / open-trip / open-charge without clobbering the others. Falls back
+    to the bare key when no VIN is known (keeps single-car behaviour identical)."""
+    return f"{base_key}::{vin}" if vin else base_key
+
+
+def active_vin(session: Session) -> str:
+    """VIN of the car the dashboard follows — the explicit pick, else the link."""
+    return get(session, ACTIVE_VIN_KEY) or get(session, LINKED_VIN_KEY)
 
 
 def active_token(session: Session) -> str:

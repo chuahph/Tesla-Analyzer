@@ -71,6 +71,37 @@ function renderScore(d) {
   wireInfoButtons(el);
 }
 
+// Car picker: shown only when a multi-car account is linked, so you can switch
+// which car the whole dashboard follows.
+function renderCarPicker(garage, activeVin) {
+  const sel = document.getElementById("car-picker");
+  if (!sel) return;
+  garage = garage || [];
+  if (garage.length < 2) { sel.classList.add("hidden"); return; }
+  sel.innerHTML = "";
+  for (const c of garage) {
+    const o = document.createElement("option");
+    o.value = c.vin;
+    const last4 = (c.vin || "").slice(-4);
+    o.textContent = (c.name || c.model || "Car") + (last4 ? ` · ${last4}` : "");
+    if (c.vin === activeVin) o.selected = true;
+    sel.appendChild(o);
+  }
+  sel.classList.remove("hidden");
+}
+
+document.getElementById("car-picker")?.addEventListener("change", async (e) => {
+  const vin = e.target.value;
+  try {
+    await fetch("/api/active-vehicle", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ vin }),
+    });
+  } catch (_) { /* ignore; reload reflects the current active car anyway */ }
+  load();
+});
+
 // Full car-info panel (opened by the "!" after the VIN in the header).
 function fillCarInfo(v) {
   const el = document.getElementById("car-info");
@@ -578,6 +609,7 @@ async function load() {
       sub.appendChild(span);
     }
     fillCarInfo(d.vehicle);
+    renderCarPicker(d.garage, d.active_vin);
 
     lastData = d;
     renderScore(d);

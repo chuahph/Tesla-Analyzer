@@ -25,11 +25,12 @@ router = APIRouter(prefix="/api", tags=["analytics"])
 
 
 def _first_vehicle(session: Session) -> Vehicle:
-    # An account-linked vehicle takes precedence over demo/imported rows.
-    linked_vin = state.get(session, state.LINKED_VIN_KEY)
-    if linked_vin:
+    # The car the dashboard follows (the active pick, else the linked car) takes
+    # precedence over demo/imported rows.
+    active_vin = state.active_vin(session)
+    if active_vin:
         vehicle = session.scalars(
-            select(Vehicle).where(Vehicle.vin == linked_vin)
+            select(Vehicle).where(Vehicle.vin == active_vin)
         ).first()
         if vehicle is not None:
             return vehicle
@@ -250,6 +251,105 @@ def oauth_callback(
     return RedirectResponse(f"/?linked={result['source']}")
 
 
+def _process_vehicle(session: Session, data: dict, v_summary: dict, settings) -> tuple:
+    """Log drives/charges for one car from its vehicle_data snapshot.
+
+    Snapshot / open-trip / open-charge state is namespaced by VIN, so each car
+    on the account advances its own independent session state machine. Returns
+    ``(vehicle, snapshot, n_drives, n_charges, open_trip)``.
+    """
+    import json as _json
+
+    from .. import sync as sync_mod
+
+    vin = data.get("vin") or v_summary.get("vin") or "LINKED-UNKNOWN"
+    vehicle = session.query(Vehicle).filter(Vehicle.vin == vin).first()
+    if vehicle is None:
+        vehicle = Vehicle(vin=vin, name=data.get("display_name") or "My Tesla", model="Tesla")
+        session.add(vehicle)
+        session.flush()
+
+    # Enrich from the car's own config (real model / trim / colour / wheels).
+    cfg = data.get("vehicle_config") or {}
+    car_map = {"model3": "Model 3", "modely": "Model Y",
+               "models": "Model S", "modelx": "Model X"}
+    real_model = (
+        car_map.get((cfg.get("car_type") or "").lower().replace(" ", ""))
+        or vin_mod.decode(vin).get("model")
+    )
+    if real_model and vehicle.model in ("Tesla", ""):
+        vehicle.model = real_model
+    if not vehicle.trim:
+        trim_bits = [
+            (cfg.get("trim_badging") or "").upper(),
+            (cfg.get("exterior_color") or ""),
+        ]
+        vehicle.trim = " ".join(b for b in trim_bits if b)
+    wheel = cfg.get("wheel_type") or ""
+    if wheel and wheel.upper() not in vehicle.trim.upper():
+        vehicle.trim = f"{vehicle.trim} {wheel}".strip()[:60]
+    if data.get("display_name") and vehicle.name in ("My Tesla", ""):
+        vehicle.name = data["display_name"]
+
+    snap = sync_mod.snapshot_from_vehicle_data(data)
+    sk = state.scoped(state.SNAPSHOT_KEY, vin)
+    tk = state.scoped(state.OPEN_TRIP_KEY, vin)
+    ck = state.scoped(state.OPEN_CHARGE_KEY, vin)
+    prev_raw = state.get(session, sk)
+    prev = _json.loads(prev_raw) if prev_raw else None
+    open_trip = _json.loads(state.get(session, tk) or "null")
+    open_charge = _json.loads(state.get(session, ck) or "null")
+
+    drives, charges, open_trip, open_charge = sync_mod.process_snapshot(
+        prev, snap, open_trip, open_charge,
+        vehicle.battery_capacity_kwh, settings.energy_price_per_kwh,
+    )
+    for d in drives:
+        d["start_location"] = _place(d["start_location"])
+        d["end_location"] = _place(d["end_location"])
+        session.add(Drive(vehicle_id=vehicle.id, **d))
+    for c in charges:
+        cap = sync_mod.implied_capacity_kwh(c)
+        c.pop("energy_measured", None)  # transient flag, not a DB column
+        if cap:
+            old = vehicle.battery_capacity_kwh or 75.0
+            vehicle.battery_capacity_kwh = round(0.8 * old + 0.2 * cap, 1)
+        c["location"] = _place(c.get("location", ""))
+        session.add(Charge(vehicle_id=vehicle.id, **c))
+    if snap["soc"] > 0 and snap.get("range_km", 0) > 0:
+        last_reading = session.scalars(
+            select(BatteryReading)
+            .where(BatteryReading.vehicle_id == vehicle.id)
+            .order_by(BatteryReading.ts.desc())
+        ).first()
+        if last_reading is None or abs(last_reading.soc - snap["soc"]) >= 1.0:
+            session.add(BatteryReading(
+                vehicle_id=vehicle.id,
+                ts=datetime.fromtimestamp(snap["ts"], sync_mod.MYT).replace(tzinfo=None),
+                soc=snap["soc"],
+                range_km=round(snap["range_km"], 1),
+                odo_km=round(snap["odo_km"], 1),
+            ))
+
+    session.commit()
+    state.put(session, sk, _json.dumps(snap))
+    state.put(session, tk, _json.dumps(open_trip) if open_trip else "")
+    state.put(session, ck, _json.dumps(open_charge) if open_charge else "")
+    return vehicle, snap, len(drives), len(charges), open_trip
+
+
+def _update_idle_window(session: Session, any_active: bool, wake: bool, now_ts: float) -> None:
+    """Schedule/clear the car-sleep quiet window from activity across all cars."""
+    IDLE_AFTER_MIN, SUSPEND_MIN = 15, 30
+    last_active = float(state.get(session, state.LAST_ACTIVE_KEY) or 0)
+    if any_active or not last_active:
+        state.put(session, state.LAST_ACTIVE_KEY, str(now_ts))
+        if any_active:
+            state.put(session, state.SUSPEND_KEY, "")
+    elif not wake and now_ts - last_active >= IDLE_AFTER_MIN * 60:
+        state.put(session, state.SUSPEND_KEY, str(now_ts + SUSPEND_MIN * 60))
+
+
 @router.get("/sync")  # GET so external cron/uptime services can trigger it
 @router.post("/sync")
 def sync_now(wake: bool = Query(False), session: Session = Depends(get_session)):
@@ -258,17 +358,18 @@ def sync_now(wake: bool = Query(False), session: Session = Depends(get_session))
     ``wake=1`` (the manual Sync button) nudges a sleeping car online first.
     The cron never wakes the car, so it can't drain the battery overnight.
     """
-    import json as _json
     import time
 
     from .. import sync as sync_mod
     from ..tesla_client import TeslaClient
+    import json as _json
 
     settings = get_settings()
     token = state.active_token(session)
     if not token:
         raise HTTPException(400, "No linked Tesla account — link your account first.")
     base = state.active_base_url(session)
+    active_target = state.active_vin(session)
 
     # Sleep window: polling an awake-but-idle car resets its sleep timer and
     # slowly drains the battery. After IDLE_AFTER_MIN of no activity the cron
@@ -286,172 +387,122 @@ def sync_now(wake: bool = Query(False), session: Session = Depends(get_session))
                 "note": ("Letting the car sleep — polling resumes in "
                          f"~{int((suspend_until - now_ts) / 60) + 1} min."),
             }
-            last_raw = state.get(session, state.SNAPSHOT_KEY)
+            last_raw = state.get(session, state.scoped(state.SNAPSHOT_KEY, active_target))
             if last_raw:
                 last = _json.loads(last_raw)
                 resp["last"] = {"soc": last.get("soc"), "ts": last.get("ts"),
                                 "odo_km": round(last.get("odo_km", 0), 1)}
             return resp
 
-    def fetch(tok: str):
-        client = TeslaClient(access_token=tok, base_url=base)
-        vehicles = client.list_vehicles()
-        if not vehicles:
-            raise HTTPException(404, "No vehicles on this Tesla account.")
-        v = vehicles[0]
-        vid = v.get("id_s") or v.get("id")
-        if wake and v.get("state") and v["state"] != "online":
+    def make_client(tok):
+        return TeslaClient(access_token=tok, base_url=base)
+
+    def refresh_or_401() -> str:
+        refresh = state.get(session, state.REFRESH_KEY)
+        if not refresh or not auth.oauth_configured():
+            raise HTTPException(401, "Token expired — sign in with Tesla again.")
+        tokens = auth.refresh_tokens(refresh)
+        state.put(session, state.TOKEN_KEY, tokens["access_token"])
+        if tokens.get("refresh_token"):
+            state.put(session, state.REFRESH_KEY, tokens["refresh_token"])
+        return tokens["access_token"]
+
+    # List every car on the account (with a single token-refresh retry).
+    try:
+        vehicles = make_client(token).list_vehicles()
+    except httpx.HTTPStatusError as exc:
+        if exc.response.status_code == 401:
+            token = refresh_or_401()
+            vehicles = make_client(token).list_vehicles()
+        else:
+            raise HTTPException(exc.response.status_code, f"Tesla error: {exc}") from exc
+    if not vehicles:
+        raise HTTPException(404, "No vehicles on this Tesla account.")
+
+    # The car the dashboard follows (and the only one the manual button wakes) —
+    # keep the current pick if it's still on the account, else default to first.
+    account_vins = [vv.get("vin") for vv in vehicles]
+    if active_target not in account_vins:
+        active_target = account_vins[0]
+    state.put(session, state.ACTIVE_VIN_KEY, active_target)
+    state.put(session, state.LINKED_VIN_KEY, active_target)
+
+    client = make_client(token)
+    total = {"drives": 0, "charges": 0}
+    any_active = False
+    purged = False
+    active_snap = active_open_trip = active_vehicle = None
+    active_cfg: dict = {}
+
+    for vv in vehicles:
+        vvin = vv.get("vin")
+        vid = vv.get("id_s") or vv.get("id")
+        vstate = vv.get("state")
+        # Only ever wake the active car, so a multi-car account is never woken
+        # (and drained) all at once.
+        if wake and vvin == active_target and vstate and vstate != "online":
             try:
                 client.wake_up(vid)
                 for _ in range(6):  # cars typically wake within ~15-30 s
                     time.sleep(5)
-                    v = client.list_vehicles()[0]
-                    if v.get("state") == "online":
+                    fresh = [x for x in client.list_vehicles() if x.get("vin") == vvin]
+                    if fresh and fresh[0].get("state") == "online":
+                        vstate = "online"
                         break
             except Exception:  # noqa: BLE001 — wake is best-effort
                 pass
-        if v.get("state") and v["state"] != "online":
-            return v, None  # asleep/offline — nothing readable right now
-        return v, client.vehicle_data(vid)
+        if vstate and vstate != "online":
+            continue  # asleep/offline — nothing readable right now
 
-    try:
-        v, data = fetch(token)
-    except httpx.HTTPStatusError as exc:
-        code = exc.response.status_code
-        if code == 401:
-            refresh = state.get(session, state.REFRESH_KEY)
-            if not refresh or not auth.oauth_configured():
-                raise HTTPException(401, "Token expired — sign in with Tesla again.") from exc
-            tokens = auth.refresh_tokens(refresh)
-            state.put(session, state.TOKEN_KEY, tokens["access_token"])
-            if tokens.get("refresh_token"):
-                state.put(session, state.REFRESH_KEY, tokens["refresh_token"])
-            v, data = fetch(tokens["access_token"])
-        elif code == 408:
-            v, data = None, None  # vehicle asleep
-        else:
-            raise HTTPException(code, f"Tesla error: {exc}") from exc
+        try:
+            data = client.vehicle_data(vid)
+        except httpx.HTTPStatusError as exc:
+            code = exc.response.status_code
+            if code == 401:
+                token = refresh_or_401()
+                client = make_client(token)
+                try:
+                    data = client.vehicle_data(vid)
+                except httpx.HTTPStatusError:
+                    continue
+            elif code == 408:
+                continue  # fell asleep between the list and the read
+            else:
+                raise HTTPException(code, f"Tesla error: {exc}") from exc
 
-    if data is None:
+        if not purged:
+            services.purge_demo(session)  # retire the seeded sample on first real data
+            purged = True
+        vehicle, snap, nd, nc, open_trip = _process_vehicle(session, data, vv, settings)
+        total["drives"] += nd
+        total["charges"] += nc
+        if snap["charging"] or sync_mod.is_driving(snap) or snap.get("user_present"):
+            any_active = True
+        if vvin == active_target:
+            active_snap, active_open_trip, active_vehicle = snap, open_trip, vehicle
+            active_cfg = data.get("vehicle_config") or {}
+
+    state.put(session, state.SOURCE_KEY, "linked")
+    _update_idle_window(session, any_active, wake, now_ts)
+
+    # The dashboard's live status reflects the active car specifically.
+    if active_snap is None:
         resp = {
             "status": "asleep",
             "tried_wake": wake,
-            "logged": {"drives": 0, "charges": 0},
+            "logged": total,
             "note": ("Couldn't wake the car — it may be offline. Try again in a minute."
                      if wake else
                      "Car is asleep — try again while charging or right after a drive."),
         }
-        # Include the last known reading so the dashboard can still show battery.
-        last_raw = state.get(session, state.SNAPSHOT_KEY)
+        last_raw = state.get(session, state.scoped(state.SNAPSHOT_KEY, active_target))
         if last_raw:
             last = _json.loads(last_raw)
-            resp["last"] = {
-                "soc": last.get("soc"),
-                "ts": last.get("ts"),
-                "odo_km": round(last.get("odo_km", 0), 1),
-            }
+            resp["last"] = {"soc": last.get("soc"), "ts": last.get("ts"),
+                            "odo_km": round(last.get("odo_km", 0), 1)}
         return resp
 
-    vin = data.get("vin") or v.get("vin") or "LINKED-UNKNOWN"
-    # Retire the seeded demo data and pin the dashboard to the real car.
-    services.purge_demo(session)
-    state.put(session, state.LINKED_VIN_KEY, vin)
-    vehicle = session.query(Vehicle).filter(Vehicle.vin == vin).first()
-    if vehicle is None:
-        vehicle = Vehicle(vin=vin, name=data.get("display_name") or "My Tesla", model="Tesla")
-        session.add(vehicle)
-        session.flush()
-
-    # Enrich the vehicle from the car's own config (real model / trim / colour),
-    # with the VIN as a fallback source for the model line.
-    cfg = data.get("vehicle_config") or {}
-    car_map = {"model3": "Model 3", "modely": "Model Y",
-               "models": "Model S", "modelx": "Model X"}
-    real_model = (
-        car_map.get((cfg.get("car_type") or "").lower().replace(" ", ""))
-        or vin_mod.decode(vin).get("model")
-    )
-    if real_model and vehicle.model in ("Tesla", ""):
-        vehicle.model = real_model
-    if not vehicle.trim:
-        trim_bits = [
-            (cfg.get("trim_badging") or "").upper(),
-            (cfg.get("exterior_color") or ""),
-        ]
-        vehicle.trim = " ".join(b for b in trim_bits if b)
-    # The wheel type decides the factory range figure (e.g. 19" Nova vs 18"
-    # Photon on a 2024 Model 3 LR) — append it once so battery health can
-    # pick the right when-new reference.
-    wheel = cfg.get("wheel_type") or ""
-    if wheel and wheel.upper() not in vehicle.trim.upper():
-        vehicle.trim = f"{vehicle.trim} {wheel}".strip()[:60]
-    if data.get("display_name") and vehicle.name in ("My Tesla", ""):
-        vehicle.name = data["display_name"]
-
-    snap = sync_mod.snapshot_from_vehicle_data(data)
-    prev_raw = state.get(session, state.SNAPSHOT_KEY)
-    prev = _json.loads(prev_raw) if prev_raw else None
-    open_trip = _json.loads(state.get(session, state.OPEN_TRIP_KEY) or "null")
-    open_charge = _json.loads(state.get(session, state.OPEN_CHARGE_KEY) or "null")
-
-    drives, charges, open_trip, open_charge = sync_mod.process_snapshot(
-        prev, snap, open_trip, open_charge,
-        vehicle.battery_capacity_kwh, settings.energy_price_per_kwh,
-    )
-    for d in drives:
-        # Name the endpoints (best effort) so trips read "Bangsar → KLCC"
-        # instead of raw coordinates.
-        d["start_location"] = _place(d["start_location"])
-        d["end_location"] = _place(d["end_location"])
-        session.add(Drive(vehicle_id=vehicle.id, **d))
-    for c in charges:
-        # Calibrate usable pack capacity from Tesla's measured charge energy so
-        # driving Wh/km tracks the real (aging) pack. Heavily smoothed and
-        # clamped so one noisy reading can't swing the numbers.
-        cap = sync_mod.implied_capacity_kwh(c)
-        c.pop("energy_measured", None)  # transient flag, not a DB column
-        if cap:
-            old = vehicle.battery_capacity_kwh or 75.0
-            vehicle.battery_capacity_kwh = round(0.8 * old + 0.2 * cap, 1)
-        # Name the charging spot (best effort) so it reads "Bangsar" not coords.
-        c["location"] = _place(c.get("location", ""))
-        session.add(Charge(vehicle_id=vehicle.id, **c))
-    # Battery-health history: store a reading when the SoC actually moved
-    # (avoids piling up identical rows from a parked car).
-    if snap["soc"] > 0 and snap.get("range_km", 0) > 0:
-        last_reading = session.scalars(
-            select(BatteryReading)
-            .where(BatteryReading.vehicle_id == vehicle.id)
-            .order_by(BatteryReading.ts.desc())
-        ).first()
-        if last_reading is None or abs(last_reading.soc - snap["soc"]) >= 1.0:
-            session.add(
-                BatteryReading(
-                    vehicle_id=vehicle.id,
-                    ts=datetime.fromtimestamp(snap["ts"], sync_mod.MYT).replace(tzinfo=None),
-                    soc=snap["soc"],
-                    range_km=round(snap["range_km"], 1),
-                    odo_km=round(snap["odo_km"], 1),
-                )
-            )
-
-    session.commit()
-    state.put(session, state.SNAPSHOT_KEY, _json.dumps(snap))
-    state.put(session, state.OPEN_TRIP_KEY, _json.dumps(open_trip) if open_trip else "")
-    state.put(session, state.OPEN_CHARGE_KEY, _json.dumps(open_charge) if open_charge else "")
-    state.put(session, state.SOURCE_KEY, "linked")
-
-    # Track activity; schedule a quiet window once the car has sat idle.
-    IDLE_AFTER_MIN, SUSPEND_MIN = 15, 30
-    active = snap["charging"] or sync_mod.is_driving(snap) or snap.get("user_present")
-    last_active = float(state.get(session, state.LAST_ACTIVE_KEY) or 0)
-    if active or not last_active:
-        state.put(session, state.LAST_ACTIVE_KEY, str(now_ts))
-        if active:
-            state.put(session, state.SUSPEND_KEY, "")
-    elif not wake and now_ts - last_active >= IDLE_AFTER_MIN * 60:
-        state.put(session, state.SUSPEND_KEY, str(now_ts + SUSPEND_MIN * 60))
-
+    snap, open_trip, vehicle = active_snap, active_open_trip, active_vehicle
     if snap["charging"]:
         activity = "charging"
     elif sync_mod.is_driving(snap):
@@ -469,10 +520,10 @@ def sync_now(wake: bool = Query(False), session: Session = Depends(get_session))
         # Tells the dashboard whether the token really has location access —
         # the 403 fallback makes a missing scope otherwise invisible.
         "location_access": snap.get("lat") is not None,
-        # Config the car reported this sync — makes wheel detection auditable.
-        "wheel_type": cfg.get("wheel_type") or None,
+        # Config the active car reported this sync — makes wheel detection auditable.
+        "wheel_type": active_cfg.get("wheel_type") or None,
         "trim": vehicle.trim,
-        "logged": {"drives": len(drives), "charges": len(charges)},
+        "logged": total,
     }
 
 
@@ -495,6 +546,18 @@ def refresh_link(session: Session = Depends(get_session)):
 @router.get("/vehicles", response_model=list[VehicleOut])
 def list_vehicles(session: Session = Depends(get_session)):
     return session.scalars(select(Vehicle).order_by(Vehicle.id)).all()
+
+
+@router.post("/active-vehicle")
+def set_active_vehicle(payload: dict = Body(...), session: Session = Depends(get_session)):
+    """Pick which linked car the dashboard follows (multi-car accounts)."""
+    vin = (payload.get("vin") or "").strip()
+    vehicle = session.query(Vehicle).filter(Vehicle.vin == vin).first()
+    if vehicle is None:
+        raise HTTPException(404, "Unknown vehicle.")
+    state.put(session, state.ACTIVE_VIN_KEY, vin)
+    state.put(session, state.LINKED_VIN_KEY, vin)
+    return {"status": "ok", "active_vin": vin, "name": vehicle.name}
 
 
 @router.get("/drives", response_model=list[DriveOut])
@@ -556,7 +619,8 @@ def export_csv(
     since = None
     label = "all"
     if current_drive:
-        open_trip = _json.loads(state.get(session, state.OPEN_TRIP_KEY) or "null")
+        open_trip = _json.loads(
+            state.get(session, state.scoped(state.OPEN_TRIP_KEY, vehicle.vin)) or "null")
         if open_trip:
             from .. import sync as sync_mod
 
@@ -639,8 +703,9 @@ def summary(
     window_label = None
     live = None
     if current_drive:
-        open_trip = _json.loads(state.get(session, state.OPEN_TRIP_KEY) or "null")
-        snap_raw = state.get(session, state.SNAPSHOT_KEY)
+        open_trip = _json.loads(
+            state.get(session, state.scoped(state.OPEN_TRIP_KEY, vehicle.vin)) or "null")
+        snap_raw = state.get(session, state.scoped(state.SNAPSHOT_KEY, vehicle.vin))
         snap = _json.loads(snap_raw) if snap_raw else None
         if open_trip and snap:
             live = sync_mod.live_trip(open_trip, snap, vehicle.battery_capacity_kwh)
@@ -697,8 +762,19 @@ def summary(
 
     vehicle_out = VehicleOut.model_validate(vehicle).model_dump()
     vehicle_out.update({k: v for k, v in vin_info.items() if v})  # year, plant
+    # The account's cars, so the header can offer a picker when more than one is
+    # linked. Only real (account-linked) cars, not demo/imported placeholders.
+    garage = []
+    if state.data_source(session) == "linked":
+        garage = [
+            {"vin": v.vin, "name": v.name, "model": v.model}
+            for v in session.scalars(select(Vehicle).order_by(Vehicle.id)).all()
+            if not v.vin.startswith(("DEMO", "IMPORT"))
+        ]
     return {
         "vehicle": vehicle_out,
+        "active_vin": vehicle.vin,
+        "garage": garage,
         "window_days": days,
         "window_label": window_label,
         "generated_at": datetime.now().isoformat(timespec="seconds"),
