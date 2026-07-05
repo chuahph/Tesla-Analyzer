@@ -228,8 +228,10 @@ function renderKpis(d) {
     cards.push(kpiCard("Drive Time", fmt(lt.duration_min) + " min",
       `avg ${fmt(lt.avg_speed_kmh)}${lt.max_speed_kmh > lt.avg_speed_kmh ? " · max " + fmt(lt.max_speed_kmh) : ""} km/h`, "amber"));
     if (lt.wh_per_km) {
+      const dsub = (lt.driving_wh_per_km != null && lt.driving_wh_per_km < lt.wh_per_km - 3)
+        ? ` · drive ≈${fmt(lt.driving_wh_per_km)}` : "";
       cards.push(kpiCard("Efficiency", fmt(lt.wh_per_km) + " Wh/km",
-        `${fmt(lt.energy_kwh, 1)} kWh this drive`, "green"));
+        `${fmt(lt.energy_kwh, 1)} kWh this drive${dsub}`, "green"));
     }
     // Battery use and km/1% in one box: % used as the headline, start→now
     // and the km/1% range figure on the sub-line.
@@ -430,7 +432,12 @@ function renderLists(d) {
         : "";
       const score = t.eco_score != null
         ? `<span class="trip-score tone-${scoreTone(t.eco_score)}">${t.eco_score}</span>` : "";
-      const whkm = t.wh_per_km != null ? ` · ${t.wh_per_km} Wh/km` : "";
+      // Driving-only Wh/km (excludes idle/AC) shown next to the total when it's
+      // meaningfully lower — comparable to Tesla's "Current Drive".
+      const drv = (t.driving_wh_per_km != null && t.wh_per_km != null
+        && t.driving_wh_per_km < t.wh_per_km - 3)
+        ? ` · drive ≈${t.driving_wh_per_km}` : "";
+      const whkm = t.wh_per_km != null ? ` · ${t.wh_per_km} Wh/km${drv}` : "";
       // In select mode, a checkbox precedes each trip (self-hosted only).
       const check = tripSelectMode && t.id != null
         ? `<input type="checkbox" class="trip-check" value="${t.id}" aria-label="Select trip" />` : "";

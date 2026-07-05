@@ -42,6 +42,19 @@
   function hasValidEnergy(d) {
     return d.energy_used_kwh > 0 && whPerKm(d) >= MIN_PLAUSIBLE_WH_PER_KM;
   }
+  // Driving-only Wh/km — removes modeled idle/climate load so it's comparable to
+  // Tesla's "Current Drive". Mirror of app/sync.driving_wh_per_km.
+  function drivingWhPerKm(d) {
+    const energy = d.energy_used_kwh, dist = d.distance_km, dur = d.duration_min;
+    if (!energy || energy <= 0 || dist <= 0 || !dur || dur <= 0) return null;
+    const V_MOVE = 30.0;
+    const movingMin = Math.min((dist / V_MOVE) * 60.0, dur);
+    const idleMin = Math.max(dur - movingMin, 0.0);
+    const t = (d.outside_temp_c == null) ? 22.0 : d.outside_temp_c;
+    const idleKw = Math.min(0.3 + 0.11 * Math.abs(t - 22.0), 2.5);
+    const drivingKwh = Math.max(energy - (idleMin / 60.0) * idleKw, energy * 0.35);
+    return Math.round((drivingKwh * 1000.0) / dist);
+  }
 
   // ISO week + year (matches Python isocalendar()).
   function isoWeek(date) {
@@ -219,6 +232,7 @@
           avg_speed_kmh: Math.round(d.avg_speed_kmh || 0),
           max_speed_kmh: Math.round(d.max_speed_kmh || 0),
           wh_per_km: hasValidEnergy(d) ? Math.round(whPerKm(d)) : null,
+          driving_wh_per_km: hasValidEnergy(d) ? drivingWhPerKm(d) : null,
           eco_score: hasValidEnergy(d) ? ecoScore(whPerKm(d), rated) : null,
           conditions: tripConditions(d),
           route: d.start_location && d.end_location
