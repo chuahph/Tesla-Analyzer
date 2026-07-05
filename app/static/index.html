@@ -158,8 +158,8 @@
         <h2>🔋 Battery Health</h2>
         <div id="battery-body"></div>
       </div>
-      <!-- Trips / routes / charging spots / recommendations sit right after
-           battery health, before the charts. -->
+      <!-- Trips / routes / charging spots sit right after battery health,
+           before the charts; recommendations move to the very bottom. -->
       <div class="card">
         <h2>🧭 Recent Trips</h2>
         <ul id="recentTrips" class="plain-list"></ul>
@@ -178,10 +178,6 @@
       <div class="card">
         <h2>📍 Charging Locations</h2>
         <ul id="topLocations" class="plain-list"></ul>
-      </div>
-      <div class="card full">
-        <h2>💡 Recommendations to improve efficiency &amp; battery health</h2>
-        <div id="recommendations"></div>
       </div>
       <div class="card">
         <h2>🌡️ Efficiency vs Temperature</h2>
@@ -206,6 +202,10 @@
       <div class="card">
         <h2>🎯 Charge Target (End SoC)</h2>
         <canvas id="socTargetChart"></canvas>
+      </div>
+      <div class="card full">
+        <h2>💡 Recommendations to improve efficiency &amp; battery health</h2>
+        <div id="recommendations"></div>
       </div>
     </section>
 
