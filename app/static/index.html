@@ -171,16 +171,36 @@
       <ol class="guide-steps">
         <li>
           <details>
-            <summary><span class="gs-num">1</span> 🗄️ Neon — a free database that never expires</summary>
+            <summary><span class="gs-num">1</span> 🍴 Fork the code to your own GitHub</summary>
             <div class="gs-body">
-              <p><strong>Why:</strong> the free Render server (Step 2) forgets everything each
+              <p><strong>Why:</strong> Render builds the app from a GitHub repository. Forking
+                makes your <em>own</em> copy of the code under your account, so your deployment
+                is fully independent — it keeps working no matter what happens to the original.</p>
+              <ol>
+                <li>You'll need a free <strong>GitHub</strong> account — the same login also
+                  signs you into Render and Neon later. Open <strong>github.com</strong> → Sign up.</li>
+                <li>Open the Tesla Analyzer repository and tap <strong>Fork</strong> (top-right)
+                  → <strong>Create fork</strong>. That copies it into <em>your</em> GitHub.</li>
+                <li>Done — you now own a copy at
+                  <code>github.com/&lt;you&gt;/Tesla-Analyzer</code>. You'll point Render at
+                  <strong>this fork</strong> in Step 3.</li>
+              </ol>
+            </div>
+          </details>
+        </li>
+
+        <li>
+          <details>
+            <summary><span class="gs-num">2</span> 🗄️ Neon — a free database that never expires</summary>
+            <div class="gs-body">
+              <p><strong>Why:</strong> the free Render server (Step 3) forgets everything each
                 time it sleeps. Neon stores your drives and charges permanently — its free tier
                 doesn't expire after 30 days like most others.</p>
               <ol>
                 <li>Open <strong>neon.tech</strong> → <strong>Sign up with GitHub</strong>.</li>
                 <li>Create a new project (any name, pick the region closest to you).</li>
                 <li>Copy the <strong>connection string</strong> — it starts with
-                  <code>postgresql://…</code>. Keep it handy for Step 2.</li>
+                  <code>postgresql://…</code>. Keep it handy for Step 3.</li>
               </ol>
             </div>
           </details>
@@ -188,30 +208,31 @@
 
         <li>
           <details>
-            <summary><span class="gs-num">2</span> ☁️ Render — host your own copy</summary>
+            <summary><span class="gs-num">3</span> ☁️ Render — host your own copy</summary>
             <div class="gs-body">
               <p><strong>Why:</strong> this puts the app on the internet so your phone can open
                 it and it can talk to Tesla. The free plan <em>sleeps</em> after ~15 min idle —
                 that's the brief <strong>“reloading / spinning” screen</strong> you sometimes
                 see; it wakes again in about 30–60 seconds.</p>
               <ol>
-                <li>Open <strong>render.com</strong> → <strong>Sign up with GitHub</strong>.</li>
-                <li><strong>New → Blueprint</strong>, then choose the
-                  <strong>Tesla-Analyzer</strong> repository. Render reads the included
+                <li>Open <strong>render.com</strong> → <strong>Sign up with GitHub</strong>
+                  (use the account you forked with in Step 1).</li>
+                <li><strong>New → Blueprint</strong>, then choose <strong>your fork</strong>
+                  (<code>&lt;you&gt;/Tesla-Analyzer</code>). Render reads the included
                   <code>render.yaml</code> automatically.</li>
                 <li>Render will prompt you to fill a few secrets:
                   <ul>
-                    <li><code>DATABASE_URL</code> — paste your Neon string from Step 1.</li>
+                    <li><code>DATABASE_URL</code> — paste your Neon string from Step 2.</li>
                     <li><code>APP_PASSCODE</code> — any passcode you like; the app asks for it
                       so only you can open your dashboard.</li>
-                    <li><code>SYNC_KEY</code> — any secret word; used for auto-logging (Step 5).</li>
+                    <li><code>SYNC_KEY</code> — any secret word; used for auto-logging (Step 6).</li>
                     <li><code>TESLA_CLIENT_ID</code> / <code>TESLA_CLIENT_SECRET</code> — leave
-                      blank for now; you'll get these in Step 3 and add them after.</li>
+                      blank for now; you'll get these in Step 4 and add them after.</li>
                   </ul>
                 </li>
                 <li>Deploy. You'll get a public address like
                   <code>https://ev-drive-analyzer.onrender.com</code>. Note it down — you'll
-                  reuse it in Step 3.</li>
+                  reuse it in Step 4.</li>
               </ol>
             </div>
           </details>
@@ -219,14 +240,14 @@
 
         <li>
           <details>
-            <summary><span class="gs-num">3</span> 🔑 Tesla Developer account — permission to read your car</summary>
+            <summary><span class="gs-num">4</span> 🔑 Tesla Developer account — permission to read your car</summary>
             <div class="gs-body">
               <p><strong>Why:</strong> Tesla only lets an officially-registered app use the
                 “Sign in with Tesla” button. This step creates that registration.</p>
               <ol>
                 <li>Open <strong>developer.tesla.com</strong> and sign in with your normal
                   Tesla account. Create a new <strong>App</strong>.</li>
-                <li>Fill the app details using your Render address from Step 2:
+                <li>Fill the app details using your Render address from Step 3:
                   <ul>
                     <li><strong>Allowed Origin:</strong>
                       <code>https://ev-drive-analyzer.onrender.com</code></li>
@@ -259,7 +280,7 @@
               </ul>
               <p class="gs-note gs-note-warn">📝 <strong>Don't see
                 <code>TESLA_CLIENT_ID</code> / <code>TESLA_CLIENT_SECRET</code> in the list?</strong>
-                If you left them blank in Step 2, Render won't have created the rows. Just add them
+                If you left them blank in Step 3, Render won't have created the rows. Just add them
                 yourself: tap <strong>+ Add Environment Variable</strong>, type the key name exactly
                 (<code>TESLA_CLIENT_ID</code>, then again for <code>TESLA_CLIENT_SECRET</code>),
                 paste each value, and <strong>Save changes</strong> — it redeploys automatically.</p>
@@ -273,7 +294,7 @@
 
         <li>
           <details>
-            <summary><span class="gs-num">4</span> 🔗 Link &amp; sign in — inside this app</summary>
+            <summary><span class="gs-num">5</span> 🔗 Link &amp; sign in — inside this app</summary>
             <div class="gs-body">
               <ol>
                 <li>Open your Render address and enter your <code>APP_PASSCODE</code>.</li>
@@ -290,14 +311,14 @@
                 (<code>chuahph.github.io/Tesla-Analyzer</code>) or have them use
                 <strong>📁 Load Tesla Data</strong> with their own Tesla export — both keep their
                 data on their own device, with no access to your car. For their own live
-                analytics, they'd set up their own copy (Steps 1–4).</p>
+                analytics, they'd set up their own copy (Steps 1–5).</p>
             </div>
           </details>
         </li>
 
         <li>
           <details>
-            <summary><span class="gs-num">5</span> 🔄 Hands-off logging — recommended</summary>
+            <summary><span class="gs-num">6</span> 🔄 Hands-off logging — recommended</summary>
             <div class="gs-body">
               <p><strong>Why:</strong> because Render sleeps, a small scheduled “ping” keeps
                 your history filling in even when you're not looking at the app.</p>
@@ -305,7 +326,7 @@
                 <li>Open a free scheduler like <strong>cron-job.org</strong>.</li>
                 <li>Create a job that visits
                   <code>https://ev-drive-analyzer.onrender.com/api/sync?key=YOUR_SYNC_KEY</code>
-                  every 15–30 minutes (use the <code>SYNC_KEY</code> you chose in Step 2).</li>
+                  every 15–30 minutes (use the <code>SYNC_KEY</code> you chose in Step 3).</li>
                 <li>That's it — it wakes the app and records new drives and charges on its own.</li>
               </ol>
               <p class="gs-note">🔋 A built-in <strong>overnight sleep window</strong> stops the
@@ -317,7 +338,7 @@
 
         <li>
           <details>
-            <summary><span class="gs-num">6</span> 📲 Install on your iPhone</summary>
+            <summary><span class="gs-num">7</span> 📲 Install on your iPhone</summary>
             <div class="gs-body">
               <ol>
                 <li>Open your Render address in <strong>Safari</strong>.</li>
