@@ -381,12 +381,15 @@
                 <li>Open a free scheduler like <strong>cron-job.org</strong>.</li>
                 <li>Create a job that visits
                   <code>https://ev-drive-analyzer.onrender.com/api/sync?key=YOUR_SYNC_KEY</code>
-                  every 15–30 minutes (use the <code>SYNC_KEY</code> you chose in Step 3).</li>
+                  <strong>every 5 minutes</strong> (use the <code>SYNC_KEY</code> you chose in Step 3).</li>
                 <li>That's it — it wakes the app and records new drives and charges on its own.</li>
               </ol>
-              <p class="gs-note">🔋 A built-in <strong>overnight sleep window</strong> stops the
-                syncing from waking your car while it rests, so it won't cause vampire battery
-                drain.</p>
+              <p class="gs-note">🔋 <strong>Every 5 minutes is safe.</strong> A built-in sleep
+                window means that once the car has been idle ~15 min, the app stops actually
+                polling it (the 5-minute pings just keep Render awake), so it <em>won't</em> cause
+                vampire battery drain. The tighter interval simply catches your drives more often
+                while you're actually moving — which gives accurate live speed (incl. max speed)
+                instead of a trip reconstructed after the fact.</p>
             </div>
           </details>
         </li>
