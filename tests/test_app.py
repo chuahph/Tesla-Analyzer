@@ -204,65 +204,6 @@ def test_export_csv_round_trips_through_importer():
         assert "since-charge" in respsc.headers["content-disposition"]
 
 
-def test_unlink_keep_data_clears_token_but_keeps_history():
-    from app import state
-    from app.database import SessionLocal
-
-    settings = get_settings()
-    old = settings.app_passcode
-    settings.app_passcode = ""
-    try:
-        with TestClient(app) as client:  # startup seeds demo data
-            with SessionLocal() as s:
-                state.put(s, state.TOKEN_KEY, "fake-token")
-                state.put(s, state.LINKED_VIN_KEY, "LRW-TEST")
-            before = client.get("/api/summary?days=730").json()["driving"]["total_drives"]
-
-            resp = client.post("/api/unlink")  # wipe defaults to false
-            assert resp.status_code == 200
-            assert resp.json() == {"status": "unlinked", "wiped": False}
-
-            with SessionLocal() as s:
-                assert state.get(s, state.TOKEN_KEY) == ""        # token cleared
-                assert state.get(s, state.LINKED_VIN_KEY) == ""   # vin cleared
-                assert not state.is_live(s)                       # no longer live
-            # History is kept.
-            after = client.get("/api/summary?days=730").json()["driving"]["total_drives"]
-            assert after == before
-            assert client.get("/api/health").json()["mode"] != "live"
-    finally:
-        settings.app_passcode = old
-
-
-def test_unlink_wipe_resets_to_demo_default():
-    from app import state
-    from app.database import SessionLocal
-    from app.models import Charge, Drive, Vehicle
-
-    settings = get_settings()
-    old = settings.app_passcode
-    settings.app_passcode = ""
-    try:
-        with TestClient(app) as client:  # startup seeds demo data
-            with SessionLocal() as s:
-                state.put(s, state.TOKEN_KEY, "fake-token")
-
-            resp = client.post("/api/unlink?wipe=true")
-            assert resp.status_code == 200
-            assert resp.json()["wiped"] is True
-
-            with SessionLocal() as s:
-                assert state.get(s, state.TOKEN_KEY) == ""
-                # Wiped then reseeded: a fresh demo vehicle (with data) is present.
-                vins = [v.vin for v in s.query(Vehicle).all()]
-                assert vins and all(v.startswith("DEMO") for v in vins)
-                assert s.query(Drive).count() > 0
-                assert s.query(Charge).count() > 0
-            assert client.get("/api/health").json()["mode"] == "demo"
-    finally:
-        settings.app_passcode = old
-
-
 def test_no_passcode_means_open():
     settings = get_settings()
     old = settings.app_passcode

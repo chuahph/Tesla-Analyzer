@@ -81,40 +81,6 @@ def replace_with_import(
     }
 
 
-def unlink(session, *, wipe: bool = False) -> dict:
-    """Disconnect the linked Tesla account and return the app to its default.
-
-    Always clears the stored token and all live-session state so the app stops
-    talking to the car. With ``wipe=True`` it also deletes every logged vehicle,
-    drive and charge, then reseeds the demo data — a truly raw default, ready to
-    hand to a new user who will link their own Tesla.
-    """
-    # Drop the token, VIN, base URL and any in-flight trip/charge/snapshot state.
-    state.delete(
-        session,
-        state.TOKEN_KEY,
-        state.REFRESH_KEY,
-        state.BASE_URL_KEY,
-        state.LINKED_VIN_KEY,
-        state.SNAPSHOT_KEY,
-        state.OPEN_TRIP_KEY,
-        state.OPEN_CHARGE_KEY,
-        state.LAST_ACTIVE_KEY,
-        state.SUSPEND_KEY,
-    )
-    if wipe:
-        _wipe(session)
-        # Fall back to a clean demo dashboard rather than an empty screen.
-        from .collector import seed_demo_if_empty
-
-        state.delete(session, state.SOURCE_KEY)
-        seed_demo_if_empty()
-    else:
-        # Keep the logged history but flag the source so the badge leaves "live".
-        state.put(session, state.SOURCE_KEY, "imported")
-    return {"status": "unlinked", "wiped": wipe}
-
-
 def link_with_token(
     session, access_token: str, refresh_token: str = "", base_url: str | None = None
 ) -> dict:
