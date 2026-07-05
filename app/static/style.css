@@ -445,6 +445,66 @@ footer { padding: 18px 28px; color: var(--muted); font-size: 12px; border-top: 1
 .format-help summary { cursor: pointer; color: var(--text); }
 .format-help p { margin: 8px 0; line-height: 1.5; }
 
+/* --- Setup guide modal --- */
+/* The "how it fits together" one-liner and the try-it-first tip. */
+.guide-flow {
+  background: var(--panel-2); border: 1px solid var(--border);
+  border-left: 3px solid var(--accent-2); border-radius: 8px;
+  padding: 10px 12px; margin: 0 0 12px;
+  font-size: 12.5px; color: var(--muted); line-height: 1.6;
+}
+.guide-flow strong { color: var(--text); }
+.guide-tip {
+  background: rgba(34, 197, 94, .08); border: 1px solid rgba(34, 197, 94, .3);
+  border-radius: 8px; padding: 10px 12px; margin: 0 0 16px;
+  font-size: 12.5px; color: var(--muted); line-height: 1.6;
+}
+.guide-tip strong { color: var(--text); }
+/* Numbered, collapsible steps. */
+.guide-steps { list-style: none; margin: 0; padding: 0; }
+.guide-steps > li {
+  border: 1px solid var(--border); border-radius: 10px;
+  background: var(--panel-2); margin-bottom: 10px; overflow: hidden;
+}
+.guide-steps summary {
+  cursor: pointer; list-style: none;
+  display: flex; align-items: center; gap: 10px;
+  padding: 13px 14px; font-size: 14px; font-weight: 600; color: var(--text);
+}
+.guide-steps summary::-webkit-details-marker { display: none; }
+.guide-steps summary::after {
+  content: "▸"; margin-left: auto; color: var(--muted);
+  font-size: 13px; transition: transform .15s;
+}
+.guide-steps details[open] summary::after { transform: rotate(90deg); }
+.guide-steps summary:hover { background: rgba(255, 255, 255, .03); }
+/* A round number chip on the left of each step title. */
+.gs-num {
+  flex: 0 0 auto; width: 24px; height: 24px;
+  display: inline-flex; align-items: center; justify-content: center;
+  border-radius: 50%; background: var(--accent); color: #fff;
+  font-size: 13px; font-weight: 800; font-variant-numeric: tabular-nums;
+}
+.gs-body {
+  padding: 2px 16px 15px; font-size: 13px; color: var(--muted); line-height: 1.6;
+  border-top: 1px solid var(--border);
+}
+.gs-body p { margin: 10px 0; }
+.gs-body strong { color: var(--text); }
+.gs-body ol, .gs-body ul { margin: 8px 0; padding-left: 22px; }
+.gs-body li { margin: 5px 0; }
+.gs-body code {
+  background: var(--bg); border: 1px solid var(--border); border-radius: 5px;
+  padding: 1px 5px; font-size: 11.5px;
+  /* Long URLs must wrap inside the modal, never force horizontal scroll. */
+  word-break: break-all; overflow-wrap: anywhere;
+}
+.gs-note {
+  background: var(--panel); border-left: 3px solid var(--green);
+  border-radius: 6px; padding: 8px 10px; margin: 10px 0 0 !important;
+  font-size: 12.5px;
+}
+
 /* Tabs */
 .tabs { display: flex; gap: 6px; margin-bottom: 18px; border-bottom: 1px solid var(--border); }
 .tab {
@@ -526,7 +586,7 @@ footer { padding: 18px 28px; color: var(--muted); font-size: 12px; border-top: 1
   .bottom-actions { gap: 6px; }
   .bottom-actions .btn { padding: 8px 10px; font-size: 12.5px; }
   .bottom-actions #btn-import, .bottom-actions #btn-link { flex: 1 1 42%; }
-  .bottom-actions #btn-export { flex: 1 1 100%; }
+  .bottom-actions #btn-export, .bottom-actions #btn-guide { flex: 1 1 42%; }
   main { padding: 12px 12px 40px; }
   .card-grid { grid-template-columns: 1fr; gap: 10px; margin-bottom: 12px; }
   .kpi-grid { grid-template-columns: repeat(2, 1fr); gap: 8px; margin-bottom: 12px; }

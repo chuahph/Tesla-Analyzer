@@ -144,6 +144,168 @@
     </div>
   </div>
 
+  <!-- Modal: First-time setup guide (host your own copy + link a real Tesla) -->
+  <div id="setup-modal" class="modal hidden">
+    <div class="modal-card">
+      <button class="modal-close" data-close>×</button>
+      <h2>🚀 First-time setup guide</h2>
+      <p class="modal-sub">
+        How to run your own copy of Tesla Analyzer and connect your real car — so it
+        logs every drive and charge automatically. Everything below is <strong>free</strong>
+        and can be done entirely from your iPhone in about <strong>20 minutes</strong>.
+        You only do this once.
+      </p>
+
+      <div class="guide-flow">
+        Your Tesla → Tesla's API → <strong>your copy of this app</strong> (hosted on Render)
+        → history saved in a database (Neon) → you view it here.
+      </div>
+
+      <p class="guide-tip">
+        💡 <strong>Just want to look around first?</strong> You don't need any of this to
+        try the app. Ask Tesla for your data (<em>tesla.com → Privacy → Download Your Data</em>)
+        and use <strong>📁 Load Tesla Data</strong> — it analyses on your phone, no hosting needed.
+        The steps below are only for <em>automatic</em>, always-on logging.
+      </p>
+
+      <ol class="guide-steps">
+        <li>
+          <details>
+            <summary><span class="gs-num">1</span> 🗄️ Neon — a free database that never expires</summary>
+            <div class="gs-body">
+              <p><strong>Why:</strong> the free Render server (Step 2) forgets everything each
+                time it sleeps. Neon stores your drives and charges permanently — its free tier
+                doesn't expire after 30 days like most others.</p>
+              <ol>
+                <li>Open <strong>neon.tech</strong> → <strong>Sign up with GitHub</strong>.</li>
+                <li>Create a new project (any name, pick the region closest to you).</li>
+                <li>Copy the <strong>connection string</strong> — it starts with
+                  <code>postgresql://…</code>. Keep it handy for Step 2.</li>
+              </ol>
+            </div>
+          </details>
+        </li>
+
+        <li>
+          <details>
+            <summary><span class="gs-num">2</span> ☁️ Render — host your own copy</summary>
+            <div class="gs-body">
+              <p><strong>Why:</strong> this puts the app on the internet so your phone can open
+                it and it can talk to Tesla. The free plan <em>sleeps</em> after ~15 min idle —
+                that's the brief <strong>“reloading / spinning” screen</strong> you sometimes
+                see; it wakes again in about 30–60 seconds.</p>
+              <ol>
+                <li>Open <strong>render.com</strong> → <strong>Sign up with GitHub</strong>.</li>
+                <li><strong>New → Blueprint</strong>, then choose the
+                  <strong>Tesla-Analyzer</strong> repository. Render reads the included
+                  <code>render.yaml</code> automatically.</li>
+                <li>Render will prompt you to fill a few secrets:
+                  <ul>
+                    <li><code>DATABASE_URL</code> — paste your Neon string from Step 1.</li>
+                    <li><code>APP_PASSCODE</code> — any passcode you like; the app asks for it
+                      so only you can open your dashboard.</li>
+                    <li><code>SYNC_KEY</code> — any secret word; used for auto-logging (Step 5).</li>
+                    <li><code>TESLA_CLIENT_ID</code> / <code>TESLA_CLIENT_SECRET</code> — leave
+                      blank for now; you'll get these in Step 3 and add them after.</li>
+                  </ul>
+                </li>
+                <li>Deploy. You'll get a public address like
+                  <code>https://ev-drive-analyzer.onrender.com</code>. Note it down — you'll
+                  reuse it in Step 3.</li>
+              </ol>
+            </div>
+          </details>
+        </li>
+
+        <li>
+          <details>
+            <summary><span class="gs-num">3</span> 🔑 Tesla Developer account — permission to read your car</summary>
+            <div class="gs-body">
+              <p><strong>Why:</strong> Tesla only lets an officially-registered app use the
+                “Sign in with Tesla” button. This step creates that registration.</p>
+              <ol>
+                <li>Open <strong>developer.tesla.com</strong> and sign in with your normal
+                  Tesla account. Create a new <strong>App</strong>.</li>
+                <li>Fill the app details using your Render address from Step 2:
+                  <ul>
+                    <li><strong>Allowed Origin:</strong>
+                      <code>https://ev-drive-analyzer.onrender.com</code></li>
+                    <li><strong>Redirect / Callback URI:</strong>
+                      <code>https://ev-drive-analyzer.onrender.com/api/link/oauth/callback</code></li>
+                    <li><strong>Scopes:</strong> Vehicle Information &amp; Vehicle Data
+                      (<code>openid</code>, <code>offline_access</code>,
+                      <code>vehicle_device_data</code>).</li>
+                  </ul>
+                </li>
+                <li>Copy the <strong>Client ID</strong> and <strong>Client Secret</strong>. In
+                  Render, open your service → <strong>Environment</strong>, paste them into
+                  <code>TESLA_CLIENT_ID</code> / <code>TESLA_CLIENT_SECRET</code>, and let it
+                  redeploy.</li>
+              </ol>
+              <p class="gs-note">✅ <strong>Public key / domain check is automatic.</strong>
+                Tesla verifies your domain by fetching a key file — this app already serves it
+                at <code>/.well-known/appspecific/com.tesla.3p.public-key.pem</code>, and the
+                first sign-in registers your domain for you. Nothing to do here.</p>
+            </div>
+          </details>
+        </li>
+
+        <li>
+          <details>
+            <summary><span class="gs-num">4</span> 🔗 Link &amp; sign in — inside this app</summary>
+            <div class="gs-body">
+              <ol>
+                <li>Open your Render address and enter your <code>APP_PASSCODE</code>.</li>
+                <li>Tap <strong>🔗 Link Tesla Account → Sign in with Tesla</strong>, then
+                  approve the request on Tesla's page.</li>
+                <li>Done — the header badge turns green <strong>“live”</strong>. Tap
+                  <strong>⟳ Sync</strong> anytime to wake the car and pull the latest.</li>
+              </ol>
+            </div>
+          </details>
+        </li>
+
+        <li>
+          <details>
+            <summary><span class="gs-num">5</span> 🔄 Hands-off logging — recommended</summary>
+            <div class="gs-body">
+              <p><strong>Why:</strong> because Render sleeps, a small scheduled “ping” keeps
+                your history filling in even when you're not looking at the app.</p>
+              <ol>
+                <li>Open a free scheduler like <strong>cron-job.org</strong>.</li>
+                <li>Create a job that visits
+                  <code>https://ev-drive-analyzer.onrender.com/api/sync?key=YOUR_SYNC_KEY</code>
+                  every 15–30 minutes (use the <code>SYNC_KEY</code> you chose in Step 2).</li>
+                <li>That's it — it wakes the app and records new drives and charges on its own.</li>
+              </ol>
+              <p class="gs-note">🔋 A built-in <strong>overnight sleep window</strong> stops the
+                syncing from waking your car while it rests, so it won't cause vampire battery
+                drain.</p>
+            </div>
+          </details>
+        </li>
+
+        <li>
+          <details>
+            <summary><span class="gs-num">6</span> 📲 Install on your iPhone</summary>
+            <div class="gs-body">
+              <ol>
+                <li>Open your Render address in <strong>Safari</strong>.</li>
+                <li>Tap the <strong>Share</strong> button (square with an ↑ arrow).</li>
+                <li>Choose <strong>Add to Home Screen → Add</strong>. It now launches full-screen
+                  from a ⚡ icon, like a native app, and opens even when offline.</li>
+              </ol>
+            </div>
+          </details>
+        </li>
+      </ol>
+
+      <div class="modal-actions">
+        <button class="btn btn-accent" data-close>Got it</button>
+      </div>
+    </div>
+  </div>
+
   <main id="dashboard">
     <!-- Driving score for the whole window (above the KPI boxes), filled by app.js. -->
     <section id="score-banner" class="score-banner" style="display:none"></section>
@@ -250,6 +412,7 @@
       <button id="btn-import" class="btn">📁 Load Tesla Data</button>
       <button id="btn-link" class="btn btn-accent">🔗 Link Tesla Account</button>
       <button id="btn-export" class="btn" title="Download all data as CSV">⬇ CSV</button>
+      <button id="btn-guide" class="btn" title="First-time setup: link your real Tesla">❓ Setup Guide</button>
     </section>
   </main>
 
