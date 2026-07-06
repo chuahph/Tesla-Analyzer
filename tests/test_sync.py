@@ -383,6 +383,48 @@ def test_driving_wh_per_km_removes_idle_load():
     assert driving_wh_per_km(1.0, 0, 10, 25) is None
 
 
+def test_stale_prev_does_not_backdate_open_trip_start():
+    """A drive seen right after an overnight park must anchor its start to *now*,
+    not to last night's stale snapshot (which would add hours of idle time)."""
+    prev = snap(T0, 10_000.0, 80, range_km=400.0)               # parked last night
+    # 10 hours later the car is seen driving (barely moved since = it was parked).
+    cur = snap(T0 + 36_000, 10_000.3, 79, shift="D", speed=40, range_km=393.0)
+    _, _, trip, _ = step(prev, cur)
+    assert trip is not None
+    assert trip["odo_km"] == cur["odo_km"]       # started here, not at prev
+    assert trip["ts"] == cur["ts"]               # start time is now, not 10h ago
+
+
+def test_stale_gap_fallback_reestimates_timing_and_energy():
+    """A short morning drive reconstructed across an overnight gap must not read
+    as hours long, nor count the night's vampire drain as trip energy."""
+    prev = snap(T0, 10_000.0, 80, range_km=400.0)               # parked 8pm
+    # Next morning: drove 4.3 km and is parked again. The range fell 400->393,
+    # but most of that 7 km of range is overnight drain, not the 4.3 km drive.
+    cur = snap(T0 + 36_000, 10_004.3, 79, range_km=393.0)
+    d, _, trip, _ = step(prev, cur)
+    assert trip is None and len(d) == 1
+    drive = d[0]
+    assert drive["distance_km"] == 4.3
+    # Duration re-estimated from distance (~4.3 km at city pace), not 600 min.
+    assert drive["duration_min"] < 30
+    # Energy from current rated consumption, well under the drain-inflated 0.84.
+    assert 0 < drive["energy_used_kwh"] < 0.7
+    # Start back-dated only by the estimated drive time, not to last night.
+    assert drive["start_time"].hour == drive["end_time"].hour
+
+
+def test_gap_fallback_keeps_real_timing_when_prev_is_fresh():
+    """A genuine drive-through-gap (car actually moving, recent prev) is left
+    intact — only stale overnight anchors get re-estimated."""
+    prev = snap(T0, 10_000.0, 80, range_km=400.0)
+    cur = snap(T0 + 1800, 10_030.0, 76, range_km=380.0)  # 30 km in 30 min, real
+    d, _, _, _ = step(prev, cur)
+    assert len(d) == 1
+    assert d[0]["distance_km"] == 30.0
+    assert d[0]["duration_min"] == 30.0          # untouched, not re-estimated
+
+
 def test_no_change_logs_nothing():
     prev = snap(T0, 10_000.0, 80)
     cur = snap(T0 + 600, 10_000.0, 80)

@@ -32,7 +32,65 @@ CHARGE_MIN_PCT = 0.5  # ignore SoC jitter below this
 PARK_END_MIN = 15.0
 PARK_GAP_MIN = 20.0
 PARK_SPEED_KMH = 15.0
+# If the last snapshot is older than this AND the car barely moved since (it was
+# parked/asleep, not driving), a new drive must NOT be anchored to it — otherwise
+# the overnight idle time and its vampire drain get counted into the trip.
+STALE_ANCHOR_MIN = 15.0
 MYT = timezone(timedelta(hours=8))  # Malaysia has no DST
+
+
+CITY_SPEED_KMH = 30.0  # assumed door-to-door pace when the real duration is unknown
+
+
+def _was_parked_since(prev: dict | None, cur: dict) -> bool:
+    """True if the last snapshot is stale — the car sat parked/asleep in between
+    (a long wall-clock gap with almost no odometer movement), so a drive seen now
+    started just now, not back then."""
+    if not prev:
+        return False
+    gap_h = (cur["ts"] - prev["ts"]) / 3600.0
+    if gap_h * 60.0 <= STALE_ANCHOR_MIN:
+        return False
+    implied_kmh = (cur["odo_km"] - prev["odo_km"]) / max(gap_h, 1e-9)
+    return implied_kmh < PARK_SPEED_KMH
+
+
+def _reanchor_stale(d: dict, cur: dict, capacity_kwh: float) -> dict:
+    """Fix a gap-fallback drive whose start snapshot was stale (the car sat
+    parked/asleep for hours before it).
+
+    When a whole drive is reconstructed from ``prev -> cur`` but ``prev`` is
+    last night's snapshot, the wall-clock span and the range delta both cover
+    the entire idle period — so the trip reads as hours long (696 min for a
+    10-min drive) and its energy includes overnight vampire drain (0.82 kWh for
+    a 0.6 kWh drive). We can't recover the exact start, so:
+
+      * re-estimate the duration from the distance at a typical city pace, and
+        back-date the start from ``cur`` (the drive just ended);
+      * recompute the energy from the distance at the car's *current* rated
+        efficiency, which strips the idle drain the range delta had folded in.
+    """
+    distance = d["distance_km"]
+    est_min = round(distance / CITY_SPEED_KMH * 60.0, 1)
+    d["duration_min"] = est_min
+    d["start_time"] = _dt(cur["ts"] - est_min * 60.0)
+    avg = distance / (est_min / 60.0) if est_min else 0.0
+    d["avg_speed_kmh"] = round(avg, 1)
+    d["max_speed_kmh"] = round(max(d.get("max_speed_kmh", 0.0), avg), 1)
+    # Energy from the car's current rated consumption (kWh/km implied by the
+    # rated range at the current SoC), not the drain-contaminated range delta.
+    soc = cur.get("soc") or 0.0
+    range_km = cur.get("range_km") or 0.0
+    if soc >= 5 and range_km > 0:
+        full_range = range_km / (soc / 100.0)
+        if full_range > 0:
+            rated_wh_per_km = capacity_kwh * 1000.0 / full_range
+            energy = distance * rated_wh_per_km / 1000.0
+            d["energy_used_kwh"] = (
+                round(energy, 2)
+                if energy * 1000.0 / distance >= MIN_PLAUSIBLE_WH_PER_KM else 0.0
+            )
+    return d
 
 
 def _dt(ts: float) -> datetime:
@@ -345,12 +403,21 @@ def process_snapshot(
                     drives.append(d)
                 open_trip = None
     elif is_driving(cur):
-        base = prev or cur  # the trip began somewhere after the last snapshot
+        # Anchor the new trip to the last snapshot — unless that snapshot is
+        # stale (the car sat parked/asleep since), in which case the drive began
+        # just now, not back then, so start it here. Anchoring to a stale prev
+        # would backdate the start by hours and fold overnight drain into it.
+        base = cur if _was_parked_since(prev, cur) else (prev or cur)
         open_trip = _open_trip_at(base, cur)
     elif prev:
         # A whole drive happened between snapshots (asleep / cron gap).
         d = _drive_from(prev, cur, capacity_kwh)
         if d:
+            # If prev was stale (car parked overnight, then a short morning
+            # drive), the reconstructed span/energy cover the idle period too —
+            # re-estimate the timing and strip the vampire drain.
+            if _was_parked_since(prev, cur):
+                _reanchor_stale(d, cur, capacity_kwh)
             drives.append(d)
 
     # --- Charges: open while charging, close when it stops -----------------
