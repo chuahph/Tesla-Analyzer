@@ -159,6 +159,12 @@ def analyze(drives: list[Drive], rated_wh_per_km: float = 150.0,
     soc_from_energy = (total_energy / capacity_kwh * 100.0) if capacity_kwh else 0.0
     soc_used = max(soc_net, soc_from_int, soc_from_energy)
     km_per_soc = round(total_distance / soc_used, 1) if soc_used >= 0.2 and total_distance else None
+    # Gross battery energy drawn over the window — the real drain from the pack,
+    # so it *includes* parking, climate-while-stopped and overnight vampire loss,
+    # not just the driving energy summed per trip. (Per-trip Wh/km and the Avg
+    # Efficiency figure stay driving-only; this is the "kWh used" headline that
+    # should reflect everything the battery actually lost.)
+    total_energy_used = round(soc_used / 100.0 * capacity_kwh, 1) if capacity_kwh else round(total_energy, 1)
 
     # Distribution of distance driven across speed regimes.
     by_speed: dict[str, float] = defaultdict(float)
@@ -193,6 +199,9 @@ def analyze(drives: list[Drive], rated_wh_per_km: float = 150.0,
         "total_distance_km": round(total_distance, 1),
         "total_duration_h": round(total_duration_h, 1),
         "total_energy_kwh": round(total_energy, 1),
+        # Gross drain including parking/idle/overnight (see above) — the KPI's
+        # "kWh used" headline. total_energy_kwh stays the driving-only sum.
+        "total_energy_used_kwh": total_energy_used,
         "avg_trip_distance_km": round(mean(distances), 1),
         "avg_trip_duration_min": round(mean(durations), 1),
         "avg_speed_kmh": round(mean(speeds), 1),

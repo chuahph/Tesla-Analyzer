@@ -126,6 +126,33 @@ def test_km_per_soc_from_net_drop_on_short_trips():
     assert r["km_per_soc_pct"] == 3.0
 
 
+def test_total_energy_used_includes_parking_drain():
+    """The 'kWh used' headline reflects gross battery drain (parking/idle/
+    overnight), not just the driving energy summed per trip."""
+    from datetime import datetime
+
+    from app.analysis.driving import analyze
+    from app.models import Drive
+
+    # Two short drives that together only *drove* ~0.8 kWh, but the battery fell
+    # 80% -> 70% over the window (10% of a 75 kWh pack = 7.5 kWh) — the extra
+    # came from a long overnight park between them. km_per_soc / gross energy
+    # must capture the whole 7.5 kWh; per-trip efficiency stays driving-only.
+    def d(hour, dist, ssoc, esoc, kwh):
+        return Drive(start_time=datetime(2026, 7, 4, hour, 0),
+                     end_time=datetime(2026, 7, 4, hour, 10),
+                     distance_km=dist, duration_min=10.0, avg_speed_kmh=30,
+                     max_speed_kmh=45, start_soc=ssoc, end_soc=esoc,
+                     energy_used_kwh=kwh, outside_temp_c=30.0)
+    drives = [d(8, 3.0, 80, 79, 0.4), d(20, 3.0, 72, 70, 0.4)]  # 8% drained parked
+    r = analyze(drives, 150.0, 75.0)
+    # Driving-only sum is ~0.8 kWh; gross drain is 10% of 75 = 7.5 kWh.
+    assert r["total_energy_kwh"] == 0.8
+    assert r["total_energy_used_kwh"] == 7.5
+    # Efficiency (per-trip model) untouched by the parking drain.
+    assert r["avg_efficiency_wh_per_km"] == round(0.8 * 1000.0 / 6.0, 1)
+
+
 def test_zero_energy_drive_does_not_dilute_efficiency():
     """A 0-kWh drive (range gap) must not lower Wh/km or inflate the score."""
     from datetime import datetime
