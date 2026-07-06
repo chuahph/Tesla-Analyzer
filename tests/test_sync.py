@@ -472,3 +472,29 @@ def test_no_change_logs_nothing():
     prev = snap(T0, 10_000.0, 80)
     cur = snap(T0 + 600, 10_000.0, 80)
     assert step(prev, cur) == ([], [], None, None)
+
+
+def test_trip_closes_immediately_when_car_locks():
+    """A trip closes immediately when the car locks, even if parked for 0 seconds.
+    This covers the user scenario: arrive at destination, lock the car, sync.
+    Trip must close and appear in the drive list."""
+    s1 = snap(T0, 10_000.0, 80)                                    # parked at home
+    s2 = snap(T0 + 600, 10_010.0, 77, shift="D", speed=70)         # driving
+    s3 = snap(T0 + 1200, 10_015.0, 75, shift="D", speed=60)        # still driving
+    s4 = snap(T0 + 1800, 10_017.5, 73, shift="P", locked=True)     # arrive & lock
+
+    _, _, trip, _ = step(None, s1)
+    assert trip is None
+
+    _, _, trip, _ = step(s1, s2)
+    assert trip is not None
+
+    _, _, trip, _ = step(s2, s3, trip)
+    assert trip is not None
+
+    # The critical test: car locks immediately after arriving.
+    d, _, trip, _ = step(s3, s4, trip)
+    assert trip is None, "Trip should close when car locks"
+    assert len(d) == 1, "Trip should be logged as a completed drive"
+    assert d[0]["distance_km"] == 17.5
+    assert 0 < d[0]["energy_used_kwh"]  # Should have valid energy data
