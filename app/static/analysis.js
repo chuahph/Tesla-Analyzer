@@ -189,6 +189,9 @@
     const socFromEnergy = capacity ? (totKwh / capacity * 100.0) : 0;
     const socUsed = Math.max(socNet, socFromInt, socFromEnergy);
     const kmPerSoc = (socUsed >= 0.2 && totKm) ? round(totKm / socUsed, 1) : null;
+    // Gross battery drain over the window (includes parking/idle/overnight) —
+    // the "kWh used" headline. Driving-only sum stays as total_energy_kwh.
+    const totalEnergyUsed = capacity ? round(socUsed / 100.0 * capacity, 1) : round(totKwh, 1);
 
     const distBand = {}; [...bySpeed.keys()].sort().forEach((k) => distBand[k] = round(bySpeed.get(k), 1));
     const tbh = {}; for (let h = 0; h < 24; h++) tbh[String(h)] = byHour.get(h) || 0;
@@ -205,6 +208,7 @@
       total_distance_km: round(dist.reduce((a, b) => a + b, 0), 1),
       total_duration_h: round(dur.reduce((a, b) => a + b, 0) / 60.0, 1),
       total_energy_kwh: round(drives.reduce((a, d) => a + d.energy_used_kwh, 0), 1),
+      total_energy_used_kwh: totalEnergyUsed,
       avg_trip_distance_km: round(mean(dist), 1),
       avg_trip_duration_min: round(mean(dur), 1),
       avg_speed_kmh: round(mean(spd), 1),

@@ -245,7 +245,7 @@ function renderKpis(d) {
     // Efficiency is unknown when the drive logged no energy (range gap).
     if (eff.available && eff.avg_efficiency_wh_per_km) {
       cards.push(kpiCard("Avg Efficiency", fmt(eff.avg_efficiency_wh_per_km) + " Wh/km",
-        `${fmt(drv.total_energy_kwh, 1)} kWh used · ${eff.vs_rated_pct >= 0 ? "+" : ""}${fmt(eff.vs_rated_pct, 1)}% vs rated`, "green"));
+        `${fmt(drv.total_energy_used_kwh ?? drv.total_energy_kwh, 1)} kWh used · ${eff.vs_rated_pct >= 0 ? "+" : ""}${fmt(eff.vs_rated_pct, 1)}% vs rated`, "green"));
     } else {
       cards.push(kpiCard("Avg Efficiency", "—",
         "waiting on range data from a synced drive", "green"));
