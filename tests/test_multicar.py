@@ -41,6 +41,12 @@ def _reset_to_demo():
         for key in (state.TOKEN_KEY, state.REFRESH_KEY, state.BASE_URL_KEY,
                     state.ACTIVE_VIN_KEY, state.LINKED_VIN_KEY, state.SOURCE_KEY):
             state.put(s, key, "")
+        # Per-VIN scoped state (open trips, last snapshot, wake tracking) must
+        # not leak into the next test's fresh link.
+        state.delete_scoped(
+            s, state.SNAPSHOT_KEY, state.OPEN_TRIP_KEY, state.OPEN_CHARGE_KEY,
+            state.LAST_VSTATE_KEY, state.WOKE_AT_KEY,
+        )
     seed_demo_if_empty()
 
 
@@ -267,6 +273,209 @@ def test_sync_recovers_drive_missed_at_multicar_upgrade(monkeypatch):
             assert 0 < drives[0].duration_min < 120
             # Legacy global keys are consumed so it never double-logs.
             assert state.get(s, state.SNAPSHOT_KEY) == ""
+    finally:
+        settings.app_passcode = old
+        _reset_to_demo()
+
+
+class _DrivingClient:
+    """An online car actively driving — for the poll_fast=True-while-driving case."""
+    VIN = "VINAAAAAAAAAAAAAA"
+
+    def __init__(self, **_):
+        pass
+
+    def list_vehicles(self):
+        return [{"vin": self.VIN, "id_s": "1", "id": 1, "state": "online"}]
+
+    def wake_up(self, vid):
+        return True
+
+    def vehicle_data(self, vid):
+        return {
+            "vin": self.VIN,
+            "display_name": "Highland",
+            "drive_state": {"timestamp": 1_760_500_000_000, "shift_state": "D", "speed": 40},
+            "charge_state": {"battery_level": 74, "battery_range": 370.0 / 1.60934,
+                             "charging_state": "Disconnected"},
+            "climate_state": {"outside_temp": 30},
+            "vehicle_state": {"odometer": ODO_KM_TO_MI(10030.0),
+                              "is_user_present": True, "locked": False},
+            "vehicle_config": {"car_type": "model3"},
+        }
+
+
+class _WokeParkedClient:
+    """Car just came online on its own (list state = online) but sits parked,
+    not driving — the ambiguous case a bounded escalation window is for."""
+    VIN = "VINAAAAAAAAAAAAAA"
+
+    def __init__(self, **_):
+        pass
+
+    def list_vehicles(self):
+        return [{"vin": self.VIN, "id_s": "1", "id": 1, "state": "online"}]
+
+    def wake_up(self, vid):
+        return True
+
+    def vehicle_data(self, vid):
+        return {
+            "vin": self.VIN,
+            "display_name": "Highland",
+            "drive_state": {"timestamp": 1_760_500_000_000, "shift_state": "P", "speed": 0},
+            "charge_state": {"battery_level": 74, "battery_range": 370.0 / 1.60934,
+                             "charging_state": "Disconnected"},
+            "climate_state": {"outside_temp": 30},
+            "vehicle_state": {"odometer": ODO_KM_TO_MI(10030.0),
+                              "is_user_present": True, "locked": False},
+            "vehicle_config": {"car_type": "model3"},
+        }
+
+
+def test_poll_fast_true_while_driving(monkeypatch):
+    """The sync cron should be told to poll again soon while a trip is in
+    progress, so an arrival/lock is caught within seconds instead of up to a
+    full cron tick late."""
+    from app import services
+
+    settings = get_settings()
+    old = settings.app_passcode
+    settings.app_passcode = ""
+    try:
+        monkeypatch.setattr("app.tesla_client.TeslaClient", _FakeClient)
+        with SessionLocal() as s:
+            services.link_with_token(s, "tok")
+
+        monkeypatch.setattr("app.tesla_client.TeslaClient", _DrivingClient)
+        with TestClient(app) as client:
+            resp = client.post("/api/sync")
+            assert resp.status_code == 200
+            body = resp.json()
+            assert body["status"] == "driving"
+            assert body["poll_fast"] is True
+    finally:
+        settings.app_passcode = old
+        _reset_to_demo()
+
+
+def test_poll_fast_true_briefly_after_unexpected_wake(monkeypatch):
+    """A car that comes online on its own (phone-as-key, precondition — not our
+    manual wake_up) may be about to drive off. Even though it's still parked,
+    poll_fast should go True for a short bounded window so the cron catches
+    the departure almost immediately instead of up to a full tick late."""
+    from app import services, state
+
+    settings = get_settings()
+    old = settings.app_passcode
+    settings.app_passcode = ""
+    try:
+        monkeypatch.setattr("app.tesla_client.TeslaClient", _FakeClient)
+        vin = "VINAAAAAAAAAAAAAA"
+        with SessionLocal() as s:
+            services.link_with_token(s, "tok")
+            state.put(s, state.scoped(state.LAST_VSTATE_KEY, vin), "asleep")
+
+        monkeypatch.setattr("app.tesla_client.TeslaClient", _WokeParkedClient)
+        with TestClient(app) as client:
+            resp = client.post("/api/sync")
+            assert resp.status_code == 200
+            body = resp.json()
+            assert body["status"] == "parked"    # not driving yet...
+            assert body["poll_fast"] is True      # ...but escalate briefly — it just woke up
+
+        with SessionLocal() as s:
+            assert float(state.get(s, state.scoped(state.WOKE_AT_KEY, vin))) > 0
+    finally:
+        settings.app_passcode = old
+        _reset_to_demo()
+
+
+def test_poll_fast_false_once_wake_window_expires(monkeypatch):
+    """Once the bounded escalation window lapses with no drive detected, the
+    cron must fall back to the normal cadence — an online-but-idle car isn't
+    kept awake by our polling indefinitely."""
+    import time as _time
+
+    from app import services, state
+
+    settings = get_settings()
+    old = settings.app_passcode
+    settings.app_passcode = ""
+    try:
+        monkeypatch.setattr("app.tesla_client.TeslaClient", _FakeClient)
+        vin = "VINAAAAAAAAAAAAAA"
+        with SessionLocal() as s:
+            services.link_with_token(s, "tok")
+            state.put(s, state.scoped(state.LAST_VSTATE_KEY, vin), "online")  # no fresh transition
+            state.put(s, state.scoped(state.WOKE_AT_KEY, vin), str(_time.time() - 5 * 60))
+
+        monkeypatch.setattr("app.tesla_client.TeslaClient", _WokeParkedClient)
+        with TestClient(app) as client:
+            resp = client.post("/api/sync")
+            assert resp.status_code == 200
+            body = resp.json()
+            assert body["status"] == "parked"
+            assert body["poll_fast"] is False
+    finally:
+        settings.app_passcode = old
+        _reset_to_demo()
+
+
+def test_manual_wake_does_not_trigger_fast_poll_escalation(monkeypatch):
+    """The user's own manual Sync (wake=1) on a sleeping car isn't an
+    'unexpected' wake worth chasing — it's just the user checking the
+    dashboard, not a signal the car is about to drive off."""
+    from app import services, state
+
+    settings = get_settings()
+    old = settings.app_passcode
+    settings.app_passcode = ""
+    monkeypatch.setattr("time.sleep", lambda *_a, **_k: None)  # skip the real wake-poll delay
+
+    class _ManualWakeClient:
+        VIN = "VINAAAAAAAAAAAAAA"
+        woken = False
+
+        def __init__(self, **_):
+            pass
+
+        def list_vehicles(self):
+            st = "online" if _ManualWakeClient.woken else "asleep"
+            return [{"vin": self.VIN, "id_s": "1", "id": 1, "state": st}]
+
+        def wake_up(self, vid):
+            _ManualWakeClient.woken = True
+            return True
+
+        def vehicle_data(self, vid):
+            return {
+                "vin": self.VIN,
+                "display_name": "Highland",
+                "drive_state": {"timestamp": 1_760_500_000_000, "shift_state": "P", "speed": 0},
+                "charge_state": {"battery_level": 74, "battery_range": 370.0 / 1.60934,
+                                 "charging_state": "Disconnected"},
+                "climate_state": {"outside_temp": 30},
+                "vehicle_state": {"odometer": ODO_KM_TO_MI(10030.0),
+                                  "is_user_present": True, "locked": True},
+                "vehicle_config": {"car_type": "model3"},
+            }
+
+    try:
+        monkeypatch.setattr("app.tesla_client.TeslaClient", _FakeClient)
+        vin = "VINAAAAAAAAAAAAAA"
+        with SessionLocal() as s:
+            services.link_with_token(s, "tok")
+            state.put(s, state.scoped(state.LAST_VSTATE_KEY, vin), "asleep")
+
+        monkeypatch.setattr("app.tesla_client.TeslaClient", _ManualWakeClient)
+        with TestClient(app) as client:
+            resp = client.post("/api/sync?wake=1")
+            assert resp.status_code == 200
+            assert resp.json()["poll_fast"] is False
+
+        with SessionLocal() as s:
+            assert state.get(s, state.scoped(state.WOKE_AT_KEY, vin)) == ""
     finally:
         settings.app_passcode = old
         _reset_to_demo()

@@ -23,6 +23,12 @@ from ..schemas import ChargeOut, DriveOut, VehicleOut
 
 router = APIRouter(prefix="/api", tags=["analytics"])
 
+# How long after an unexpected wake (phone-as-key, precondition, remote start —
+# not our own manual wake_up) the sync cron should treat the car as "worth
+# polling tightly": long enough to catch a likely departure, short enough that
+# an online-but-idle car isn't kept awake past this on our account.
+FAST_POLL_WINDOW_MIN = 3.0
+
 
 def _first_vehicle(session: Session) -> Vehicle:
     # The car the dashboard follows (the active pick, else the linked car) takes
@@ -432,6 +438,7 @@ def sync_now(wake: bool = Query(False), session: Session = Depends(get_session))
             resp = {
                 "status": "sleep-window",
                 "logged": {"drives": 0, "charges": 0},
+                "poll_fast": False,
                 "note": ("Letting the car sleep — polling resumes in "
                          f"~{int((suspend_until - now_ts) / 60) + 1} min."),
             }
@@ -489,6 +496,21 @@ def sync_now(wake: bool = Query(False), session: Session = Depends(get_session))
         vvin = vv.get("vin")
         vid = vv.get("id_s") or vv.get("id")
         vstate = vv.get("state")
+        # Tesla's own reported state, captured before any wake_up() of ours below
+        # — the pure signal of whether the car woke up on its own (phone-as-key,
+        # a scheduled precondition, remote start) between this poll and the last.
+        # list_vehicles() is a cached backend read that never touches the car, so
+        # tracking it costs nothing extra regardless of polling frequency.
+        raw_vstate = vstate
+        vstate_key = state.scoped(state.LAST_VSTATE_KEY, vvin)
+        prev_vstate = state.get(session, vstate_key)
+        if prev_vstate and prev_vstate != "online" and raw_vstate == "online":
+            # It came online without our help — possibly about to drive off.
+            # Remember this so the caller can poll tightly for a short bounded
+            # window instead of waiting up to a full cron tick to notice.
+            state.put(session, state.scoped(state.WOKE_AT_KEY, vvin), str(now_ts))
+        state.put(session, vstate_key, raw_vstate or "")
+
         # Only ever wake the active car, so a multi-car account is never woken
         # (and drained) all at once.
         if wake and vvin == active_target and vstate and vstate != "online":
@@ -546,6 +568,7 @@ def sync_now(wake: bool = Query(False), session: Session = Depends(get_session))
             "status": "asleep",
             "tried_wake": wake,
             "logged": total,
+            "poll_fast": False,
             "note": ("Couldn't wake the car — it may be offline. Try again in a minute."
                      if wake else
                      "Car is asleep — try again while charging or right after a drive."),
@@ -566,12 +589,24 @@ def sync_now(wake: bool = Query(False), session: Session = Depends(get_session))
         activity = "stopped"  # trip still open — parked briefly, driver present
     else:
         activity = "parked"
+
+    # Tell the caller (the sync cron) whether it's worth polling again soon
+    # instead of waiting for the next scheduled tick: a trip is actively in
+    # progress, or the car just woke up on its own within the last few
+    # minutes and may be about to drive off. Bounded so an online-but-idle
+    # car isn't kept awake indefinitely — once the window lapses (or it goes
+    # back to sleep) this drops to False and the normal cadence takes over.
+    woke_at = float(state.get(session, state.scoped(state.WOKE_AT_KEY, active_target)) or 0)
+    recently_woke = bool(woke_at) and (now_ts - woke_at) <= FAST_POLL_WINDOW_MIN * 60
+    poll_fast = activity == "driving" or recently_woke
+
     return {
         "status": activity,
         "soc": snap["soc"],
         "odo_km": round(snap["odo_km"], 1),
         "speed_kmh": round(snap.get("speed_kmh") or 0.0),
         "trip_in_progress": bool(open_trip),
+        "poll_fast": poll_fast,
         # Tells the dashboard whether the token really has location access —
         # the 403 fallback makes a missing scope otherwise invisible.
         "location_access": snap.get("lat") is not None,

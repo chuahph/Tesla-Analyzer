@@ -5,6 +5,15 @@ name: Sync car from Tesla
 # service and records new drives/charges. It is battery-safe — the app's own
 # sleep-window stops actually polling the car once it's been idle ~15 min.
 #
+# Resolution boost: GitHub Actions can't schedule tighter than 5 minutes, but
+# a single run can poll several times internally. /api/sync returns
+# "poll_fast": true only while a trip is actively in progress, or briefly
+# after the car came online on its own (not our doing) and may be about to
+# drive off. We loop on that hint alone — an online-but-idle car is never
+# polled beyond its normal 5-minute cadence, so this can't add phantom drain:
+# each extra call in the loop only happens when the car is already awake for
+# its own reasons (driving, or a wake we didn't trigger).
+#
 # To enable it, add two repository secrets (Settings → Secrets and variables →
 # Actions → New repository secret):
 #   RENDER_URL  e.g. https://ev-drive-analyzer.onrender.com   (no trailing slash)
@@ -25,7 +34,7 @@ jobs:
   sync:
     runs-on: ubuntu-latest
     steps:
-      - name: Ping /api/sync
+      - name: Ping /api/sync (escalate briefly while poll_fast is true)
         env:
           RENDER_URL: ${{ secrets.RENDER_URL }}
           SYNC_KEY: ${{ secrets.SYNC_KEY }}
@@ -35,9 +44,17 @@ jobs:
             echo "Add them as repository secrets to enable automatic syncing."
             exit 0
           fi
-          # Show the response + status but never fail the run on a transient
-          # error (asleep car, cold start, brief Tesla outage) — the next run
-          # picks it up. The secret is masked by Actions and not echoed.
-          resp=$(curl -sS --max-time 150 -w $'\nHTTP %{http_code}' \
-            "${RENDER_URL%/}/api/sync?key=${SYNC_KEY}" || true)
-          echo "$resp"
+          # Up to 6 pings, ~20s apart (~2 min worst case) — comfortably inside
+          # the 5-min tick so this run finishes before the next one is due.
+          # Stops the moment the server says poll_fast is false (trip over,
+          # or nothing happened during a bounded wake window), so a quiet car
+          # costs exactly one call, same as before.
+          for i in $(seq 1 6); do
+            resp=$(curl -sS --max-time 15 -w $'\nHTTP %{http_code}' \
+              "${RENDER_URL%/}/api/sync?key=${SYNC_KEY}" || true)
+            echo "$resp"
+            case "$resp" in
+              *'"poll_fast":true'*) sleep 20 ;;
+              *) break ;;
+            esac
+          done
