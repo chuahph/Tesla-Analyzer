@@ -234,12 +234,12 @@ def analyze(drives: list[Drive], rated_wh_per_km: float = 150.0,
                 "wh_per_km": round(d.wh_per_km) if has_valid_energy(d) else None,
                 "energy_kwh": round(d.energy_used_kwh, 2) if has_valid_energy(d) else None,
                 "driving_wh_per_km": (
-                    sync_mod.driving_wh_per_km(
+                    driving_wh_val := sync_mod.driving_wh_per_km(
                         d.energy_used_kwh, d.distance_km, d.duration_min, d.outside_temp_c,
                         d.avg_speed_kmh, d.max_speed_kmh)
                     if has_valid_energy(d) else None
                 ),
-                "eco_score": eco_score(d.wh_per_km, rated_wh_per_km) if has_valid_energy(d) else None,
+                "eco_score": eco_score(driving_wh_val, rated_wh_per_km) if has_valid_energy(d) and driving_wh_val else None,
                 "conditions": _trip_conditions(d),
                 "route": f"{d.start_location} → {d.end_location}"
                 if d.start_location and d.end_location else "",
