@@ -449,7 +449,13 @@ def process_snapshot(
             gap_min = (cur["ts"] - prev["ts"]) / 60.0
             moved = cur["odo_km"] - prev["odo_km"]
             if gap_min > PARK_END_MIN and moved >= DRIVE_MIN_KM:
-                est_start = cur["ts"] - moved / CITY_SPEED_KMH * 3600.0
+                # Same pace model as the arrival-side estimate: ``cur`` is the
+                # first driving reading, so its instantaneous speed is real
+                # evidence of the pace, not just an assumption — prefer it
+                # over the flat city-speed floor when it implies a faster
+                # start (e.g. already on a fast road when first seen).
+                pace = max((cur.get("speed_kmh") or 0.0) * 0.65, CITY_SPEED_KMH)
+                est_start = cur["ts"] - moved / pace * 3600.0
                 open_trip["ts"] = min(max(est_start, prev["ts"]), cur["ts"])
     elif prev:
         # A whole drive happened between snapshots (asleep / cron gap).
@@ -480,10 +486,17 @@ def process_snapshot(
             "ts": base["ts"],
             "soc": base["soc"],
             "range_km": base.get("range_km"),
-            # Baseline for the measured meter is THIS (first charging) snapshot,
-            # not prev — Tesla resets charge_energy_added to ~0 at plug-in, and
-            # prev's value is stale from a previous session.
-            "energy_added_kwh": cur.get("energy_added_kwh") or 0.0,
+            # Baseline is 0, not cur's already-accumulated meter reading. Tesla
+            # resets charge_energy_added to ~0 at the true plug-in moment, so
+            # by the time we first observe charging=True, cur's value already
+            # reflects energy delivered since that reset — including whatever
+            # was added during the poll gap before we noticed. Treating that
+            # as a baseline to subtract silently discarded it, undercounting
+            # every session that starts between polls (worst on fast DC —
+            # a 5-minute miss at 100+ kW is several kWh gone from the total).
+            # prev's meter value is never used here: it's stale from whatever
+            # session was last measured, not this one.
+            "energy_added_kwh": 0.0,
             "max_kw": cur.get("charger_kw") or 0.0,
             "fast": bool(cur.get("fast")),
             "lat": cur.get("lat"),

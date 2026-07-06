@@ -341,13 +341,37 @@ def test_charge_uses_teslas_measured_energy():
     c4 = snap(T0 + 3600, 10_000.0, 78, energy_added=15.4)  # meter at session end
 
     d, c, trip, charge = step(None, c1)
-    d, c, trip, charge = step(c1, c2, charge=charge)   # opens; baseline 3.2
+    d, c, trip, charge = step(c1, c2, charge=charge)   # opens
     d, c, trip, charge = step(c2, c3, charge=charge)
     d, c, trip, charge = step(c3, c4, charge=charge)
     (chg,) = c
-    # Measured: 15.4 − 3.2 = 12.2 kWh (not the ~10.8 the SoC estimate would give).
-    assert abs(chg["energy_added_kwh"] - 12.2) < 1e-6
-    assert abs(chg["cost"] - 12.2 * 0.90) < 1e-6
+    # Full meter reading (15.4 kWh), not 15.4-3.2=12.2: the 3.2 kWh already on
+    # the meter when we first saw charging=True was delivered during the poll
+    # gap before plug-in was noticed — it's real energy of *this* session
+    # (Tesla resets the meter to ~0 at the true plug-in), not a stale prior
+    # reading to subtract away.
+    assert abs(chg["energy_added_kwh"] - 15.4) < 1e-6
+    assert abs(chg["cost"] - 15.4 * 0.90) < 1e-6
+
+
+def test_fast_dc_charge_missed_at_plugin_is_not_undercounted():
+    """A DC session caught a few minutes late must not lose the energy
+    delivered before we noticed — at 100+ kW that's several kWh per missed
+    minute, the biggest real-world case of this class of bug."""
+    c1 = snap(T0, 10_000.0, 20)                                          # parked, unplugged
+    # 5-min poll gap; by the time we see charging=True the fast charger has
+    # already put ~8.3 kWh on the meter (100 kW for ~5 min).
+    c2 = snap(T0 + 300, 10_000.0, 27, charging=True, kw=100, fast=True, energy_added=8.3)
+    c3 = snap(T0 + 900, 10_000.0, 55, energy_added=25.0)                 # session ends
+
+    d, c, trip, charge = step(None, c1)
+    d, c, trip, charge = step(c1, c2, charge=charge)
+    d, c, trip, charge = step(c2, c3, charge=charge)
+    (chg,) = c
+    # The full 25.0 kWh delivered, not 25.0-8.3=16.7 — the pre-poll 8.3 kWh
+    # actually reached the battery and must count.
+    assert abs(chg["energy_added_kwh"] - 25.0) < 1e-6
+    assert chg["charge_type"] == "DC"
 
 
 def test_fast_charge_flag_makes_dc():
@@ -424,6 +448,24 @@ def test_power_on_polled_late_does_not_inflate_start():
     d, _, trip, _ = step(s2, s3, trip)
     assert trip is None and len(d) == 1
     assert d[0]["avg_speed_kmh"] > 20             # realistic, not a parked crawl
+
+
+def test_power_on_estimate_uses_observed_speed_not_flat_assumption():
+    """The pace used to back-estimate power-on time should reflect the actual
+    speed seen at the first driving reading, not always a flat 30 km/h — the
+    same real-evidence-over-assumption model already used on the arrival side.
+    A car already doing 90 km/h when first seen implies a faster pace across
+    the gap, and therefore a *later* (more accurate) power-on estimate."""
+    s1 = snap(T0, 10_000.0, 80)                                # parked at home
+    # 20-min gap, then first driving reading already at 90 km/h — clearly on a
+    # fast road, not crawling out of the driveway.
+    s2 = snap(T0 + 1200, 10_007.0, 78, shift="D", speed=90)
+    _, _, trip, _ = step(s1, s2)
+    assert trip is not None
+    # pace = max(90*0.65, 30) = 58.5 km/h -> 7 km / 58.5 km/h ≈ 7.2 min back,
+    # tighter than the flat-30 estimate's ~14 min.
+    back_min = (s2["ts"] - trip["ts"]) / 60.0
+    assert 5 < back_min < 10
 
 
 def test_stale_prev_does_not_backdate_open_trip_start():
