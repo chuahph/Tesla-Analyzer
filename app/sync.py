@@ -42,6 +42,18 @@ MYT = timezone(timedelta(hours=8))  # Malaysia has no DST
 CITY_SPEED_KMH = 30.0  # assumed door-to-door pace when the real duration is unknown
 
 
+def _lock_unlocked(prev: dict | None, cur: dict) -> bool:
+    """True if the car transitioned from locked to unlocked between snapshots.
+
+    This is a strong signal of driving intent — the user explicitly unlocked
+    the car, so a following shift to D/R/N is almost certainly the start of a trip.
+    Used to confirm trip start when shift changes or speed increases.
+    """
+    if not prev:
+        return False
+    return bool(prev.get("locked")) and not bool(cur.get("locked"))
+
+
 def _was_parked_since(prev: dict | None, cur: dict) -> bool:
     """True if the last snapshot is stale — the car sat parked/asleep in between
     (a long wall-clock gap with almost no odometer movement), so a drive seen now
@@ -135,8 +147,11 @@ def is_driving(s: dict[str, Any]) -> bool:
     return (s.get("shift") or "P") != "P" or (s.get("speed_kmh") or 0.0) > 0
 
 
-def _open_trip_at(base: dict[str, Any], cur: dict[str, Any]) -> dict[str, Any]:
-    """Start a fresh open-trip anchored at ``base`` (the snapshot it began from)."""
+def _open_trip_at(base: dict[str, Any], cur: dict[str, Any], prev: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Start a fresh open-trip anchored at ``base`` (the snapshot it began from).
+
+    Tracks whether the unlock event preceded this shift to confirm driving intent.
+    """
     return {
         "ts": base["ts"],
         "odo_km": base["odo_km"],
@@ -145,6 +160,9 @@ def _open_trip_at(base: dict[str, Any], cur: dict[str, Any]) -> dict[str, Any]:
         "max_speed": cur.get("speed_kmh") or 0.0,
         "lat": base.get("lat"),
         "lon": base.get("lon"),
+        # Lock event tracking: if the car was just unlocked, this trip is confirmed
+        # as intentional driving (not just a brief shift to P or accidental gear change).
+        "unlocked_before_drive": _lock_unlocked(prev, cur),
     }
 
 
@@ -382,7 +400,7 @@ def process_snapshot(
             d = _drive_from(open_trip, prev, capacity_kwh, open_trip.get("max_speed", 0.0))
             if d:
                 drives.append(d)
-            open_trip = _open_trip_at(cur, cur)
+            open_trip = _open_trip_at(cur, cur, prev)
         elif is_driving(cur):
             open_trip["stop_at"] = None   # moving — cancel any pending stop point
         else:
@@ -419,7 +437,7 @@ def process_snapshot(
         # just now, not back then, so start it here. Anchoring to a stale prev
         # would backdate the start by hours and fold overnight drain into it.
         base = cur if _was_parked_since(prev, cur) else (prev or cur)
-        open_trip = _open_trip_at(base, cur)
+        open_trip = _open_trip_at(base, cur, prev)
         # Symmetric to the arrival case: if the first *driving* reading only came
         # through after a long unpolled gap (poor signal at power-on), the last
         # parked reading is well before the car actually set off, so counting

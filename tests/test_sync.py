@@ -498,3 +498,25 @@ def test_trip_closes_immediately_when_car_locks():
     assert len(d) == 1, "Trip should be logged as a completed drive"
     assert d[0]["distance_km"] == 17.5
     assert 0 < d[0]["energy_used_kwh"]  # Should have valid energy data
+
+
+def test_trip_tracks_unlock_event_sequence():
+    """Track door unlock → shift sequence to confirm driving intent.
+
+    Unlock-before-drive flag signals high confidence that the trip is real
+    (not accidental gear shifting or brief driveway movement)."""
+    s1 = snap(T0, 10_000.0, 80, locked=True)                   # locked at home
+    s2 = snap(T0 + 60, 10_000.0, 80, locked=False, shift="D")  # unlocked → shift D
+    s3 = snap(T0 + 300, 10_010.0, 77, shift="D", speed=70)     # driving
+
+    _, _, trip, _ = step(None, s1)
+    assert trip is None
+
+    # Transition from locked to unlocked with shift change
+    _, _, trip, _ = step(s1, s2)
+    assert trip is not None, "Trip should open on unlock + shift"
+    assert trip.get("unlocked_before_drive") is True, "Should detect unlock event"
+
+    _, _, trip, _ = step(s2, s3, trip)
+    assert trip is not None
+    assert trip.get("unlocked_before_drive") is True, "Should preserve unlock flag"
