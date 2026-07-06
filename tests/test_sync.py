@@ -405,6 +405,27 @@ def test_arrival_after_signal_gap_does_not_inflate_duration():
     assert drive["avg_speed_kmh"] > 40
 
 
+def test_power_on_polled_late_does_not_inflate_start():
+    """Poor signal at power-on: the first driving reading arrives long after the
+    car set off. The start must be estimated from the odometer, not stretched
+    back to the stale parked reading's timestamp."""
+    s1 = snap(T0, 10_000.0, 80)                               # parked at home
+    # 20-min gap, then the first driving reading: car moved 7 km (drove part of
+    # it, parked the rest) — implied ~21 km/h, below a steady city pace.
+    s2 = snap(T0 + 1200, 10_007.0, 78, shift="D", speed=55)
+    s3 = snap(T0 + 1800, 10_012.0, 76, locked=True)           # arrives & parks
+    _, _, trip, _ = step(s1, s2)
+    assert trip is not None
+    # Start moved forward from the 20-min-old parked reading toward power-on,
+    # by ~7 km / 30 km/h ≈ 14 min back from the first driving reading — not the
+    # full 20 min that anchoring to the stale parked reading would have counted.
+    assert trip["ts"] > s1["ts"]
+    assert (s2["ts"] - trip["ts"]) / 60.0 <= 15
+    d, _, trip, _ = step(s2, s3, trip)
+    assert trip is None and len(d) == 1
+    assert d[0]["avg_speed_kmh"] > 20             # realistic, not a parked crawl
+
+
 def test_stale_prev_does_not_backdate_open_trip_start():
     """A drive seen right after an overnight park must anchor its start to *now*,
     not to last night's stale snapshot (which would add hours of idle time)."""

@@ -420,6 +420,19 @@ def process_snapshot(
         # would backdate the start by hours and fold overnight drain into it.
         base = cur if _was_parked_since(prev, cur) else (prev or cur)
         open_trip = _open_trip_at(base, cur)
+        # Symmetric to the arrival case: if the first *driving* reading only came
+        # through after a long unpolled gap (poor signal at power-on), the last
+        # parked reading is well before the car actually set off, so counting
+        # from it inflates the start. When the car covered the gap's distance
+        # slower than a steady city pace, it sat parked for part of it — start
+        # the clock from when driving plausibly began, from the odometer, not
+        # from the stale parked reading's timestamp.
+        if base is prev and prev:
+            gap_min = (cur["ts"] - prev["ts"]) / 60.0
+            moved = cur["odo_km"] - prev["odo_km"]
+            if gap_min > PARK_END_MIN and moved >= DRIVE_MIN_KM:
+                est_start = cur["ts"] - moved / CITY_SPEED_KMH * 3600.0
+                open_trip["ts"] = min(max(est_start, prev["ts"]), cur["ts"])
     elif prev:
         # A whole drive happened between snapshots (asleep / cron gap).
         d = _drive_from(prev, cur, capacity_kwh)
