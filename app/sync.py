@@ -391,10 +391,21 @@ def process_snapshot(
             # never counted — once it's clearly over: powered down, charging, or
             # it has sat still past PARK_END_MIN.
             if not open_trip.get("stop_at"):
-                open_trip["stop_at"] = {
+                stop = {
                     k: cur.get(k) for k in
                     ("ts", "odo_km", "soc", "range_km", "out_temp", "lat", "lon")
                 }
+                # If this parked reading arrived after a long unpolled gap during
+                # which the car was still moving (poor signal on arrival, synced
+                # much later), cur's timestamp is the *sync* time, not when the
+                # car actually stopped — trusting it balloons the duration. The
+                # car covered the gap's distance and then parked, so estimate the
+                # real stop as the last reading plus the time to drive that
+                # distance at the trip's moving pace.
+                if prev and gap_min > PARK_END_MIN and moved >= DRIVE_MIN_KM:
+                    pace = max(open_trip.get("max_speed", 0.0) * 0.65, CITY_SPEED_KMH)
+                    stop["ts"] = min(cur["ts"], prev["ts"] + moved / pace * 3600.0)
+                open_trip["stop_at"] = stop
             stop_at = open_trip["stop_at"]
             parked_min = (cur["ts"] - stop_at["ts"]) / 60.0
             if is_powered_down(cur) or cur.get("charging") or parked_min >= PARK_END_MIN:

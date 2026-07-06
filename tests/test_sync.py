@@ -383,6 +383,28 @@ def test_driving_wh_per_km_removes_idle_load():
     assert driving_wh_per_km(1.0, 0, 10, 25) is None
 
 
+def test_arrival_after_signal_gap_does_not_inflate_duration():
+    """Poor signal on arrival: the car is only polled well after it parked, so
+    the first parked reading's timestamp is the sync time, not the real stop.
+    The trip must end near the actual stop (estimated from the distance driven
+    after the last poll), not balloon out to the sync time."""
+    s1 = snap(T0, 10_000.0, 80)                              # home, parked
+    s2 = snap(T0 + 300, 10_005.0, 78, shift="D", speed=60)   # driving
+    s3 = snap(T0 + 600, 10_010.0, 76, shift="D", speed=60)   # still driving (last poll)
+    # No poll on arrival (~T0+900, weak signal). First sync 28 min later: parked.
+    s4 = snap(T0 + 2280, 10_013.0, 75, locked=True)
+    _, _, trip, _ = step(s1, s2)
+    _, _, trip, _ = step(s2, s3, trip)
+    d, _, trip, _ = step(s3, s4, trip)
+    assert trip is None and len(d) == 1
+    drive = d[0]
+    assert drive["distance_km"] == 13.0
+    # Duration from the 3 km driven after the last poll, not the full ~38 min
+    # to sync time; average speed stays a realistic road pace, not a parked ~20.
+    assert drive["duration_min"] < 20
+    assert drive["avg_speed_kmh"] > 40
+
+
 def test_stale_prev_does_not_backdate_open_trip_start():
     """A drive seen right after an overnight park must anchor its start to *now*,
     not to last night's stale snapshot (which would add hours of idle time)."""
