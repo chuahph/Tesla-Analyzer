@@ -81,6 +81,17 @@ def _reanchor_stale(d: dict, cur: dict, capacity_kwh: float) -> dict:
         back-date the start from ``cur`` (the drive just ended);
       * recompute the energy from the distance at the car's *current* rated
         efficiency, which strips the idle drain the range delta had folded in.
+
+    Anchoring the end to ``cur`` assumes cur is itself a prompt reading (the
+    normal case: the car stays reachable and the next poll catches it shortly
+    after arrival). That assumption breaks if the car locks and falls straight
+    back to sleep — cur then arrives whenever the car next wakes on its own,
+    which can be much later, and the whole window reads late by exactly that
+    amount. There's no reliable way to tell the two cases apart from just
+    ``prev``/``cur`` (splitting the difference instead makes the far more
+    common prompt case worse), so this is a known blind spot: the fix is
+    catching the drive live via tighter polling (see poll_fast in the sync
+    endpoint), not guessing harder after the fact.
     """
     distance = d["distance_km"]
     est_min = round(distance / CITY_SPEED_KMH * 60.0, 1)
