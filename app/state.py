@@ -24,6 +24,7 @@ LAST_ACTIVE_KEY = "last_active_ts"  # epoch of the last driving/charging/occupie
 SUSPEND_KEY = "suspend_until_ts"  # epoch until which cron polling stays quiet (car sleep window)
 LAST_VSTATE_KEY = "last_vstate"  # last-seen list_vehicles() state per VIN (online/asleep/offline)
 WOKE_AT_KEY = "woke_at_ts"  # epoch a car was last seen waking on its own (not our manual wake)
+LAST_POLL_KEY = "last_poll_ts"  # epoch of the last actual vehicle_data() read per VIN
 
 
 def get(session: Session, key: str, default: str = "") -> str:

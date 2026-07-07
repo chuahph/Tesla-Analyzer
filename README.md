@@ -215,11 +215,16 @@ which incidentally also gets you uptime alerts for free), EasyCron, or your
 own always-on machine's system `cron` calling `curl`.
 
 **Battery safety is unaffected by how often you call this.** The endpoint
-itself decides whether to actually read the car: it never polls a car that's
-asleep, and it only escalates beyond the normal cadence while a trip is
-genuinely in progress or the car just woke up on its own — calling it every
-minute doesn't mean the car gets polled every minute. See `poll_fast` in
-`app/api/routes.py` for the exact logic.
+decides for itself whether to actually read the car, separately from how
+often you hit it: it never reads a car that's asleep, and beyond that it
+only reads an online-but-idle car about once every `BASE_POLL_INTERVAL_MIN`
+(5 min by default) — escalating tighter only while a trip is genuinely in
+progress or the car just woke up on its own. Calling `/api/sync` every
+minute drives that decision more often, it doesn't force a read every
+minute. See `BASE_POLL_INTERVAL_MIN` / `FAST_POLL_WINDOW_MIN` in
+`app/api/routes.py` for the exact logic — a `vehicle_data` read is itself an
+activity signal that resets Tesla's own sleep countdown, which is exactly
+what this throttle protects against.
 
 ### Re-enabling the GitHub Actions schedule instead
 

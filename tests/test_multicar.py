@@ -45,7 +45,7 @@ def _reset_to_demo():
         # not leak into the next test's fresh link.
         state.delete_scoped(
             s, state.SNAPSHOT_KEY, state.OPEN_TRIP_KEY, state.OPEN_CHARGE_KEY,
-            state.LAST_VSTATE_KEY, state.WOKE_AT_KEY,
+            state.LAST_VSTATE_KEY, state.WOKE_AT_KEY, state.LAST_POLL_KEY,
         )
     seed_demo_if_empty()
 
@@ -476,6 +476,159 @@ def test_manual_wake_does_not_trigger_fast_poll_escalation(monkeypatch):
 
         with SessionLocal() as s:
             assert state.get(s, state.scoped(state.WOKE_AT_KEY, vin)) == ""
+    finally:
+        settings.app_passcode = old
+        _reset_to_demo()
+
+
+class _CountingParkedClient:
+    """An online, parked car that counts vehicle_data() calls — lets tests
+    prove whether the poll throttle actually skipped/allowed a real read,
+    not just what status string came back."""
+    VIN = "VINAAAAAAAAAAAAAA"
+    calls = 0
+
+    def __init__(self, **_):
+        pass
+
+    def list_vehicles(self):
+        return [{"vin": self.VIN, "id_s": "1", "id": 1, "state": "online"}]
+
+    def wake_up(self, vid):
+        return True
+
+    def vehicle_data(self, vid):
+        type(self).calls += 1
+        return {
+            "vin": self.VIN,
+            "display_name": "Highland",
+            "drive_state": {"timestamp": 1_760_500_000_000, "shift_state": "P", "speed": 0},
+            "charge_state": {"battery_level": 74, "battery_range": 370.0 / 1.60934,
+                             "charging_state": "Disconnected"},
+            "climate_state": {"outside_temp": 30},
+            "vehicle_state": {"odometer": ODO_KM_TO_MI(10030.0),
+                              "is_user_present": False, "locked": True},
+            "vehicle_config": {"car_type": "model3"},
+        }
+
+
+def test_online_idle_car_is_not_read_again_within_base_interval(monkeypatch):
+    """A car that's online but idle must not be read faster than the base
+    interval, even if /api/sync itself is called every minute (an external
+    cron) — reading it resets Tesla's own sleep countdown, so calling the
+    endpoint often must not translate into polling the car often."""
+    import time as _time
+
+    from app import services, state
+
+    settings = get_settings()
+    old = settings.app_passcode
+    settings.app_passcode = ""
+    _CountingParkedClient.calls = 0
+    try:
+        monkeypatch.setattr("app.tesla_client.TeslaClient", _FakeClient)
+        vin = "VINAAAAAAAAAAAAAA"
+        with SessionLocal() as s:
+            services.link_with_token(s, "tok")
+            state.put(s, state.scoped(state.LAST_POLL_KEY, vin), str(_time.time() - 60))  # read 1 min ago
+
+        monkeypatch.setattr("app.tesla_client.TeslaClient", _CountingParkedClient)
+        with TestClient(app) as client:
+            resp = client.post("/api/sync")
+            assert resp.status_code == 200
+            body = resp.json()
+            assert body["status"] == "parked"       # online, just not re-read this tick
+            assert "asleep" not in body["note"].lower()
+        assert _CountingParkedClient.calls == 0     # vehicle_data() never actually called
+    finally:
+        settings.app_passcode = old
+        _reset_to_demo()
+
+
+def test_online_idle_car_is_read_once_base_interval_elapses(monkeypatch):
+    """Once the base interval has passed, the normal cadence still applies —
+    the throttle only suppresses *extra* reads, not the ones that were due
+    anyway."""
+    import time as _time
+
+    from app import services, state
+
+    settings = get_settings()
+    old = settings.app_passcode
+    settings.app_passcode = ""
+    _CountingParkedClient.calls = 0
+    try:
+        monkeypatch.setattr("app.tesla_client.TeslaClient", _FakeClient)
+        vin = "VINAAAAAAAAAAAAAA"
+        with SessionLocal() as s:
+            services.link_with_token(s, "tok")
+            state.put(s, state.scoped(state.LAST_POLL_KEY, vin), str(_time.time() - 6 * 60))
+
+        monkeypatch.setattr("app.tesla_client.TeslaClient", _CountingParkedClient)
+        with TestClient(app) as client:
+            resp = client.post("/api/sync")
+            assert resp.status_code == 200
+            assert resp.json()["status"] == "parked"
+        assert _CountingParkedClient.calls == 1
+    finally:
+        settings.app_passcode = old
+        _reset_to_demo()
+
+
+def test_trip_in_progress_bypasses_the_poll_throttle(monkeypatch):
+    """A trip already open must always get a fresh read regardless of the base
+    interval — it needs live tracking, not a stale skip."""
+    import json as _json
+    import time as _time
+
+    from app import services, state
+
+    settings = get_settings()
+    old = settings.app_passcode
+    settings.app_passcode = ""
+    _CountingParkedClient.calls = 0
+    try:
+        monkeypatch.setattr("app.tesla_client.TeslaClient", _FakeClient)
+        vin = "VINAAAAAAAAAAAAAA"
+        with SessionLocal() as s:
+            services.link_with_token(s, "tok")
+            state.put(s, state.scoped(state.LAST_POLL_KEY, vin), str(_time.time() - 60))  # would block alone
+            state.put(s, state.scoped(state.OPEN_TRIP_KEY, vin),
+                      _json.dumps({"ts": _time.time(), "odo_km": 10000.0, "soc": 80}))
+
+        monkeypatch.setattr("app.tesla_client.TeslaClient", _CountingParkedClient)
+        with TestClient(app) as client:
+            resp = client.post("/api/sync")
+            assert resp.status_code == 200
+        assert _CountingParkedClient.calls == 1
+    finally:
+        settings.app_passcode = old
+        _reset_to_demo()
+
+
+def test_manual_sync_bypasses_the_poll_throttle(monkeypatch):
+    """The user's own manual Sync button always gets a fresh read of the
+    active car, even inside the base-interval throttle window."""
+    import time as _time
+
+    from app import services, state
+
+    settings = get_settings()
+    old = settings.app_passcode
+    settings.app_passcode = ""
+    _CountingParkedClient.calls = 0
+    try:
+        monkeypatch.setattr("app.tesla_client.TeslaClient", _FakeClient)
+        vin = "VINAAAAAAAAAAAAAA"
+        with SessionLocal() as s:
+            services.link_with_token(s, "tok")
+            state.put(s, state.scoped(state.LAST_POLL_KEY, vin), str(_time.time() - 60))
+
+        monkeypatch.setattr("app.tesla_client.TeslaClient", _CountingParkedClient)
+        with TestClient(app) as client:
+            resp = client.post("/api/sync?wake=1")
+            assert resp.status_code == 200
+        assert _CountingParkedClient.calls == 1
     finally:
         settings.app_passcode = old
         _reset_to_demo()

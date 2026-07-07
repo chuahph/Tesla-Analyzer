@@ -29,6 +29,15 @@ router = APIRouter(prefix="/api", tags=["analytics"])
 # an online-but-idle car isn't kept awake past this on our account.
 FAST_POLL_WINDOW_MIN = 3.0
 
+# A vehicle_data() read is itself an activity signal to the car — it resets
+# Tesla's own inactivity countdown, delaying sleep, regardless of how the
+# request got triggered. /api/sync may now be called every minute or so (an
+# external cron, an uptime monitor), far more often than a car naturally needs
+# reading. Outside an active trip or a just-woke escalation window, don't read
+# more often than this — let an online-but-idle car actually reach its normal
+# sleep instead of being kept awake by our own frequent checks.
+BASE_POLL_INTERVAL_MIN = 5.0
+
 
 def _first_vehicle(session: Session) -> Vehicle:
     # The car the dashboard follows (the active pick, else the linked car) takes
@@ -491,11 +500,14 @@ def sync_now(wake: bool = Query(False), session: Session = Depends(get_session))
     purged = False
     active_snap = active_open_trip = active_vehicle = None
     active_cfg: dict = {}
+    active_seen_online = False
 
     for vv in vehicles:
         vvin = vv.get("vin")
         vid = vv.get("id_s") or vv.get("id")
         vstate = vv.get("state")
+        if vvin == active_target and vstate == "online":
+            active_seen_online = True
         # Tesla's own reported state, captured before any wake_up() of ours below
         # — the pure signal of whether the car woke up on its own (phone-as-key,
         # a scheduled precondition, remote start) between this poll and the last.
@@ -526,6 +538,24 @@ def sync_now(wake: bool = Query(False), session: Session = Depends(get_session))
                 pass
         if vstate and vstate != "online":
             continue  # asleep/offline — nothing readable right now
+
+        # The car is online, but that alone isn't reason enough to read it —
+        # it may just not have fallen asleep yet from something unrelated to
+        # us. Only actually call vehicle_data() (the read that resets Tesla's
+        # own sleep countdown) when there's a concrete reason to: a trip is
+        # already open (need to track it live), it woke up unprompted within
+        # the escalation window (may be about to drive off), the normal base
+        # interval has elapsed anyway, or this is the user's own manual sync.
+        poll_key = state.scoped(state.LAST_POLL_KEY, vvin)
+        last_poll_ts = float(state.get(session, poll_key) or 0)
+        woke_at = float(state.get(session, state.scoped(state.WOKE_AT_KEY, vvin)) or 0)
+        recently_woke = bool(woke_at) and (now_ts - woke_at) <= FAST_POLL_WINDOW_MIN * 60
+        due = (now_ts - last_poll_ts) >= BASE_POLL_INTERVAL_MIN * 60
+        trip_in_progress = bool(state.get(session, state.scoped(state.OPEN_TRIP_KEY, vvin)))
+        manual_sync = wake and vvin == active_target
+        if not (trip_in_progress or recently_woke or due or manual_sync):
+            continue  # online but idle, not due yet — let it settle toward sleep
+        state.put(session, poll_key, str(now_ts))
 
         try:
             data = client.vehicle_data(vid)
@@ -564,14 +594,20 @@ def sync_now(wake: bool = Query(False), session: Session = Depends(get_session))
 
     # The dashboard's live status reflects the active car specifically.
     if active_snap is None:
+        # Distinguish "genuinely asleep/offline" from "online, but this tick
+        # deliberately skipped reading it" (the poll-throttle above) — telling
+        # a user their online car is "asleep" would be actively misleading.
         resp = {
-            "status": "asleep",
+            "status": "asleep" if not active_seen_online else "parked",
             "tried_wake": wake,
             "logged": total,
             "poll_fast": False,
             "note": ("Couldn't wake the car — it may be offline. Try again in a minute."
                      if wake else
-                     "Car is asleep — try again while charging or right after a drive."),
+                     "Car is asleep — try again while charging or right after a drive."
+                     if not active_seen_online else
+                     "Car is online but idle — skipping this read to let it settle to "
+                     "sleep. It'll be read again shortly if that changes."),
         }
         last_raw = state.get(session, state.scoped(state.SNAPSHOT_KEY, active_target))
         if last_raw:
