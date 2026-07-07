@@ -46,6 +46,7 @@ def _reset_to_demo():
         state.delete_scoped(
             s, state.SNAPSHOT_KEY, state.OPEN_TRIP_KEY, state.OPEN_CHARGE_KEY,
             state.LAST_VSTATE_KEY, state.WOKE_AT_KEY, state.LAST_POLL_KEY,
+            state.UNREACHABLE_SINCE_KEY,
         )
     seed_demo_if_empty()
 
@@ -672,8 +673,9 @@ class _SleepsAfterDrivingClient:
 
 class _OfflineAfterDrivingClient(_SleepsAfterDrivingClient):
     """Same as above, but the third read is ambiguous 'offline' rather than
-    a confirmed 'asleep' — must NOT auto-close (could just be a signal gap
-    mid-drive, e.g. a tunnel)."""
+    a confirmed 'asleep' — must not auto-close on the *first* such reading
+    (could just be a signal gap mid-drive, e.g. a tunnel), only once it's
+    been sustained for a while."""
 
     def list_vehicles(self):
         st = "offline" if type(self).step >= 2 else "online"
@@ -723,10 +725,11 @@ def test_open_trip_closes_immediately_when_car_falls_asleep(monkeypatch):
         _reset_to_demo()
 
 
-def test_offline_does_not_auto_close_open_trip(monkeypatch):
-    """'offline' is ambiguous — unlike 'asleep' it can mean a momentary signal
-    gap during an active drive, so it must not trigger an auto-close (that
-    would risk splitting one real trip into two over a brief dead zone)."""
+def test_offline_does_not_auto_close_open_trip_on_first_reading(monkeypatch):
+    """A single 'offline' reading is ambiguous — unlike 'asleep' it can mean a
+    momentary signal gap during an active drive — so it must not trigger an
+    auto-close immediately (that would risk splitting one real trip into two
+    over a brief dead zone like a tunnel)."""
     from app import services, state
     from app.models import Drive
 
@@ -747,13 +750,62 @@ def test_offline_does_not_auto_close_open_trip(monkeypatch):
             _OfflineAfterDrivingClient.step = 1
             client.post("/api/sync")
             _OfflineAfterDrivingClient.step = 2
-            resp = client.post("/api/sync")               # now offline (ambiguous)
-            assert resp.json()["logged"]["drives"] == 0     # not auto-closed
+            resp = client.post("/api/sync")               # first offline reading
+            assert resp.json()["logged"]["drives"] == 0     # not auto-closed yet
 
         with SessionLocal() as s:
             drives = s.query(Drive).filter(Drive.vehicle_id == vid).all()
             assert len(drives) == 0
             assert state.get(s, state.scoped(state.OPEN_TRIP_KEY, vin)) != ""  # still open
+    finally:
+        settings.app_passcode = old
+        _reset_to_demo()
+
+
+def test_sustained_offline_eventually_closes_open_trip(monkeypatch):
+    """Some accounts/cars report a genuinely-sleeping car as 'offline' rather
+    than a clean 'asleep' — trusting only 'asleep' would leave those trips
+    open indefinitely. Once 'offline' has been sustained past
+    UNREACHABLE_CLOSE_MIN (not just a single blip), it must still close."""
+    import time as _time
+
+    from app import services, state
+    from app.models import Drive
+
+    settings = get_settings()
+    old = settings.app_passcode
+    settings.app_passcode = ""
+    _OfflineAfterDrivingClient.step = 0
+    try:
+        monkeypatch.setattr("app.tesla_client.TeslaClient", _FakeClient)
+        vin = "VINAAAAAAAAAAAAAA"
+        with SessionLocal() as s:
+            services.link_with_token(s, "tok")
+            vid = s.query(Vehicle).filter(Vehicle.vin == vin).first().id
+
+        monkeypatch.setattr("app.tesla_client.TeslaClient", _OfflineAfterDrivingClient)
+        with TestClient(app) as client:
+            client.post("/api/sync")
+            _OfflineAfterDrivingClient.step = 1
+            client.post("/api/sync")
+            _OfflineAfterDrivingClient.step = 2
+            client.post("/api/sync")                       # offline episode begins
+
+        # Backdate the episode's start past the sustained-offline threshold,
+        # as if several more minutes of continued "offline" ticks had passed.
+        with SessionLocal() as s:
+            state.put(s, state.scoped(state.UNREACHABLE_SINCE_KEY, vin),
+                      str(_time.time() - 4 * 60))
+
+        with TestClient(app) as client:
+            resp = client.post("/api/sync")                # still offline, now sustained
+            assert resp.json()["logged"]["drives"] == 1      # closed despite never seeing "asleep"
+
+        with SessionLocal() as s:
+            drives = s.query(Drive).filter(Drive.vehicle_id == vid).all()
+            assert len(drives) == 1
+            assert drives[0].distance_km == 12.0
+            assert state.get(s, state.scoped(state.OPEN_TRIP_KEY, vin)) == ""
     finally:
         settings.app_passcode = old
         _reset_to_demo()

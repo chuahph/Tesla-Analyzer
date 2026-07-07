@@ -38,6 +38,14 @@ FAST_POLL_WINDOW_MIN = 3.0
 # sleep instead of being kept awake by our own frequent checks.
 BASE_POLL_INTERVAL_MIN = 5.0
 
+# How long "offline" (as opposed to a clean "asleep") must be sustained before
+# an open trip is closed on it. Some accounts/cars report a genuinely-sleeping
+# car as "offline" rather than "asleep", so treating only "asleep" as
+# definitive left those cars' trips open indefinitely. This threshold is long
+# enough that a momentary signal gap mid-drive (a tunnel, a dead zone) will
+# already have recovered, short enough that a real stop still closes promptly.
+UNREACHABLE_CLOSE_MIN = 3.0
+
 
 def _save_last_status(session: Session, vin: str, **fields) -> None:
     """Persist the cron's own last determination of what the car was doing.
@@ -552,16 +560,23 @@ def sync_now(wake: bool = Query(False), session: Session = Depends(get_session))
                 pass
         if vstate and vstate != "online":
             # A car can only reach true "asleep" while parked and idle — never
-            # mid-drive. If a trip is still open when that happens, it's
-            # definitely over: close it now using the last snapshot we did
-            # read (fresh, since the poll-throttle below never skips a
-            # vehicle with an open trip) instead of waiting for it to wake up
-            # again — possibly hours later — and having to guess the timing.
-            # "offline" is deliberately excluded: unlike "asleep" it can mean
-            # a momentary signal gap *during* an active drive (a tunnel, a
-            # dead zone), so treating it as a close-now signal risks
-            # splitting one real trip into two.
-            if vstate == "asleep":
+            # mid-drive — so it's an immediate, definitive "the trip is over"
+            # signal. "offline" is murkier: some accounts/cars report a
+            # genuinely-sleeping car as "offline" rather than "asleep", but it
+            # can *also* mean a momentary signal gap during an active drive (a
+            # tunnel, a dead zone). So "offline" only counts once it's been
+            # sustained for UNREACHABLE_CLOSE_MIN straight — long enough that a
+            # brief blip would have already recovered, short enough that a
+            # short trip still closes promptly rather than waiting hours for
+            # the car to happen to wake up again.
+            unreachable_key = state.scoped(state.UNREACHABLE_SINCE_KEY, vvin)
+            unreachable_since = float(state.get(session, unreachable_key) or 0)
+            if not unreachable_since:
+                unreachable_since = now_ts
+                state.put(session, unreachable_key, str(now_ts))
+            sustained_offline = (now_ts - unreachable_since) >= UNREACHABLE_CLOSE_MIN * 60
+
+            if vstate == "asleep" or sustained_offline:
                 trip_key = state.scoped(state.OPEN_TRIP_KEY, vvin)
                 trip_raw = state.get(session, trip_key)
                 last_raw = state.get(session, state.scoped(state.SNAPSHOT_KEY, vvin))
@@ -580,6 +595,10 @@ def sync_now(wake: bool = Query(False), session: Session = Depends(get_session))
                             total["drives"] += 1
                     state.put(session, trip_key, "")
             continue  # asleep/offline — nothing readable right now
+
+        # Back online — this unreachable episode (if any) is over; the next
+        # one starts its own fresh clock.
+        state.put(session, state.scoped(state.UNREACHABLE_SINCE_KEY, vvin), "")
 
         # The car is online, but that alone isn't reason enough to read it —
         # it may just not have fallen asleep yet from something unrelated to

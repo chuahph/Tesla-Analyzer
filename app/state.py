@@ -29,6 +29,9 @@ LAST_STATUS_KEY = "last_status"  # JSON: {status, ts, soc, odo_km, speed_kmh, no
 # the cron's own last determination of what the car was doing, so the
 # dashboard can show a near-live status straight from Neon on page load
 # without itself pinging Tesla.
+UNREACHABLE_SINCE_KEY = "unreachable_since_ts"  # epoch a car was first seen not
+# "online" (asleep or offline) this episode, per VIN — cleared once it's back
+# online. Used to close an open trip after sustained "offline", not just "asleep".
 
 
 def get(session: Session, key: str, default: str = "") -> str:
