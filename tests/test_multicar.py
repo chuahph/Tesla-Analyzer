@@ -759,6 +759,49 @@ def test_offline_does_not_auto_close_open_trip(monkeypatch):
         _reset_to_demo()
 
 
+def test_summary_surfaces_last_known_status_from_neon(monkeypatch):
+    """/api/summary must reflect the cron's own last determination of car
+    status — including 'asleep' — purely from what's already persisted in
+    the database, without itself ever pinging Tesla. This is what lets the
+    dashboard show a near-live status on page load: the background cron
+    already did the polling and left the answer in Neon."""
+    from app import services
+
+    settings = get_settings()
+    old = settings.app_passcode
+    settings.app_passcode = ""
+    _SleepsAfterDrivingClient.step = 0
+    try:
+        monkeypatch.setattr("app.tesla_client.TeslaClient", _FakeClient)
+        with SessionLocal() as s:
+            services.link_with_token(s, "tok")
+
+        monkeypatch.setattr("app.tesla_client.TeslaClient", _SleepsAfterDrivingClient)
+        with TestClient(app) as client:
+            client.post("/api/sync")                      # step 0: driving
+            _SleepsAfterDrivingClient.step = 1
+            client.post("/api/sync")                       # step 1: still driving
+            _SleepsAfterDrivingClient.step = 2
+            sync_resp = client.post("/api/sync")            # step 2: asleep
+            assert sync_resp.json()["status"] == "asleep"
+
+            # Prove /api/summary reads this back without touching Tesla at all.
+            class _ExplodesIfCalled:
+                def __init__(self, **_):
+                    pass
+
+                def list_vehicles(self):
+                    raise AssertionError("summary must not call Tesla")
+
+            monkeypatch.setattr("app.tesla_client.TeslaClient", _ExplodesIfCalled)
+            summary = client.get("/api/summary").json()
+            assert summary["last_status"]["status"] == "asleep"
+            assert summary["last_status"]["soc"] == 76          # from step 1's last real read
+    finally:
+        settings.app_passcode = old
+        _reset_to_demo()
+
+
 def test_single_car_summary_has_no_garage_picker():
     """A one-car (demo) dashboard exposes no garage, so no picker shows."""
     settings = get_settings()

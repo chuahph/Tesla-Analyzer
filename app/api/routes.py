@@ -39,6 +39,20 @@ FAST_POLL_WINDOW_MIN = 3.0
 BASE_POLL_INTERVAL_MIN = 5.0
 
 
+def _save_last_status(session: Session, vin: str, **fields) -> None:
+    """Persist the cron's own last determination of what the car was doing.
+
+    Written on every /api/sync tick (including "found it asleep") so the
+    dashboard can show a near-live status straight from the database on page
+    load — mirroring what a push-based telemetry feed would give you, but
+    built from polling: the cron is the thing pinging Tesla, writing the
+    result to Neon every time, and the dashboard only ever reads that back.
+    """
+    import json as _json
+
+    state.put(session, state.scoped(state.LAST_STATUS_KEY, vin), _json.dumps(fields))
+
+
 def _first_vehicle(session: Session) -> Vehicle:
     # The car the dashboard follows (the active pick, else the linked car) takes
     # precedence over demo/imported rows.
@@ -642,6 +656,11 @@ def sync_now(wake: bool = Query(False), session: Session = Depends(get_session))
             last = _json.loads(last_raw)
             resp["last"] = {"soc": last.get("soc"), "ts": last.get("ts"),
                             "odo_km": round(last.get("odo_km", 0), 1)}
+        _save_last_status(
+            session, active_target, status=resp["status"], ts=now_ts,
+            soc=resp.get("last", {}).get("soc"), odo_km=resp.get("last", {}).get("odo_km"),
+            speed_kmh=None, note=resp["note"],
+        )
         return resp
 
     snap, open_trip, vehicle = active_snap, active_open_trip, active_vehicle
@@ -664,6 +683,11 @@ def sync_now(wake: bool = Query(False), session: Session = Depends(get_session))
     recently_woke = bool(woke_at) and (now_ts - woke_at) <= FAST_POLL_WINDOW_MIN * 60
     poll_fast = activity == "driving" or recently_woke
 
+    _save_last_status(
+        session, active_target, status=activity, ts=now_ts,
+        soc=snap["soc"], odo_km=round(snap["odo_km"], 1),
+        speed_kmh=round(snap.get("speed_kmh") or 0.0), note=None,
+    )
     return {
         "status": activity,
         "soc": snap["soc"],
@@ -860,6 +884,13 @@ def summary(
 
     settings = get_settings()
     vehicle = _first_vehicle(session)
+    # The cron's own last determination of what the car was doing (including
+    # "found it asleep") — written every /api/sync tick, read here purely
+    # from the database. This is what lets the dashboard show a near-live
+    # status on page load without itself ever pinging Tesla: the background
+    # cron already did, and left the answer sitting in Neon.
+    last_status_raw = state.get(session, state.scoped(state.LAST_STATUS_KEY, vehicle.vin))
+    last_status = _json.loads(last_status_raw) if last_status_raw else None
     since = None
     window_label = None
     live = None
@@ -940,6 +971,7 @@ def summary(
         "window_label": window_label,
         "generated_at": datetime.now().isoformat(timespec="seconds"),
         "currency": settings.currency,
+        "last_status": last_status,
         "live_trip": live,
         "driving": driving,
         "charging": charging,

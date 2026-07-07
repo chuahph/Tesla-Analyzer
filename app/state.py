@@ -25,6 +25,10 @@ SUSPEND_KEY = "suspend_until_ts"  # epoch until which cron polling stays quiet (
 LAST_VSTATE_KEY = "last_vstate"  # last-seen list_vehicles() state per VIN (online/asleep/offline)
 WOKE_AT_KEY = "woke_at_ts"  # epoch a car was last seen waking on its own (not our manual wake)
 LAST_POLL_KEY = "last_poll_ts"  # epoch of the last actual vehicle_data() read per VIN
+LAST_STATUS_KEY = "last_status"  # JSON: {status, ts, soc, odo_km, speed_kmh, note} per VIN —
+# the cron's own last determination of what the car was doing, so the
+# dashboard can show a near-live status straight from Neon on page load
+# without itself pinging Tesla.
 
 
 def get(session: Session, key: str, default: str = "") -> str:
