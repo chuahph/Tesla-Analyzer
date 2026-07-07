@@ -634,6 +634,131 @@ def test_manual_sync_bypasses_the_poll_throttle(monkeypatch):
         _reset_to_demo()
 
 
+class _SleepsAfterDrivingClient:
+    """Reports driving for its first two reads, then goes properly 'asleep'
+    (not just 'offline') on the third — for testing that an open trip closes
+    immediately using the last real reading, rather than waiting for the car
+    to wake up again."""
+    VIN = "VINAAAAAAAAAAAAAA"
+    step = 0
+
+    def __init__(self, **_):
+        pass
+
+    def list_vehicles(self):
+        st = "asleep" if type(self).step >= 2 else "online"
+        return [{"vin": self.VIN, "id_s": "1", "id": 1, "state": st}]
+
+    def wake_up(self, vid):
+        return True
+
+    def vehicle_data(self, vid):
+        odo = {0: 10_000.0, 1: 10_012.0}[type(self).step]
+        soc = {0: 80, 1: 76}[type(self).step]
+        return {
+            "vin": self.VIN,
+            "display_name": "Highland",
+            "drive_state": {"timestamp": 1_760_500_000_000 + type(self).step * 300_000,
+                            "shift_state": "D", "speed": 60},
+            "charge_state": {"battery_level": soc,
+                             "battery_range": (400.0 - type(self).step * 20) / 1.60934,
+                             "charging_state": "Disconnected"},
+            "climate_state": {"outside_temp": 28},
+            "vehicle_state": {"odometer": ODO_KM_TO_MI(odo),
+                              "is_user_present": True, "locked": False},
+            "vehicle_config": {"car_type": "model3"},
+        }
+
+
+class _OfflineAfterDrivingClient(_SleepsAfterDrivingClient):
+    """Same as above, but the third read is ambiguous 'offline' rather than
+    a confirmed 'asleep' — must NOT auto-close (could just be a signal gap
+    mid-drive, e.g. a tunnel)."""
+
+    def list_vehicles(self):
+        st = "offline" if type(self).step >= 2 else "online"
+        return [{"vin": self.VIN, "id_s": "1", "id": 1, "state": st}]
+
+
+def test_open_trip_closes_immediately_when_car_falls_asleep(monkeypatch):
+    """The car going to true sleep is a definitive 'the drive is over' signal
+    (impossible mid-drive) — the trip should close right then using the last
+    real reading, not wait for the car to wake up again and reconstruct a
+    possibly hours-stale window."""
+    from app import services, state
+    from app.models import Drive
+
+    settings = get_settings()
+    old = settings.app_passcode
+    settings.app_passcode = ""
+    _SleepsAfterDrivingClient.step = 0
+    try:
+        monkeypatch.setattr("app.tesla_client.TeslaClient", _FakeClient)
+        vin = "VINAAAAAAAAAAAAAA"
+        with SessionLocal() as s:
+            services.link_with_token(s, "tok")
+            vid = s.query(Vehicle).filter(Vehicle.vin == vin).first().id
+
+        monkeypatch.setattr("app.tesla_client.TeslaClient", _SleepsAfterDrivingClient)
+        with TestClient(app) as client:
+            resp0 = client.post("/api/sync")            # opens the trip
+            assert resp0.json()["status"] == "driving"
+
+            _SleepsAfterDrivingClient.step = 1
+            resp1 = client.post("/api/sync")             # still driving, further along
+            assert resp1.json()["status"] == "driving"
+
+            _SleepsAfterDrivingClient.step = 2
+            resp2 = client.post("/api/sync")              # now properly asleep
+            assert resp2.json()["status"] == "asleep"
+            assert resp2.json()["logged"]["drives"] == 1   # auto-closed, not left dangling
+
+        with SessionLocal() as s:
+            drives = s.query(Drive).filter(Drive.vehicle_id == vid).all()
+            assert len(drives) == 1
+            assert drives[0].distance_km == 12.0             # 10000 -> 10012
+            assert state.get(s, state.scoped(state.OPEN_TRIP_KEY, vin)) == ""
+    finally:
+        settings.app_passcode = old
+        _reset_to_demo()
+
+
+def test_offline_does_not_auto_close_open_trip(monkeypatch):
+    """'offline' is ambiguous — unlike 'asleep' it can mean a momentary signal
+    gap during an active drive, so it must not trigger an auto-close (that
+    would risk splitting one real trip into two over a brief dead zone)."""
+    from app import services, state
+    from app.models import Drive
+
+    settings = get_settings()
+    old = settings.app_passcode
+    settings.app_passcode = ""
+    _OfflineAfterDrivingClient.step = 0
+    try:
+        monkeypatch.setattr("app.tesla_client.TeslaClient", _FakeClient)
+        vin = "VINAAAAAAAAAAAAAA"
+        with SessionLocal() as s:
+            services.link_with_token(s, "tok")
+            vid = s.query(Vehicle).filter(Vehicle.vin == vin).first().id
+
+        monkeypatch.setattr("app.tesla_client.TeslaClient", _OfflineAfterDrivingClient)
+        with TestClient(app) as client:
+            client.post("/api/sync")
+            _OfflineAfterDrivingClient.step = 1
+            client.post("/api/sync")
+            _OfflineAfterDrivingClient.step = 2
+            resp = client.post("/api/sync")               # now offline (ambiguous)
+            assert resp.json()["logged"]["drives"] == 0     # not auto-closed
+
+        with SessionLocal() as s:
+            drives = s.query(Drive).filter(Drive.vehicle_id == vid).all()
+            assert len(drives) == 0
+            assert state.get(s, state.scoped(state.OPEN_TRIP_KEY, vin)) != ""  # still open
+    finally:
+        settings.app_passcode = old
+        _reset_to_demo()
+
+
 def test_single_car_summary_has_no_garage_picker():
     """A one-car (demo) dashboard exposes no garage, so no picker shows."""
     settings = get_settings()

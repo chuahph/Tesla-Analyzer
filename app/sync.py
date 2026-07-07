@@ -282,6 +282,23 @@ def _drive_from(start: dict, cur: dict, capacity_kwh: float, max_speed: float = 
     }
 
 
+def close_trip_on_sleep(open_trip: dict, last_snapshot: dict, capacity_kwh: float):
+    """Close a trip the moment the car is confirmed properly asleep.
+
+    A car cannot reach true sleep while driving — it needs power to move, so
+    sleep is only reachable once parked and idle for a while. If a trip is
+    still open when that happens, it is therefore definitely over, and
+    ``last_snapshot`` (the most recent successful read) is a *good* anchor for
+    the end, not a guess: with the sync endpoint's own poll-throttle bypassing
+    for any car with an open trip, that reading is at most one poll interval
+    old, never the hours-stale reading a later reconnect could bring. This
+    avoids the whole-gap reconstruction (``_reanchor_stale``) and its inherent
+    "which end of the gap did the drive happen near" ambiguity entirely, for
+    this specific transition.
+    """
+    return _drive_from(open_trip, last_snapshot, capacity_kwh, open_trip.get("max_speed", 0.0))
+
+
 def live_trip(
     open_trip: dict | None, snap: dict | None, capacity_kwh: float = 75.0
 ) -> dict | None:

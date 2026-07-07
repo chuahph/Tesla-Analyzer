@@ -562,3 +562,20 @@ def test_trip_tracks_unlock_event_sequence():
     _, _, trip, _ = step(s2, s3, trip)
     assert trip is not None
     assert trip.get("unlocked_before_drive") is True, "Should preserve unlock flag"
+
+
+def test_close_trip_on_sleep_uses_last_snapshot_as_the_end():
+    """A car can't reach true sleep mid-drive, so an open trip is definitely
+    over once it does — close using the last successful read as the end,
+    not a guess."""
+    from app.sync import _dt, close_trip_on_sleep
+
+    open_trip = {"ts": T0, "odo_km": 10_000.0, "soc": 80, "max_speed": 70.0}
+    last_snapshot = snap(T0 + 900, 10_012.0, 76)  # last read before it went asleep
+    d = close_trip_on_sleep(open_trip, last_snapshot, 60.0)
+    assert d is not None
+    assert d["distance_km"] == 12.0
+    assert d["duration_min"] == 15.0
+    # Anchored at the last real reading's own timestamp, not a guess.
+    assert d["end_time"] == _dt(T0 + 900)
+    assert d["start_time"] == _dt(T0)

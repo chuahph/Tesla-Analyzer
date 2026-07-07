@@ -537,6 +537,34 @@ def sync_now(wake: bool = Query(False), session: Session = Depends(get_session))
             except Exception:  # noqa: BLE001 — wake is best-effort
                 pass
         if vstate and vstate != "online":
+            # A car can only reach true "asleep" while parked and idle — never
+            # mid-drive. If a trip is still open when that happens, it's
+            # definitely over: close it now using the last snapshot we did
+            # read (fresh, since the poll-throttle below never skips a
+            # vehicle with an open trip) instead of waiting for it to wake up
+            # again — possibly hours later — and having to guess the timing.
+            # "offline" is deliberately excluded: unlike "asleep" it can mean
+            # a momentary signal gap *during* an active drive (a tunnel, a
+            # dead zone), so treating it as a close-now signal risks
+            # splitting one real trip into two.
+            if vstate == "asleep":
+                trip_key = state.scoped(state.OPEN_TRIP_KEY, vvin)
+                trip_raw = state.get(session, trip_key)
+                last_raw = state.get(session, state.scoped(state.SNAPSHOT_KEY, vvin))
+                if trip_raw and last_raw:
+                    vehicle_row = session.query(Vehicle).filter(Vehicle.vin == vvin).first()
+                    if vehicle_row:
+                        d = sync_mod.close_trip_on_sleep(
+                            _json.loads(trip_raw), _json.loads(last_raw),
+                            vehicle_row.battery_capacity_kwh,
+                        )
+                        if d:
+                            d["start_location"] = _place(d["start_location"])
+                            d["end_location"] = _place(d["end_location"])
+                            session.add(Drive(vehicle_id=vehicle_row.id, **d))
+                            session.commit()
+                            total["drives"] += 1
+                    state.put(session, trip_key, "")
             continue  # asleep/offline — nothing readable right now
 
         # The car is online, but that alone isn't reason enough to read it —
