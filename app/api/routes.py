@@ -552,21 +552,47 @@ def sync_now(wake: bool = Query(False), session: Session = Depends(get_session))
             if vstate == "asleep" or sustained_offline:
                 trip_key = state.scoped(state.OPEN_TRIP_KEY, vvin)
                 trip_raw = state.get(session, trip_key)
+                charge_key = state.scoped(state.OPEN_CHARGE_KEY, vvin)
+                charge_raw = state.get(session, charge_key)
                 last_raw = state.get(session, state.scoped(state.SNAPSHOT_KEY, vvin))
-                if trip_raw and last_raw:
-                    vehicle_row = session.query(Vehicle).filter(Vehicle.vin == vvin).first()
-                    if vehicle_row:
-                        d = sync_mod.close_trip_on_sleep(
-                            _json.loads(trip_raw), _json.loads(last_raw),
-                            vehicle_row.battery_capacity_kwh,
-                        )
-                        if d:
-                            d["start_location"] = _place(d["start_location"])
-                            d["end_location"] = _place(d["end_location"])
-                            session.add(Drive(vehicle_id=vehicle_row.id, **d))
-                            session.commit()
-                            total["drives"] += 1
+                vehicle_row = (
+                    session.query(Vehicle).filter(Vehicle.vin == vvin).first()
+                    if (trip_raw or charge_raw) and last_raw else None
+                )
+                if trip_raw and last_raw and vehicle_row:
+                    d = sync_mod.close_trip_on_sleep(
+                        _json.loads(trip_raw), _json.loads(last_raw),
+                        vehicle_row.battery_capacity_kwh,
+                    )
+                    if d:
+                        d["start_location"] = _place(d["start_location"])
+                        d["end_location"] = _place(d["end_location"])
+                        session.add(Drive(vehicle_id=vehicle_row.id, **d))
+                        session.commit()
+                        total["drives"] += 1
+                if trip_raw:
                     state.put(session, trip_key, "")
+                # Charging usually keeps the car awake, so this rarely fires —
+                # but connectivity can still drop mid-session, and without
+                # this an interrupted charge would sit open indefinitely
+                # waiting for a reconnect, never logged to Neon at all.
+                if charge_raw and last_raw and vehicle_row:
+                    c = sync_mod.close_charge_on_sleep(
+                        _json.loads(charge_raw), _json.loads(last_raw),
+                        vehicle_row.battery_capacity_kwh, settings.energy_price_per_kwh,
+                    )
+                    if c:
+                        cap = sync_mod.implied_capacity_kwh(c)
+                        c.pop("energy_measured", None)
+                        if cap:
+                            old_cap = vehicle_row.battery_capacity_kwh or 75.0
+                            vehicle_row.battery_capacity_kwh = round(0.8 * old_cap + 0.2 * cap, 1)
+                        c["location"] = _place(c.get("location", ""))
+                        session.add(Charge(vehicle_id=vehicle_row.id, **c))
+                        session.commit()
+                        total["charges"] += 1
+                if charge_raw:
+                    state.put(session, charge_key, "")
             continue  # asleep/offline — nothing readable right now
 
         # Back online — this unreachable episode (if any) is over; the next
@@ -576,18 +602,20 @@ def sync_now(wake: bool = Query(False), session: Session = Depends(get_session))
         # The car is online, but that alone isn't reason enough to read it —
         # it may just not have fallen asleep yet from something unrelated to
         # us. Only actually call vehicle_data() (the read that resets Tesla's
-        # own sleep countdown) when there's a concrete reason to: a trip is
-        # already open (need to track it live), it woke up unprompted within
-        # the escalation window (may be about to drive off), the normal base
-        # interval has elapsed anyway, or this is the user's own manual sync.
+        # own sleep countdown) when there's a concrete reason to: a trip or
+        # charge is already open (need to track it live), it woke up
+        # unprompted within the escalation window (may be about to drive
+        # off), the normal base interval has elapsed anyway, or this is the
+        # user's own manual sync.
         poll_key = state.scoped(state.LAST_POLL_KEY, vvin)
         last_poll_ts = float(state.get(session, poll_key) or 0)
         woke_at = float(state.get(session, state.scoped(state.WOKE_AT_KEY, vvin)) or 0)
         recently_woke = bool(woke_at) and (now_ts - woke_at) <= FAST_POLL_WINDOW_MIN * 60
         due = (now_ts - last_poll_ts) >= BASE_POLL_INTERVAL_MIN * 60
         trip_in_progress = bool(state.get(session, state.scoped(state.OPEN_TRIP_KEY, vvin)))
+        charge_in_progress = bool(state.get(session, state.scoped(state.OPEN_CHARGE_KEY, vvin)))
         manual_sync = wake and vvin == active_target
-        if not (trip_in_progress or recently_woke or due or manual_sync):
+        if not (trip_in_progress or charge_in_progress or recently_woke or due or manual_sync):
             continue  # online but idle, not due yet — let it settle toward sleep
         state.put(session, poll_key, str(now_ts))
 

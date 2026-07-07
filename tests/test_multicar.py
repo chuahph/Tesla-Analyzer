@@ -725,6 +725,84 @@ def test_open_trip_closes_immediately_when_car_falls_asleep(monkeypatch):
         _reset_to_demo()
 
 
+class _SleepsWhileChargingClient:
+    """Reports charging for its first two reads, then goes properly 'asleep'
+    mid-session — for testing that an open charge closes immediately using
+    the last real reading, symmetric to the trip case."""
+    VIN = "VINAAAAAAAAAAAAAA"
+    step = 0
+
+    def __init__(self, **_):
+        pass
+
+    def list_vehicles(self):
+        st = "asleep" if type(self).step >= 2 else "online"
+        return [{"vin": self.VIN, "id_s": "1", "id": 1, "state": st}]
+
+    def wake_up(self, vid):
+        return True
+
+    def vehicle_data(self, vid):
+        soc = {0: 60, 1: 70}[type(self).step]
+        energy_added = {0: 3.0, 1: 8.0}[type(self).step]
+        return {
+            "vin": self.VIN,
+            "display_name": "Highland",
+            "drive_state": {"timestamp": 1_760_500_000_000 + type(self).step * 300_000,
+                            "shift_state": "P", "speed": 0},
+            "charge_state": {"battery_level": soc, "battery_range": 300.0 / 1.60934,
+                             "charging_state": "Charging", "charger_power": 11,
+                             "charge_energy_added": energy_added},
+            "climate_state": {"outside_temp": 25},
+            "vehicle_state": {"odometer": ODO_KM_TO_MI(10_000.0),
+                              "is_user_present": False, "locked": True},
+            "vehicle_config": {"car_type": "model3"},
+        }
+
+
+def test_open_charge_closes_immediately_when_car_falls_asleep(monkeypatch):
+    """A charge session interrupted by the car going properly asleep (rare —
+    charging usually keeps it awake — but connectivity can still drop at the
+    charge site) must close using the last real reading, symmetric to the
+    trip case, rather than sit open indefinitely and never reach Neon."""
+    from app import services, state
+    from app.models import Charge
+
+    settings = get_settings()
+    old = settings.app_passcode
+    settings.app_passcode = ""
+    _SleepsWhileChargingClient.step = 0
+    try:
+        monkeypatch.setattr("app.tesla_client.TeslaClient", _FakeClient)
+        vin = "VINAAAAAAAAAAAAAA"
+        with SessionLocal() as s:
+            services.link_with_token(s, "tok")
+            vid = s.query(Vehicle).filter(Vehicle.vin == vin).first().id
+
+        monkeypatch.setattr("app.tesla_client.TeslaClient", _SleepsWhileChargingClient)
+        with TestClient(app) as client:
+            resp0 = client.post("/api/sync")             # step 0: charging opens
+            assert resp0.json()["status"] == "charging"
+
+            _SleepsWhileChargingClient.step = 1
+            resp1 = client.post("/api/sync")              # step 1: still charging
+            assert resp1.json()["status"] == "charging"
+
+            _SleepsWhileChargingClient.step = 2
+            resp2 = client.post("/api/sync")               # step 2: now asleep
+            assert resp2.json()["status"] == "asleep"
+            assert resp2.json()["logged"]["charges"] == 1    # auto-closed
+
+        with SessionLocal() as s:
+            charges = s.query(Charge).filter(Charge.vehicle_id == vid).all()
+            assert len(charges) == 1
+            assert abs(charges[0].energy_added_kwh - 8.0) < 1e-6  # Tesla's own meter
+            assert state.get(s, state.scoped(state.OPEN_CHARGE_KEY, vin)) == ""
+    finally:
+        settings.app_passcode = old
+        _reset_to_demo()
+
+
 def test_offline_does_not_auto_close_open_trip_on_first_reading(monkeypatch):
     """A single 'offline' reading is ambiguous — unlike 'asleep' it can mean a
     momentary signal gap during an active drive — so it must not trigger an

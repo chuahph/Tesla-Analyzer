@@ -376,6 +376,20 @@ def _charge_from(start: dict, cur: dict, capacity_kwh: float, price_per_kwh: flo
     }
 
 
+def close_charge_on_sleep(open_charge: dict, last_snapshot: dict, capacity_kwh: float,
+                          price_per_kwh: float):
+    """Close a charge session the moment the car is confirmed asleep/gone
+    unreachable, symmetric to ``close_trip_on_sleep``.
+
+    Charging usually keeps a Tesla's computer awake, so this fires rarely —
+    but connectivity can still drop (Wi-Fi/cell issue at the charge site)
+    without the session having actually ended, so it's still worth closing
+    from the last real reading rather than leaving it open indefinitely
+    waiting for a reconnect that might be hours away.
+    """
+    return _charge_from(open_charge, last_snapshot, capacity_kwh, price_per_kwh)
+
+
 def implied_capacity_kwh(charge: dict) -> float | None:
     """Usable pack capacity implied by a Tesla-measured charge (kWh).
 
