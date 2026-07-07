@@ -423,18 +423,6 @@ def _process_vehicle(
     return vehicle, snap, len(drives), len(charges), open_trip
 
 
-def _update_idle_window(session: Session, any_active: bool, wake: bool, now_ts: float) -> None:
-    """Schedule/clear the car-sleep quiet window from activity across all cars."""
-    IDLE_AFTER_MIN, SUSPEND_MIN = 15, 30
-    last_active = float(state.get(session, state.LAST_ACTIVE_KEY) or 0)
-    if any_active or not last_active:
-        state.put(session, state.LAST_ACTIVE_KEY, str(now_ts))
-        if any_active:
-            state.put(session, state.SUSPEND_KEY, "")
-    elif not wake and now_ts - last_active >= IDLE_AFTER_MIN * 60:
-        state.put(session, state.SUSPEND_KEY, str(now_ts + SUSPEND_MIN * 60))
-
-
 @router.get("/sync")  # GET so external cron/uptime services can trigger it
 @router.post("/sync")
 def sync_now(wake: bool = Query(False), session: Session = Depends(get_session)):
@@ -456,29 +444,7 @@ def sync_now(wake: bool = Query(False), session: Session = Depends(get_session))
     base = state.active_base_url(session)
     active_target = state.active_vin(session)
 
-    # Sleep window: polling an awake-but-idle car resets its sleep timer and
-    # slowly drains the battery. After IDLE_AFTER_MIN of no activity the cron
-    # goes quiet for SUSPEND_MIN so the car can nap; the manual Sync button
-    # (wake=1) always bypasses this and clears the window.
     now_ts = datetime.now().timestamp()
-    if wake:
-        state.put(session, state.SUSPEND_KEY, "")
-    else:
-        suspend_until = float(state.get(session, state.SUSPEND_KEY) or 0)
-        if now_ts < suspend_until:
-            resp = {
-                "status": "sleep-window",
-                "logged": {"drives": 0, "charges": 0},
-                "poll_fast": False,
-                "note": ("Letting the car sleep — polling resumes in "
-                         f"~{int((suspend_until - now_ts) / 60) + 1} min."),
-            }
-            last_raw = state.get(session, state.scoped(state.SNAPSHOT_KEY, active_target))
-            if last_raw:
-                last = _json.loads(last_raw)
-                resp["last"] = {"soc": last.get("soc"), "ts": last.get("ts"),
-                                "odo_km": round(last.get("odo_km", 0), 1)}
-            return resp
 
     def make_client(tok):
         return TeslaClient(access_token=tok, base_url=base)
@@ -518,7 +484,6 @@ def sync_now(wake: bool = Query(False), session: Session = Depends(get_session))
 
     client = make_client(token)
     total = {"drives": 0, "charges": 0}
-    any_active = False
     purged = False
     active_snap = active_open_trip = active_vehicle = None
     active_cfg: dict = {}
@@ -644,14 +609,11 @@ def sync_now(wake: bool = Query(False), session: Session = Depends(get_session))
         )
         total["drives"] += nd
         total["charges"] += nc
-        if snap["charging"] or sync_mod.is_driving(snap) or snap.get("user_present"):
-            any_active = True
         if vvin == active_target:
             active_snap, active_open_trip, active_vehicle = snap, open_trip, vehicle
             active_cfg = data.get("vehicle_config") or {}
 
     state.put(session, state.SOURCE_KEY, "linked")
-    _update_idle_window(session, any_active, wake, now_ts)
 
     # The dashboard's live status reflects the active car specifically.
     if active_snap is None:

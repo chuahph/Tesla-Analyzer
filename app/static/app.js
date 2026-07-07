@@ -1095,10 +1095,6 @@ async function syncNow(wake) {
       setSyncStatus(batt, body.tried_wake
         ? "😴 Couldn't wake the car — it may be offline. Try again in a minute."
         : "😴 Car asleep — tap Sync to wake it, or sync after a drive.", "warn");
-    } else if (body.status === "sleep-window") {
-      const batt = body.last && body.last.soc
-        ? `🔋 ${Math.round(body.last.soc)}% (last known)` : "";
-      setSyncStatus(batt, `💤 ${body.note} Tap Sync for fresh data now.`, "");
     } else {
       const l = body.logged || {};
       const extra = (l.drives || l.charges)
