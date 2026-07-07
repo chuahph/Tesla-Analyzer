@@ -38,6 +38,14 @@ FAST_POLL_WINDOW_MIN = 3.0
 # sleep instead of being kept awake by our own frequent checks.
 BASE_POLL_INTERVAL_MIN = 5.0
 
+# If /api/sync hasn't written a last_status update in this long, something's
+# wrong upstream of the app itself — the external cron has stopped firing, or
+# a request is failing before it even gets far enough to record a status
+# (e.g. a database write failure). A healthy 1-minute cron refreshes this
+# every tick regardless of whether the car itself is reachable, so a gap
+# this large is a real signal, not normal jitter.
+CRON_STALE_MIN = 10.0
+
 # How long "offline" (as opposed to a clean "asleep") must be sustained before
 # an open trip is closed on it. Some accounts/cars report a genuinely-sleeping
 # car as "offline" rather than "asleep", so treating only "asleep" as
@@ -872,6 +880,11 @@ def summary(
     # cron already did, and left the answer sitting in Neon.
     last_status_raw = state.get(session, state.scoped(state.LAST_STATUS_KEY, vehicle.vin))
     last_status = _json.loads(last_status_raw) if last_status_raw else None
+    # Computed fresh on every request from the server's own clock (not the
+    # browser's), so a stale/wrong client clock can't mask or fake this.
+    if last_status is not None:
+        age_min = (datetime.now().timestamp() - (last_status.get("ts") or 0)) / 60.0
+        last_status["stale"] = age_min > CRON_STALE_MIN
     since = None
     window_label = None
     live = None

@@ -849,6 +849,42 @@ def test_summary_surfaces_last_known_status_from_neon(monkeypatch):
             summary = client.get("/api/summary").json()
             assert summary["last_status"]["status"] == "asleep"
             assert summary["last_status"]["soc"] == 76          # from step 1's last real read
+            assert summary["last_status"]["stale"] is False      # just written, not stale
+    finally:
+        settings.app_passcode = old
+        _reset_to_demo()
+
+
+def test_summary_flags_stale_last_status_when_cron_stops(monkeypatch):
+    """last_status.ts is refreshed by /api/sync every cron tick regardless of
+    whether the car itself is reachable — so a large gap since it means the
+    cron has stopped firing (or something is failing before it can even
+    record a status), not that the car has just been busy. /api/summary must
+    flag this so the dashboard can show a clear warning instead of quietly
+    presenting a stale reading as current."""
+    import json as _json
+    import time as _time
+
+    from app import services, state
+
+    settings = get_settings()
+    old = settings.app_passcode
+    settings.app_passcode = ""
+    try:
+        monkeypatch.setattr("app.tesla_client.TeslaClient", _FakeClient)
+        vin = "VINAAAAAAAAAAAAAA"
+        with SessionLocal() as s:
+            services.link_with_token(s, "tok")
+            # Simulate a last_status written 20 minutes ago — no cron tick
+            # since, well past the staleness threshold.
+            state.put(s, state.scoped(state.LAST_STATUS_KEY, vin), _json.dumps({
+                "status": "parked", "ts": _time.time() - 20 * 60,
+                "soc": 60, "odo_km": 100.0, "speed_kmh": 0,
+            }))
+
+        with TestClient(app) as client:
+            summary = client.get("/api/summary").json()
+            assert summary["last_status"]["stale"] is True
     finally:
         settings.app_passcode = old
         _reset_to_demo()

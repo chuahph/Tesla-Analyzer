@@ -169,7 +169,6 @@ document.getElementById("btn-unlink")?.addEventListener("click", async () => {
     const r = await fetch("/api/unlink", { method: "POST" });
     if (!r.ok) throw new Error(await r.text());
   } catch (e) { alert("Unlink failed: " + e.message); return; }
-  window._syncedOnce = false;
   renderHome();
 });
 
@@ -654,17 +653,24 @@ async function load() {
     // already in the database — before any fresh Tesla call of our own even
     // starts. With an external cron pinging every minute or so, this is
     // near-live without the page itself having to reach Tesla first.
-    if (!STATIC_MODE && mode === "live") renderLastStatus(d.last_status);
-
-    // Live mode: reveal the Sync button and snapshot the car once per visit.
-    const syncBtn = document.getElementById("btn-sync");
-    if (syncBtn) {
-      syncBtn.classList.toggle("hidden", STATIC_MODE || mode !== "live");
-      if (!STATIC_MODE && mode === "live" && !window._syncedOnce) {
-        window._syncedOnce = true;
-        syncNow();
+    if (!STATIC_MODE && mode === "live") {
+      if (d.last_status) {
+        renderLastStatus(d.last_status);
+      } else {
+        // Live mode but never once synced — the cron isn't configured/
+        // reaching this app at all, not just stale. Distinct from the
+        // "was working, now stopped" case above.
+        setSyncStatus("", "⚠️ No sync data yet — set up your cron job to ping "
+          + "/api/sync, or tap Sync below.", "err");
       }
     }
+
+    // Live mode: reveal the Sync button. The dashboard itself never pings
+    // Tesla on its own any more — it's a pure read-only view of Neon (see
+    // renderLastStatus above); the external cron is the only thing that
+    // talks to the car, plus this button for an explicit manual check.
+    const syncBtn = document.getElementById("btn-sync");
+    if (syncBtn) syncBtn.classList.toggle("hidden", STATIC_MODE || mode !== "live");
 
     const v = d.vehicle;
     const realVin = v.vin && !/^(DEMO|IMPORT|LINKED)/.test(v.vin) ? `VIN ${v.vin}` : null;
@@ -1048,13 +1054,26 @@ function relTime(ts) {
 
 // Paint the background cron's last-known status (persisted every /api/sync
 // tick, including "asleep") straight from /api/summary — no Tesla call of
-// our own. syncNow() below will overwrite this with a fresher line once its
-// own (possibly throttled) check completes — or, if that check fails, fall
+// our own; this is the dashboard's only view of car status now that the
+// page never pings Tesla itself. A manual Sync (below) overwrites this with
+// a fresher line once its own check completes — or, if that fails, falls
 // back to re-showing this cached copy rather than losing it to a bare error.
 let lastStatusCache = null;
 function renderLastStatus(ls, note) {
   if (!ls || !ls.status) return;
   lastStatusCache = ls;
+  // last_status.ts is refreshed by /api/sync every cron tick regardless of
+  // whether the car itself was reachable — so a large gap here means the
+  // cron has stopped firing, or something is failing before it can even
+  // record a status (e.g. a database write failure), not that the car has
+  // been busy. Surface this distinctly rather than quietly showing an old
+  // status as if it were current.
+  if (ls.stale) {
+    const batt = ls.soc != null ? `🔋 ${Math.round(ls.soc)}% (last known)` : "";
+    setSyncStatus(batt, `⚠️ No sync update in over ${relTime(ls.ts).replace(" ago", "")} — `
+      + `check your cron job / Render deploy.${note ? " · " + note : ""}`, "err");
+    return;
+  }
   const label = {
     charging: "⚡ Charging",
     driving: `🚗 Driving${ls.speed_kmh ? " · " + Math.round(ls.speed_kmh) + " km/h" : ""}`,
@@ -1128,10 +1147,6 @@ async function syncNow(wake) {
 }
 const syncBtnEl = document.getElementById("btn-sync");
 if (syncBtnEl) syncBtnEl.addEventListener("click", () => syncNow(true));
-// Re-sync every 5 minutes while the dashboard stays open and visible.
-setInterval(() => {
-  if (!document.hidden && !STATIC_MODE && window._syncedOnce) syncNow();
-}, 5 * 60 * 1000);
 
 // --- Export all data as a ZIP of CSVs (drives.csv + charges.csv) ---
 function csvOf(rows, headers) {
