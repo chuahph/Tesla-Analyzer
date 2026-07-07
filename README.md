@@ -173,6 +173,63 @@ dashboard badge shows **live**.
 
 ---
 
+## Keeping it in sync (cron)
+
+For the hosted deployment (Render), something needs to hit `/api/sync` on a
+timer so drives/charges get logged without you opening the dashboard. The repo
+ships `.github/workflows/sync-car.yml` for this, but **its schedule trigger is
+disabled by default** — use an external cron service instead (below). It stays
+in the workflow only as a manual `workflow_dispatch` button (Actions tab → Sync
+car from Tesla → Run workflow) for on-demand testing.
+
+**Why not GitHub Actions' own schedule?** GitHub
+[documents](https://docs.github.com/en/actions/using-workflows/events-that-trigger-workflows#schedule)
+its `schedule` trigger as best-effort — runs can be delayed by several minutes,
+worse at the top of every hour, and can be skipped outright under load. A
+5-minute nominal interval can easily become 10-15 minutes in practice. That's
+long enough to miss a short trip's entire "driving" window, so the sync never
+sees the car in gear at all — it only catches up once the car is parked again,
+and if it fell straight asleep after locking, that catch-up read can be an hour
+or more late. The result: a real trip logged with the right distance but the
+wrong clock time. A dedicated external cron service is simply more reliable
+than GitHub's for a job that needs to fire close to on-time, every time.
+
+### Set up an external cron (recommended)
+
+Any service that can hit a URL on a schedule works. [cron-job.org](https://cron-job.org)
+is free and reliable enough for this:
+
+1. Create a free account.
+2. **Create cronjob** → URL:
+   ```
+   https://<your-app>.onrender.com/api/sync?key=<SYNC_KEY>
+   ```
+   (`SYNC_KEY` is whatever you set in Render's environment variables — see the
+   Render blueprint section above.)
+3. Set the schedule to **every 1-2 minutes** — see the battery-safety note below
+   for why this doesn't drain the car.
+4. Save. That's it; no repository secrets or GitHub Actions involved.
+
+Any similar service works the same way — UptimeRobot (as an "HTTP(s)" monitor,
+which incidentally also gets you uptime alerts for free), EasyCron, or your
+own always-on machine's system `cron` calling `curl`.
+
+**Battery safety is unaffected by how often you call this.** The endpoint
+itself decides whether to actually read the car: it never polls a car that's
+asleep, and it only escalates beyond the normal cadence while a trip is
+genuinely in progress or the car just woke up on its own — calling it every
+minute doesn't mean the car gets polled every minute. See `poll_fast` in
+`app/api/routes.py` for the exact logic.
+
+### Re-enabling the GitHub Actions schedule instead
+
+If you'd rather not sign up for another service, uncomment the `schedule:`
+block at the top of `.github/workflows/sync-car.yml` and add the `RENDER_URL`
+/ `SYNC_KEY` repository secrets (Settings → Secrets and variables → Actions).
+It will work, just with the delay/reliability caveat above.
+
+---
+
 ## Install on iPhone / iPad (PWA) — no computer needed
 
 Tesla Analyzer is an installable **Progressive Web App** — it adds to your home

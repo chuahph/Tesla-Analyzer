@@ -1,18 +1,24 @@
 name: Sync car from Tesla
 
-# Hands-off logging without a third-party scheduler: this pings your deployed
-# app's /api/sync on a timer, which wakes the (free-tier, sleeping) Render
-# service and records new drives/charges. It is battery-safe — the app's own
-# sleep-window stops actually polling the car once it's been idle ~15 min.
+# DISABLED by default — see "Keeping it in sync" in the README. GitHub Actions' schedule
+# trigger is documented by GitHub as best-effort and can be delayed several
+# minutes (worse at the top of every hour), which is long enough to miss a
+# short trip's entire "driving" window and fall back to blind gap
+# reconstruction (wrong trip times). An external cron service hitting
+# /api/sync every 1-2 minutes is far more reliable for this, so that's now
+# the primary trigger. This workflow is kept only for workflow_dispatch (a
+# manual "Run workflow" button from the Actions tab) as a backup — re-enable
+# the schedule block below only if you're not using an external cron.
 #
-# Resolution boost: GitHub Actions can't schedule tighter than 5 minutes, but
-# a single run can poll several times internally. /api/sync returns
-# "poll_fast": true only while a trip is actively in progress, or briefly
-# after the car came online on its own (not our doing) and may be about to
-# drive off. We loop on that hint alone — an online-but-idle car is never
-# polled beyond its normal 5-minute cadence, so this can't add phantom drain:
-# each extra call in the loop only happens when the car is already awake for
-# its own reasons (driving, or a wake we didn't trigger).
+# Resolution boost when it does run: GitHub Actions can't schedule tighter
+# than 5 minutes, but a single run can poll several times internally.
+# /api/sync returns "poll_fast": true only while a trip is actively in
+# progress, or briefly after the car came online on its own (not our doing)
+# and may be about to drive off. We loop on that hint alone — an
+# online-but-idle car is never polled beyond its normal cadence, so this
+# can't add phantom drain: each extra call in the loop only happens when the
+# car is already awake for its own reasons (driving, or a wake we didn't
+# trigger).
 #
 # To enable it, add two repository secrets (Settings → Secrets and variables →
 # Actions → New repository secret):
@@ -21,9 +27,9 @@ name: Sync car from Tesla
 # Without both secrets this job simply does nothing, so it's safe in any fork.
 
 on:
-  schedule:
-    - cron: "*/5 * * * *" # every 5 minutes
-  workflow_dispatch: {}   # also runnable by hand from the Actions tab
+  # schedule:
+  #   - cron: "*/5 * * * *" # disabled — see note above; use an external cron instead
+  workflow_dispatch: {}   # manual "Run workflow" button — kept as a backup trigger
 
 # Never let two pings overlap (a wake can take ~30 s).
 concurrency:
