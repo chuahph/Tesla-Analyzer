@@ -650,6 +650,12 @@ async function load() {
     if (STATIC_MODE) updateResetButton();
     // (The trip tools' visibility is handled in renderLists, once trips load.)
 
+    // Show the background cron's last-known status immediately from what's
+    // already in the database — before any fresh Tesla call of our own even
+    // starts. With an external cron pinging every minute or so, this is
+    // near-live without the page itself having to reach Tesla first.
+    if (!STATIC_MODE && mode === "live") renderLastStatus(d.last_status);
+
     // Live mode: reveal the Sync button and snapshot the car once per visit.
     const syncBtn = document.getElementById("btn-sync");
     if (syncBtn) {
@@ -1030,6 +1036,37 @@ function setSyncStatus(batt, cond, kind) {
   wrap.style.display = batt || cond ? "" : "none";
 }
 
+// "42s ago" / "5m ago" / "2h ago" from a unix-seconds timestamp.
+function relTime(ts) {
+  if (!ts) return "";
+  const s = Math.max(0, Math.round(Date.now() / 1000 - ts));
+  if (s < 90) return `${s}s ago`;
+  const m = Math.round(s / 60);
+  if (m < 90) return `${m}m ago`;
+  return `${Math.round(m / 60)}h ago`;
+}
+
+// Paint the background cron's last-known status (persisted every /api/sync
+// tick, including "asleep") straight from /api/summary — no Tesla call of
+// our own. syncNow() below will overwrite this with a fresher line once its
+// own (possibly throttled) check completes — or, if that check fails, fall
+// back to re-showing this cached copy rather than losing it to a bare error.
+let lastStatusCache = null;
+function renderLastStatus(ls, note) {
+  if (!ls || !ls.status) return;
+  lastStatusCache = ls;
+  const label = {
+    charging: "⚡ Charging",
+    driving: `🚗 Driving${ls.speed_kmh ? " · " + Math.round(ls.speed_kmh) + " km/h" : ""}`,
+    stopped: "🚗 Trip in progress — stopped briefly",
+    parked: "🅿️ Parked",
+    asleep: "😴 Asleep",
+  }[ls.status] || ls.status;
+  const batt = ls.soc != null ? `🔋 ${Math.round(ls.soc)}%` : "";
+  const kind = ls.status === "asleep" ? "warn" : "ok";
+  setSyncStatus(batt, `${label} · as of ${relTime(ls.ts)}${note ? " · " + note : ""}`, kind);
+}
+
 let syncBusy = false;
 // wake=true (the Sync button) nudges a sleeping car online before reading it;
 // the automatic syncs never wake the car.
@@ -1044,6 +1081,14 @@ async function syncNow(wake) {
     let body = {};
     try { body = await res.json(); } catch (_) { body = {}; }
     if (!res.ok) throw new Error(body.detail || `Sync unavailable (${res.status}) — try again shortly`);
+    // Keep the fallback cache fresh with this live result, so a *later*
+    // failed check still has something better than a bare error to fall
+    // back on than the page-load snapshot from Neon.
+    lastStatusCache = {
+      status: body.status, ts: Date.now() / 1000,
+      soc: body.soc ?? (body.last && body.last.soc),
+      odo_km: body.odo_km, speed_kmh: body.speed_kmh,
+    };
     if (body.status === "asleep") {
       const batt = body.last && body.last.soc
         ? `🔋 ${Math.round(body.last.soc)}% (last known)` : "";
@@ -1073,7 +1118,14 @@ async function syncNow(wake) {
       if (l.drives || l.charges || body.trip_in_progress) load();
     }
   } catch (e) {
-    setSyncStatus("", e.message, "err");
+    // A failed live check shouldn't erase perfectly good info we already
+    // have from Neon (this tab's last load, or an earlier successful sync
+    // this visit) — re-show it with a note instead of a bare error.
+    if (lastStatusCache) {
+      renderLastStatus(lastStatusCache, `⚠️ live check failed: ${e.message}`);
+    } else {
+      setSyncStatus("", e.message, "err");
+    }
   } finally {
     syncBusy = false;
   }
