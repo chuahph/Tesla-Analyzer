@@ -44,11 +44,31 @@ engine = _make_engine()
 SessionLocal = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False, future=True)
 
 
+def _ensure_column(table: str, column: str, ddl_type: str, default_sql: str) -> None:
+    """Defensively add a column to an already-existing table if it's missing —
+    a minimal stand-in for a migration tool (no Alembic in this project).
+    create_all() only creates missing *tables*; it never alters ones that
+    already exist, so a column added to a model after a database has already
+    been created would otherwise silently never appear there. Only ever
+    additive (a new column with a default) — never destructive."""
+    from sqlalchemy import inspect, text
+
+    inspector = inspect(engine)
+    if not inspector.has_table(table):
+        return  # brand new table — create_all() above already gave it every column
+    existing = {c["name"] for c in inspector.get_columns(table)}
+    if column in existing:
+        return
+    with engine.begin() as conn:
+        conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {column} {ddl_type} DEFAULT {default_sql}"))
+
+
 def init_db() -> None:
     """Create all tables. Models must be imported before calling this."""
     from . import models  # noqa: F401  (registers models on Base.metadata)
 
     Base.metadata.create_all(bind=engine)
+    _ensure_column("drives", "idle_min", "FLOAT", "0.0")
 
 
 def get_session() -> Iterator[Session]:

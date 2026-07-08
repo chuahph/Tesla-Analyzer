@@ -34,6 +34,7 @@ class DriveOut(BaseModel):
     start_location: str
     end_location: str
     wh_per_km: float
+    idle_min: float
 
     class Config:
         from_attributes = True

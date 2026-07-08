@@ -234,9 +234,22 @@ def analyze(drives: list[Drive], rated_wh_per_km: float = 150.0,
                 "wh_per_km": round(d.wh_per_km) if has_valid_energy(d) else None,
                 "energy_kwh": round(d.energy_used_kwh, 2) if has_valid_energy(d) else None,
                 "driving_wh_per_km": (
-                    driving_wh_val := sync_mod.driving_wh_per_km(
-                        d.energy_used_kwh, d.distance_km, d.duration_min, d.outside_temp_c,
-                        d.avg_speed_kmh, d.max_speed_kmh)
+                    # Prefer real tracked idle time (from live 1-min-cron
+                    # sampling while the trip was open) over the avg/max-speed
+                    # estimate, when it's available — a genuine measurement,
+                    # not a guess. 0.0 covers both "confirmed no sustained
+                    # stop" and "unknown" (trips logged before this existed,
+                    # or reconstructed across an unpolled gap); either way the
+                    # estimate is the right fallback.
+                    driving_wh_val := (
+                        sync_mod._subtract_idle_energy(
+                            d.energy_used_kwh, d.distance_km, getattr(d, "idle_min", 0.0) or 0.0,
+                            d.outside_temp_c)
+                        if getattr(d, "idle_min", 0.0) else
+                        sync_mod.driving_wh_per_km(
+                            d.energy_used_kwh, d.distance_km, d.duration_min, d.outside_temp_c,
+                            d.avg_speed_kmh, d.max_speed_kmh)
+                    )
                     if has_valid_energy(d) else None
                 ),
                 "eco_score": eco_score(driving_wh_val, rated_wh_per_km) if has_valid_energy(d) and driving_wh_val else None,

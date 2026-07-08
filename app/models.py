@@ -58,6 +58,13 @@ class Drive(Base):
     start_location: Mapped[str] = mapped_column(String(120), default="")
     end_location: Mapped[str] = mapped_column(String(120), default="")
 
+    # Real (not estimated) minutes spent stopped >= sync.IDLE_STREAK_MIN,
+    # tracked live while the trip was open. 0.0 means either genuinely no
+    # sustained stop, or (for trips logged before this field existed, or
+    # reconstructed across an unpolled gap) unknown — analysis code falls
+    # back to the avg/max-speed estimate in that case.
+    idle_min: Mapped[float] = mapped_column(Float, default=0.0)
+
     vehicle: Mapped["Vehicle"] = relationship(back_populates="drives")
 
     @property

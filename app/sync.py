@@ -207,6 +207,21 @@ def _track_idle(open_trip: dict[str, Any], cur: dict[str, Any]) -> None:
         open_trip["zero_since"] = None
 
 
+def _confirmed_idle_min(open_trip: dict[str, Any], end_ts: float) -> float:
+    """Real idle minutes accumulated in ``open_trip`` as of ``end_ts`` —
+    confirmed streaks, plus whatever's in progress if it's already sustained
+    past IDLE_STREAK_MIN by that point (so closing a trip mid-stop still
+    counts a stop that was already long enough, even though no snapshot
+    since has confirmed it by seeing the car move again)."""
+    idle_min = open_trip.get("idle_min", 0.0)
+    zero_since = open_trip.get("zero_since")
+    if zero_since:
+        ongoing = (end_ts - zero_since) / 60.0
+        if ongoing >= IDLE_STREAK_MIN:
+            idle_min += ongoing
+    return idle_min
+
+
 def is_powered_down(s: dict[str, Any]) -> bool:
     """Trip boundary: parked AND done driving.
 
@@ -296,7 +311,8 @@ def driving_wh_per_km(energy_kwh, distance_km, duration_min, out_temp_c=None,
     return _subtract_idle_energy(energy_kwh, distance_km, idle_min, out_temp_c)
 
 
-def _drive_from(start: dict, cur: dict, capacity_kwh: float, max_speed: float = 0.0):
+def _drive_from(start: dict, cur: dict, capacity_kwh: float, max_speed: float = 0.0,
+                idle_min: float = 0.0):
     distance = cur["odo_km"] - start["odo_km"]
     if distance < DRIVE_MIN_KM:
         return None
@@ -325,6 +341,10 @@ def _drive_from(start: dict, cur: dict, capacity_kwh: float, max_speed: float = 
         "outside_temp_c": cur["out_temp"],
         "start_location": _coords(start),
         "end_location": _coords(cur),
+        # Real (not estimated) minutes spent stopped >= IDLE_STREAK_MIN, from
+        # _track_idle. 0.0 for whole-gap reconstructions (no live tracking
+        # happened) — analysis code treats 0 as "fall back to the estimate".
+        "idle_min": round(min(idle_min, dt_min), 1) if dt_min else 0.0,
     }
 
 
@@ -342,7 +362,8 @@ def close_trip_on_sleep(open_trip: dict, last_snapshot: dict, capacity_kwh: floa
     "which end of the gap did the drive happen near" ambiguity entirely, for
     this specific transition.
     """
-    return _drive_from(open_trip, last_snapshot, capacity_kwh, open_trip.get("max_speed", 0.0))
+    idle_min = _confirmed_idle_min(open_trip, last_snapshot["ts"])
+    return _drive_from(open_trip, last_snapshot, capacity_kwh, open_trip.get("max_speed", 0.0), idle_min)
 
 
 def live_trip(
@@ -367,15 +388,7 @@ def live_trip(
         energy_kwh = 0.0
     soc_from_energy = (energy_kwh / capacity_kwh * 100.0) if capacity_kwh else 0.0
     soc_eff = max(soc_used, soc_from_energy)
-    # Real (not estimated) idle time: confirmed streaks accumulated by
-    # _track_idle, plus whatever's happening right now if the car has
-    # already been stopped past IDLE_STREAK_MIN this very moment.
-    idle_min = open_trip.get("idle_min", 0.0)
-    zero_since = open_trip.get("zero_since")
-    if zero_since:
-        ongoing = (snap["ts"] - zero_since) / 60.0
-        if ongoing >= IDLE_STREAK_MIN:
-            idle_min += ongoing
+    idle_min = _confirmed_idle_min(open_trip, snap["ts"])
     return {
         "start_time": _dt(open_trip["ts"]).isoformat(timespec="minutes"),
         "distance_km": round(distance, 1),
@@ -494,7 +507,8 @@ def process_snapshot(
             # Blind gap with little movement: the car parked and slept (unpolled),
             # then a new drive began. Close the first drive at the last seen point
             # and start a fresh one — two drives across a nap aren't one trip.
-            d = _drive_from(open_trip, prev, capacity_kwh, open_trip.get("max_speed", 0.0))
+            d = _drive_from(open_trip, prev, capacity_kwh, open_trip.get("max_speed", 0.0),
+                            _confirmed_idle_min(open_trip, prev["ts"]))
             if d:
                 drives.append(d)
             open_trip = _open_trip_at(cur, cur, prev)
@@ -524,7 +538,8 @@ def process_snapshot(
             stop_at = open_trip["stop_at"]
             parked_min = (cur["ts"] - stop_at["ts"]) / 60.0
             if is_powered_down(cur) or cur.get("charging") or parked_min >= PARK_END_MIN:
-                d = _drive_from(open_trip, stop_at, capacity_kwh, open_trip.get("max_speed", 0.0))
+                d = _drive_from(open_trip, stop_at, capacity_kwh, open_trip.get("max_speed", 0.0),
+                                _confirmed_idle_min(open_trip, stop_at["ts"]))
                 if d:
                     drives.append(d)
                 open_trip = None
