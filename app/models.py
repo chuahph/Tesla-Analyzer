@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from sqlalchemy import DateTime, Float, ForeignKey, String
+from sqlalchemy import Boolean, DateTime, Float, ForeignKey, String
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from .database import Base
@@ -59,11 +59,15 @@ class Drive(Base):
     end_location: Mapped[str] = mapped_column(String(120), default="")
 
     # Real (not estimated) minutes spent stopped >= sync.IDLE_STREAK_MIN,
-    # tracked live while the trip was open. 0.0 means either genuinely no
-    # sustained stop, or (for trips logged before this field existed, or
-    # reconstructed across an unpolled gap) unknown — analysis code falls
-    # back to the avg/max-speed estimate in that case.
+    # tracked live while the trip was open. idle_tracked distinguishes
+    # "confirmed via live tracking, genuinely 0" from "unknown" (trips logged
+    # before this existed, or reconstructed across an unpolled gap with no
+    # live tracking) — 0.0 alone is ambiguous between those two, since a
+    # trip with zero sustained stops and a trip nobody ever measured both
+    # read the same. Analysis code trusts idle_min only when idle_tracked is
+    # true; otherwise it falls back to the avg/max-speed estimate.
     idle_min: Mapped[float] = mapped_column(Float, default=0.0)
+    idle_tracked: Mapped[bool] = mapped_column(Boolean, default=False)
 
     vehicle: Mapped["Vehicle"] = relationship(back_populates="drives")
 

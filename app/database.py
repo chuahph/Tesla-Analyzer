@@ -69,6 +69,7 @@ def init_db() -> None:
 
     Base.metadata.create_all(bind=engine)
     _ensure_column("drives", "idle_min", "FLOAT", "0.0")
+    _ensure_column("drives", "idle_tracked", "BOOLEAN", "FALSE")
 
 
 def get_session() -> Iterator[Session]:

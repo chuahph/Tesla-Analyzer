@@ -180,6 +180,49 @@ def test_zero_energy_drive_does_not_dilute_efficiency():
     assert drv["total_drives"] == 2
 
 
+def test_confirmed_zero_idle_is_trusted_not_re_estimated():
+    """A trip with real live idle-tracking (idle_tracked=True) that measured
+    genuinely zero sustained stops must show driving_wh_per_km == the raw
+    figure — not silently re-estimated by the old avg/max-speed heuristic,
+    which would guess idle time from the speed spread alone and produce a
+    lower, wrong number despite having the real (zero) measurement in hand.
+
+    Real-world case: 8.0 km / 25.5 min, avg 18.9 avg / max 74 km/h (heavy
+    stop-go traffic with many short lights, none reaching the 3-min
+    threshold), 1.52 kWh -> 190 Wh/km. Before idle_tracked existed, this
+    silently fell back to the heuristic and showed ~144 instead of 190.
+    """
+    from datetime import datetime
+
+    from app.analysis import driving as driving_analysis
+    from app.models import Drive
+
+    tracked = Drive(
+        start_time=datetime(2026, 7, 8, 19, 5), end_time=datetime(2026, 7, 8, 19, 30),
+        distance_km=8.0, duration_min=25.5, avg_speed_kmh=18.9, max_speed_kmh=74.0,
+        start_soc=44, end_soc=42, energy_used_kwh=1.52, outside_temp_c=31.0,
+        idle_min=0.0, idle_tracked=True,
+    )
+    result = driving_analysis.analyze([tracked], 150.0, 75.0)
+    trip = result["recent_trips"][0]
+    assert trip["wh_per_km"] == 190
+    assert trip["driving_wh_per_km"] == 190  # trusted zero, not re-estimated to ~144
+
+    # An otherwise-identical *untracked* trip (idle_tracked=False, e.g. logged
+    # before this feature or reconstructed across a gap) must still fall back
+    # to the old heuristic, which does infer idle from the speed spread here.
+    untracked = Drive(
+        start_time=datetime(2026, 7, 8, 19, 5), end_time=datetime(2026, 7, 8, 19, 30),
+        distance_km=8.0, duration_min=25.5, avg_speed_kmh=18.9, max_speed_kmh=74.0,
+        start_soc=44, end_soc=42, energy_used_kwh=1.52, outside_temp_c=31.0,
+        idle_min=0.0, idle_tracked=False,
+    )
+    result2 = driving_analysis.analyze([untracked], 150.0, 75.0)
+    trip2 = result2["recent_trips"][0]
+    assert trip2["wh_per_km"] == 190
+    assert trip2["driving_wh_per_km"] < 190   # heuristic still applies here
+
+
 def test_driving_analysis_reports_scores(seeded):
     drives = seeded.scalars(select(Drive)).all()
     result = driving_analysis.analyze(list(drives), 150.0)

@@ -237,15 +237,16 @@ def analyze(drives: list[Drive], rated_wh_per_km: float = 150.0,
                     # Prefer real tracked idle time (from live 1-min-cron
                     # sampling while the trip was open) over the avg/max-speed
                     # estimate, when it's available — a genuine measurement,
-                    # not a guess. 0.0 covers both "confirmed no sustained
-                    # stop" and "unknown" (trips logged before this existed,
-                    # or reconstructed across an unpolled gap); either way the
-                    # estimate is the right fallback.
+                    # not a guess. Gated on idle_tracked, not just idle_min
+                    # being truthy: a trip with confirmed zero sustained stops
+                    # and a trip nobody ever measured both read idle_min=0.0,
+                    # and only idle_tracked tells them apart. Trust a real
+                    # zero; only fall back to the estimate when it's unknown.
                     driving_wh_val := (
                         sync_mod._subtract_idle_energy(
                             d.energy_used_kwh, d.distance_km, getattr(d, "idle_min", 0.0) or 0.0,
                             d.outside_temp_c)
-                        if getattr(d, "idle_min", 0.0) else
+                        if getattr(d, "idle_tracked", False) else
                         sync_mod.driving_wh_per_km(
                             d.energy_used_kwh, d.distance_km, d.duration_min, d.outside_temp_c,
                             d.avg_speed_kmh, d.max_speed_kmh)
