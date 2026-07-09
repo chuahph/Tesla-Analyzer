@@ -275,7 +275,11 @@ function renderKpis(d) {
     cards.push(kpiCard("Avg Speed", fmt(drv.avg_speed_kmh) + " km/h",
       `max ${fmt(drv.max_speed_kmh)} · peak ${fmt(drv.p95_speed_kmh)} km/h`, "amber"));
     // Always present so the box never "disappears"; "—" until energy data lands.
-    const socSub = drv.soc_used_pct != null ? `${fmt(drv.soc_used_pct, 1)}% battery used` : "real-world range";
+    // Wide windows drain the pack many times over — phrase that as full
+    // charges rather than a ">100%" that reads as a glitch.
+    const socSub = drv.soc_used_pct == null ? "real-world range"
+      : drv.soc_used_pct <= 100 ? `${fmt(drv.soc_used_pct, 1)}% battery used`
+      : `${fmt(drv.soc_used_pct / 100, 1)} full charges used`;
     cards.push(drv.km_per_soc_pct
       ? kpiCard("km / 1% Battery", fmt(drv.km_per_soc_pct, 1) + " km", socSub, "teal")
       : kpiCard("km / 1% Battery", "—", "waiting on range data from a synced drive", "teal"));
@@ -283,8 +287,13 @@ function renderKpis(d) {
     // implied by the last 100% charge (matches how the car itself converts
     // kWh to %, not a generic/default pack size).
     if (bal && bal.used_pct != null) {
-      cards.push(kpiCard("Battery Used", fmt(bal.used_pct, 1) + "%",
-        `${fmt(bal.used_kwh, 1)} kWh of ${fmt(bal.full_charge_kwh, 1)} kWh full charge`, "amber"));
+      // A wide window uses the pack many times over — "1,422%" is technically
+      // true but reads as a glitch. Past 100%, say it in full charges instead.
+      cards.push(bal.used_pct <= 100
+        ? kpiCard("Battery Used", fmt(bal.used_pct, 1) + "%",
+            `${fmt(bal.used_kwh, 1)} kWh of ${fmt(bal.full_charge_kwh, 1)} kWh full charge`, "amber")
+        : kpiCard("Battery Used", `${fmt(bal.used_pct / 100, 1)}× pack`,
+            `${fmt(bal.used_kwh, 1)} kWh ≈ ${fmt(bal.used_pct / 100, 1)} full charges`, "amber"));
     }
     // The petrol-money view of the same energy: what this window's driving
     // cost at the configured tariff, and per km.
@@ -1359,7 +1368,10 @@ function buildReport(d) {
     <h2>Driving</h2>
     <table>${
       row("Distance", drv.available ? fmt(drv.total_distance_km) + " km · " + fmt(drv.total_drives) + " drives" : null)
-    }${row("Energy used", drv.total_energy_used_kwh != null ? fmt(drv.total_energy_used_kwh, 1) + " kWh (" + fmt(drv.soc_used_pct, 1) + "% battery)" : null)
+    }${row("Energy used", drv.total_energy_used_kwh != null
+      ? fmt(drv.total_energy_used_kwh, 1) + " kWh (" + (drv.soc_used_pct <= 100
+          ? fmt(drv.soc_used_pct, 1) + "% battery" : "≈ " + fmt(drv.soc_used_pct / 100, 1) + " full charges") + ")"
+      : null)
     }${row("Avg efficiency", eff.avg_efficiency_wh_per_km ? fmt(eff.avg_efficiency_wh_per_km) + " Wh/km" : null)
     }${row("Driving cost", drv.total_cost != null ? cur + " " + fmt(drv.total_cost, 2) + (drv.cost_per_km != null ? " (" + cur + " " + fmt(drv.cost_per_km, 3) + "/km)" : "") : null)
     }${row("km per 1% battery", drv.km_per_soc_pct ? fmt(drv.km_per_soc_pct, 1) + " km" : null)}</table>
