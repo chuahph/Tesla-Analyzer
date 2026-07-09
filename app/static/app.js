@@ -33,6 +33,14 @@ function scoreTone(s) {
   return s >= 85 ? "green" : s >= 70 ? "blue" : s >= 55 ? "amber" : "red";
 }
 
+// Semantic rail colour for an efficiency reading vs the rated figure.
+// vs_rated_pct is the overshoot: <=0 means at/under rated (good, green),
+// a little over is amber, well over is red. Null (unknown) stays neutral.
+function effTone(vsRatedPct) {
+  if (vsRatedPct == null) return "green";
+  return vsRatedPct <= 2 ? "green" : vsRatedPct <= 15 ? "amber" : "red";
+}
+
 // Prominent window driving score at the top, with an info popover explaining
 // how it's computed.
 function renderScore(d) {
@@ -230,8 +238,13 @@ function renderKpis(d) {
     if (lt.wh_per_km) {
       const dsub = (lt.driving_wh_per_km != null && lt.driving_wh_per_km < lt.wh_per_km - 3)
         ? ` · drive ≈${fmt(lt.driving_wh_per_km)}` : "";
+      // Colour by how this drive's efficiency compares to rated (drive-only
+      // figure when idle was stripped out, else the raw one).
+      const rated = (eff && eff.rated_wh_per_km) || null;
+      const liveEff = lt.driving_wh_per_km != null ? lt.driving_wh_per_km : lt.wh_per_km;
+      const liveVs = rated ? (liveEff - rated) / rated * 100 : null;
       cards.push(kpiCard("Efficiency", fmt(lt.wh_per_km) + " Wh/km",
-        `${fmt(lt.energy_kwh, 1)} kWh this drive${dsub}`, "green"));
+        `${fmt(lt.energy_kwh, 1)} kWh this drive${dsub}`, effTone(liveVs)));
     }
     // Battery use and km/1% in one box: % used as the headline, start→now
     // and the km/1% range figure on the sub-line.
@@ -245,7 +258,8 @@ function renderKpis(d) {
     // Efficiency is unknown when the drive logged no energy (range gap).
     if (eff.available && eff.avg_efficiency_wh_per_km) {
       cards.push(kpiCard("Avg Efficiency", fmt(eff.avg_efficiency_wh_per_km) + " Wh/km",
-        `${fmt(drv.total_energy_used_kwh ?? drv.total_energy_kwh, 1)} kWh used · ${eff.vs_rated_pct >= 0 ? "+" : ""}${fmt(eff.vs_rated_pct, 1)}% vs rated`, "green"));
+        `${fmt(drv.total_energy_used_kwh ?? drv.total_energy_kwh, 1)} kWh used · ${eff.vs_rated_pct >= 0 ? "+" : ""}${fmt(eff.vs_rated_pct, 1)}% vs rated`,
+        effTone(eff.vs_rated_pct)));
     } else {
       cards.push(kpiCard("Avg Efficiency", "—",
         "waiting on range data from a synced drive", "green"));

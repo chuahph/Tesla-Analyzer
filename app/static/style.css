@@ -354,13 +354,17 @@ main { padding: 24px 28px 60px; max-width: 1280px; margin: 0 auto; }
   justify-content: center;
   min-height: 66px;
 }
-/* A coloured rail per KPI makes the row scannable at a glance. */
-.kpi.tone-blue   { border-left: 3px solid var(--accent-2); }
-.kpi.tone-green  { border-left: 3px solid var(--green); }
-.kpi.tone-amber  { border-left: 3px solid var(--amber); }
-.kpi.tone-violet { border-left: 3px solid var(--violet); }
-.kpi.tone-teal   { border-left: 3px solid var(--teal); }
-.kpi.tone-red    { border-left: 3px solid var(--accent); }
+/* A coloured rail + faint matching glow per KPI makes the row scannable at a
+   glance, and lets a tone read as good/bad on cards that assign one from the
+   value (efficiency vs rated, battery balance). A wider rail and the inset
+   glow give the tones far more visible separation than a thin line alone. */
+.kpi[class*="tone-"] { border-left-width: 5px; border-left-style: solid; }
+.kpi.tone-blue   { border-left-color: var(--accent-2); box-shadow: 0 1px 3px rgba(0,0,0,.3), inset 5px 0 16px -9px var(--accent-2); }
+.kpi.tone-green  { border-left-color: var(--green);    box-shadow: 0 1px 3px rgba(0,0,0,.3), inset 5px 0 16px -9px var(--green); }
+.kpi.tone-amber  { border-left-color: var(--amber);    box-shadow: 0 1px 3px rgba(0,0,0,.3), inset 5px 0 16px -9px var(--amber); }
+.kpi.tone-violet { border-left-color: var(--violet);   box-shadow: 0 1px 3px rgba(0,0,0,.3), inset 5px 0 16px -9px var(--violet); }
+.kpi.tone-teal   { border-left-color: var(--teal);     box-shadow: 0 1px 3px rgba(0,0,0,.3), inset 5px 0 16px -9px var(--teal); }
+.kpi.tone-red    { border-left-color: var(--accent);   box-shadow: 0 1px 3px rgba(0,0,0,.3), inset 5px 0 16px -9px var(--accent); }
 .kpi .label { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: .4px; }
 .kpi-empty { grid-column: 1 / -1; }
 .kpi-empty .sub { margin-top: 6px; line-height: 1.5; }
