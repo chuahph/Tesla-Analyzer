@@ -160,6 +160,7 @@ def is_driving(s: dict[str, Any]) -> bool:
 
 ZERO_SPEED_KMH = 2.0  # below this = "stopped", not still rolling (GPS/speedo jitter floor)
 IDLE_STREAK_MIN = 3.0  # a stopped streak only counts as idle once sustained this long
+ODO_STILL_KM = 0.05    # odometer move below this between snapshots = the car sat still
 
 
 def _open_trip_at(base: dict[str, Any], cur: dict[str, Any], prev: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -178,47 +179,65 @@ def _open_trip_at(base: dict[str, Any], cur: dict[str, Any], prev: dict[str, Any
         # Lock event tracking: if the car was just unlocked, this trip is confirmed
         # as intentional driving (not just a brief shift to P or accidental gear change).
         "unlocked_before_drive": _lock_unlocked(prev, cur),
-        # Real (not estimated) idle-time tracking: idle_min accumulates confirmed
-        # stopped streaks of at least IDLE_STREAK_MIN; zero_since marks an
-        # in-progress streak not yet confirmed. Needs snapshots roughly every
-        # ~1 min (the poll-throttle already guarantees this while a trip is
-        # open) to actually catch stops this granular.
+        # Real (not estimated) idle-time tracking, from the odometer: idle_min
+        # accumulates stationary runs of at least IDLE_STREAK_MIN; still_run is
+        # the in-progress run not yet committed. Odometer-based, so it catches
+        # a sustained stop even when polling is sparse and never samples the
+        # car at zero speed mid-stop.
         "idle_min": 0.0,
-        "zero_since": None,
+        "still_run": 0.0,
     }
 
 
-def _track_idle(open_trip: dict[str, Any], cur: dict[str, Any]) -> None:
-    """Update ``open_trip``'s real idle-time accumulator from this snapshot.
+def _flush_idle_run(open_trip: dict[str, Any]) -> None:
+    """Commit an in-progress stationary run to idle_min if it lasted long
+    enough to be real idling (>= IDLE_STREAK_MIN), then clear it. A brief
+    stop — a red light, a give-way — never reaches the threshold and is
+    dropped as normal driving."""
+    run = open_trip.get("still_run", 0.0)
+    if run >= IDLE_STREAK_MIN:
+        open_trip["idle_min"] = open_trip.get("idle_min", 0.0) + run
+    open_trip["still_run"] = 0.0
 
-    A stopped streak (speed at/near zero) only counts once it's been sustained
-    for IDLE_STREAK_MIN — a red light or brief queue isn't "idling", only a
-    genuine, sustained stop is. Mutates open_trip in place.
+
+def _track_idle(open_trip: dict[str, Any], prev: dict[str, Any] | None,
+                cur: dict[str, Any]) -> None:
+    """Accumulate real idle time from the *odometer* between two snapshots.
+
+    If the wheels covered essentially no distance over an interval, the car
+    sat still for that whole interval — true regardless of the instantaneous
+    speed reading, so a stop is caught even when polling never lands a
+    zero-speed sample mid-stop (the common case at multi-minute cron cadence,
+    which the old speed-only tracker missed). Consecutive still intervals build
+    a run that only counts once sustained past IDLE_STREAK_MIN, so short stops
+    don't register while a genuine sit does. Intervals long enough to be a
+    park/nap (>= PARK_GAP_MIN, handled separately as a trip boundary) end the
+    run so overnight/parked drain is never folded into in-drive idle. Mutates
+    open_trip in place.
     """
-    speed = cur.get("speed_kmh") or 0.0
-    zero_since = open_trip.get("zero_since")
-    if speed <= ZERO_SPEED_KMH:
-        if zero_since is None:
-            open_trip["zero_since"] = cur["ts"]
-    elif zero_since:
-        streak_min = (cur["ts"] - zero_since) / 60.0
-        if streak_min >= IDLE_STREAK_MIN:
-            open_trip["idle_min"] = open_trip.get("idle_min", 0.0) + streak_min
-        open_trip["zero_since"] = None
+    if not prev:
+        return
+    interval_min = (cur["ts"] - prev["ts"]) / 60.0
+    if interval_min <= 0 or interval_min >= PARK_GAP_MIN:
+        _flush_idle_run(open_trip)
+        return
+    moved = (cur.get("odo_km") or 0.0) - (prev.get("odo_km") or 0.0)
+    if moved <= ODO_STILL_KM:
+        open_trip["still_run"] = open_trip.get("still_run", 0.0) + interval_min
+    else:
+        _flush_idle_run(open_trip)
 
 
 def _confirmed_idle_min(open_trip: dict[str, Any], end_ts: float) -> float:
-    """Real idle minutes accumulated in ``open_trip`` as of ``end_ts`` —
-    confirmed streaks, plus whatever's in progress if it's already sustained
-    past IDLE_STREAK_MIN by that point (so closing a trip mid-stop still
-    counts a stop that was already long enough, even though no snapshot
-    since has confirmed it by seeing the car move again)."""
+    """Real idle minutes accumulated in ``open_trip`` — committed runs plus any
+    in-progress stationary run that's already sustained past IDLE_STREAK_MIN
+    (so closing a trip while still stopped counts a sit that was already long
+    enough). ``end_ts`` is accepted for call-site symmetry; the run already
+    spans up to the latest snapshot."""
     idle_min = open_trip.get("idle_min", 0.0)
-    zero_since = open_trip.get("zero_since")
-    if zero_since:
-        ongoing = (end_ts - zero_since) / 60.0
-        if ongoing >= IDLE_STREAK_MIN:
-            idle_min += ongoing
+    run = open_trip.get("still_run", 0.0)
+    if run >= IDLE_STREAK_MIN:
+        idle_min += run
     return idle_min
 
 
@@ -263,18 +282,24 @@ def _energy_kwh(frm: dict, to: dict, capacity_kwh: float) -> float:
 MIN_PLAUSIBLE_WH_PER_KM = 40.0  # below this over a whole trip = contaminated data
 
 
-def _subtract_idle_energy(energy_kwh, distance_km, idle_min, out_temp_c=None):
-    """Core idle-adjustment: given actual idle minutes (measured or estimated),
-    remove modeled climate/accessory draw for that time and return driving-only
-    Wh/km. Shared by the historical-trip estimate below and live_trip's
-    real-tracked figure, so both use the same climate-load model."""
-    if not energy_kwh or energy_kwh <= 0 or distance_km <= 0:
-        return None
+def _idle_adjusted_kwh(energy_kwh, idle_min, out_temp_c=None):
+    """Driving-only energy (kWh): gross minus modeled climate/accessory draw
+    over the idle minutes. Floored at half the gross so a noisy idle estimate
+    can never wipe out most of the drive. This is the energy Tesla's own
+    "Current Drive" reflects — it excludes the draw while sitting still."""
     t = out_temp_c if out_temp_c is not None else 22.0
     # Climate/accessory draw while stopped — higher the further from a mild ~22°C.
     idle_kw = min(0.35 + 0.12 * abs(t - 22.0), 2.6)
-    driving_kwh = max(energy_kwh - idle_min / 60.0 * idle_kw, energy_kwh * 0.5)
-    return round(driving_kwh * 1000.0 / distance_km)
+    return max(energy_kwh - idle_min / 60.0 * idle_kw, energy_kwh * 0.5)
+
+
+def _subtract_idle_energy(energy_kwh, distance_km, idle_min, out_temp_c=None):
+    """Driving-only Wh/km: the idle-adjusted energy over the distance. Shared
+    by the historical-trip estimate below and live_trip's real-tracked figure,
+    so both use the same climate-load model."""
+    if not energy_kwh or energy_kwh <= 0 or distance_km <= 0:
+        return None
+    return round(_idle_adjusted_kwh(energy_kwh, idle_min, out_temp_c) * 1000.0 / distance_km)
 
 
 def driving_wh_per_km(energy_kwh, distance_km, duration_min, out_temp_c=None,
@@ -405,6 +430,10 @@ def live_trip(
         "soc_used": round(soc_used, 1),
         "km_per_soc": round(distance / soc_eff, 1) if soc_eff >= 0.2 and distance else None,
         "energy_kwh": round(energy_kwh, 2),
+        "driving_energy_kwh": (
+            round(_idle_adjusted_kwh(energy_kwh, idle_min, snap.get("out_temp")), 2)
+            if energy_kwh > 0 and distance >= DRIVE_MIN_KM else None
+        ),
         "wh_per_km": round(energy_kwh * 1000.0 / distance) if energy_kwh > 0 and distance >= DRIVE_MIN_KM else None,
         "driving_wh_per_km": (
             _subtract_idle_energy(energy_kwh, distance, idle_min, snap.get("out_temp"))
@@ -517,7 +546,7 @@ def process_snapshot(
             **open_trip,
             "max_speed": max(open_trip.get("max_speed", 0.0), cur.get("speed_kmh") or 0.0),
         }
-        _track_idle(open_trip, cur)
+        _track_idle(open_trip, prev, cur)
         gap_min = ((cur["ts"] - prev["ts"]) / 60.0) if prev else 0.0
         moved = cur["odo_km"] - (prev["odo_km"] if prev else cur["odo_km"])
         implied = (moved / (gap_min / 60.0)) if gap_min > 0 else 0.0

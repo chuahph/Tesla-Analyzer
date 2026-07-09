@@ -223,6 +223,35 @@ def test_confirmed_zero_idle_is_trusted_not_re_estimated():
     assert trip2["driving_wh_per_km"] < 190   # heuristic still applies here
 
 
+def test_recent_trips_report_idle_stripped_driving_energy():
+    """A trip with real tracked idle exposes driving_energy_kwh below the gross
+    energy (Tesla-'Current Drive'-comparable); a trip with no idle reports the
+    two equal."""
+    from datetime import datetime
+
+    from app.analysis import driving as driving_analysis
+    from app.models import Drive
+
+    idled = Drive(
+        start_time=datetime(2026, 7, 9, 21, 24), end_time=datetime(2026, 7, 9, 21, 47),
+        distance_km=10.4, duration_min=23.0, avg_speed_kmh=27.0, max_speed_kmh=84.0,
+        start_soc=73, end_soc=71, energy_used_kwh=1.78, outside_temp_c=31.0,
+        idle_min=6.0, idle_tracked=True,
+    )
+    row = driving_analysis.analyze([idled], 150.0, 72.0)["recent_trips"][0]
+    assert row["driving_energy_kwh"] is not None
+    assert row["driving_energy_kwh"] < row["energy_kwh"]      # idle draw removed
+
+    steady = Drive(
+        start_time=datetime(2026, 7, 9, 8, 0), end_time=datetime(2026, 7, 9, 8, 25),
+        distance_km=8.0, duration_min=25.5, avg_speed_kmh=18.9, max_speed_kmh=74.0,
+        start_soc=44, end_soc=42, energy_used_kwh=1.52, outside_temp_c=31.0,
+        idle_min=0.0, idle_tracked=True,   # confirmed zero idle -> no stripping
+    )
+    row = driving_analysis.analyze([steady], 150.0, 72.0)["recent_trips"][0]
+    assert row["driving_energy_kwh"] == row["energy_kwh"]
+
+
 def test_recent_trips_report_soc_used_pct():
     """Each recent_trips entry carries the % of battery that trip drew, at
     1-decimal precision. Because start_soc/end_soc are integer battery_level,

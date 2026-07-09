@@ -236,8 +236,9 @@ function renderKpis(d) {
     cards.push(kpiCard("Drive Time", fmt(lt.duration_min) + " min",
       `avg ${fmt(lt.avg_speed_kmh)}${lt.max_speed_kmh > lt.avg_speed_kmh ? " · max " + fmt(lt.max_speed_kmh) : ""} km/h`, "amber"));
     if (lt.wh_per_km) {
-      const dsub = (lt.driving_wh_per_km != null && lt.driving_wh_per_km < lt.wh_per_km - 3)
-        ? ` · drive ≈${fmt(lt.driving_wh_per_km)}` : "";
+      const hasDrive = lt.driving_wh_per_km != null && lt.driving_wh_per_km < lt.wh_per_km - 3;
+      const dKwh = (hasDrive && lt.driving_energy_kwh != null) ? `${fmt(lt.driving_energy_kwh, 1)} kWh / ` : "";
+      const dsub = hasDrive ? ` · drive ≈${dKwh}${fmt(lt.driving_wh_per_km)} Wh/km` : "";
       // Colour by how this drive's efficiency compares to rated (drive-only
       // figure when idle was stripped out, else the raw one).
       const rated = (eff && eff.rated_wh_per_km) || null;
@@ -461,11 +462,14 @@ function renderLists(d) {
         : "";
       const score = t.eco_score != null
         ? `<span class="trip-score tone-${scoreTone(t.eco_score)}">${t.eco_score}</span>` : "";
-      // Driving-only Wh/km (excludes idle/AC) shown next to the total when it's
-      // meaningfully lower — comparable to Tesla's "Current Drive".
-      const drv = (t.driving_wh_per_km != null && t.wh_per_km != null
-        && t.driving_wh_per_km < t.wh_per_km - 3)
-        ? ` · drive ≈${t.driving_wh_per_km}` : "";
+      // Driving-only figures (idle/AC stripped) shown next to the gross total
+      // when meaningfully lower — the apples-to-apples match for Tesla's own
+      // "Current Drive" kWh and Wh/km.
+      const hasDrive = t.driving_wh_per_km != null && t.wh_per_km != null
+        && t.driving_wh_per_km < t.wh_per_km - 3;
+      const driveKwh = (hasDrive && t.driving_energy_kwh != null)
+        ? `${t.driving_energy_kwh} kWh / ` : "";
+      const drv = hasDrive ? ` · drive ≈${driveKwh}${t.driving_wh_per_km} Wh/km` : "";
       const kwh = t.energy_kwh != null ? ` · ${t.energy_kwh} kWh` : "";
       const whkm = t.wh_per_km != null ? ` · ${t.wh_per_km} Wh/km${drv}` : "";
       const soc = t.soc_used_pct != null ? ` · ${fmt(t.soc_used_pct, 1)}% battery` : "";

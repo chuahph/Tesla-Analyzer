@@ -420,43 +420,80 @@ def test_driving_wh_per_km_removes_idle_load():
     assert driving_wh_per_km(1.0, 0, 10, 25) is None
 
 
-def test_track_idle_only_counts_sustained_stops():
-    """A stop only counts as idle once sustained >= IDLE_STREAK_MIN (3 min) —
-    a brief red-light stop must not be counted, only a genuine sustained one."""
+def test_track_idle_counts_sustained_stationary_from_odometer():
+    """Idle is measured from the odometer between snapshots, so a sustained
+    stationary stretch is caught even when polling is sparse and never samples
+    zero speed mid-stop; brief stops stay below the threshold and don't count."""
+    from app.sync import _confirmed_idle_min, _track_idle
+
+    # Brief stationary interval (90s, odometer unchanged) then the car moves on
+    # — below IDLE_STREAK_MIN, so it must not count.
+    open_trip = {"idle_min": 0.0, "still_run": 0.0}
+    prev = snap(T0, 10_000.0, 80, shift="D", speed=0)
+    cur = snap(T0 + 90, 10_000.0, 80, shift="D", speed=0)          # same odometer
+    _track_idle(open_trip, prev, cur)
+    assert open_trip["still_run"] == 1.5
+    moving = snap(T0 + 150, 10_001.0, 80, shift="D", speed=40)      # odo advanced
+    _track_idle(open_trip, cur, moving)
+    assert open_trip["idle_min"] == 0.0          # brief stop dropped
+    assert open_trip["still_run"] == 0.0
+
+    # A single sparse 4-minute interval with no odometer movement — the case
+    # the old speed-only tracker missed — is caught as 4 min of idle.
+    p2 = snap(T0 + 200, 10_005.0, 79, shift="D", speed=30)
+    c2 = snap(T0 + 440, 10_005.0, 79, shift="D", speed=30)          # 4 min, odo unchanged
+    _track_idle(open_trip, p2, c2)
+    assert _confirmed_idle_min(open_trip, c2["ts"]) == 4.0          # in-progress, already long enough
+    m2 = snap(T0 + 500, 10_006.0, 79, shift="D", speed=45)          # moves on -> commit
+    _track_idle(open_trip, c2, m2)
+    assert open_trip["idle_min"] == 4.0
+
+
+def test_track_idle_dense_sampling_builds_a_run():
+    """Many short still intervals accumulate into one run, so a stop sampled
+    every minute still crosses the threshold and counts."""
     from app.sync import _track_idle
 
-    # Short stop: 90s at 0 km/h, then moving again — must NOT count.
-    open_trip = {"idle_min": 0.0, "zero_since": None}
-    _track_idle(open_trip, snap(T0, 10_000.0, 80, shift="D", speed=0))
-    assert open_trip["zero_since"] == T0
-    _track_idle(open_trip, snap(T0 + 90, 10_000.0, 80, shift="D", speed=50))
-    assert open_trip["idle_min"] == 0.0          # too short to count
-    assert open_trip["zero_since"] is None        # streak reset
+    ot = {"idle_min": 0.0, "still_run": 0.0}
+    base = snap(T0, 10_000.0, 80, shift="D", speed=0)
+    for i in range(1, 4):                                           # 3 x 1-min still intervals
+        nxt = snap(T0 + 60 * i, 10_000.0, 80, shift="D", speed=0)
+        _track_idle(ot, base, nxt)
+        base = nxt
+    assert ot["still_run"] == 3.0
+    _track_idle(ot, base, snap(T0 + 300, 10_001.0, 80, shift="D", speed=40))
+    assert ot["idle_min"] == 3.0
 
-    # Sustained stop: 4 minutes at 0 km/h, then moving again — must count.
-    _track_idle(open_trip, snap(T0 + 200, 10_005.0, 79, shift="D", speed=0))
-    assert open_trip["zero_since"] == T0 + 200
-    _track_idle(open_trip, snap(T0 + 200 + 240, 10_005.0, 79, shift="D", speed=40))
-    assert open_trip["idle_min"] == 4.0           # 240s = 4 min, confirmed
-    assert open_trip["zero_since"] is None
+
+def test_track_idle_ignores_park_nap_gaps():
+    """An interval long enough to be a park/nap (a trip boundary handled
+    elsewhere) must not be folded into in-drive idle."""
+    from app.sync import _track_idle
+
+    ot = {"idle_min": 0.0, "still_run": 0.0}
+    prev = snap(T0, 10_000.0, 80, shift="D", speed=0)
+    cur = snap(T0 + 1500, 10_000.0, 80, shift="D", speed=0)         # 25-min gap, no movement
+    _track_idle(ot, prev, cur)
+    assert ot["idle_min"] == 0.0
+    assert ot["still_run"] == 0.0
 
 
 def test_live_trip_uses_real_tracked_idle_not_speed_heuristic():
     """live_trip's driving_wh_per_km should reflect actually-observed stopped
     time (from _track_idle), not the old avg/max-speed estimate — a genuine
     sustained stop lowers it below the raw wh_per_km."""
-    from app.sync import live_trip, process_snapshot
+    from app.sync import _confirmed_idle_min, live_trip, process_snapshot
 
     s1 = snap(T0, 10_000.0, 80, shift="D", speed=60, range_km=400.0)
     _, _, trip, _ = process_snapshot(None, s1, None, None, 60.0, 0.90)
     assert trip is not None
 
-    # Sustained 4-minute stop mid-trip.
+    # Sustained 4-minute stationary stretch mid-trip (odometer unchanged).
     s2 = snap(T0 + 300, 10_005.0, 79, shift="D", speed=0, range_km=395.0)
     _, _, trip, _ = process_snapshot(s1, s2, trip, None, 60.0, 0.90)
     s3 = snap(T0 + 300 + 240, 10_005.0, 79, shift="D", speed=50, range_km=395.0)
     _, _, trip, _ = process_snapshot(s2, s3, trip, None, 60.0, 0.90)
-    assert trip["idle_min"] == 4.0
+    assert _confirmed_idle_min(trip, s3["ts"]) == 4.0
 
     now = snap(T0 + 300 + 240 + 300, 10_030.0, 74, shift="D", speed=60, range_km=380.0)
     lt = live_trip(trip, now, capacity_kwh=60.0)
