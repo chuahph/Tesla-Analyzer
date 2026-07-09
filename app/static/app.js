@@ -318,13 +318,6 @@ function renderKpis(d) {
         `AC ${cur} ${fmt(chg.ac_cost, 2)} · DC ${cur} ${fmt(chg.dc_cost, 2)}${per100}`, "blue"));
     }
   }
-  // Battery Balance: the fuel gauge — how much charge is actually left in
-  // the pack right now (latest logged SoC), not a derived charged-vs-used
-  // delta.
-  if (bal && bal.current_soc_pct != null) {
-    cards.push(kpiCard("Battery Balance", `${fmt(bal.current_soc_pct, 1)}%`,
-      "left in the pack right now", bal.current_soc_pct >= 20 ? "green" : "amber"));
-  }
   if (!cards.length) {
     // The window is genuinely empty (e.g. "Since charge" right after charging)
     // — say so instead of leaving a hole where the KPIs were.
