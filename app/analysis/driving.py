@@ -253,10 +253,11 @@ def analyze(drives: list[Drive], rated_wh_per_km: float = 150.0,
                     )
                     if has_valid_energy(d) else None
                 ),
-                # Idle-stripped energy for this drive, the counterpart to
-                # driving_wh_per_km and the apples-to-apples match for Tesla's
-                # own "Current Drive" kWh (which excludes the draw while sitting
-                # still). Derived from the same driving Wh/km so the two agree;
+                # Propulsion-only energy for this drive, the counterpart to
+                # driving_wh_per_km (≈ Tesla's "Driving" energy-breakdown line).
+                # NB the *gross* energy_kwh is what matches Tesla's "Current
+                # Drive" total, which includes climate/idle; this strips that
+                # out. Derived from the same driving Wh/km so the two agree;
                 # equals the gross energy when no idle was found.
                 "driving_energy_kwh": (
                     round(driving_wh_val * d.distance_km / 1000.0, 2)

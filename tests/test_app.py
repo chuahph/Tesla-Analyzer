@@ -1,6 +1,4 @@
 """App-level tests: passcode gate boundaries and the Tesla partner key path."""
-from datetime import datetime
-
 from fastapi.testclient import TestClient
 
 from app.config import get_settings
@@ -153,58 +151,6 @@ def test_place_label_prefers_specific_feature_over_broad_district():
         "address": {"suburb": "George Town", "city": "George Town"},
     }) == "George Town"
     assert _label_from_geocode({}) == ""
-
-
-def test_last_full_charge_kwh_prefers_recent_near_full_and_corrects_ac():
-    """Capacity is calibrated from the most recent (near-)100% charge, with
-    an AC onboard-charger loss correction — this is what keeps per-trip kWh
-    in line with the car's own Current Drive screen."""
-    from app.api.routes import _last_full_charge_kwh
-    from app.database import SessionLocal
-    from app.models import Charge, Vehicle
-
-    with SessionLocal() as s:
-        v = Vehicle(vin="TESTVIN-CAP", name="Test", model="Model 3")
-        s.add(v)
-        s.flush()
-        # DC (Supercharger) near-full charge: 20% -> 100%, 60 kWh added.
-        # No conversion loss on DC, so capacity is unadjusted: 75.0 kWh.
-        s.add(Charge(vehicle_id=v.id, start_time=datetime(2026, 1, 1),
-                      end_time=datetime(2026, 1, 1, 1), start_soc=20, end_soc=100,
-                      energy_added_kwh=60.0, charge_type="DC"))
-        s.commit()
-        assert _last_full_charge_kwh(s, v.id, fallback=999.0) == 75.0
-
-        # A later AC near-full charge takes precedence (most recent wins)
-        # and gets the ~5% onboard-charger loss correction applied.
-        s.add(Charge(vehicle_id=v.id, start_time=datetime(2026, 1, 2),
-                      end_time=datetime(2026, 1, 2, 1), start_soc=10, end_soc=100,
-                      energy_added_kwh=63.0, charge_type="AC"))
-        s.commit()
-        assert _last_full_charge_kwh(s, v.id, fallback=999.0) == 66.5
-
-
-def test_last_full_charge_kwh_falls_back_to_best_gain_when_never_full():
-    """A daily charge limit under 95% (e.g. 80%) shouldn't strand capacity
-    calibration on the stale default — the largest-gain recent charge is
-    used instead."""
-    from app.api.routes import _last_full_charge_kwh
-    from app.database import SessionLocal
-    from app.models import Charge, Vehicle
-
-    with SessionLocal() as s:
-        v = Vehicle(vin="TESTVIN-CAP2", name="Test", model="Model 3")
-        s.add(v)
-        s.flush()
-        # Never reaches 95%: a small top-up and a bigger 20->80% charge.
-        s.add(Charge(vehicle_id=v.id, start_time=datetime(2026, 1, 1),
-                      end_time=datetime(2026, 1, 1, 1), start_soc=30, end_soc=50,
-                      energy_added_kwh=15.0, charge_type="AC"))
-        s.add(Charge(vehicle_id=v.id, start_time=datetime(2026, 1, 2),
-                      end_time=datetime(2026, 1, 2, 1), start_soc=20, end_soc=80,
-                      energy_added_kwh=42.0, charge_type="AC"))
-        s.commit()
-        assert _last_full_charge_kwh(s, v.id, fallback=999.0) == 66.5
 
 
 def test_clear_drives_keeps_charges_and_respects_gate():

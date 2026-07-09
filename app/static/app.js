@@ -462,9 +462,10 @@ function renderLists(d) {
         : "";
       const score = t.eco_score != null
         ? `<span class="trip-score tone-${scoreTone(t.eco_score)}">${t.eco_score}</span>` : "";
-      // Driving-only figures (idle/AC stripped) shown next to the gross total
-      // when meaningfully lower — the apples-to-apples match for Tesla's own
-      // "Current Drive" kWh and Wh/km.
+      // Propulsion-only figures (idle/AC stripped) shown next to the gross
+      // total when meaningfully lower — ≈ Tesla's "Driving" energy-breakdown
+      // line. (The gross total is what matches Tesla's "Current Drive", which
+      // includes climate/idle.)
       const hasDrive = t.driving_wh_per_km != null && t.wh_per_km != null
         && t.driving_wh_per_km < t.wh_per_km - 3;
       const driveKwh = (hasDrive && t.driving_energy_kwh != null)
