@@ -257,9 +257,17 @@ def analyze(drives: list[Drive], rated_wh_per_km: float = 150.0,
                 "conditions": _trip_conditions(d),
                 "route": f"{d.start_location} → {d.end_location}"
                 if d.start_location and d.end_location else "",
-                # % of the battery this trip drew (start_soc -> end_soc), the
-                # per-trip counterpart to the window-level soc_used_pct below.
-                "soc_used_pct": round(max(d.start_soc - d.end_soc, 0.0), 1),
+                # % of the battery this trip drew. start_soc/end_soc come from
+                # Tesla's integer battery_level, so their delta is whole-number
+                # only — useless at 1 decimal. When the trip has valid energy
+                # (from the fractional range delta) derive the % from that
+                # instead, giving true sub-1% precision; fall back to the
+                # integer delta only when energy is unknown (a range gap).
+                "soc_used_pct": (
+                    round(d.energy_used_kwh / capacity_kwh * 100.0, 1)
+                    if has_valid_energy(d) and capacity_kwh
+                    else round(max(d.start_soc - d.end_soc, 0.0), 1)
+                ),
             }
             for d in sorted(drives, key=lambda x: x.start_time, reverse=True)[:5]
         ],

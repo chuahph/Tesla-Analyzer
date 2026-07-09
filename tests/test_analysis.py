@@ -224,21 +224,34 @@ def test_confirmed_zero_idle_is_trusted_not_re_estimated():
 
 
 def test_recent_trips_report_soc_used_pct():
-    """Each recent_trips entry carries the % of battery that trip drew
-    (start_soc - end_soc), the per-trip counterpart to the window-level
-    soc_used_pct."""
+    """Each recent_trips entry carries the % of battery that trip drew, at
+    1-decimal precision. Because start_soc/end_soc are integer battery_level,
+    the % is derived from the fractional energy (energy_used / capacity) when
+    energy is valid, and only falls back to the integer SoC delta otherwise."""
     from datetime import datetime
 
     from app.analysis import driving as driving_analysis
     from app.models import Drive
 
+    # Integer SoC delta says 2% (44 -> 42), but the trip actually drew 1.9 kWh
+    # of a 75 kWh pack = 2.5333...% -> reported as 2.5, a real sub-1% gain in
+    # precision the whole-number SoC delta could never show.
     trip = Drive(
         start_time=datetime(2026, 7, 8, 19, 5), end_time=datetime(2026, 7, 8, 19, 30),
         distance_km=8.0, duration_min=25.5, avg_speed_kmh=18.9, max_speed_kmh=74.0,
-        start_soc=44, end_soc=42, energy_used_kwh=1.52, outside_temp_c=31.0,
+        start_soc=44, end_soc=42, energy_used_kwh=1.9, outside_temp_c=31.0,
     )
     result = driving_analysis.analyze([trip], 150.0, 75.0)
-    assert result["recent_trips"][0]["soc_used_pct"] == 2.0
+    assert result["recent_trips"][0]["soc_used_pct"] == 2.5
+
+    # No valid energy (range gap): fall back to the integer SoC delta.
+    gap = Drive(
+        start_time=datetime(2026, 7, 8, 20, 5), end_time=datetime(2026, 7, 8, 20, 30),
+        distance_km=8.0, duration_min=25.0, avg_speed_kmh=19.2, max_speed_kmh=70.0,
+        start_soc=42, end_soc=39, energy_used_kwh=0.0, outside_temp_c=31.0,
+    )
+    result = driving_analysis.analyze([gap], 150.0, 75.0)
+    assert result["recent_trips"][0]["soc_used_pct"] == 3.0
 
 
 def test_driving_analysis_reports_scores(seeded):

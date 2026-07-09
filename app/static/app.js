@@ -454,7 +454,7 @@ function renderLists(d) {
         ? ` · drive ≈${t.driving_wh_per_km}` : "";
       const kwh = t.energy_kwh != null ? ` · ${t.energy_kwh} kWh` : "";
       const whkm = t.wh_per_km != null ? ` · ${t.wh_per_km} Wh/km${drv}` : "";
-      const soc = t.soc_used_pct != null ? ` · ${t.soc_used_pct}% battery` : "";
+      const soc = t.soc_used_pct != null ? ` · ${fmt(t.soc_used_pct, 1)}% battery` : "";
       // In select mode, a checkbox precedes each trip (self-hosted only).
       const check = tripSelectMode && t.id != null
         ? `<input type="checkbox" class="trip-check" value="${t.id}" aria-label="Select trip" />` : "";
