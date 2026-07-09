@@ -72,6 +72,8 @@ def init_db() -> None:
     _ensure_column("drives", "idle_tracked", "BOOLEAN", "FALSE")
     _ensure_column("drives", "start_area", "VARCHAR(120)", "''")
     _ensure_column("drives", "end_area", "VARCHAR(120)", "''")
+    _ensure_column("drives", "start_coords", "VARCHAR(40)", "''")
+    _ensure_column("drives", "end_coords", "VARCHAR(40)", "''")
 
 
 def get_session() -> Iterator[Session]:

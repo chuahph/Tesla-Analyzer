@@ -286,6 +286,12 @@ function renderKpis(d) {
       cards.push(kpiCard("Battery Used", fmt(bal.used_pct, 1) + "%",
         `${fmt(bal.used_kwh, 1)} kWh of ${fmt(bal.full_charge_kwh, 1)} kWh full charge`, "amber"));
     }
+    // The petrol-money view of the same energy: what this window's driving
+    // cost at the configured tariff, and per km.
+    if (drv.total_cost != null) {
+      cards.push(kpiCard("Driving Cost", `${cur} ${fmt(drv.total_cost, 2)}`,
+        drv.cost_per_km != null ? `${cur} ${fmt(drv.cost_per_km, 3)} / km` : "", "violet"));
+    }
   }
   if (chg.available) {
     cards.push(kpiCard("Energy Charged", fmt(chg.total_energy_kwh) + " kWh",
@@ -295,6 +301,13 @@ function renderKpis(d) {
     const acShare = Math.max(0, Math.round(100 - dcShare));
     cards.push(kpiCard("AC / DC Energy", `${acShare} / ${fmt(dcShare, 0)}%`,
       `${fmt(chg.ac_energy_kwh, 0)} / ${fmt(chg.dc_energy_kwh, 0)} kWh`, "red"));
+    // What the window's charging cost, with the per-100km "fuel cost" figure
+    // a petrol driver can compare directly.
+    if (chg.total_cost != null && chg.total_cost > 0) {
+      const per100 = chg.cost_per_100km != null ? ` · ${cur} ${fmt(chg.cost_per_100km, 2)}/100km` : "";
+      cards.push(kpiCard("Charging Cost", `${cur} ${fmt(chg.total_cost, 2)}`,
+        `AC ${cur} ${fmt(chg.ac_cost, 2)} · DC ${cur} ${fmt(chg.dc_cost, 2)}${per100}`, "blue"));
+    }
   }
   // Battery Balance: the fuel gauge — how much charge is actually left in
   // the pack right now (latest logged SoC), not a derived charged-vs-used
@@ -347,6 +360,41 @@ function showCard(canvasId, show) {
   const card = canvas && canvas.closest(".card");
   if (card) card.style.display = show ? "" : "none";
   if (!show) destroy(canvasId);
+}
+
+// "This week vs last week" pulse: rolling 7-day windows, shown only when
+// both weeks have drives (the API sends null otherwise).
+function renderWeekCompare(d) {
+  const el = document.getElementById("week-compare");
+  if (!el) return;
+  const wc = d.week_compare;
+  if (!wc) { el.style.display = "none"; return; }
+  const delta = (a, b, goodDown = false) => {
+    if (a == null || b == null || !b) return "";
+    const pct = Math.round((a - b) / b * 100);
+    if (!pct) return `<span class="wk-delta flat">＝</span>`;
+    const good = goodDown ? pct < 0 : pct > 0;
+    return `<span class="wk-delta ${good ? "good" : "bad"}">${pct > 0 ? "+" : ""}${pct}%</span>`;
+  };
+  const t = wc.this, l = wc.last;
+  el.innerHTML =
+    `<span class="wk-title">vs last week</span>` +
+    `<span>${fmt(t.distance_km)} km ${delta(t.distance_km, l.distance_km)}</span>` +
+    `<span>${fmt(t.drives)} drives ${delta(t.drives, l.drives)}</span>` +
+    `<span>${fmt(t.energy_kwh, 1)} kWh ${delta(t.energy_kwh, l.energy_kwh, true)}</span>` +
+    (t.wh_per_km && l.wh_per_km
+      ? `<span>${fmt(t.wh_per_km)} Wh/km ${delta(t.wh_per_km, l.wh_per_km, true)}</span>` : "");
+  el.style.display = "";
+}
+
+// Data-driven observations mined from the window's own drives.
+function renderInsights(d) {
+  const card = document.getElementById("insights-card");
+  const body = document.getElementById("insights-body");
+  if (!card || !body) return;
+  const ins = (d.driving && d.driving.insights) || [];
+  card.style.display = ins.length ? "" : "none";
+  body.innerHTML = ins.map((s) => `<li>💡 ${s}</li>`).join("");
 }
 
 function renderCharts(d) {
@@ -481,6 +529,11 @@ function renderLists(d) {
       const kwh = t.energy_kwh != null ? ` · ${t.energy_kwh} kWh` : "";
       const whkm = t.wh_per_km != null ? ` · ${t.wh_per_km} Wh/km${drv}` : "";
       const soc = t.soc_used_pct != null ? ` · ${fmt(t.soc_used_pct, 1)}% battery` : "";
+      const cost = t.cost != null ? ` · ${d.currency} ${fmt(t.cost, 2)}` : "";
+      // Live directions link when the trip's raw endpoints were stored.
+      const mapLink = t.map_url
+        ? ` <a class="trip-map" href="${t.map_url}" target="_blank" rel="noopener" title="Open route in Google Maps">🗺</a>`
+        : "";
       // In select mode, a checkbox precedes each trip (self-hosted only).
       const check = tripSelectMode && t.id != null
         ? `<input type="checkbox" class="trip-check" value="${t.id}" aria-label="Select trip" />` : "";
@@ -491,8 +544,8 @@ function renderLists(d) {
           `<span id="${condId}" class="info-pop hidden">${tripConditionWhy(t)}</span>`
         : "";
       return `<li class="trip${tripSelectMode ? " selectable" : ""}">` +
-        `<span class="trip-head">${check}${score}<span class="trip-route">${when}${t.route ? "<br>" + t.route : ""}</span></span>` +
-        `<span class="trip-meta">${t.distance_km} km · ${t.duration_min} min${speed}${kwh}${whkm}${soc}</span>${cond}</li>`;
+        `<span class="trip-head">${check}${score}<span class="trip-route">${when}${t.route ? "<br>" + t.route : ""}${mapLink}</span></span>` +
+        `<span class="trip-meta">${t.distance_km} km · ${t.duration_min} min${speed}${kwh}${whkm}${soc}${cost}</span>${cond}</li>`;
     })
     .join("");
   const list = document.getElementById("recentTrips");
@@ -583,6 +636,33 @@ function renderBattery(d) {
   const btn = document.getElementById("batt-info-btn");
   if (btn) btn.addEventListener("click", () =>
     document.getElementById("batt-info").classList.toggle("hidden"));
+
+  // Health as a curve: monthly median projected full range. Needs at least
+  // two plottable months to be a trend; hidden until then.
+  const trendEl = document.getElementById("battTrendChart");
+  const trend = b.trend || [];
+  if (trendEl) {
+    trendEl.style.display = trend.length >= 2 ? "" : "none";
+    if (trend.length >= 2) {
+      makeChart("battTrendChart", {
+        type: "line",
+        data: { labels: trend.map((p) => p.month), datasets: [{
+          label: "km", data: trend.map((p) => p.full_range_km),
+          borderColor: "#2dd4bf", borderWidth: 2, tension: .3,
+          backgroundColor: "rgba(45,212,191,.08)", fill: true,
+          pointRadius: 2, pointBackgroundColor: "#2dd4bf" }] },
+        options: { responsive: true, maintainAspectRatio: false,
+          plugins: { legend: { display: false },
+            tooltip: { callbacks: { label: (c) => ` ${fmt(c.parsed.y)} km projected full range` } } },
+          scales: {
+            x: { grid: { display: false }, border: { display: false } },
+            y: { border: { display: false }, grid: { color: GRID }, ticks: { maxTicksLimit: 5 } },
+          } },
+      });
+    } else {
+      destroy("battTrendChart");
+    }
+  }
 }
 
 // Tesla's API reports wheels by internal engineering names; show the
@@ -751,10 +831,12 @@ async function load() {
     lastData = d;
     renderScore(d);
     renderKpis(d);
+    renderWeekCompare(d);
     renderCharts(d);
     renderBehaviour(d);
     renderBattery(d);
     renderLists(d);
+    renderInsights(d);
     renderRecommendations(d.recommendations);
 
     const now = new Date();
@@ -1256,6 +1338,51 @@ async function exportCsv() {
 }
 const exportBtn = document.getElementById("btn-export");
 if (exportBtn) exportBtn.addEventListener("click", exportCsv);
+
+// Printable summary report: build a clean report DOM from the data already
+// on screen, then hand it to the browser's print flow (Save as PDF on
+// phones). Print CSS shows only the report while printing.
+function buildReport(d) {
+  const drv = d.driving || {}, chg = d.charging || {}, eff = d.efficiency || {};
+  const b = d.battery || {}, v = d.vehicle || {}, cur = d.currency || "";
+  const windowText = d.window_label || `last ${d.window_days} days`;
+  const row = (k, val) => val != null && val !== ""
+    ? `<tr><td>${k}</td><td>${val}</td></tr>` : "";
+  const trips = (drv.recent_trips || []).slice(0, 5).map((t) =>
+    `<tr><td>${tripWhen(t.start_time)}</td><td>${t.distance_km} km</td>` +
+    `<td>${t.wh_per_km != null ? t.wh_per_km + " Wh/km" : "—"}</td>` +
+    `<td>${t.cost != null ? cur + " " + fmt(t.cost, 2) : "—"}</td></tr>`).join("");
+  return `
+    <h1>Tesla Analyzer — ${windowText}</h1>
+    <p class="rep-sub">${[v.year, v.model, v.name].filter(Boolean).join(" · ")}
+      · generated ${footerDateFmt.format(new Date())}</p>
+    <h2>Driving</h2>
+    <table>${
+      row("Distance", drv.available ? fmt(drv.total_distance_km) + " km · " + fmt(drv.total_drives) + " drives" : null)
+    }${row("Energy used", drv.total_energy_used_kwh != null ? fmt(drv.total_energy_used_kwh, 1) + " kWh (" + fmt(drv.soc_used_pct, 1) + "% battery)" : null)
+    }${row("Avg efficiency", eff.avg_efficiency_wh_per_km ? fmt(eff.avg_efficiency_wh_per_km) + " Wh/km" : null)
+    }${row("Driving cost", drv.total_cost != null ? cur + " " + fmt(drv.total_cost, 2) + (drv.cost_per_km != null ? " (" + cur + " " + fmt(drv.cost_per_km, 3) + "/km)" : "") : null)
+    }${row("km per 1% battery", drv.km_per_soc_pct ? fmt(drv.km_per_soc_pct, 1) + " km" : null)}</table>
+    <h2>Charging</h2>
+    <table>${
+      row("Energy added", chg.available ? fmt(chg.total_energy_kwh, 1) + " kWh · " + fmt(chg.total_sessions) + " sessions" : null)
+    }${row("Cost", chg.total_cost ? cur + " " + fmt(chg.total_cost, 2) + (chg.cost_per_100km != null ? " (" + cur + " " + fmt(chg.cost_per_100km, 2) + "/100km)" : "") : null)
+    }${row("AC / DC split", chg.available ? fmt(chg.ac_energy_kwh, 0) + " / " + fmt(chg.dc_energy_kwh, 0) + " kWh" : null)}</table>
+    <h2>Battery Health</h2>
+    <table>${
+      row("Health", b.available ? fmt(b.health_pct, 1) + "% (" + fmt(b.degradation_pct, 1) + "% degradation)" : null)
+    }${row("Est. full range", b.available ? fmt(b.est_full_range_km) + " km vs " + fmt(b.reference_km) + " km reference" : null)}</table>
+    ${trips ? `<h2>Recent Trips</h2>
+    <table><tr><th>When</th><th>Distance</th><th>Efficiency</th><th>Cost</th></tr>${trips}</table>` : ""}`;
+}
+
+const reportBtn = document.getElementById("btn-report");
+if (reportBtn) reportBtn.addEventListener("click", () => {
+  if (!lastData) return;
+  const holder = document.getElementById("print-report");
+  holder.innerHTML = buildReport(lastData);
+  window.print();
+});
 
 // Pull-to-refresh: drag down from the top of the page and release to reload
 // the app (fresh data AND the newest deployed version, thanks to the

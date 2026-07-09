@@ -126,8 +126,53 @@ def _trip_conditions(d: Drive) -> str:
     return " · ".join(parts)
 
 
+def _insights(drives: list[Drive]) -> list[str]:
+    """Data-driven observations from the raw drives — patterns the aggregate
+    KPIs can't show. Only reports a pattern when there are enough drives on
+    both sides of a comparison (>= 3) and the difference is material (>= 8%),
+    so a single odd trip never masquerades as a trend."""
+    out: list[str] = []
+    eff = [d for d in drives if d.distance_km > 0 and has_valid_energy(d)]
+
+    def median_whkm(subset: list[Drive]) -> float:
+        return percentile([d.wh_per_km for d in subset], 0.5) if subset else 0.0
+
+    def compare(a: list[Drive], b: list[Drive], a_name: str, b_name: str, verb: str):
+        if len(a) < 3 or len(b) < 3:
+            return
+        ma, mb = median_whkm(a), median_whkm(b)
+        if not ma or not mb:
+            return
+        diff = (ma - mb) / mb * 100.0
+        if abs(diff) >= 8.0:
+            worse, better, pct = (a_name, b_name, diff) if diff > 0 else (b_name, a_name, -diff)
+            out.append(
+                f"{worse.capitalize()} {verb} average {round(pct)}% more Wh/km "
+                f"than {better} ({round(ma if diff > 0 else mb)} vs "
+                f"{round(mb if diff > 0 else ma)})."
+            )
+
+    peak = [d for d in eff if d.start_time.hour in (7, 8, 17, 18, 19)]
+    off = [d for d in eff if d.start_time.hour not in (7, 8, 17, 18, 19)]
+    compare(peak, off, "peak-hour drives", "off-peak drives", "use on")
+
+    weekend = [d for d in eff if d.start_time.weekday() >= 5]
+    weekday = [d for d in eff if d.start_time.weekday() < 5]
+    compare(weekend, weekday, "weekend drives", "weekday drives", "use on")
+
+    hot = [d for d in eff if (d.outside_temp_c or 0) >= 33]
+    mild = [d for d in eff if 0 < (d.outside_temp_c or 0) < 33]
+    compare(hot, mild, "hot-day drives (33°C+)", "milder-day drives", "use on")
+
+    short = [d for d in eff if d.distance_km < 5]
+    longer = [d for d in eff if d.distance_km >= 5]
+    compare(short, longer, "short hops (<5 km)", "longer drives", "use on")
+
+    return out[:3]
+
+
 def analyze(drives: list[Drive], rated_wh_per_km: float = 150.0,
-            capacity_kwh: float = 75.0) -> dict[str, Any]:
+            capacity_kwh: float = 75.0, energy_price: float = 0.0) -> dict[str, Any]:
     if not drives:
         return {"available": False}
 
@@ -225,6 +270,14 @@ def analyze(drives: list[Drive], rated_wh_per_km: float = 150.0,
         "avg_speed_kmh": round(mean(speeds), 1),
         "km_per_soc_pct": km_per_soc,
         "soc_used_pct": round(soc_used, 1),
+        # What the window's gross battery drain cost at the configured tariff,
+        # and per km driven — the "petrol money" view of the same energy.
+        "total_cost": round(total_energy_used * energy_price, 2) if energy_price else None,
+        "cost_per_km": (
+            round(total_energy_used * energy_price / total_distance, 3)
+            if energy_price and total_distance else None
+        ),
+        "insights": _insights(drives),
         "p95_speed_kmh": round(percentile([d.max_speed_kmh for d in drives], 0.95), 1),
         "max_speed_kmh": round(max((d.max_speed_kmh for d in drives), default=0.0), 1),
         "longest_trip_km": round(max(distances), 1),
@@ -283,9 +336,24 @@ def analyze(drives: list[Drive], rated_wh_per_km: float = 150.0,
                     (round(d.energy_used_kwh, 2) if has_valid_energy(d) else None)
                 ),
                 "eco_score": eco_score(driving_wh_val, rated_wh_per_km) if has_valid_energy(d) and driving_wh_val else None,
+                # What this trip's energy cost at the configured tariff.
+                "cost": (
+                    round(d.energy_used_kwh * energy_price, 2)
+                    if has_valid_energy(d) and energy_price else None
+                ),
                 "conditions": _trip_conditions(d),
                 "route": f"{d.start_location} → {d.end_location}"
                 if d.start_location and d.end_location else "",
+                # Live directions link (Google Maps start -> end) when the raw
+                # endpoints were kept; empty for rows logged before coords
+                # were stored.
+                "map_url": (
+                    "https://www.google.com/maps/dir/?api=1"
+                    f"&origin={getattr(d, 'start_coords', '').replace(' ', '')}"
+                    f"&destination={getattr(d, 'end_coords', '').replace(' ', '')}"
+                    if getattr(d, "start_coords", "") and getattr(d, "end_coords", "")
+                    else None
+                ),
                 # % of the battery this trip drew. start_soc/end_soc come from
                 # Tesla's integer battery_level, so their delta is whole-number
                 # only — useless at 1 decimal. When the trip has valid energy

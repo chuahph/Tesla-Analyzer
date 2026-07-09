@@ -121,6 +121,30 @@ def test_new_range_19in_nova_wheels():
     assert new_range_for("Model 3", "74D QUICKSILVER Photon18") == 549.0
 
 
+def test_health_trend_groups_projections_by_month():
+    """Readings with timestamps produce a monthly median-projection trend;
+    months with fewer than 3 readings are too noisy to plot and are skipped."""
+    from datetime import datetime
+
+    def mk_ts(soc, full_range_km, when):
+        r = mk(soc, full_range_km)
+        r["ts"] = when
+        return r
+
+    readings = (
+        [mk_ts(60, 500, datetime(2026, 1, 10 + i)) for i in range(5)]   # Jan: 500 km
+        + [mk_ts(60, 490, datetime(2026, 2, 10 + i)) for i in range(5)]  # Feb: 490 km
+        + [mk_ts(60, 480, datetime(2026, 3, 15))]                        # Mar: 1 reading only
+    )
+    r = analyze(readings)
+    months = {p["month"]: p["full_range_km"] for p in r["trend"]}
+    assert months == {"2026-01": 500.0, "2026-02": 490.0}   # Mar skipped
+
+    # Readings without timestamps (e.g. the degradation helper) -> empty trend.
+    r2 = analyze([mk(60, 500) for _ in range(10)])
+    assert r2["trend"] == []
+
+
 def test_usable_capacity_lookup_by_variant():
     from app.analysis.battery import usable_capacity_for
 

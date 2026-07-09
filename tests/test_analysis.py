@@ -223,6 +223,79 @@ def test_confirmed_zero_idle_is_trusted_not_re_estimated():
     assert trip2["driving_wh_per_km"] < 190   # heuristic still applies here
 
 
+def test_driving_cost_and_map_links():
+    """With a tariff configured, the window reports total driving cost and
+    cost/km (from gross energy used), each trip reports its own cost, and a
+    trip with stored raw coords links out to Google Maps directions."""
+    from datetime import datetime
+
+    from app.analysis import driving as driving_analysis
+    from app.models import Drive
+
+    trip = Drive(
+        start_time=datetime(2026, 7, 9, 8, 0), end_time=datetime(2026, 7, 9, 8, 20),
+        distance_km=10.0, duration_min=20.0, avg_speed_kmh=30.0, max_speed_kmh=60.0,
+        start_soc=60, end_soc=58, energy_used_kwh=1.5, outside_temp_c=28.0,
+        start_coords="5.3312, 100.3060", end_coords="5.3500, 100.2800",
+    )
+    r = driving_analysis.analyze([trip], 150.0, 75.0, energy_price=0.90)
+    row = r["recent_trips"][0]
+    assert row["cost"] == round(1.5 * 0.90, 2)
+    assert r["total_cost"] == round(r["total_energy_used_kwh"] * 0.90, 2)
+    assert r["cost_per_km"] == round(r["total_energy_used_kwh"] * 0.90 / 10.0, 3)
+    assert row["map_url"].startswith("https://www.google.com/maps/dir/?api=1")
+    assert "origin=5.3312,100.3060" in row["map_url"]
+    assert "destination=5.3500,100.2800" in row["map_url"]
+
+    # No tariff -> no cost figures; no coords -> no map link.
+    bare = Drive(
+        start_time=datetime(2026, 7, 9, 9, 0), end_time=datetime(2026, 7, 9, 9, 20),
+        distance_km=10.0, duration_min=20.0, avg_speed_kmh=30.0, max_speed_kmh=60.0,
+        start_soc=60, end_soc=58, energy_used_kwh=1.5, outside_temp_c=28.0,
+        start_coords="", end_coords="",
+    )
+    r2 = driving_analysis.analyze([bare], 150.0, 75.0)
+    assert r2["total_cost"] is None
+    assert r2["recent_trips"][0]["cost"] is None
+    assert r2["recent_trips"][0]["map_url"] is None
+
+
+def test_insights_report_material_patterns_only():
+    """Peak-hour drives consistently 25% worse than off-peak (3+ each side)
+    produce an insight; too few drives or immaterial differences stay silent."""
+    from datetime import datetime
+
+    from app.analysis import driving as driving_analysis
+    from app.models import Drive
+
+    def trip(day, hour, whkm):
+        km = 10.0
+        return Drive(
+            start_time=datetime(2026, 7, day, hour, 0), end_time=datetime(2026, 7, day, hour, 30),
+            distance_km=km, duration_min=30.0, avg_speed_kmh=20.0, max_speed_kmh=60.0,
+            start_soc=60, end_soc=58, energy_used_kwh=km * whkm / 1000.0, outside_temp_c=28.0,
+        )
+
+    peak = [trip(d, 8, 190) for d in range(1, 5)]       # 4 peak drives, 190 Wh/km
+    off = [trip(d, 21, 140) for d in range(1, 5)]       # 4 off-peak, 140 Wh/km
+    r = driving_analysis.analyze(peak + off, 150.0, 75.0)
+    assert any("peak-hour" in s.lower() for s in r["insights"])
+
+    # Same split but a trivial 3% difference — no insight.
+    quiet = [trip(d, 8, 145) for d in range(1, 5)] + [trip(d, 21, 141) for d in range(1, 5)]
+    r2 = driving_analysis.analyze(quiet, 150.0, 75.0)
+    assert not any("peak-hour" in s.lower() for s in r2["insights"])
+
+
+def test_charging_cost_split_and_per_100km(seeded):
+    charges = seeded.scalars(select(Charge)).all()
+    drives = seeded.scalars(select(Drive)).all()
+    r = charging_analysis.analyze(charges, drives)
+    assert round(r["ac_cost"] + r["dc_cost"], 2) == r["total_cost"]
+    km = sum(d.distance_km for d in drives)
+    assert r["cost_per_100km"] == round(r["total_cost"] / km * 100.0, 2)
+
+
 def test_top_routes_group_by_area_but_show_specific_label():
     """Repeat trips to 'the same place' shouldn't fragment into many
     single-count Top Routes entries just because the exact matched POI/

@@ -507,6 +507,8 @@ def _process_vehicle(
     )
     drives = recovered + drives  # include a drive recovered from the upgrade gap
     for d in drives:
+        # Keep the raw coords (for map links) before geocoding replaces them.
+        d["start_coords"], d["end_coords"] = d["start_location"], d["end_location"]
         d["start_location"], d["start_area"] = _place_and_area(d["start_location"])
         d["end_location"], d["end_area"] = _place_and_area(d["end_location"])
         session.add(Drive(vehicle_id=vehicle.id, **d))
@@ -675,6 +677,7 @@ def sync_now(wake: bool = Query(False), session: Session = Depends(get_session))
                         row_capacity_kwh,
                     )
                     if d:
+                        d["start_coords"], d["end_coords"] = d["start_location"], d["end_location"]
                         d["start_location"], d["start_area"] = _place_and_area(d["start_location"])
                         d["end_location"], d["end_area"] = _place_and_area(d["end_location"])
                         session.add(Drive(vehicle_id=vehicle_row.id, **d))
@@ -1055,9 +1058,30 @@ def summary(
     drives, charges = _window(session, vehicle.id, days, since=since)
 
     driving = driving_analysis.analyze(
-        drives, settings.rated_wh_per_km, capacity_kwh)
+        drives, settings.rated_wh_per_km, capacity_kwh, settings.energy_price_per_kwh)
     charging = charging_analysis.analyze(charges, drives)
     efficiency = efficiency_analysis.analyze(drives, settings.rated_wh_per_km)
+
+    # This week vs last week (rolling 7-day windows anchored at now), regardless
+    # of the display window — a steady, comparable pulse of usage.
+    now = datetime.now()
+    wk_drives = [d for d in drives if d.start_time >= now - timedelta(days=7)] \
+        if since is None and days >= 14 else None
+    week_compare = None
+    if wk_drives is not None:
+        last_wk = [d for d in drives
+                   if now - timedelta(days=14) <= d.start_time < now - timedelta(days=7)]
+        if wk_drives and last_wk:
+            def _wk(ds):
+                dist = sum(d.distance_km for d in ds)
+                energy = sum(d.energy_used_kwh for d in ds)
+                return {
+                    "drives": len(ds),
+                    "distance_km": round(dist, 1),
+                    "energy_kwh": round(energy, 1),
+                    "wh_per_km": round(energy * 1000.0 / dist) if dist and energy > 0 else None,
+                }
+            week_compare = {"this": _wk(wk_drives), "last": _wk(last_wk)}
 
     # Battery Used %: gross energy used this window (parking/idle included,
     # matching total_energy_used_kwh) as a share of usable pack capacity — the
@@ -1096,7 +1120,7 @@ def summary(
         vehicle.model, vehicle.trim, year=vin_info.get("year")
     )
     battery = battery_analysis.analyze(
-        [{"soc": r.soc, "range_km": r.range_km} for r in readings],
+        [{"soc": r.soc, "range_km": r.range_km, "ts": r.ts} for r in readings],
         new_range_km=spec_km,
     )
 
@@ -1140,5 +1164,6 @@ def summary(
         "efficiency": efficiency,
         "battery": battery,
         "battery_balance": battery_balance,
+        "week_compare": week_compare,
         "recommendations": recs,
     }

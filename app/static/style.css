@@ -703,3 +703,39 @@ footer { padding: 18px 28px; color: var(--muted); font-size: 12px; border-top: 1
   .modal-card { padding: 22px 18px; }
   .rec { flex-direction: column; gap: 8px; }
 }
+
+/* --- Week-over-week compare strip (under the KPI grid) ------------------- */
+.week-compare {
+  display: flex; flex-wrap: wrap; gap: 8px 18px; align-items: center;
+  margin: 2px 0 14px; padding: 8px 14px;
+  background: var(--panel-2); border: 1px solid var(--border); border-radius: 10px;
+  font-size: 12.5px; color: var(--muted);
+}
+.week-compare .wk-title { text-transform: uppercase; letter-spacing: .4px; font-size: 10.5px; }
+.wk-delta { font-weight: 700; margin-left: 2px; }
+.wk-delta.good { color: var(--green); }
+.wk-delta.bad { color: var(--amber); }
+.wk-delta.flat { color: var(--muted); }
+
+/* Map link on a trip row */
+.trip-map { text-decoration: none; font-size: 13px; margin-left: 4px; }
+
+/* Battery trend chart inside the health card */
+.batt-trend { max-height: 150px; margin-top: 10px; }
+
+/* --- Printable report ----------------------------------------------------- */
+.print-report { display: none; }
+@media print {
+  /* Show only the report: everything else off. */
+  body > *:not(.print-report) { display: none !important; }
+  body { background: #fff; color: #111; }
+  .print-report { display: block; padding: 8mm; font: 12pt/1.5 Georgia, serif; }
+  .print-report h1 { font-size: 18pt; margin: 0 0 2mm; }
+  .print-report h2 { font-size: 13pt; margin: 6mm 0 2mm; border-bottom: 1px solid #999; }
+  .print-report .rep-sub { color: #555; margin: 0 0 4mm; font-size: 10pt; }
+  .print-report table { width: 100%; border-collapse: collapse; }
+  .print-report td, .print-report th {
+    padding: 1.5mm 2mm; border-bottom: 1px solid #ddd; text-align: left; font-size: 10.5pt;
+  }
+  .print-report td:first-child { color: #555; width: 38%; }
+}

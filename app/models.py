@@ -66,6 +66,11 @@ class Drive(Base):
     # specific location in that case.
     start_area: Mapped[str] = mapped_column(String(120), default="")
     end_area: Mapped[str] = mapped_column(String(120), default="")
+    # Raw "lat, lon" endpoints, kept alongside the resolved names (which
+    # replace the coords in start/end_location) so each trip can link out to
+    # a live map. Empty on rows logged before this existed.
+    start_coords: Mapped[str] = mapped_column(String(40), default="")
+    end_coords: Mapped[str] = mapped_column(String(40), default="")
 
     # Real (not estimated) minutes spent stopped >= sync.IDLE_STREAK_MIN,
     # tracked live while the trip was open. idle_tracked distinguishes

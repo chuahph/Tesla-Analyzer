@@ -174,11 +174,28 @@ def analyze(
     )
     health = min(100.0, 100.0 - degradation)
 
+    # Health trend: median projected full range per month, so degradation
+    # reads as a curve over time instead of a single number. Only months with
+    # a few readings (>= 3) qualify — a lone reading is too noisy to plot.
+    by_month: dict[str, list[float]] = {}
+    for r, p in projections:
+        ts = r.get("ts")
+        if ts is None:
+            continue
+        key = ts.strftime("%Y-%m") if hasattr(ts, "strftime") else str(ts)[:7]
+        by_month.setdefault(key, []).append(p)
+    trend = [
+        {"month": m, "full_range_km": round(percentile(vals, 0.5), 0)}
+        for m, vals in sorted(by_month.items())
+        if len(vals) >= 3
+    ]
+
     socs = [r["soc"] for r, _ in projections]
     recent_socs = [r["soc"] for r, _ in recent]
     return {
         "available": True,
         "n_readings": len(projections),
+        "trend": trend,
         "health_pct": round(health, 1),
         "degradation_pct": round(degradation, 1),
         "est_full_range_km": round(current_km, 0),

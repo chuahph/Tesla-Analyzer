@@ -425,6 +425,8 @@
     <section id="score-banner" class="score-banner" style="display:none"></section>
     <hr id="sep-score" class="sep" style="display:none" />
     <section id="kpis" class="kpi-grid"></section>
+    <!-- Rolling 7-day pulse vs the week before, filled by app.js. -->
+    <section id="week-compare" class="week-compare" style="display:none"></section>
     <hr class="sep" />
 
     <section class="card-grid">
@@ -435,6 +437,12 @@
       <div class="card" id="battery-card" style="display:none">
         <h2>🔋 Battery Health</h2>
         <div id="battery-body"></div>
+        <!-- Monthly projected-full-range trend; shown once 2+ months exist. -->
+        <canvas id="battTrendChart" class="batt-trend" style="display:none"></canvas>
+      </div>
+      <div class="card" id="insights-card" style="display:none">
+        <h2>🔎 Insights</h2>
+        <ul id="insights-body" class="plain-list"></ul>
       </div>
       <!-- Trips / routes / charging spots sit right after battery health,
            before the charts; recommendations move to the very bottom. -->
@@ -524,8 +532,12 @@
     <!-- Per-car export lives with the car; account actions are on the main page. -->
     <section class="bottom-actions">
       <button id="btn-export" class="btn" title="Download this car's data as CSV">⬇ Export CSV</button>
+      <button id="btn-report" class="btn" title="Print or save a summary report (PDF via the print dialog)">📄 Report</button>
     </section>
   </main>
+
+  <!-- Print-only summary report, rebuilt from the current data on demand. -->
+  <div id="print-report" class="print-report"></div>
 
   <footer>
     <span id="footer-meta"></span>

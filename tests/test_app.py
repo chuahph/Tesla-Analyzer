@@ -165,6 +165,33 @@ def test_place_and_area_passes_through_invalid_coords():
     assert _place("") == ""
 
 
+def test_summary_reports_week_compare_and_costs():
+    """A wide window includes the rolling week-over-week compare (or null when
+    a week is empty) plus driving/charging cost figures."""
+    settings = get_settings()
+    old = settings.app_passcode
+    settings.app_passcode = ""
+    try:
+        with TestClient(app) as client:  # startup seeds demo data
+            body = client.get("/api/summary?days=365").json()
+            assert "week_compare" in body
+            wc = body["week_compare"]
+            if wc is not None:  # demo data spans recent weeks, so usually present
+                assert set(wc) == {"this", "last"}
+                assert wc["this"]["distance_km"] >= 0
+            drv, chg = body["driving"], body["charging"]
+            assert drv["total_cost"] is not None      # tariff configured by default
+            assert drv["cost_per_km"] is not None
+            assert "insights" in drv
+            assert round(chg["ac_cost"] + chg["dc_cost"], 1) == round(chg["total_cost"], 1)
+            # Narrow "since charge" windows skip the compare rather than
+            # sending a misleading partial week.
+            since = client.get("/api/summary?days=365&since_charge=1").json()
+            assert since["week_compare"] is None
+    finally:
+        settings.app_passcode = old
+
+
 def test_clear_drives_keeps_charges_and_respects_gate():
     settings = get_settings()
     old = settings.app_passcode

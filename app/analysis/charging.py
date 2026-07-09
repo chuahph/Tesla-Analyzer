@@ -89,11 +89,19 @@ def analyze(charges: list[Charge], drives: list[Drive] | None = None) -> dict[st
         for name in ordered_names
     ]
 
+    # "Fuel cost" view: what the window's charging cost per 100 km actually
+    # driven — the EV counterpart of a petrol car's RM/100km figure.
+    drive_km = sum(d.distance_km for d in drives)
+    cost_per_100km = round(safe_div(total_cost, drive_km) * 100.0, 2) if drive_km else None
+
     return {
         "available": True,
         "total_sessions": len(charges),
         "total_energy_kwh": round(total_energy, 1),
         "total_cost": round(total_cost, 2),
+        "ac_cost": round(sum(c.cost for c in ac), 2),
+        "dc_cost": round(sum(c.cost for c in dc), 2),
+        "cost_per_100km": cost_per_100km,
         "avg_cost_per_kwh": round(safe_div(total_cost, total_energy), 3),
         "ac_sessions": len(ac),
         "dc_sessions": len(dc),
