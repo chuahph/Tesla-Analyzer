@@ -71,6 +71,36 @@ def test_spec_ignored_when_scale_mismatch():
     assert r["health_pct"] == 100
 
 
+def test_spec_trusted_for_moderate_degradation_even_with_lots_of_history():
+    # A pack that's genuinely lost a plausible amount of range (5%) keeps
+    # trusting spec no matter how much history accumulates — most tracking
+    # starts after a car has already lost some range, and the car's own data
+    # alone can't distinguish that from a healthy pack; only spec can.
+    readings = [mk(50 + (i % 40), 520) for i in range(50)]  # lots of history
+    r = analyze(readings, new_range_km=549.0)
+    assert r["reference"] == "factory spec"
+
+
+def test_spec_overridden_when_implied_degradation_is_implausible():
+    # A pack consistently projecting 35% below spec, with plenty of history
+    # to trust it, more likely means the spec figure itself is wrong than a
+    # normal Tesla pack having degraded that much — real data wins instead of
+    # reporting an alarming (and probably wrong) degradation figure forever.
+    readings = [mk(50 + (i % 40), 357) for i in range(40)]  # 357/549 ~= -35%
+    r = analyze(readings, new_range_km=549.0)
+    assert r["reference"] == "best seen"
+    assert r["health_pct"] > 99   # own data treated as its own 100% baseline
+
+
+def test_spec_not_overridden_without_enough_history():
+    # The same implausible-vs-spec gap, but too few readings to trust it yet
+    # — spec still anchors the estimate rather than an early, noisy reading
+    # cluster overriding a documented figure.
+    readings = [mk(50 + (i % 40), 357) for i in range(10)]
+    r = analyze(readings, new_range_km=549.0)
+    assert r["reference"] == "factory spec"
+
+
 def test_new_range_lookup_by_badge():
     assert new_range_for("Model 3", "74D QUICKSILVER") == 549.0
     assert new_range_for("Model 3", "P74D") == 476.0

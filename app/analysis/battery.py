@@ -19,6 +19,11 @@ MIN_READINGS = 5      # below this the estimate is too noisy to show
 MIN_SOC = 20.0        # low-SoC readings project unreliably
 RELIABLE_SOC = 40.0   # rated range is most linear in the mid/high SoC band
 RECENT_N = 12         # recent projections summarised as the "current" estimate
+IMPLAUSIBLE_DEGRADATION_PCT = 20.0  # beyond this, a modern Tesla pack under
+# normal use almost certainly hasn't degraded that much -- more likely the
+# spec figure itself is wrong than the pack being unrealistically degraded.
+SPEC_OVERRIDE_MIN_READINGS = 30     # readings needed before real data is
+# trusted enough to override a documented spec figure downward.
 
 # Factory rated range at 100% when new, in km (EPA figures — the same scale
 # the API's battery_range field uses). Each entry needs the model substring,
@@ -135,13 +140,33 @@ def analyze(
     recent = pool[-RECENT_N:]
     current_km = percentile([p for _, p in recent], 0.5)  # median resists outliers
 
-    # 100% reference: the factory when-new figure if it plausibly matches the
-    # scale of this car's readings; otherwise the measured best. (A region
-    # whose firmware reports a different range scale would make the EPA spec
-    # meaningless — measured projections beating spec by >3% flags that.)
+    # 100% reference: the factory when-new figure (EPA-published, looked up
+    # by exact variant) if it plausibly matches this car's own history;
+    # otherwise the car's own actual best-observed range — a continuously
+    # updating real measurement, not a number pinned indefinitely just
+    # because it was asserted once. Two-sided guard so a wrong spec figure
+    # can't dominate forever in either direction:
+    #  - real data reading well ABOVE spec (baseline > spec + 3%) means a
+    #    scale/region mismatch (different range convention) — spec is
+    #    meaningless here, so it's discarded outright;
+    #  - real data reading implausibly far BELOW spec (> 20% implied
+    #    degradation), once there's enough history to trust it (>= 30
+    #    readings), more likely means the spec itself overstates the true
+    #    when-new figure than the pack being unrealistically degraded — also
+    #    discarded, so real accumulated data can correct a wrong spec.
+    # Short of those, spec anchors the estimate: most tracking starts after
+    # a car has already lost some range, and our own data alone can't tell
+    # that apart from a healthy pack — only the factory figure can.
     reference_km, reference = baseline_km, "best seen"
-    if new_range_km and baseline_km <= new_range_km * 1.03:
-        reference_km, reference = new_range_km, "factory spec"
+    if new_range_km:
+        scale_mismatch = baseline_km > new_range_km * 1.03
+        implied_degradation = 100.0 * (new_range_km - baseline_km) / new_range_km
+        implausible = (
+            implied_degradation > IMPLAUSIBLE_DEGRADATION_PCT
+            and len(projections) >= SPEC_OVERRIDE_MIN_READINGS
+        )
+        if not scale_mismatch and not implausible:
+            reference_km, reference = new_range_km, "factory spec"
 
     degradation = (
         max(0.0, 100.0 * (reference_km - current_km) / reference_km)
