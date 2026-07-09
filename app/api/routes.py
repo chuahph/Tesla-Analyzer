@@ -85,23 +85,54 @@ def _first_vehicle(session: Session) -> Vehicle:
     return vehicle
 
 
-def _usable_capacity(vehicle: Vehicle, settings) -> tuple[float, str]:
+def _degradation_pct(session: Session, vehicle: Vehicle, settings) -> float | None:
+    """The car's own range-based degradation estimate (% capacity lost vs
+    new) — the same figure the Battery Health card shows, computed purely
+    from range-projection history, independent of any charge-derived kWh
+    figure. None while there isn't yet enough reading history."""
+    readings = session.scalars(
+        select(BatteryReading)
+        .where(BatteryReading.vehicle_id == vehicle.id)
+        .order_by(BatteryReading.ts)
+        .limit(2000)
+    ).all()
+    vin_info = vin_mod.decode(vehicle.vin)
+    spec_km = settings.battery_new_range_km or battery_analysis.new_range_for(
+        vehicle.model, vehicle.trim, year=vin_info.get("year"))
+    health = battery_analysis.analyze(
+        [{"soc": r.soc, "range_km": r.range_km} for r in readings], new_range_km=spec_km)
+    return health["degradation_pct"] if health.get("available") else None
+
+
+def _usable_capacity(session: Session, vehicle: Vehicle, settings) -> tuple[float, str]:
     """Usable pack capacity (kWh) for turning a drive's range/SoC delta into
-    kWh, plus where it came from. Priority: an explicit config override, then
-    the measured charge EMA (seeded from the variant spec at link), then the
-    variant spec directly, then a generic default. Returned source lets the
-    dashboard show which one is in play so a wrong figure is diagnosable."""
+    kWh, plus where it came from.
+
+    Primary method: the factory spec for this exact variant (model/badge/
+    wheel from the trim, generation from the VIN year) minus the car's own
+    measured degradation (from range-projection history, the same figure the
+    Battery Health card shows) — this ties the capacity used for every kWh/%
+    calculation to the same degradation signal already displayed elsewhere,
+    instead of two unrelated numbers that can silently disagree (e.g. a car
+    showing 7% degradation implying, via a noisy charge-derived figure, a
+    pack far smaller than spec-minus-7% would say).
+
+    Falls back to the measured charge EMA when degradation data isn't
+    available yet (a freshly-linked car with little reading history), then
+    spec alone, then a generic default. An explicit config override always
+    wins outright.
+    """
     if settings.battery_capacity_kwh and settings.battery_capacity_kwh > 0:
         return settings.battery_capacity_kwh, "override"
     spec = battery_analysis.usable_capacity_for(
         vehicle.model, vehicle.trim, vin_mod.decode(vehicle.vin).get("year"))
-    if vehicle.battery_capacity_kwh:
-        # 75.0 is the untouched column default; if that's all we have and the
-        # variant is known, the spec is the better answer.
-        if vehicle.battery_capacity_kwh == 75.0 and spec:
-            return spec, "variant spec"
+    if spec:
+        degradation = _degradation_pct(session, vehicle, settings)
+        if degradation is not None:
+            return round(spec * (1 - degradation / 100.0), 1), "spec - degradation"
+    if vehicle.battery_capacity_kwh and vehicle.battery_capacity_kwh != 75.0:
         return vehicle.battery_capacity_kwh, "measured"
-    return (spec or 75.0), ("variant spec" if spec else "default")
+    return (spec or vehicle.battery_capacity_kwh or 75.0), ("variant spec" if spec else "default")
 
 
 def _window(session: Session, vehicle_id: int, days: int, since: datetime | None = None):
@@ -411,7 +442,7 @@ def _process_vehicle(
     # variant spec) > spec > default. The EMA is a smoothed average over
     # measured charges — robust to a single contaminated charge reading that
     # a "last full charge" figure would swallow whole.
-    capacity_kwh, _ = _usable_capacity(vehicle, settings)
+    capacity_kwh, _ = _usable_capacity(session, vehicle, settings)
 
     # One-time migration from the pre-multi-car global keys (only the active car
     # inherits them), so a drive taken around the upgrade isn't lost.
@@ -625,7 +656,7 @@ def sync_now(wake: bool = Query(False), session: Session = Depends(get_session))
                     session.query(Vehicle).filter(Vehicle.vin == vvin).first()
                     if (trip_raw or charge_raw) and last_raw else None
                 )
-                row_capacity_kwh = _usable_capacity(vehicle_row, settings)[0] if vehicle_row else 75.0
+                row_capacity_kwh = _usable_capacity(session, vehicle_row, settings)[0] if vehicle_row else 75.0
                 if trip_raw and last_raw and vehicle_row:
                     d = sync_mod.close_trip_on_sleep(
                         _json.loads(trip_raw), _json.loads(last_raw),
@@ -970,7 +1001,7 @@ def summary(
     vehicle = _first_vehicle(session)
     # Usable pack capacity (override > measured EMA > variant spec > default),
     # used everywhere below that turns kWh into % or range delta into kWh.
-    capacity_kwh, capacity_source = _usable_capacity(vehicle, settings)
+    capacity_kwh, capacity_source = _usable_capacity(session, vehicle, settings)
     # The cron's own last determination of what the car was doing (including
     # "found it asleep") — written every /api/sync tick, read here purely
     # from the database. This is what lets the dashboard show a near-live

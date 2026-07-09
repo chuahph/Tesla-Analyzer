@@ -107,20 +107,65 @@ def test_usable_capacity_lookup_by_variant():
     assert usable_capacity_for("Tesla", "unknown") is None
 
 
-def test_usable_capacity_resolution_prefers_override_then_measured():
+def test_usable_capacity_uses_spec_minus_degradation_as_the_primary_method():
+    """The primary path is factory spec for the variant minus the car's own
+    range-measured degradation (the same figure the Battery Health card
+    shows) — not a charge-derived figure, so it's right immediately instead
+    of waiting for many charges to converge, and it can't silently disagree
+    with the degradation the app already displays."""
+    from datetime import datetime, timedelta
     from types import SimpleNamespace
 
     from app.api.routes import _usable_capacity
+    from app.database import SessionLocal
+    from app.models import BatteryReading, Vehicle
 
-    v = SimpleNamespace(vin="LRW3F7EK3RC000000", model="Model 3",
-                        trim="74D Nova19", battery_capacity_kwh=75.0)
-    # Untouched default + known variant -> the spec (78), not the generic 75.
-    assert _usable_capacity(v, SimpleNamespace(battery_capacity_kwh=0.0)) == (78.0, "variant spec")
-    # A measured EMA that has moved off the default is trusted.
-    v.battery_capacity_kwh = 72.4
-    assert _usable_capacity(v, SimpleNamespace(battery_capacity_kwh=0.0)) == (72.4, "measured")
-    # An explicit config override beats everything.
-    assert _usable_capacity(v, SimpleNamespace(battery_capacity_kwh=73.0)) == (73.0, "override")
+    with SessionLocal() as s:
+        v = Vehicle(vin="LRW3F7EK3RC000001", model="Model 3", trim="74D Nova19",
+                    battery_capacity_kwh=75.0)
+        s.add(v)
+        s.flush()
+        # ~7% range-based degradation vs the 491 km spec for this variant
+        # (74D + 19" wheels): readings consistently project ~457 km.
+        base = datetime(2026, 1, 1)
+        for i in range(20):
+            soc = 50 + (i % 40)
+            s.add(BatteryReading(vehicle_id=v.id, ts=base + timedelta(hours=i),
+                                  soc=soc, range_km=457.0 * soc / 100.0))
+        s.commit()
+        settings = SimpleNamespace(battery_capacity_kwh=0.0, battery_new_range_km=0.0)
+
+        cap, source = _usable_capacity(s, v, settings)
+        assert source == "spec - degradation"
+        assert 71.5 <= cap <= 73.5   # 78 kWh spec x (1 - ~7%) ~= 72.5
+
+        # An explicit config override still beats the computed figure.
+        override = SimpleNamespace(battery_capacity_kwh=73.0, battery_new_range_km=0.0)
+        assert _usable_capacity(s, v, override) == (73.0, "override")
+
+
+def test_usable_capacity_falls_back_without_degradation_history():
+    """A freshly-linked car has no battery-reading history yet: falls back to
+    the measured charge EMA if it's moved off the default, else the spec."""
+    from types import SimpleNamespace
+
+    from app.api.routes import _usable_capacity
+    from app.database import SessionLocal
+    from app.models import Vehicle
+
+    with SessionLocal() as s:
+        v = Vehicle(vin="LRW3F7EK3RC000002", model="Model 3", trim="74D Nova19",
+                    battery_capacity_kwh=75.0)
+        s.add(v)
+        s.commit()
+        settings = SimpleNamespace(battery_capacity_kwh=0.0, battery_new_range_km=0.0)
+
+        # Untouched default + no degradation data yet -> the spec (78).
+        assert _usable_capacity(s, v, settings) == (78.0, "variant spec")
+
+        # A measured EMA that has moved off the default is trusted instead.
+        v.battery_capacity_kwh = 72.4
+        assert _usable_capacity(s, v, settings) == (72.4, "measured")
 
 
 def test_new_range_uses_vin_year_generation():
