@@ -223,6 +223,24 @@ def test_confirmed_zero_idle_is_trusted_not_re_estimated():
     assert trip2["driving_wh_per_km"] < 190   # heuristic still applies here
 
 
+def test_recent_trips_report_soc_used_pct():
+    """Each recent_trips entry carries the % of battery that trip drew
+    (start_soc - end_soc), the per-trip counterpart to the window-level
+    soc_used_pct."""
+    from datetime import datetime
+
+    from app.analysis import driving as driving_analysis
+    from app.models import Drive
+
+    trip = Drive(
+        start_time=datetime(2026, 7, 8, 19, 5), end_time=datetime(2026, 7, 8, 19, 30),
+        distance_km=8.0, duration_min=25.5, avg_speed_kmh=18.9, max_speed_kmh=74.0,
+        start_soc=44, end_soc=42, energy_used_kwh=1.52, outside_temp_c=31.0,
+    )
+    result = driving_analysis.analyze([trip], 150.0, 75.0)
+    assert result["recent_trips"][0]["soc_used_pct"] == 2.0
+
+
 def test_driving_analysis_reports_scores(seeded):
     drives = seeded.scalars(select(Drive)).all()
     result = driving_analysis.analyze(list(drives), 150.0)

@@ -252,9 +252,15 @@ function renderKpis(d) {
     cards.push(kpiCard("Avg Speed", fmt(drv.avg_speed_kmh) + " km/h",
       `max ${fmt(drv.max_speed_kmh)} · peak ${fmt(drv.p95_speed_kmh)} km/h`, "amber"));
     // Always present so the box never "disappears"; "—" until energy data lands.
+    const socSub = drv.soc_used_pct ? `${fmt(drv.soc_used_pct, 1)}% battery used` : "real-world range";
     cards.push(drv.km_per_soc_pct
-      ? kpiCard("km / 1% Battery", fmt(drv.km_per_soc_pct, 1) + " km", "real-world range", "teal")
+      ? kpiCard("km / 1% Battery", fmt(drv.km_per_soc_pct, 1) + " km", socSub, "teal")
       : kpiCard("km / 1% Battery", "—", "waiting on range data from a synced drive", "teal"));
+    // Headline % of the pack consumed by driving over the whole window.
+    if (drv.soc_used_pct) {
+      cards.push(kpiCard("Battery Used", fmt(drv.soc_used_pct, 1) + "%",
+        `${fmt(drv.total_energy_used_kwh ?? drv.total_energy_kwh, 1)} kWh over ${fmt(drv.total_drives)} drives`, "amber"));
+    }
   }
   if (chg.available) {
     cards.push(kpiCard("Energy Charged", fmt(chg.total_energy_kwh) + " kWh",
@@ -264,6 +270,17 @@ function renderKpis(d) {
     const acShare = Math.max(0, Math.round(100 - dcShare));
     cards.push(kpiCard("AC / DC Energy", `${acShare} / ${fmt(dcShare, 0)}%`,
       `${fmt(chg.ac_energy_kwh, 0)} / ${fmt(chg.dc_energy_kwh, 0)} kWh`, "red"));
+  }
+  // Net battery movement for the window: charged minus gross used (parking/
+  // idle included). Shown whenever there's anything to net against — either
+  // driving or charging activity — so a charge-only or drive-only window
+  // still gets a meaningful "-X%"/"+X%" instead of the card just vanishing.
+  const bal = d.battery_balance;
+  if (bal && (drv.available || chg.available)) {
+    const sign = bal.balance_kwh > 0 ? "+" : "";
+    cards.push(kpiCard("Battery Balance", `${sign}${fmt(bal.balance_pct, 1)}%`,
+      `${sign}${fmt(bal.balance_kwh, 1)} kWh · ${fmt(bal.charged_kwh, 1)} charged − ${fmt(bal.used_kwh, 1)} used`,
+      bal.balance_kwh >= 0 ? "green" : "amber"));
   }
   if (!cards.length) {
     // The window is genuinely empty (e.g. "Since charge" right after charging)
@@ -438,6 +455,7 @@ function renderLists(d) {
         ? ` · drive ≈${t.driving_wh_per_km}` : "";
       const kwh = t.energy_kwh != null ? ` · ${t.energy_kwh} kWh` : "";
       const whkm = t.wh_per_km != null ? ` · ${t.wh_per_km} Wh/km${drv}` : "";
+      const soc = t.soc_used_pct ? ` · ${t.soc_used_pct}% battery` : "";
       // In select mode, a checkbox precedes each trip (self-hosted only).
       const check = tripSelectMode && t.id != null
         ? `<input type="checkbox" class="trip-check" value="${t.id}" aria-label="Select trip" />` : "";
@@ -449,7 +467,7 @@ function renderLists(d) {
         : "";
       return `<li class="trip${tripSelectMode ? " selectable" : ""}">` +
         `<span class="trip-head">${check}${score}<span class="trip-route">${when}${t.route ? "<br>" + t.route : ""}</span></span>` +
-        `<span class="trip-meta">${t.distance_km} km · ${t.duration_min} min${speed}${kwh}${whkm}</span>${cond}</li>`;
+        `<span class="trip-meta">${t.distance_km} km · ${t.duration_min} min${speed}${kwh}${whkm}${soc}</span>${cond}</li>`;
     })
     .join("");
   const list = document.getElementById("recentTrips");

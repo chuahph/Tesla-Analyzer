@@ -946,6 +946,20 @@ def summary(
     charging = charging_analysis.analyze(charges, drives)
     efficiency = efficiency_analysis.analyze(drives, settings.rated_wh_per_km)
 
+    # Net battery movement for the window: charge added vs. gross energy used
+    # (parking/idle included, matching total_energy_used_kwh) — positive means
+    # you charged more than you used this window, negative means you drew down.
+    capacity_kwh = vehicle.battery_capacity_kwh or 75.0
+    charged_kwh = charging.get("total_energy_kwh") or 0.0
+    used_kwh = (driving.get("total_energy_used_kwh") or 0.0) if driving.get("available") else 0.0
+    balance_kwh = round(charged_kwh - used_kwh, 1)
+    battery_balance = {
+        "charged_kwh": round(charged_kwh, 1),
+        "used_kwh": round(used_kwh, 1),
+        "balance_kwh": balance_kwh,
+        "balance_pct": round(balance_kwh / capacity_kwh * 100.0, 1) if capacity_kwh else None,
+    }
+
     # Battery health uses the full reading history, not the display window.
     readings = session.scalars(
         select(BatteryReading)
@@ -999,5 +1013,6 @@ def summary(
         "charging": charging,
         "efficiency": efficiency,
         "battery": battery,
+        "battery_balance": battery_balance,
         "recommendations": recs,
     }

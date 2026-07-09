@@ -257,6 +257,9 @@ def analyze(drives: list[Drive], rated_wh_per_km: float = 150.0,
                 "conditions": _trip_conditions(d),
                 "route": f"{d.start_location} → {d.end_location}"
                 if d.start_location and d.end_location else "",
+                # % of the battery this trip drew (start_soc -> end_soc), the
+                # per-trip counterpart to the window-level soc_used_pct below.
+                "soc_used_pct": round(max(d.start_soc - d.end_soc, 0.0), 1),
             }
             for d in sorted(drives, key=lambda x: x.start_time, reverse=True)[:5]
         ],

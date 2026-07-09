@@ -101,6 +101,24 @@ def test_summary_since_charge_window():
         settings.app_passcode = old
 
 
+def test_summary_reports_battery_balance():
+    """battery_balance nets charge added against gross energy used for the
+    window, in both kWh and % of pack capacity."""
+    settings = get_settings()
+    old = settings.app_passcode
+    settings.app_passcode = ""
+    try:
+        with TestClient(app) as client:  # startup seeds demo data
+            body = client.get("/api/summary?days=365").json()
+            bal = body["battery_balance"]
+            assert set(bal) == {"charged_kwh", "used_kwh", "balance_kwh", "balance_pct"}
+            assert bal["charged_kwh"] >= 0
+            assert bal["used_kwh"] >= 0
+            assert round(bal["balance_kwh"], 1) == round(bal["charged_kwh"] - bal["used_kwh"], 1)
+    finally:
+        settings.app_passcode = old
+
+
 def test_clear_drives_keeps_charges_and_respects_gate():
     settings = get_settings()
     old = settings.app_passcode
