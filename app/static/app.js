@@ -252,12 +252,12 @@ function renderKpis(d) {
     cards.push(kpiCard("Avg Speed", fmt(drv.avg_speed_kmh) + " km/h",
       `max ${fmt(drv.max_speed_kmh)} · peak ${fmt(drv.p95_speed_kmh)} km/h`, "amber"));
     // Always present so the box never "disappears"; "—" until energy data lands.
-    const socSub = drv.soc_used_pct ? `${fmt(drv.soc_used_pct, 1)}% battery used` : "real-world range";
+    const socSub = drv.soc_used_pct != null ? `${fmt(drv.soc_used_pct, 1)}% battery used` : "real-world range";
     cards.push(drv.km_per_soc_pct
       ? kpiCard("km / 1% Battery", fmt(drv.km_per_soc_pct, 1) + " km", socSub, "teal")
       : kpiCard("km / 1% Battery", "—", "waiting on range data from a synced drive", "teal"));
     // Headline % of the pack consumed by driving over the whole window.
-    if (drv.soc_used_pct) {
+    if (drv.soc_used_pct != null) {
       cards.push(kpiCard("Battery Used", fmt(drv.soc_used_pct, 1) + "%",
         `${fmt(drv.total_energy_used_kwh ?? drv.total_energy_kwh, 1)} kWh over ${fmt(drv.total_drives)} drives`, "amber"));
     }
@@ -455,7 +455,7 @@ function renderLists(d) {
         ? ` · drive ≈${t.driving_wh_per_km}` : "";
       const kwh = t.energy_kwh != null ? ` · ${t.energy_kwh} kWh` : "";
       const whkm = t.wh_per_km != null ? ` · ${t.wh_per_km} Wh/km${drv}` : "";
-      const soc = t.soc_used_pct ? ` · ${t.soc_used_pct}% battery` : "";
+      const soc = t.soc_used_pct != null ? ` · ${t.soc_used_pct}% battery` : "";
       // In select mode, a checkbox precedes each trip (self-hosted only).
       const check = tripSelectMode && t.id != null
         ? `<input type="checkbox" class="trip-check" value="${t.id}" aria-label="Select trip" />` : "";
