@@ -55,8 +55,17 @@ class Drive(Base):
     max_speed_kmh: Mapped[float] = mapped_column(Float, default=0.0)
 
     outside_temp_c: Mapped[float] = mapped_column(Float, default=20.0)
+    # The specific spot (POI/street/address) for per-trip display.
     start_location: Mapped[str] = mapped_column(String(120), default="")
     end_location: Mapped[str] = mapped_column(String(120), default="")
+    # Coarser district/suburb bucket, stable across GPS jitter between repeat
+    # visits to "the same place" (the exact matched POI/building can flip a
+    # few metres apart) — used to group Top Routes so a real repeated route
+    # doesn't fragment into many near-duplicate single-count entries. Empty
+    # on rows logged before this existed; analysis code falls back to the
+    # specific location in that case.
+    start_area: Mapped[str] = mapped_column(String(120), default="")
+    end_area: Mapped[str] = mapped_column(String(120), default="")
 
     # Real (not estimated) minutes spent stopped >= sync.IDLE_STREAK_MIN,
     # tracked live while the trip was open. idle_tracked distinguishes

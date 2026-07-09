@@ -151,17 +151,22 @@ def _window(session: Session, vehicle_id: int, days: int, since: datetime | None
     return list(drives), list(charges)
 
 
-_PLACE_CACHE: dict[str, str] = {}
+_PLACE_CACHE: dict[str, tuple[str, str]] = {}
 
 
-def _label_from_geocode(data: dict) -> str:
-    """Turn a Nominatim reverse payload into a short 'Place, Area' label.
+def _label_from_geocode(data: dict) -> tuple[str, str]:
+    """Turn a Nominatim reverse payload into (label, area).
 
-    Prefers the most *specific* feature actually at the point — the named POI
-    (mall, building, amenity) or the street, with house number when present —
-    over the broader neighbourhood/suburb. That's what a person calls "the
-    place", so it tracks the real position instead of naming an adjacent
-    district. Falls back down the granularity ladder so there's always a name.
+    ``label`` prefers the most *specific* feature actually at the point — the
+    named POI (mall, building, amenity) or the street, with house number when
+    present — over the broader neighbourhood/suburb. That's what a person
+    calls "the place", so it tracks the real position instead of naming an
+    adjacent district; falls back down the granularity ladder so there's
+    always a name. ``area`` is the coarser district/suburb it sits in, kept
+    separately so callers that need a GPS-jitter-stable grouping key (e.g.
+    "did I drive this same route before?") aren't stuck matching on the
+    specific label, which can legitimately vary between visits to the same
+    place (a different POI/building matched a few metres apart).
     """
     addr = data.get("address") or {}
     # The named feature Nominatim matched at this exact point (a POI/building),
@@ -185,18 +190,18 @@ def _label_from_geocode(data: dict) -> str:
         or addr.get("town") or addr.get("county") or ""
     )
     label = f"{name}, {area}" if name and area and name != area else (name or area)
-    return label[:120]
+    return label[:120], area[:120]
 
 
-def _place(coords: str) -> str:
-    """Best-effort reverse geocode of a 'lat, lon' string to a short place name.
+def _place_and_area(coords: str) -> tuple[str, str]:
+    """Best-effort reverse geocode of a 'lat, lon' string to (label, area).
 
     Uses OpenStreetMap's Nominatim (a couple of lookups per completed trip is
     well within its usage policy). Any failure falls back to the raw
-    coordinates, which stay searchable in a maps app.
+    coordinates for both, which stay searchable in a maps app.
     """
     if not coords or "," not in coords:
-        return coords
+        return coords, coords
     if coords in _PLACE_CACHE:
         return _PLACE_CACHE[coords]
     try:
@@ -214,11 +219,18 @@ def _place(coords: str) -> str:
             timeout=4.0,
         )
         resp.raise_for_status()
-        result = _label_from_geocode(resp.json()) or coords
+        label, area = _label_from_geocode(resp.json())
+        result = (label or coords, area or coords)
     except Exception:  # noqa: BLE001 — never let naming block trip logging
-        result = coords
+        result = (coords, coords)
     _PLACE_CACHE[coords] = result
     return result
+
+
+def _place(coords: str) -> str:
+    """Specific place label only — for callers (Charge locations) that don't
+    need the coarser route-grouping key."""
+    return _place_and_area(coords)[0]
 
 
 def _build_info() -> dict:
@@ -495,8 +507,8 @@ def _process_vehicle(
     )
     drives = recovered + drives  # include a drive recovered from the upgrade gap
     for d in drives:
-        d["start_location"] = _place(d["start_location"])
-        d["end_location"] = _place(d["end_location"])
+        d["start_location"], d["start_area"] = _place_and_area(d["start_location"])
+        d["end_location"], d["end_area"] = _place_and_area(d["end_location"])
         session.add(Drive(vehicle_id=vehicle.id, **d))
     for c in charges:
         cap = sync_mod.implied_capacity_kwh(c)
@@ -663,8 +675,8 @@ def sync_now(wake: bool = Query(False), session: Session = Depends(get_session))
                         row_capacity_kwh,
                     )
                     if d:
-                        d["start_location"] = _place(d["start_location"])
-                        d["end_location"] = _place(d["end_location"])
+                        d["start_location"], d["start_area"] = _place_and_area(d["start_location"])
+                        d["end_location"], d["end_area"] = _place_and_area(d["end_location"])
                         session.add(Drive(vehicle_id=vehicle_row.id, **d))
                         session.commit()
                         total["drives"] += 1

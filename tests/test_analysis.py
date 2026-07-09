@@ -223,6 +223,64 @@ def test_confirmed_zero_idle_is_trusted_not_re_estimated():
     assert trip2["driving_wh_per_km"] < 190   # heuristic still applies here
 
 
+def test_top_routes_group_by_area_but_show_specific_label():
+    """Repeat trips to 'the same place' shouldn't fragment into many
+    single-count Top Routes entries just because the exact matched POI/
+    building differs a few metres apart between visits — grouped by the
+    coarser area, but displaying the most common specific label seen."""
+    from datetime import datetime
+
+    from app.analysis import driving as driving_analysis
+    from app.models import Drive
+
+    def trip(day, start_loc, end_loc, start_area, end_area):
+        return Drive(
+            start_time=datetime(2026, 7, day, 8, 0), end_time=datetime(2026, 7, day, 8, 20),
+            distance_km=5.0, duration_min=20.0, avg_speed_kmh=15.0, max_speed_kmh=40.0,
+            start_soc=60, end_soc=58, energy_used_kwh=0.7, outside_temp_c=25.0,
+            start_location=start_loc, end_location=end_loc,
+            start_area=start_area, end_area=end_area,
+        )
+
+    drives = [
+        # Three visits to "the mall": the exact POI label wobbles between
+        # trips (GPS jitter matches a slightly different unit/entrance), but
+        # the area stays the same suburb every time.
+        trip(1, "Home, George Town", "Queensbay Mall, Bayan Lepas", "George Town", "Bayan Lepas"),
+        trip(2, "Home, George Town", "Queensbay Mall, Bayan Lepas", "George Town", "Bayan Lepas"),
+        trip(3, "Home, George Town", "Queensbay Mall Car Park, Bayan Lepas", "George Town", "Bayan Lepas"),
+        # A single one-off trip to a genuinely different area.
+        trip(4, "Home, George Town", "Airport, Bayan Lepas", "George Town", "Bayan Lepas Airport Zone"),
+    ]
+    routes = dict(driving_analysis.analyze(drives, 150.0, 75.0)["top_routes"])
+    # The three mall visits count as ONE route (3x), not three separate
+    # single-count entries — displayed using the most common specific label.
+    assert routes.get("Home, George Town → Queensbay Mall, Bayan Lepas") == 3
+    assert "Home, George Town → Queensbay Mall Car Park, Bayan Lepas" not in routes
+    assert routes.get("Home, George Town → Airport, Bayan Lepas") == 1
+
+
+def test_top_routes_falls_back_to_location_when_area_missing():
+    """Rows logged before start_area/end_area existed (empty string) still
+    group sensibly, using the specific location as their own grouping key."""
+    from datetime import datetime
+
+    from app.analysis import driving as driving_analysis
+    from app.models import Drive
+
+    def trip(day):
+        return Drive(
+            start_time=datetime(2026, 7, day, 8, 0), end_time=datetime(2026, 7, day, 8, 20),
+            distance_km=5.0, duration_min=20.0, avg_speed_kmh=15.0, max_speed_kmh=40.0,
+            start_soc=60, end_soc=58, energy_used_kwh=0.7, outside_temp_c=25.0,
+            start_location="Home, George Town", end_location="Office, George Town",
+            start_area="", end_area="",
+        )
+
+    routes = dict(driving_analysis.analyze([trip(1), trip(2)], 150.0, 75.0)["top_routes"])
+    assert routes.get("Home, George Town → Office, George Town") == 2
+
+
 def test_recent_trips_report_idle_stripped_driving_energy():
     """A trip with real tracked idle exposes driving_energy_kwh below the gross
     energy (Tesla-'Current Drive'-comparable); a trip with no idle reports the

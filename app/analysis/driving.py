@@ -176,12 +176,30 @@ def analyze(drives: list[Drive], rated_wh_per_km: float = 150.0,
     by_weekday = Counter(d.start_time.weekday() for d in drives)
     weekdays = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
 
-    # Most frequent routes.
-    routes = Counter(
-        f"{d.start_location} → {d.end_location}"
-        for d in drives
-        if d.start_location and d.end_location
-    )
+    # Most frequent routes. Grouped by the coarser start/end *area* (a
+    # district/suburb bucket, stable across GPS jitter between repeat visits
+    # to "the same place" — the specific matched POI/building can legitimately
+    # differ a few metres apart) rather than the specific location string, so
+    # a real repeated route doesn't fragment into many near-duplicate
+    # single-count entries. Each group still displays its most common
+    # specific label, not the coarse area, so the list stays informative.
+    # Rows logged before start_area/end_area existed fall back to the
+    # specific location as their own grouping key.
+    route_counts: Counter[tuple[str, str]] = Counter()
+    route_labels: dict[tuple[str, str], Counter[str]] = defaultdict(Counter)
+    for d in drives:
+        if not (d.start_location and d.end_location):
+            continue
+        area_key = (
+            getattr(d, "start_area", "") or d.start_location,
+            getattr(d, "end_area", "") or d.end_location,
+        )
+        route_counts[area_key] += 1
+        route_labels[area_key][f"{d.start_location} → {d.end_location}"] += 1
+    routes = Counter({
+        route_labels[key].most_common(1)[0][0]: count
+        for key, count in route_counts.items()
+    })
 
     # How strongly speed affects efficiency (Wh/km per km/h).
     speed_slope, _ = linregress([d.avg_speed_kmh for d in eff_drives], effs)

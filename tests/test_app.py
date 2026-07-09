@@ -128,29 +128,41 @@ def test_summary_reports_battery_balance():
 
 def test_place_label_prefers_specific_feature_over_broad_district():
     """The label should name the actual spot (POI/street) rather than the
-    broader neighbourhood the old zoom-16 logic settled on."""
+    broader neighbourhood the old zoom-16 logic settled on, and area should
+    be the coarser district it sits in (the route-grouping key)."""
     from app.api.routes import _label_from_geocode
 
-    # A named POI at the point wins over the surrounding suburb.
+    # A named POI at the point wins over the surrounding suburb; area is the
+    # coarser suburb it sits in.
     assert _label_from_geocode({
         "name": "Queensbay Mall",
         "address": {"building": "Queensbay Mall", "suburb": "Bayan Lepas",
                     "city": "George Town", "neighbourhood": "Bayan Mutiara"},
-    }) == "Queensbay Mall, Bayan Lepas"
+    }) == ("Queensbay Mall, Bayan Lepas", "Bayan Lepas")
 
     # No POI: the street (with house number) beats the neighbourhood for the
     # specific part; the area falls to the city when no suburb is present.
     assert _label_from_geocode({
         "address": {"house_number": "12", "road": "Lebuh Tunku Kudin",
                     "neighbourhood": "Bayan Mutiara", "city": "George Town"},
-    }) == "12 Lebuh Tunku Kudin, George Town"
+    }) == ("12 Lebuh Tunku Kudin, George Town", "George Town")
 
     # Falls back gracefully when only coarse fields exist, and never repeats
     # the same word on both sides of the comma.
     assert _label_from_geocode({
         "address": {"suburb": "George Town", "city": "George Town"},
-    }) == "George Town"
-    assert _label_from_geocode({}) == ""
+    }) == ("George Town", "George Town")
+    assert _label_from_geocode({}) == ("", "")
+
+
+def test_place_and_area_passes_through_invalid_coords():
+    """No network call for an empty/malformed coordinate string — both label
+    and area fall back to the raw input untouched."""
+    from app.api.routes import _place, _place_and_area
+
+    assert _place_and_area("") == ("", "")
+    assert _place_and_area("not-coords") == ("not-coords", "not-coords")
+    assert _place("") == ""
 
 
 def test_clear_drives_keeps_charges_and_respects_gate():
