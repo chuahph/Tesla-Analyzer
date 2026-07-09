@@ -287,19 +287,32 @@ def test_gap_fallback_logs_merged_sessions():
 
 
 def test_implied_capacity_from_measured_charge():
-    from app.sync import implied_capacity_kwh
+    from app.sync import AC_CHARGE_EFFICIENCY, implied_capacity_kwh
 
-    # Tesla measured 18.5 kWh for a 55->80% (25%) charge => 74 kWh usable.
-    c = {"energy_measured": True, "start_soc": 55, "end_soc": 80, "energy_added_kwh": 18.5}
+    # Tesla measured 18.5 kWh for a 55->80% (25%) charge on a Supercharger
+    # (DC, no onboard-charger conversion loss) => 74 kWh usable, unadjusted.
+    c = {"energy_measured": True, "start_soc": 55, "end_soc": 80,
+         "energy_added_kwh": 18.5, "charge_type": "DC"}
     assert implied_capacity_kwh(c) == 74.0
+    # The identical session on AC (home/destination) loses ~5% to the
+    # onboard charger's AC->DC conversion, so the raw energy_added figure
+    # overstates what actually reached the pack — corrected down.
+    ac = {**c, "charge_type": "AC"}
+    assert implied_capacity_kwh(ac) == round(74.0 * AC_CHARGE_EFFICIENCY, 1)
+    # Charge type missing (legacy data) is treated as AC (the common case,
+    # and the safer assumption — DC should always be tagged explicitly).
+    assert implied_capacity_kwh({k: v for k, v in c.items() if k != "charge_type"}) == \
+        round(74.0 * AC_CHARGE_EFFICIENCY, 1)
     # SoC-estimate charges are ignored (calibrating from them is circular).
     assert implied_capacity_kwh({**c, "energy_measured": False}) is None
     # Small gains are too quantised to trust.
     assert implied_capacity_kwh({"energy_measured": True, "start_soc": 70,
-                                 "end_soc": 78, "energy_added_kwh": 6.0}) is None
+                                 "end_soc": 78, "energy_added_kwh": 6.0,
+                                 "charge_type": "AC"}) is None
     # Implausible results are clamped out (e.g. a metering glitch).
     assert implied_capacity_kwh({"energy_measured": True, "start_soc": 20,
-                                 "end_soc": 80, "energy_added_kwh": 90.0}) is None
+                                 "end_soc": 80, "energy_added_kwh": 90.0,
+                                 "charge_type": "AC"}) is None
 
 
 def test_charge_records_location():

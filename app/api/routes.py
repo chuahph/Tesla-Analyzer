@@ -86,24 +86,51 @@ def _first_vehicle(session: Session) -> Vehicle:
 
 
 def _last_full_charge_kwh(session: Session, vehicle_id: int, fallback: float) -> float:
-    """Usable pack capacity implied by the most recent charge that reached
-    (near) 100%, so window kWh-to-% conversions match what the car itself
-    would show instead of a smoothed average across every charge (including
-    small partial top-ups, which are noisier per % point of SoC gain).
+    """Usable pack capacity implied by recent charge history, so window
+    kWh-to-% conversions match what the car itself would show instead of a
+    smoothed EMA blended from every charge (including small, noisier
+    partial top-ups).
+
+    Prefers the most recent charge that reached (near) 100% — the single
+    most reliable calibration point. Falls back to the largest-gain charge
+    in recent history when the car hasn't been charged that full lately
+    (e.g. a daily limit under 95%), since a bigger SoC gain still beats a
+    small top-up on quantisation noise. AC sessions get the same onboard-
+    charger loss correction as ``sync.implied_capacity_kwh`` (see there).
     """
+    from .. import sync as sync_mod
+
     candidates = session.scalars(
         select(Charge)
-        .where(Charge.vehicle_id == vehicle_id, Charge.end_soc >= 95)
+        .where(Charge.vehicle_id == vehicle_id)
         .order_by(Charge.end_time.desc())
-        .limit(5)
+        .limit(20)
     ).all()
-    for c in candidates:
+
+    def implied(c: Charge) -> float | None:
         gain = c.end_soc - c.start_soc
-        if gain >= 15 and c.energy_added_kwh > 0:
-            cap = c.energy_added_kwh / (gain / 100.0)
-            if 45.0 <= cap <= 95.0:
+        if gain < 15 or c.energy_added_kwh <= 0:
+            return None
+        cap = c.energy_added_kwh / (gain / 100.0)
+        if c.charge_type != "DC":
+            cap *= sync_mod.AC_CHARGE_EFFICIENCY
+        return cap if 45.0 <= cap <= 95.0 else None
+
+    for c in candidates:
+        if c.end_soc >= 95:
+            cap = implied(c)
+            if cap is not None:
                 return round(cap, 1)
-    return fallback
+
+    best: tuple[float, float] | None = None
+    for c in candidates:
+        cap = implied(c)
+        if cap is None:
+            continue
+        gain = c.end_soc - c.start_soc
+        if best is None or gain > best[1]:
+            best = (cap, gain)
+    return round(best[0], 1) if best else fallback
 
 
 def _window(session: Session, vehicle_id: int, days: int, since: datetime | None = None):
@@ -367,6 +394,10 @@ def _process_vehicle(
     sk = state.scoped(state.SNAPSHOT_KEY, vin)
     tk = state.scoped(state.OPEN_TRIP_KEY, vin)
     ck = state.scoped(state.OPEN_CHARGE_KEY, vin)
+    # Capacity implied by the last ~100% charge, not the EMA over every charge
+    # (including small partial top-ups, which are noisier per % of SoC gain) —
+    # keeps per-trip kWh in line with what the car's own screen reports.
+    capacity_kwh = _last_full_charge_kwh(session, vehicle.id, vehicle.battery_capacity_kwh or 75.0)
 
     # One-time migration from the pre-multi-car global keys (only the active car
     # inherits them), so a drive taken around the upgrade isn't lost.
@@ -388,7 +419,7 @@ def _process_vehicle(
                 try:
                     legacy = _json.loads(legacy_snap)
                     scoped = _json.loads(state.get(session, sk))
-                    d = sync_mod._drive_from(legacy, scoped, vehicle.battery_capacity_kwh)
+                    d = sync_mod._drive_from(legacy, scoped, capacity_kwh)
                     if d:
                         # The car slept between the two snapshots, so the true drive
                         # time is unknown; give it a sensible duration from the
@@ -415,7 +446,7 @@ def _process_vehicle(
 
     drives, charges, open_trip, open_charge = sync_mod.process_snapshot(
         prev, snap, open_trip, open_charge,
-        vehicle.battery_capacity_kwh, settings.energy_price_per_kwh,
+        capacity_kwh, settings.energy_price_per_kwh,
     )
     drives = recovered + drives  # include a drive recovered from the upgrade gap
     for d in drives:
@@ -580,10 +611,14 @@ def sync_now(wake: bool = Query(False), session: Session = Depends(get_session))
                     session.query(Vehicle).filter(Vehicle.vin == vvin).first()
                     if (trip_raw or charge_raw) and last_raw else None
                 )
+                row_capacity_kwh = (
+                    _last_full_charge_kwh(session, vehicle_row.id, vehicle_row.battery_capacity_kwh or 75.0)
+                    if vehicle_row else 75.0
+                )
                 if trip_raw and last_raw and vehicle_row:
                     d = sync_mod.close_trip_on_sleep(
                         _json.loads(trip_raw), _json.loads(last_raw),
-                        vehicle_row.battery_capacity_kwh,
+                        row_capacity_kwh,
                     )
                     if d:
                         d["start_location"] = _place(d["start_location"])
@@ -600,7 +635,7 @@ def sync_now(wake: bool = Query(False), session: Session = Depends(get_session))
                 if charge_raw and last_raw and vehicle_row:
                     c = sync_mod.close_charge_on_sleep(
                         _json.loads(charge_raw), _json.loads(last_raw),
-                        vehicle_row.battery_capacity_kwh, settings.energy_price_per_kwh,
+                        row_capacity_kwh, settings.energy_price_per_kwh,
                     )
                     if c:
                         cap = sync_mod.implied_capacity_kwh(c)
@@ -922,6 +957,10 @@ def summary(
 
     settings = get_settings()
     vehicle = _first_vehicle(session)
+    # Capacity implied by the last ~100% charge, not the EMA over every charge
+    # — used everywhere below that turns kWh into %, so it tracks the car's
+    # own screen rather than a smoothed/default pack size.
+    capacity_kwh = _last_full_charge_kwh(session, vehicle.id, vehicle.battery_capacity_kwh or 75.0)
     # The cron's own last determination of what the car was doing (including
     # "found it asleep") — written every /api/sync tick, read here purely
     # from the database. This is what lets the dashboard show a near-live
@@ -943,7 +982,7 @@ def summary(
         snap_raw = state.get(session, state.scoped(state.SNAPSHOT_KEY, vehicle.vin))
         snap = _json.loads(snap_raw) if snap_raw else None
         if open_trip and snap:
-            live = sync_mod.live_trip(open_trip, snap, vehicle.battery_capacity_kwh)
+            live = sync_mod.live_trip(open_trip, snap, capacity_kwh)
             since = datetime.fromtimestamp(open_trip["ts"], sync_mod.MYT).replace(tzinfo=None)
             window_label = "current drive"
         else:
@@ -963,7 +1002,7 @@ def summary(
     drives, charges = _window(session, vehicle.id, days, since=since)
 
     driving = driving_analysis.analyze(
-        drives, settings.rated_wh_per_km, vehicle.battery_capacity_kwh)
+        drives, settings.rated_wh_per_km, capacity_kwh)
     charging = charging_analysis.analyze(charges, drives)
     efficiency = efficiency_analysis.analyze(drives, settings.rated_wh_per_km)
 
@@ -971,7 +1010,7 @@ def summary(
     # matching total_energy_used_kwh) as a share of the pack capacity implied
     # by the last 100% charge — the same yardstick the car itself uses to turn
     # kWh into %, so this tracks the Tesla app instead of a generic default.
-    full_charge_kwh = _last_full_charge_kwh(session, vehicle.id, vehicle.battery_capacity_kwh or 75.0)
+    full_charge_kwh = capacity_kwh
     charged_kwh = charging.get("total_energy_kwh") or 0.0
     used_kwh = (driving.get("total_energy_used_kwh") or 0.0) if driving.get("available") else 0.0
     # Battery Balance: how much charge is actually left in the pack right now

@@ -462,6 +462,18 @@ def close_charge_on_sleep(open_charge: dict, last_snapshot: dict, capacity_kwh: 
     return _charge_from(open_charge, last_snapshot, capacity_kwh, price_per_kwh)
 
 
+# AC (home/destination) charging routes mains power through the car's onboard
+# charger, which loses ~5% to heat converting it to DC for the pack — so
+# Tesla's reported charge_energy_added for an AC session runs a few % above
+# what actually reached the battery. DC (Supercharger) feeds the pack
+# directly with negligible conversion loss, so it's left unadjusted. Without
+# this, every implied-capacity reading from AC charges (most home charging)
+# is inflated, which then inflates every trip's computed kWh by the same
+# proportion (confirmed against real Tesla-app Current Drive readings that
+# ran ~5% under the uncorrected figure across independent trips).
+AC_CHARGE_EFFICIENCY = 0.95
+
+
 def implied_capacity_kwh(charge: dict) -> float | None:
     """Usable pack capacity implied by a Tesla-measured charge (kWh).
 
@@ -478,6 +490,8 @@ def implied_capacity_kwh(charge: dict) -> float | None:
     if gain < 15 or energy <= 0:
         return None
     cap = energy / (gain / 100.0)
+    if charge.get("charge_type") != "DC":
+        cap *= AC_CHARGE_EFFICIENCY
     return round(cap, 1) if 45.0 <= cap <= 95.0 else None
 
 
