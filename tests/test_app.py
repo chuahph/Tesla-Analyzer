@@ -102,8 +102,9 @@ def test_summary_since_charge_window():
 
 
 def test_summary_reports_battery_balance():
-    """battery_balance nets charge added against gross energy used for the
-    window, in both kWh and % of pack capacity."""
+    """battery_balance reports the window's kWh used as a % of the pack
+    capacity implied by the last 100% charge, plus the current SoC as the
+    "left in the pack" figure."""
     settings = get_settings()
     old = settings.app_passcode
     settings.app_passcode = ""
@@ -111,10 +112,16 @@ def test_summary_reports_battery_balance():
         with TestClient(app) as client:  # startup seeds demo data
             body = client.get("/api/summary?days=365").json()
             bal = body["battery_balance"]
-            assert set(bal) == {"charged_kwh", "used_kwh", "balance_kwh", "balance_pct"}
+            assert set(bal) == {
+                "full_charge_kwh", "charged_kwh", "used_kwh", "used_pct", "current_soc_pct",
+            }
             assert bal["charged_kwh"] >= 0
             assert bal["used_kwh"] >= 0
-            assert round(bal["balance_kwh"], 1) == round(bal["charged_kwh"] - bal["used_kwh"], 1)
+            assert bal["full_charge_kwh"] > 0
+            if bal["used_pct"] is not None:
+                assert round(bal["used_pct"], 1) == round(bal["used_kwh"] / bal["full_charge_kwh"] * 100.0, 1)
+            if bal["current_soc_pct"] is not None:
+                assert 0 <= bal["current_soc_pct"] <= 100
     finally:
         settings.app_passcode = old
 

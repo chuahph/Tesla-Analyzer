@@ -220,6 +220,7 @@ function renderKpis(d) {
   const drv = d.driving, chg = d.charging, eff = d.efficiency, cur = d.currency;
   const cards = [];
   const lt = d.live_trip;
+  const bal = d.battery_balance;
   if (lt) {
     // A drive is in progress — show its live numbers first.
     cards.push(kpiCard("Current Drive", fmt(lt.distance_km, 1) + " km",
@@ -256,10 +257,12 @@ function renderKpis(d) {
     cards.push(drv.km_per_soc_pct
       ? kpiCard("km / 1% Battery", fmt(drv.km_per_soc_pct, 1) + " km", socSub, "teal")
       : kpiCard("km / 1% Battery", "—", "waiting on range data from a synced drive", "teal"));
-    // Headline % of the pack consumed by driving over the whole window.
-    if (drv.soc_used_pct != null) {
-      cards.push(kpiCard("Battery Used", fmt(drv.soc_used_pct, 1) + "%",
-        `${fmt(drv.total_energy_used_kwh ?? drv.total_energy_kwh, 1)} kWh over ${fmt(drv.total_drives)} drives`, "amber"));
+    // Headline % of the pack consumed this window: kWh used ÷ the capacity
+    // implied by the last 100% charge (matches how the car itself converts
+    // kWh to %, not a generic/default pack size).
+    if (bal && bal.used_pct != null) {
+      cards.push(kpiCard("Battery Used", fmt(bal.used_pct, 1) + "%",
+        `${fmt(bal.used_kwh, 1)} kWh of ${fmt(bal.full_charge_kwh, 1)} kWh full charge`, "amber"));
     }
   }
   if (chg.available) {
@@ -271,16 +274,12 @@ function renderKpis(d) {
     cards.push(kpiCard("AC / DC Energy", `${acShare} / ${fmt(dcShare, 0)}%`,
       `${fmt(chg.ac_energy_kwh, 0)} / ${fmt(chg.dc_energy_kwh, 0)} kWh`, "red"));
   }
-  // Net battery movement for the window: charged minus gross used (parking/
-  // idle included). Shown whenever there's anything to net against — either
-  // driving or charging activity — so a charge-only or drive-only window
-  // still gets a meaningful "-X%"/"+X%" instead of the card just vanishing.
-  const bal = d.battery_balance;
-  if (bal && (drv.available || chg.available)) {
-    const sign = bal.balance_kwh > 0 ? "+" : "";
-    cards.push(kpiCard("Battery Balance", `${sign}${fmt(bal.balance_pct, 1)}%`,
-      `${sign}${fmt(bal.balance_kwh, 1)} kWh · ${fmt(bal.charged_kwh, 1)} charged − ${fmt(bal.used_kwh, 1)} used`,
-      bal.balance_kwh >= 0 ? "green" : "amber"));
+  // Battery Balance: the fuel gauge — how much charge is actually left in
+  // the pack right now (latest logged SoC), not a derived charged-vs-used
+  // delta.
+  if (bal && bal.current_soc_pct != null) {
+    cards.push(kpiCard("Battery Balance", `${fmt(bal.current_soc_pct, 1)}%`,
+      "left in the pack right now", bal.current_soc_pct >= 20 ? "green" : "amber"));
   }
   if (!cards.length) {
     // The window is genuinely empty (e.g. "Since charge" right after charging)

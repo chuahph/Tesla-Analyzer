@@ -85,6 +85,27 @@ def _first_vehicle(session: Session) -> Vehicle:
     return vehicle
 
 
+def _last_full_charge_kwh(session: Session, vehicle_id: int, fallback: float) -> float:
+    """Usable pack capacity implied by the most recent charge that reached
+    (near) 100%, so window kWh-to-% conversions match what the car itself
+    would show instead of a smoothed average across every charge (including
+    small partial top-ups, which are noisier per % point of SoC gain).
+    """
+    candidates = session.scalars(
+        select(Charge)
+        .where(Charge.vehicle_id == vehicle_id, Charge.end_soc >= 95)
+        .order_by(Charge.end_time.desc())
+        .limit(5)
+    ).all()
+    for c in candidates:
+        gain = c.end_soc - c.start_soc
+        if gain >= 15 and c.energy_added_kwh > 0:
+            cap = c.energy_added_kwh / (gain / 100.0)
+            if 45.0 <= cap <= 95.0:
+                return round(cap, 1)
+    return fallback
+
+
 def _window(session: Session, vehicle_id: int, days: int, since: datetime | None = None):
     if since is None:
         since = datetime.now() - timedelta(days=days)
@@ -946,18 +967,27 @@ def summary(
     charging = charging_analysis.analyze(charges, drives)
     efficiency = efficiency_analysis.analyze(drives, settings.rated_wh_per_km)
 
-    # Net battery movement for the window: charge added vs. gross energy used
-    # (parking/idle included, matching total_energy_used_kwh) — positive means
-    # you charged more than you used this window, negative means you drew down.
-    capacity_kwh = vehicle.battery_capacity_kwh or 75.0
+    # Battery Used %: gross energy used this window (parking/idle included,
+    # matching total_energy_used_kwh) as a share of the pack capacity implied
+    # by the last 100% charge — the same yardstick the car itself uses to turn
+    # kWh into %, so this tracks the Tesla app instead of a generic default.
+    full_charge_kwh = _last_full_charge_kwh(session, vehicle.id, vehicle.battery_capacity_kwh or 75.0)
     charged_kwh = charging.get("total_energy_kwh") or 0.0
     used_kwh = (driving.get("total_energy_used_kwh") or 0.0) if driving.get("available") else 0.0
-    balance_kwh = round(charged_kwh - used_kwh, 1)
+    # Battery Balance: how much charge is actually left in the pack right now
+    # (the latest logged SoC reading) — the "fuel gauge", not a derived delta.
+    current_soc = session.scalar(
+        select(BatteryReading.soc)
+        .where(BatteryReading.vehicle_id == vehicle.id)
+        .order_by(BatteryReading.ts.desc())
+        .limit(1)
+    )
     battery_balance = {
+        "full_charge_kwh": full_charge_kwh,
         "charged_kwh": round(charged_kwh, 1),
         "used_kwh": round(used_kwh, 1),
-        "balance_kwh": balance_kwh,
-        "balance_pct": round(balance_kwh / capacity_kwh * 100.0, 1) if capacity_kwh else None,
+        "used_pct": round(used_kwh / full_charge_kwh * 100.0, 1) if full_charge_kwh else None,
+        "current_soc_pct": round(current_soc, 1) if current_soc is not None else None,
     }
 
     # Battery health uses the full reading history, not the display window.
