@@ -94,11 +94,11 @@ def test_new_range_19in_nova_wheels():
 def test_usable_capacity_lookup_by_variant():
     from app.analysis.battery import usable_capacity_for
 
-    # LR / Performance Model 3 & Y share the big pack (~78 kWh usable); wheel
-    # size doesn't change the pack, so a 19" LR still reads 78.
-    assert usable_capacity_for("Model 3", "74D QUICKSILVER Nova19") == 78.0
-    assert usable_capacity_for("Model 3", "P74D") == 78.0
-    assert usable_capacity_for("Model Y", "74D") == 78.0
+    # LR / Performance Model 3 & Y share the 82 kWh gross / 75 kWh usable
+    # pack; wheel size doesn't change the pack, so a 19" LR still reads 75.
+    assert usable_capacity_for("Model 3", "74D QUICKSILVER Nova19") == 75.0
+    assert usable_capacity_for("Model 3", "P74D") == 75.0
+    assert usable_capacity_for("Model Y", "74D") == 75.0
     # Standard-range packs are smaller.
     assert usable_capacity_for("Model 3", "50") == 57.5
     assert usable_capacity_for("Model Y", "50") == 60.0
@@ -137,7 +137,7 @@ def test_usable_capacity_uses_spec_minus_degradation_as_the_primary_method():
 
         cap, source = _usable_capacity(s, v, settings)
         assert source == "spec - degradation"
-        assert 71.5 <= cap <= 73.5   # 78 kWh spec x (1 - ~7%) ~= 72.5
+        assert 68.5 <= cap <= 71.0   # 75 kWh spec x (1 - ~7%) ~= 69.75
 
         # An explicit config override still beats the computed figure.
         override = SimpleNamespace(battery_capacity_kwh=73.0, battery_new_range_km=0.0)
@@ -160,8 +160,8 @@ def test_usable_capacity_falls_back_without_degradation_history():
         s.commit()
         settings = SimpleNamespace(battery_capacity_kwh=0.0, battery_new_range_km=0.0)
 
-        # Untouched default + no degradation data yet -> the spec (78).
-        assert _usable_capacity(s, v, settings) == (78.0, "variant spec")
+        # Untouched default + no degradation data yet -> the spec (75).
+        assert _usable_capacity(s, v, settings) == (75.0, "variant spec")
 
         # A measured EMA that has moved off the default is trusted instead.
         v.battery_capacity_kwh = 72.4

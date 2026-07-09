@@ -52,12 +52,12 @@ NEW_RANGE_KM: list[tuple[str, tuple[str, ...], tuple[int, int] | None, float]] =
 # seed/sanity-check the measured capacity; the charge EMA and an explicit
 # override refine it. Figures are the widely-cited usable (not gross) values.
 USABLE_KWH: list[tuple[str, tuple[str, ...], tuple[int, int] | None, float]] = [
-    ("MODEL 3", ("P74D",), None, 78.0),   # Performance / LR-pack
-    ("MODEL 3", ("74D",), None, 78.0),    # Long Range AWD
-    ("MODEL 3", ("74",), None, 78.0),
+    ("MODEL 3", ("P74D",), None, 75.0),   # Performance / LR-pack (82 kWh gross)
+    ("MODEL 3", ("74D",), None, 75.0),    # Long Range AWD (82 kWh gross)
+    ("MODEL 3", ("74",), None, 75.0),
     ("MODEL 3", ("50",), None, 57.5),     # RWD (standard-range pack)
-    ("MODEL Y", ("P74D",), None, 78.0),
-    ("MODEL Y", ("74D",), None, 78.0),    # Long Range AWD
+    ("MODEL Y", ("P74D",), None, 75.0),
+    ("MODEL Y", ("74D",), None, 75.0),    # Long Range AWD (82 kWh gross)
     ("MODEL Y", ("50",), None, 60.0),     # RWD
 ]
 
