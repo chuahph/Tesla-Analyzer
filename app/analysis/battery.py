@@ -47,6 +47,21 @@ NEW_RANGE_KM: list[tuple[str, tuple[str, ...], tuple[int, int] | None, float]] =
 ]
 
 
+# Nominal usable pack capacity (kWh) — the 100%->0% energy of a healthy pack —
+# by variant. Wheel size doesn't change the pack, so no @-tokens here. Used to
+# seed/sanity-check the measured capacity; the charge EMA and an explicit
+# override refine it. Figures are the widely-cited usable (not gross) values.
+USABLE_KWH: list[tuple[str, tuple[str, ...], tuple[int, int] | None, float]] = [
+    ("MODEL 3", ("P74D",), None, 78.0),   # Performance / LR-pack
+    ("MODEL 3", ("74D",), None, 78.0),    # Long Range AWD
+    ("MODEL 3", ("74",), None, 78.0),
+    ("MODEL 3", ("50",), None, 57.5),     # RWD (standard-range pack)
+    ("MODEL Y", ("P74D",), None, 78.0),
+    ("MODEL Y", ("74D",), None, 78.0),    # Long Range AWD
+    ("MODEL Y", ("50",), None, 60.0),     # RWD
+]
+
+
 def _wheel_diameter(tokens: set[str]) -> int | None:
     """Wheel diameter from a wheel-name token like NOVA19 / PHOTON18DARK."""
     for t in tokens:
@@ -56,12 +71,10 @@ def _wheel_diameter(tokens: set[str]) -> int | None:
     return None
 
 
-def new_range_for(model: str, trim: str, year: int | None = None) -> float | None:
-    """Factory new range for this exact variant, if we recognise the badge.
-
-    ``year`` (decoded from the VIN) picks the right generation — e.g. a 74D
-    badge means 536 km on a 2023 Model 3 but 549 km on a 2024 Highland.
-    """
+def _variant_lookup(table, model: str, trim: str, year: int | None):
+    """First matching value in a variant table (model substring + all required
+    badge/wheel tokens + optional VIN-year window). Shared by the range and
+    capacity lookups so they identify a car identically."""
     text = f"{model or ''} {trim or ''}".upper()
     tokens = set(re.split(r"[^A-Z0-9]+", text))
 
@@ -71,12 +84,26 @@ def new_range_for(model: str, trim: str, year: int | None = None) -> float | Non
         # Exact token, or token prefix for wheel names ("Nova19DarkTinted").
         return req in tokens or any(t.startswith(req) for t in tokens if t)
 
-    for m, required, years, km in NEW_RANGE_KM:
+    for m, required, years, value in table:
         if years is not None and (year is None or not years[0] <= year <= years[1]):
             continue
         if m in text and all(has(r) for r in required):
-            return km
+            return value
     return None
+
+
+def new_range_for(model: str, trim: str, year: int | None = None) -> float | None:
+    """Factory new range for this exact variant, if we recognise the badge.
+
+    ``year`` (decoded from the VIN) picks the right generation — e.g. a 74D
+    badge means 536 km on a 2023 Model 3 but 549 km on a 2024 Highland.
+    """
+    return _variant_lookup(NEW_RANGE_KM, model, trim, year)
+
+
+def usable_capacity_for(model: str, trim: str, year: int | None = None) -> float | None:
+    """Nominal usable pack capacity (kWh) for the variant, if recognised."""
+    return _variant_lookup(USABLE_KWH, model, trim, year)
 
 
 def analyze(

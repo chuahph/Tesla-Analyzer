@@ -91,6 +91,38 @@ def test_new_range_19in_nova_wheels():
     assert new_range_for("Model 3", "74D QUICKSILVER Photon18") == 549.0
 
 
+def test_usable_capacity_lookup_by_variant():
+    from app.analysis.battery import usable_capacity_for
+
+    # LR / Performance Model 3 & Y share the big pack (~78 kWh usable); wheel
+    # size doesn't change the pack, so a 19" LR still reads 78.
+    assert usable_capacity_for("Model 3", "74D QUICKSILVER Nova19") == 78.0
+    assert usable_capacity_for("Model 3", "P74D") == 78.0
+    assert usable_capacity_for("Model Y", "74D") == 78.0
+    # Standard-range packs are smaller.
+    assert usable_capacity_for("Model 3", "50") == 57.5
+    assert usable_capacity_for("Model Y", "50") == 60.0
+    # Unknown variant -> no guess.
+    assert usable_capacity_for("Model 3", "") is None
+    assert usable_capacity_for("Tesla", "unknown") is None
+
+
+def test_usable_capacity_resolution_prefers_override_then_measured():
+    from types import SimpleNamespace
+
+    from app.api.routes import _usable_capacity
+
+    v = SimpleNamespace(vin="LRW3F7EK3RC000000", model="Model 3",
+                        trim="74D Nova19", battery_capacity_kwh=75.0)
+    # Untouched default + known variant -> the spec (78), not the generic 75.
+    assert _usable_capacity(v, SimpleNamespace(battery_capacity_kwh=0.0)) == (78.0, "variant spec")
+    # A measured EMA that has moved off the default is trusted.
+    v.battery_capacity_kwh = 72.4
+    assert _usable_capacity(v, SimpleNamespace(battery_capacity_kwh=0.0)) == (72.4, "measured")
+    # An explicit config override beats everything.
+    assert _usable_capacity(v, SimpleNamespace(battery_capacity_kwh=73.0)) == (73.0, "override")
+
+
 def test_new_range_uses_vin_year_generation():
     # Same 74D badge, different generation: 2023 pre-Highland vs 2024 Highland.
     assert new_range_for("Model 3", "74D", year=2023) == 536.0

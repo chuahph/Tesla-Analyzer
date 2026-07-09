@@ -199,6 +199,13 @@ function fillCarInfo(v) {
     colour ? `Colour: <strong>${colour}</strong>` : null,
     wheel ? `Wheels: <strong>${prettyWheel(wheel)}</strong>` : null,
     v.plant ? `Built at: <strong>Giga ${v.plant}</strong>` : null,
+    // The pack size used to turn range/SoC deltas into kWh — every drive's
+    // kWh scales with it, so show it (and its source) to make a wrong value
+    // obvious. "measured" = learned from your charges, "variant spec" = from
+    // the car's badge, "override" = set in config.
+    v.usable_capacity_kwh
+      ? `Usable capacity: <strong>${fmt(v.usable_capacity_kwh, 1)} kWh</strong>` +
+        (v.capacity_source ? ` <span class="muted">(${v.capacity_source})</span>` : "") : null,
   ].filter(Boolean);
   el.innerHTML = rows.map((r) => `<div>${r}</div>`).join("")
     || "<div>No linked car yet.</div>";

@@ -45,6 +45,12 @@ class Settings(BaseSettings):
     # When-new full range (km) used as the battery-health 100% reference.
     # 0 = auto-detect from the car's variant badge (e.g. 74D -> 549 km).
     battery_new_range_km: float = 0.0
+    # Usable pack capacity (kWh), the 100%->0% energy that turns a drive's
+    # range/SoC delta into kWh. 0 = auto: the measured charge EMA, seeded from
+    # the car's variant spec. Set this to your car's known usable figure (e.g.
+    # a Long Range Model 3 is ~78 kWh new) to override, if the auto value looks
+    # off against the car's own energy screen.
+    battery_capacity_kwh: float = 0.0
 
     @property
     def demo_mode(self) -> bool:

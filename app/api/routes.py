@@ -85,6 +85,25 @@ def _first_vehicle(session: Session) -> Vehicle:
     return vehicle
 
 
+def _usable_capacity(vehicle: Vehicle, settings) -> tuple[float, str]:
+    """Usable pack capacity (kWh) for turning a drive's range/SoC delta into
+    kWh, plus where it came from. Priority: an explicit config override, then
+    the measured charge EMA (seeded from the variant spec at link), then the
+    variant spec directly, then a generic default. Returned source lets the
+    dashboard show which one is in play so a wrong figure is diagnosable."""
+    if settings.battery_capacity_kwh and settings.battery_capacity_kwh > 0:
+        return settings.battery_capacity_kwh, "override"
+    spec = battery_analysis.usable_capacity_for(
+        vehicle.model, vehicle.trim, vin_mod.decode(vehicle.vin).get("year"))
+    if vehicle.battery_capacity_kwh:
+        # 75.0 is the untouched column default; if that's all we have and the
+        # variant is known, the spec is the better answer.
+        if vehicle.battery_capacity_kwh == 75.0 and spec:
+            return spec, "variant spec"
+        return vehicle.battery_capacity_kwh, "measured"
+    return (spec or 75.0), ("variant spec" if spec else "default")
+
+
 def _window(session: Session, vehicle_id: int, days: int, since: datetime | None = None):
     if since is None:
         since = datetime.now() - timedelta(days=days)
@@ -374,17 +393,25 @@ def _process_vehicle(
         vehicle.trim = f"{vehicle.trim} {wheel}".strip()[:60]
     if data.get("display_name") and vehicle.name in ("My Tesla", ""):
         vehicle.name = data["display_name"]
+    # Seed usable capacity from the variant spec so the EMA starts from the
+    # right pack size (an LR Model 3 is ~78 kWh, not the generic 75 default)
+    # and per-drive kWh is right from the first synced drive. Only when the
+    # column is still untouched — a measured value is never overwritten.
+    if vehicle.battery_capacity_kwh == 75.0:
+        spec_cap = battery_analysis.usable_capacity_for(
+            vehicle.model, vehicle.trim, vin_mod.decode(vin).get("year"))
+        if spec_cap:
+            vehicle.battery_capacity_kwh = spec_cap
 
     snap = sync_mod.snapshot_from_vehicle_data(data)
     sk = state.scoped(state.SNAPSHOT_KEY, vin)
     tk = state.scoped(state.OPEN_TRIP_KEY, vin)
     ck = state.scoped(state.OPEN_CHARGE_KEY, vin)
-    # Usable pack capacity: the smoothed EMA over measured charges. A single
-    # recent full charge sounds more "current" but is noisy (one contaminated
-    # energy_added/SoC-gain reading throws it off by 20%+, inflating every
-    # trip's kWh); the EMA averages that out and matched the car's own
-    # per-drive kWh closely in practice.
-    capacity_kwh = vehicle.battery_capacity_kwh or 75.0
+    # Usable pack capacity: override > measured charge EMA (seeded from the
+    # variant spec) > spec > default. The EMA is a smoothed average over
+    # measured charges — robust to a single contaminated charge reading that
+    # a "last full charge" figure would swallow whole.
+    capacity_kwh, _ = _usable_capacity(vehicle, settings)
 
     # One-time migration from the pre-multi-car global keys (only the active car
     # inherits them), so a drive taken around the upgrade isn't lost.
@@ -598,7 +625,7 @@ def sync_now(wake: bool = Query(False), session: Session = Depends(get_session))
                     session.query(Vehicle).filter(Vehicle.vin == vvin).first()
                     if (trip_raw or charge_raw) and last_raw else None
                 )
-                row_capacity_kwh = (vehicle_row.battery_capacity_kwh or 75.0) if vehicle_row else 75.0
+                row_capacity_kwh = _usable_capacity(vehicle_row, settings)[0] if vehicle_row else 75.0
                 if trip_raw and last_raw and vehicle_row:
                     d = sync_mod.close_trip_on_sleep(
                         _json.loads(trip_raw), _json.loads(last_raw),
@@ -941,9 +968,9 @@ def summary(
 
     settings = get_settings()
     vehicle = _first_vehicle(session)
-    # Usable pack capacity (smoothed EMA over measured charges) — used
-    # everywhere below that turns kWh into % or range delta into kWh.
-    capacity_kwh = vehicle.battery_capacity_kwh or 75.0
+    # Usable pack capacity (override > measured EMA > variant spec > default),
+    # used everywhere below that turns kWh into % or range delta into kWh.
+    capacity_kwh, capacity_source = _usable_capacity(vehicle, settings)
     # The cron's own last determination of what the car was doing (including
     # "found it asleep") — written every /api/sync tick, read here purely
     # from the database. This is what lets the dashboard show a near-live
@@ -1041,6 +1068,11 @@ def summary(
 
     vehicle_out = VehicleOut.model_validate(vehicle).model_dump()
     vehicle_out.update({k: v for k, v in vin_info.items() if v})  # year, plant
+    # The pack size actually used to turn range/SoC deltas into kWh, and where
+    # it came from — surfaced so a wrong figure (which scales every drive's
+    # kWh) is visible and diagnosable rather than hidden.
+    vehicle_out["usable_capacity_kwh"] = round(capacity_kwh, 1)
+    vehicle_out["capacity_source"] = capacity_source
     # The account's cars, so the header can offer a picker when more than one is
     # linked. Only real (account-linked) cars, not demo/imported placeholders.
     garage = []
