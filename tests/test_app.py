@@ -128,6 +128,33 @@ def test_summary_reports_battery_balance():
         settings.app_passcode = old
 
 
+def test_place_label_prefers_specific_feature_over_broad_district():
+    """The label should name the actual spot (POI/street) rather than the
+    broader neighbourhood the old zoom-16 logic settled on."""
+    from app.api.routes import _label_from_geocode
+
+    # A named POI at the point wins over the surrounding suburb.
+    assert _label_from_geocode({
+        "name": "Queensbay Mall",
+        "address": {"building": "Queensbay Mall", "suburb": "Bayan Lepas",
+                    "city": "George Town", "neighbourhood": "Bayan Mutiara"},
+    }) == "Queensbay Mall, Bayan Lepas"
+
+    # No POI: the street (with house number) beats the neighbourhood for the
+    # specific part; the area falls to the city when no suburb is present.
+    assert _label_from_geocode({
+        "address": {"house_number": "12", "road": "Lebuh Tunku Kudin",
+                    "neighbourhood": "Bayan Mutiara", "city": "George Town"},
+    }) == "12 Lebuh Tunku Kudin, George Town"
+
+    # Falls back gracefully when only coarse fields exist, and never repeats
+    # the same word on both sides of the comma.
+    assert _label_from_geocode({
+        "address": {"suburb": "George Town", "city": "George Town"},
+    }) == "George Town"
+    assert _label_from_geocode({}) == ""
+
+
 def test_last_full_charge_kwh_prefers_recent_near_full_and_corrects_ac():
     """Capacity is calibrated from the most recent (near-)100% charge, with
     an AC onboard-charger loss correction — this is what keeps per-trip kWh

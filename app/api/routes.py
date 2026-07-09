@@ -152,6 +152,40 @@ def _window(session: Session, vehicle_id: int, days: int, since: datetime | None
 _PLACE_CACHE: dict[str, str] = {}
 
 
+def _label_from_geocode(data: dict) -> str:
+    """Turn a Nominatim reverse payload into a short 'Place, Area' label.
+
+    Prefers the most *specific* feature actually at the point — the named POI
+    (mall, building, amenity) or the street, with house number when present —
+    over the broader neighbourhood/suburb. That's what a person calls "the
+    place", so it tracks the real position instead of naming an adjacent
+    district. Falls back down the granularity ladder so there's always a name.
+    """
+    addr = data.get("address") or {}
+    # The named feature Nominatim matched at this exact point (a POI/building),
+    # then the specific address fields, in decreasing precision.
+    poi = (
+        data.get("name")
+        or addr.get("amenity") or addr.get("shop") or addr.get("building")
+        or addr.get("office") or addr.get("leisure") or addr.get("tourism")
+    )
+    road = addr.get("road")
+    if road and addr.get("house_number"):
+        road = f"{addr['house_number']} {road}"
+    name = (
+        poi or road or addr.get("neighbourhood") or addr.get("suburb")
+        or addr.get("village") or addr.get("town") or addr.get("city") or ""
+    )
+    # The surrounding district/city, kept coarser than `name` so the two read
+    # as "specific spot, general area" rather than repeating the same word.
+    area = (
+        addr.get("suburb") or addr.get("city_district") or addr.get("city")
+        or addr.get("town") or addr.get("county") or ""
+    )
+    label = f"{name}, {area}" if name and area and name != area else (name or area)
+    return label[:120]
+
+
 def _place(coords: str) -> str:
     """Best-effort reverse geocode of a 'lat, lon' string to a short place name.
 
@@ -167,19 +201,18 @@ def _place(coords: str) -> str:
         lat, lon = (p.strip() for p in coords.split(",", 1))
         resp = httpx.get(
             "https://nominatim.openstreetmap.org/reverse",
-            params={"format": "jsonv2", "lat": lat, "lon": lon, "zoom": 16},
+            # zoom 18 = building/address level (16 stopped at neighbourhood, so
+            # it named a broad district instead of the actual spot);
+            # namedetails surfaces the matched feature's own name.
+            params={
+                "format": "jsonv2", "lat": lat, "lon": lon,
+                "zoom": 18, "addressdetails": 1, "namedetails": 1,
+            },
             headers={"User-Agent": "tesla-analyzer/0.1"},
             timeout=4.0,
         )
         resp.raise_for_status()
-        addr = resp.json().get("address") or {}
-        name = (
-            addr.get("neighbourhood") or addr.get("suburb") or addr.get("road")
-            or addr.get("village") or addr.get("town") or addr.get("city") or ""
-        )
-        area = addr.get("city") or addr.get("town") or addr.get("county") or ""
-        label = f"{name}, {area}" if name and area and name != area else (name or area)
-        result = (label or coords)[:120]
+        result = _label_from_geocode(resp.json()) or coords
     except Exception:  # noqa: BLE001 — never let naming block trip logging
         result = coords
     _PLACE_CACHE[coords] = result
