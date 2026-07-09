@@ -465,6 +465,39 @@ def test_track_idle_dense_sampling_builds_a_run():
     assert ot["idle_min"] == 3.0
 
 
+def test_trailing_parked_wait_is_not_counted_as_in_drive_idle():
+    """A trip that ends by sitting parked closes backdated to stop_at, but the
+    stationary run keeps accumulating through the trailing parked wait (up to
+    PARK_END_MIN before the timeout close). Only the part of the run before
+    the trip's end may count as in-drive idle — the trailing parked minutes
+    are post-trip parking, and counting them over-strips idle energy."""
+    from app.sync import _confirmed_idle_min, process_snapshot
+
+    # Drive off, then park (shift P, driver aboard) and sit for 16 minutes of
+    # 1-minute polls until the PARK_END_MIN timeout closes the trip.
+    s0 = snap(T0, 10_000.0, 80, shift="D", speed=50, range_km=400.0)
+    _, _, trip, _ = process_snapshot(None, s0, None, None, 60.0, 0.90)
+    s1 = snap(T0 + 600, 10_008.0, 79, shift="D", speed=45, range_km=394.0)
+    _, _, trip, _ = process_snapshot(s0, s1, trip, None, 60.0, 0.90)
+
+    prev = s1
+    drives = []
+    for i in range(1, 17):  # parked, polled every minute, odometer frozen
+        cur = snap(T0 + 600 + 60 * i, 10_008.0, 79, present=True, range_km=394.0)
+        drives, _, trip, _ = process_snapshot(prev, cur, trip, None, 60.0, 0.90)
+        prev = cur
+        if drives:
+            break
+
+    assert len(drives) == 1                      # closed by the parked timeout
+    d = drives[0]
+    # The trip ends at stop_at (the first parked reading, one poll after the
+    # last driving one), and none of the trailing 15 parked minutes leak in
+    # as in-drive idle.
+    assert d["idle_min"] == 0.0
+    assert d["duration_min"] == 11.0             # power-on to stop_at only
+
+
 def test_track_idle_ignores_park_nap_gaps():
     """An interval long enough to be a park/nap (a trip boundary handled
     elsewhere) must not be folded into in-drive idle."""

@@ -181,11 +181,13 @@ def _open_trip_at(base: dict[str, Any], cur: dict[str, Any], prev: dict[str, Any
         "unlocked_before_drive": _lock_unlocked(prev, cur),
         # Real (not estimated) idle-time tracking, from the odometer: idle_min
         # accumulates stationary runs of at least IDLE_STREAK_MIN; still_run is
-        # the in-progress run not yet committed. Odometer-based, so it catches
-        # a sustained stop even when polling is sparse and never samples the
-        # car at zero speed mid-stop.
+        # the in-progress run not yet committed, and still_since is when that
+        # run began (so a trip closed mid-run counts only the in-window part).
+        # Odometer-based, so it catches a sustained stop even when polling is
+        # sparse and never samples the car at zero speed mid-stop.
         "idle_min": 0.0,
         "still_run": 0.0,
+        "still_since": None,
     }
 
 
@@ -198,6 +200,7 @@ def _flush_idle_run(open_trip: dict[str, Any]) -> None:
     if run >= IDLE_STREAK_MIN:
         open_trip["idle_min"] = open_trip.get("idle_min", 0.0) + run
     open_trip["still_run"] = 0.0
+    open_trip["still_since"] = None
 
 
 def _track_idle(open_trip: dict[str, Any], prev: dict[str, Any] | None,
@@ -223,19 +226,31 @@ def _track_idle(open_trip: dict[str, Any], prev: dict[str, Any] | None,
         return
     moved = (cur.get("odo_km") or 0.0) - (prev.get("odo_km") or 0.0)
     if moved <= ODO_STILL_KM:
+        if not open_trip.get("still_run"):
+            # Anchor the run's start so a trip closed mid-run can count only
+            # the part that falls inside the trip window (see _confirmed_idle_min).
+            open_trip["still_since"] = prev["ts"]
         open_trip["still_run"] = open_trip.get("still_run", 0.0) + interval_min
     else:
         _flush_idle_run(open_trip)
 
 
 def _confirmed_idle_min(open_trip: dict[str, Any], end_ts: float) -> float:
-    """Real idle minutes accumulated in ``open_trip`` — committed runs plus any
-    in-progress stationary run that's already sustained past IDLE_STREAK_MIN
-    (so closing a trip while still stopped counts a sit that was already long
-    enough). ``end_ts`` is accepted for call-site symmetry; the run already
-    spans up to the latest snapshot."""
+    """Real idle minutes accumulated in ``open_trip`` as of ``end_ts`` —
+    committed runs plus any in-progress stationary run, truncated at
+    ``end_ts``, once the counted part is sustained past IDLE_STREAK_MIN.
+
+    The truncation matters at trip close: a trip that ends by sitting parked
+    closes backdated to ``stop_at`` (when it first stopped), but the run kept
+    accumulating through the trailing parked wait (up to PARK_END_MIN before
+    the timeout close). Only the portion before ``end_ts`` is in-drive idle;
+    the rest is post-trip parking and counting it would over-strip idle
+    energy from driving_wh_per_km."""
     idle_min = open_trip.get("idle_min", 0.0)
     run = open_trip.get("still_run", 0.0)
+    since = open_trip.get("still_since")
+    if since is not None:
+        run = min(run, max((end_ts - since) / 60.0, 0.0))
     if run >= IDLE_STREAK_MIN:
         idle_min += run
     return idle_min
