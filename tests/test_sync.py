@@ -438,15 +438,15 @@ def test_track_idle_counts_sustained_stationary_from_odometer():
     assert open_trip["idle_min"] == 0.0          # brief stop dropped
     assert open_trip["still_run"] == 0.0
 
-    # A single sparse 4-minute interval with no odometer movement — the case
-    # the old speed-only tracker missed — is caught as 4 min of idle.
+    # A single sparse 6-minute interval with no odometer movement — the case
+    # the old speed-only tracker missed — is caught as 6 min of idle.
     p2 = snap(T0 + 200, 10_005.0, 79, shift="D", speed=30)
-    c2 = snap(T0 + 440, 10_005.0, 79, shift="D", speed=30)          # 4 min, odo unchanged
+    c2 = snap(T0 + 560, 10_005.0, 79, shift="D", speed=30)          # 6 min, odo unchanged
     _track_idle(open_trip, p2, c2)
-    assert _confirmed_idle_min(open_trip, c2["ts"]) == 4.0          # in-progress, already long enough
-    m2 = snap(T0 + 500, 10_006.0, 79, shift="D", speed=45)          # moves on -> commit
+    assert _confirmed_idle_min(open_trip, c2["ts"]) == 6.0          # in-progress, already long enough
+    m2 = snap(T0 + 620, 10_006.0, 79, shift="D", speed=45)          # moves on -> commit
     _track_idle(open_trip, c2, m2)
-    assert open_trip["idle_min"] == 4.0
+    assert open_trip["idle_min"] == 6.0
 
 
 def test_track_idle_dense_sampling_builds_a_run():
@@ -456,13 +456,38 @@ def test_track_idle_dense_sampling_builds_a_run():
 
     ot = {"idle_min": 0.0, "still_run": 0.0}
     base = snap(T0, 10_000.0, 80, shift="D", speed=0)
-    for i in range(1, 4):                                           # 3 x 1-min still intervals
+    for i in range(1, 7):                                           # 6 x 1-min still intervals
         nxt = snap(T0 + 60 * i, 10_000.0, 80, shift="D", speed=0)
         _track_idle(ot, base, nxt)
         base = nxt
-    assert ot["still_run"] == 3.0
-    _track_idle(ot, base, snap(T0 + 300, 10_001.0, 80, shift="D", speed=40))
-    assert ot["idle_min"] == 3.0
+    assert ot["still_run"] == 6.0
+    _track_idle(ot, base, snap(T0 + 420, 10_001.0, 80, shift="D", speed=40))
+    assert ot["idle_min"] == 6.0
+
+
+def test_queue_creep_breaks_the_still_run():
+    """Stop-go traffic chains: a light-wait, then queue creep (moving, but
+    only ~50 m in a minute), then another light. The creep interval implies
+    ~3 km/h — moving traffic, not idling — so it must BREAK the run instead
+    of chaining the two waits into one long 'idle'. Ground truth from a real
+    commute: a 29-min stop-go trip with only short light-waits was getting
+    ~5 phantom idle minutes from exactly this chaining."""
+    from app.sync import _confirmed_idle_min, _track_idle
+
+    ot = {"idle_min": 0.0, "still_run": 0.0}
+    a = snap(T0, 10_000.0, 80, shift="D", speed=0)
+    b = snap(T0 + 120, 10_000.0, 80, shift="D", speed=0)     # 2-min light wait
+    _track_idle(ot, a, b)
+    c = snap(T0 + 180, 10_000.05, 80, shift="D", speed=2)    # 50 m creep in 1 min (3 km/h)
+    _track_idle(ot, b, c)
+    d = snap(T0 + 300, 10_000.05, 80, shift="D", speed=0)    # next 2-min light wait
+    _track_idle(ot, c, d)
+    e = snap(T0 + 360, 10_001.0, 80, shift="D", speed=40)    # traffic clears
+    _track_idle(ot, d, e)
+    # Neither wait reached the threshold on its own, and the creep broke the
+    # chain — no idle recorded for a normal stop-go stretch.
+    assert ot["idle_min"] == 0.0
+    assert _confirmed_idle_min(ot, e["ts"]) == 0.0
 
 
 def test_trailing_parked_wait_is_not_counted_as_in_drive_idle():
@@ -521,14 +546,14 @@ def test_live_trip_uses_real_tracked_idle_not_speed_heuristic():
     _, _, trip, _ = process_snapshot(None, s1, None, None, 60.0, 0.90)
     assert trip is not None
 
-    # Sustained 4-minute stationary stretch mid-trip (odometer unchanged).
+    # Sustained 6-minute stationary stretch mid-trip (odometer unchanged).
     s2 = snap(T0 + 300, 10_005.0, 79, shift="D", speed=0, range_km=395.0)
     _, _, trip, _ = process_snapshot(s1, s2, trip, None, 60.0, 0.90)
-    s3 = snap(T0 + 300 + 240, 10_005.0, 79, shift="D", speed=50, range_km=395.0)
+    s3 = snap(T0 + 300 + 360, 10_005.0, 79, shift="D", speed=50, range_km=395.0)
     _, _, trip, _ = process_snapshot(s2, s3, trip, None, 60.0, 0.90)
-    assert _confirmed_idle_min(trip, s3["ts"]) == 4.0
+    assert _confirmed_idle_min(trip, s3["ts"]) == 6.0
 
-    now = snap(T0 + 300 + 240 + 300, 10_030.0, 74, shift="D", speed=60, range_km=380.0)
+    now = snap(T0 + 300 + 360 + 300, 10_030.0, 74, shift="D", speed=60, range_km=380.0)
     lt = live_trip(trip, now, capacity_kwh=60.0)
     assert lt["wh_per_km"] is not None
     assert lt["driving_wh_per_km"] < lt["wh_per_km"]   # idle energy subtracted

@@ -159,8 +159,18 @@ def is_driving(s: dict[str, Any]) -> bool:
 
 
 ZERO_SPEED_KMH = 2.0  # below this = "stopped", not still rolling (GPS/speedo jitter floor)
-IDLE_STREAK_MIN = 3.0  # a stopped streak only counts as idle once sustained this long
-ODO_STILL_KM = 0.05    # odometer move below this between snapshots = the car sat still
+# A stopped streak only counts as idle once sustained this long. 5 min (up
+# from 3): real-world stop-go commutes chain a long traffic light + queue
+# creep + the next light into 3-4 continuous near-stationary minutes, which
+# is driving, not idling — a genuine mid-trip idle (parked with A/C, a
+# pickup, a drive-through) comfortably exceeds 5.
+IDLE_STREAK_MIN = 5.0
+# An interval counts as stationary when the odometer implies at most this
+# speed across it. A speed, not a fixed distance: 50 m over a 1-min poll is
+# queue creep (moving traffic, ~3 km/h) and must break the still run rather
+# than chain two light-waits into one long "idle", while 50 m over 4 sparse
+# minutes (~0.75 km/h) genuinely is a car sitting still.
+IDLE_CREEP_KMH = 1.5
 
 
 def _open_trip_at(base: dict[str, Any], cur: dict[str, Any], prev: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -207,16 +217,17 @@ def _track_idle(open_trip: dict[str, Any], prev: dict[str, Any] | None,
                 cur: dict[str, Any]) -> None:
     """Accumulate real idle time from the *odometer* between two snapshots.
 
-    If the wheels covered essentially no distance over an interval, the car
-    sat still for that whole interval — true regardless of the instantaneous
-    speed reading, so a stop is caught even when polling never lands a
-    zero-speed sample mid-stop (the common case at multi-minute cron cadence,
-    which the old speed-only tracker missed). Consecutive still intervals build
-    a run that only counts once sustained past IDLE_STREAK_MIN, so short stops
-    don't register while a genuine sit does. Intervals long enough to be a
-    park/nap (>= PARK_GAP_MIN, handled separately as a trip boundary) end the
-    run so overnight/parked drain is never folded into in-drive idle. Mutates
-    open_trip in place.
+    If the wheels covered essentially no distance over an interval (implied
+    speed at most IDLE_CREEP_KMH), the car sat still for that whole interval
+    — true regardless of the instantaneous speed reading, so a stop is caught
+    even when polling never lands a zero-speed sample mid-stop (the common
+    case at multi-minute cron cadence, which the old speed-only tracker
+    missed). Consecutive still intervals build a run that only counts once
+    sustained past IDLE_STREAK_MIN, so short stops and chained light-waits
+    with queue creep between them don't register while a genuine sit does.
+    Intervals long enough to be a park/nap (>= PARK_GAP_MIN, handled
+    separately as a trip boundary) end the run so overnight/parked drain is
+    never folded into in-drive idle. Mutates open_trip in place.
     """
     if not prev:
         return
@@ -225,7 +236,7 @@ def _track_idle(open_trip: dict[str, Any], prev: dict[str, Any] | None,
         _flush_idle_run(open_trip)
         return
     moved = (cur.get("odo_km") or 0.0) - (prev.get("odo_km") or 0.0)
-    if moved <= ODO_STILL_KM:
+    if moved / (interval_min / 60.0) <= IDLE_CREEP_KMH:
         if not open_trip.get("still_run"):
             # Anchor the run's start so a trip closed mid-run can count only
             # the part that falls inside the trip window (see _confirmed_idle_min).
