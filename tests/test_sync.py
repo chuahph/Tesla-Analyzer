@@ -286,6 +286,50 @@ def test_gap_fallback_logs_merged_sessions():
     assert trip is None and charge is None
 
 
+def test_gap_fallback_splits_charge_then_short_drive():
+    """A charge finishing and a short drive right after it, both missed by
+    the cron in one gap, must NOT vanish or corrupt each other.
+
+    Regression: previously the whole-gap fallback sized the charge from the
+    net prev->cur SoC delta, so a drive right after the charge could eat
+    enough of that gain to sink it below CHARGE_MIN_PCT and drop the charge
+    entirely — while the drive's own energy read off a range delta that was
+    really measuring the charge. Tesla's own session meter (energy_added_kwh)
+    now detects and sizes the charge independently of what happened after.
+    """
+    prev = snap(T0, 10_000.0, 40, energy_added=0.0)
+    # +12 kWh charge (20% of the 60 kWh test pack), then a 4 km errand that
+    # used ~1.2 kWh (2%) — net SoC only rose 18%, but the real charge was 12
+    # kWh and must be reported in full, and the drive must still appear.
+    cur = snap(T0 + 7200, 10_004.0, 58, energy_added=12.0)
+    d, c, trip, charge = step(prev, cur)
+
+    assert len(c) == 1
+    assert c[0]["energy_added_kwh"] == 12.0     # the real meter reading, not net SoC
+    assert c[0]["start_soc"] == 40 and c[0]["end_soc"] == 60
+    assert c[0]["cost"] == 10.8                 # 12 kWh * 0.90/kWh
+
+    assert len(d) == 1
+    assert d[0]["distance_km"] == 4.0
+    assert d[0]["start_soc"] == 60 and d[0]["end_soc"] == 58
+    assert trip is None and charge is None
+    # Charge happened before the drive, in this order.
+    assert c[0]["end_time"] <= d[0]["start_time"]
+    assert d[0]["end_time"] == d[0]["end_time"]  # anchored at cur, sanity
+
+
+def test_gap_fallback_plain_drive_and_charge_unaffected_without_meter():
+    """Without a usable energy_added_kwh signal (e.g. legacy/imported data),
+    the original net-delta whole-gap reconstruction still applies."""
+    prev = snap(T0, 10_000.0, 80)
+    cur = snap(T0 + 7200, 10_030.0, 85)
+    d, c, trip, charge = step(prev, cur)
+    assert len(d) == 1 and len(c) == 1
+    assert d[0]["distance_km"] == 30.0
+    assert c[0]["energy_added_kwh"] == 3.0
+    assert trip is None and charge is None
+
+
 def test_implied_capacity_from_measured_charge():
     from app.sync import AC_CHARGE_EFFICIENCY, implied_capacity_kwh
 

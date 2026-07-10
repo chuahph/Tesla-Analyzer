@@ -550,6 +550,71 @@ def implied_capacity_kwh(charge: dict) -> float | None:
     return round(cap, 1) if 45.0 <= cap <= 95.0 else None
 
 
+def _split_gap_events(prev: dict, cur: dict, capacity_kwh: float, price_per_kwh: float):
+    """Reconstruct a charge immediately followed by a short drive, when both
+    happened inside one unpolled gap (the car charged, then set off before
+    the next poll caught it — e.g. a nap-time top-up followed by a school run).
+
+    The plain whole-gap fallbacks (below, in ``process_snapshot``) size each
+    kind of event purely from the net prev->cur delta — the drive from the
+    odometer, the charge from the SoC/range change. That's wrong once *both*
+    kinds of event share the gap: the drive eats into the charge's net SoC
+    gain, which can sink it below CHARGE_MIN_PCT and drop the whole session
+    (exactly what a short errand right after a top-up charge does), while the
+    drive's own energy calc gets a range delta that's really measuring the
+    charge, not the drive.
+
+    Tesla's own per-session charge meter (``energy_added_kwh``) survives in
+    the vehicle_data payload until the *next* plug-in resets it — so a value
+    higher than ``prev`` had, on two snapshots that are both parked/not
+    charging, means a charge really completed inside this gap regardless of
+    what driving happened afterward. Paired with genuine odometer movement
+    (not jitter — see DRIVE_MIN_KM), that's enough to split the gap into an
+    ordered charge-then-drive pair instead of corrupting or losing one of
+    them.
+
+    Returns ``(charge_or_None, drive_or_None)``; both None when there's no
+    evidence of a combined event (the caller then uses the plain fallbacks).
+    Order is assumed charge-first (plug in, charge, then depart) — the common
+    case, and the only one there's any evidence for from just two snapshots.
+    """
+    meter_delta = max(
+        (cur.get("energy_added_kwh") or 0.0) - (prev.get("energy_added_kwh") or 0.0), 0.0
+    )
+    moved = max(cur["odo_km"] - prev["odo_km"], 0.0)
+    if meter_delta <= 0 or moved < DRIVE_MIN_KM:
+        return None, None
+
+    gained_pct = meter_delta / capacity_kwh * 100.0 if capacity_kwh else 0.0
+    split_soc = min(prev["soc"] + gained_pct, 100.0)
+
+    # The charge dominates the gap in the common case (a multi-hour AC
+    # session vs. a short errand); estimate the drive's own span from its
+    # distance at a typical city pace, anchored to end at `cur` (the
+    # prompt-poll assumption used throughout this module — see
+    # _reanchor_stale), leaving the rest of the gap to the charge.
+    drive_min = moved / CITY_SPEED_KMH * 60.0
+    gap_min = max((cur["ts"] - prev["ts"]) / 60.0, 0.0)
+    drive_min = min(drive_min, max(gap_min - 1.0, 0.0))
+    split_ts = cur["ts"] - drive_min * 60.0
+
+    charge = _charge_from(
+        {"ts": prev["ts"], "soc": prev["soc"], "range_km": prev.get("range_km"),
+         "energy_added_kwh": 0.0, "max_kw": prev.get("charger_kw", 0.0),
+         "fast": prev.get("fast"), "lat": prev.get("lat"), "lon": prev.get("lon")},
+        {"ts": split_ts, "soc": split_soc, "energy_added_kwh": meter_delta,
+         "charger_kw": 0.0, "fast": bool(prev.get("fast") or cur.get("fast")),
+         "out_temp": cur["out_temp"]},
+        capacity_kwh, price_per_kwh,
+    )
+    drive = _drive_from(
+        {"ts": split_ts, "odo_km": prev["odo_km"], "soc": split_soc,
+         "lat": prev.get("lat"), "lon": prev.get("lon")},
+        cur, capacity_kwh,
+    )
+    return charge, drive
+
+
 def process_snapshot(
     prev: dict | None,
     cur: dict,
@@ -565,6 +630,18 @@ def process_snapshot(
     """
     drives: list[dict] = []
     charges: list[dict] = []
+
+    # Detect a charge-then-drive combo sharing this gap up front — reached
+    # only when both the trip and charge fallbacks below would otherwise run
+    # (no open session, nothing in progress right now) — see
+    # _split_gap_events for why the plain fallbacks corrupt/drop one event
+    # when both happened together.
+    split_charge = split_drive = None
+    if (
+        not open_trip and not open_charge and prev
+        and not is_driving(cur) and not cur.get("charging")
+    ):
+        split_charge, split_drive = _split_gap_events(prev, cur, capacity_kwh, price_per_kwh)
 
     # --- Trips: open on power-on/in-gear, close when the car stops ---------
     if open_trip:
@@ -643,6 +720,11 @@ def process_snapshot(
                 pace = max((cur.get("speed_kmh") or 0.0) * 0.65, CITY_SPEED_KMH)
                 est_start = cur["ts"] - moved / pace * 3600.0
                 open_trip["ts"] = min(max(est_start, prev["ts"]), cur["ts"])
+    elif prev and split_drive:
+        # A charge and a drive both happened in this gap — see
+        # _split_gap_events for why the plain whole-gap drive reconstruction
+        # below would get the wrong energy here.
+        drives.append(split_drive)
     elif prev:
         # A whole drive happened between snapshots (asleep / cron gap).
         d = _drive_from(prev, cur, capacity_kwh)
@@ -688,6 +770,11 @@ def process_snapshot(
             "lat": cur.get("lat"),
             "lon": cur.get("lon"),
         }
+    elif prev and split_charge:
+        # A charge and a drive both happened in this gap — see
+        # _split_gap_events for why the plain whole-gap charge reconstruction
+        # below would drop or shrink this session.
+        charges.append(split_charge)
     elif prev:
         # A whole charge happened between snapshots — the session meter is
         # unreliable across the gap, so match cur's value to force the
