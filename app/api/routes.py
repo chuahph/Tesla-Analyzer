@@ -753,7 +753,7 @@ def _process_vehicle(
 
     drives, charges, open_trip, open_charge = sync_mod.process_snapshot(
         prev, snap, open_trip, open_charge,
-        capacity_kwh, settings.energy_price_per_kwh,
+        capacity_kwh, settings.energy_price_per_kwh, settings.drive_min_km,
     )
     drives = recovered + drives  # include a drive recovered from the upgrade gap
     for d in drives:
@@ -960,7 +960,7 @@ def sync_now(wake: bool = Query(False), session: Session = Depends(get_session))
                 if trip_raw and last_raw and vehicle_row:
                     d = sync_mod.close_trip_on_sleep(
                         _json.loads(trip_raw), _json.loads(last_raw),
-                        row_capacity_kwh,
+                        row_capacity_kwh, settings.drive_min_km,
                     )
                     if d:
                         d["start_coords"], d["end_coords"] = d["start_location"], d["end_location"]
@@ -984,7 +984,7 @@ def sync_now(wake: bool = Query(False), session: Session = Depends(get_session))
                 if charge_raw and last_raw and vehicle_row:
                     c = sync_mod.close_charge_on_sleep(
                         _json.loads(charge_raw), _json.loads(last_raw),
-                        row_capacity_kwh, settings.energy_price_per_kwh,
+                        row_capacity_kwh, settings.energy_price_per_kwh, settings.drive_min_km,
                     )
                     if c:
                         cap = sync_mod.implied_capacity_kwh(c)
@@ -1619,7 +1619,7 @@ def summary(
         snap_raw = state.get(session, state.scoped(state.SNAPSHOT_KEY, vehicle.vin))
         snap = _json.loads(snap_raw) if snap_raw else None
         if open_trip and snap:
-            live = sync_mod.live_trip(open_trip, snap, capacity_kwh)
+            live = sync_mod.live_trip(open_trip, snap, capacity_kwh, settings.drive_min_km)
             live["eta"] = _live_eta(session, snap, live, capacity_kwh)
             since = datetime.fromtimestamp(open_trip["ts"], sync_mod.MYT).replace(tzinfo=None)
             window_label = "current drive"

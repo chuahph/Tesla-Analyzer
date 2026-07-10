@@ -194,6 +194,33 @@ def test_trip_closes_when_charging_starts_not_merging_across_a_charge():
     assert d[0]["energy_used_kwh"] > 0
 
 
+def test_drive_min_km_is_configurable():
+    """A short move (e.g. charger to parking spot) sits below the default
+    0.5 km floor and is filtered as jitter — but a lower configured
+    drive_min_km must let it through as a real logged trip."""
+    from app.sync import _drive_from
+
+    start = snap(T0, 10_000.0, 91, range_km=453.0)
+    end = snap(T0 + 180, 10_000.4, 91, range_km=452.8)  # 0.4 km, 3 min
+
+    assert _drive_from(start, end, 75.0) is None                          # default 0.5 km floor
+    d = _drive_from(start, end, 75.0, drive_min_km=0.2)
+    assert d is not None and d["distance_km"] == 0.4                      # 0.2 km floor lets it through
+
+
+def test_drive_min_km_threaded_through_process_snapshot():
+    """The configurable floor must reach the whole-gap trip reconstruction
+    that process_snapshot uses, not just _drive_from in isolation."""
+    s1 = snap(T0, 10_000.0, 91)
+    s2 = snap(T0 + 180, 10_000.4, 91)   # 0.4 km short move, no snapshot in between
+
+    d, _, _, _ = process_snapshot(s1, s2, None, None, 75.0, 0.90)
+    assert d == []                       # default floor: filtered as jitter
+
+    d2, _, _, _ = process_snapshot(s1, s2, None, None, 75.0, 0.90, drive_min_km=0.2)
+    assert len(d2) == 1 and d2[0]["distance_km"] == 0.4   # lowered floor: logged
+
+
 def test_contaminated_low_energy_drive_flagged_unknown():
     """A drive whose range was refilled mid-trip (Wh/km < 40) logs energy 0."""
     # 8 km but range only dropped 300.0 -> 299.5 (a charge refilled it): the

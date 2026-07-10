@@ -528,6 +528,7 @@ def test_charge_cost_uses_time_of_use_pricing_at_write_time():
         energy_price_offpeak_kwh=0.45, tariff_peak_start_hour=8,
         tariff_peak_end_hour=22, tariff_weekend_offpeak=True,
         battery_capacity_kwh=0.0, battery_new_range_km=0.0, low_soc_notify_pct=0.0,
+        drive_min_km=0.5,
     )
 
     def vehicle_data(vin, ts, odo_mi, soc, added_kwh, charging, lat=None, lon=None):
@@ -588,6 +589,7 @@ def test_drive_complete_fires_event_webhook_but_not_push(monkeypatch):
         energy_price_offpeak_kwh=0.0, tariff_peak_start_hour=8,
         tariff_peak_end_hour=22, tariff_weekend_offpeak=True,
         battery_capacity_kwh=0.0, battery_new_range_km=0.0, low_soc_notify_pct=0.0,
+        drive_min_km=0.5,
     )
 
     def vehicle_data(vin, ts, odo_mi, soc, shift, speed=0):

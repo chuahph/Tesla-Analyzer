@@ -576,6 +576,12 @@ def test_online_idle_car_is_read_once_base_interval_elapses(monkeypatch):
         _reset_to_demo()
 
 
+def test_drive_min_km_defaults_to_half_a_km():
+    from app.config import Settings
+
+    assert Settings().drive_min_km == 0.5
+
+
 def test_sync_poll_interval_defaults_to_one_minute():
     """The whole point of this project's cron guidance ('every 1 minute')
     is that a real read happens on close to every tick by default — so the

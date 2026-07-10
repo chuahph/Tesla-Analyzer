@@ -31,6 +31,12 @@ class Settings(BaseSettings):
     # recommends for the external cron, so a real read happens on (close
     # to) every tick by default.
     sync_poll_interval_min: float = 1.0
+    # Minimum odometer movement (km) treated as a real trip rather than
+    # jitter — a car nudged while parked, GPS drift, a multi-point turn.
+    # Lower it to catch genuinely short moves (e.g. a charger-to-parking-spot
+    # shuffle) as logged trips; the trade-off is more exposure to logging a
+    # non-trip as a tiny phantom drive. See DRIVE_MIN_KM in app/sync.py.
+    drive_min_km: float = 0.5
 
     # Tesla OAuth (Fleet API). Required only for the "Sign in with Tesla" button;
     # the access-token paste flow and demo/import modes do not need these.

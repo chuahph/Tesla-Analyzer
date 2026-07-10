@@ -265,6 +265,12 @@ activity signal that resets Tesla's own sleep countdown, which is exactly
 what this setting trades off. See `SYNC_POLL_INTERVAL_MIN` / `FAST_POLL_WINDOW_MIN`
 in `app/config.py` / `app/api/routes.py` for the exact logic.
 
+**Very short moves** (a charger-to-parking-spot shuffle, under ~0.5 km) are
+filtered out by default as odometer/GPS jitter rather than logged as a trip
+— set `DRIVE_MIN_KM` lower (e.g. `0.2`) if you want those caught too. The
+trade-off: a lower floor also catches more actual jitter (a car nudged while
+parked, a multi-point turn) as tiny phantom drives.
+
 ### Re-enabling the GitHub Actions schedule instead
 
 If you'd rather not sign up for another service, uncomment the `schedule:`

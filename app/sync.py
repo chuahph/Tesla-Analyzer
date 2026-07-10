@@ -363,9 +363,10 @@ def driving_wh_per_km(energy_kwh, distance_km, duration_min, out_temp_c=None,
 
 
 def _drive_from(start: dict, cur: dict, capacity_kwh: float, max_speed: float = 0.0,
-                idle_min: float = 0.0, idle_tracked: bool = False):
+                idle_min: float = 0.0, idle_tracked: bool = False,
+                drive_min_km: float = DRIVE_MIN_KM):
     distance = cur["odo_km"] - start["odo_km"]
-    if distance < DRIVE_MIN_KM:
+    if distance < drive_min_km:
         return None
     dt_min = max((cur["ts"] - start["ts"]) / 60.0, 0.0)
     soc_used = max(start["soc"] - cur["soc"], 0.0)
@@ -403,7 +404,8 @@ def _drive_from(start: dict, cur: dict, capacity_kwh: float, max_speed: float = 
     }
 
 
-def close_trip_on_sleep(open_trip: dict, last_snapshot: dict, capacity_kwh: float):
+def close_trip_on_sleep(open_trip: dict, last_snapshot: dict, capacity_kwh: float,
+                        drive_min_km: float = DRIVE_MIN_KM):
     """Close a trip the moment the car is confirmed properly asleep.
 
     A car cannot reach true sleep while driving — it needs power to move, so
@@ -419,11 +421,12 @@ def close_trip_on_sleep(open_trip: dict, last_snapshot: dict, capacity_kwh: floa
     """
     idle_min = _confirmed_idle_min(open_trip, last_snapshot["ts"])
     return _drive_from(open_trip, last_snapshot, capacity_kwh, open_trip.get("max_speed", 0.0),
-                       idle_min, idle_tracked=True)
+                       idle_min, idle_tracked=True, drive_min_km=drive_min_km)
 
 
 def live_trip(
-    open_trip: dict | None, snap: dict | None, capacity_kwh: float = 75.0
+    open_trip: dict | None, snap: dict | None, capacity_kwh: float = 75.0,
+    drive_min_km: float = DRIVE_MIN_KM,
 ) -> dict | None:
     """Progress of the drive in flight — the dashboard's "current drive" view."""
     if not open_trip or not snap:
@@ -440,7 +443,7 @@ def live_trip(
     # the measured energy (fractional range delta) when it's the larger figure.
     # Same contamination guard as completed drives: sub-40 Wh/km over the trip
     # means the range reading was refilled mid-drive — treat energy as unknown.
-    if distance >= DRIVE_MIN_KM and energy_kwh * 1000.0 / distance < MIN_PLAUSIBLE_WH_PER_KM:
+    if distance >= drive_min_km and energy_kwh * 1000.0 / distance < MIN_PLAUSIBLE_WH_PER_KM:
         energy_kwh = 0.0
     soc_from_energy = (energy_kwh / capacity_kwh * 100.0) if capacity_kwh else 0.0
     soc_eff = max(soc_used, soc_from_energy)
@@ -458,17 +461,18 @@ def live_trip(
         "energy_kwh": round(energy_kwh, 2),
         "driving_energy_kwh": (
             round(_idle_adjusted_kwh(energy_kwh, idle_min, snap.get("out_temp")), 2)
-            if energy_kwh > 0 and distance >= DRIVE_MIN_KM else None
+            if energy_kwh > 0 and distance >= drive_min_km else None
         ),
-        "wh_per_km": round(energy_kwh * 1000.0 / distance) if energy_kwh > 0 and distance >= DRIVE_MIN_KM else None,
+        "wh_per_km": round(energy_kwh * 1000.0 / distance) if energy_kwh > 0 and distance >= drive_min_km else None,
         "driving_wh_per_km": (
             _subtract_idle_energy(energy_kwh, distance, idle_min, snap.get("out_temp"))
-            if energy_kwh > 0 and distance >= DRIVE_MIN_KM else None
+            if energy_kwh > 0 and distance >= drive_min_km else None
         ),
     }
 
 
-def _charge_from(start: dict, cur: dict, capacity_kwh: float, price_per_kwh: float):
+def _charge_from(start: dict, cur: dict, capacity_kwh: float, price_per_kwh: float,
+                 drive_min_km: float = DRIVE_MIN_KM):
     dt_min = max((cur["ts"] - start["ts"]) / 60.0, 0.0)
     # Prefer Tesla's own measured energy for the session (charge_energy_added,
     # which accumulates during charging). Fall back to the range/SoC estimate
@@ -488,7 +492,7 @@ def _charge_from(start: dict, cur: dict, capacity_kwh: float, price_per_kwh: flo
     # case, instead of the now-contaminated raw reading.
     moved = (
         start.get("odo_km") is not None and cur.get("odo_km") is not None
-        and (cur["odo_km"] - start["odo_km"]) >= DRIVE_MIN_KM
+        and (cur["odo_km"] - start["odo_km"]) >= drive_min_km
     )
     if moved and energy_measured:
         gain = measured / capacity_kwh * 100.0 if capacity_kwh else 0.0
@@ -525,7 +529,7 @@ def _charge_from(start: dict, cur: dict, capacity_kwh: float, price_per_kwh: flo
 
 
 def close_charge_on_sleep(open_charge: dict, last_snapshot: dict, capacity_kwh: float,
-                          price_per_kwh: float):
+                          price_per_kwh: float, drive_min_km: float = DRIVE_MIN_KM):
     """Close a charge session the moment the car is confirmed asleep/gone
     unreachable, symmetric to ``close_trip_on_sleep``.
 
@@ -535,7 +539,7 @@ def close_charge_on_sleep(open_charge: dict, last_snapshot: dict, capacity_kwh: 
     from the last real reading rather than leaving it open indefinitely
     waiting for a reconnect that might be hours away.
     """
-    return _charge_from(open_charge, last_snapshot, capacity_kwh, price_per_kwh)
+    return _charge_from(open_charge, last_snapshot, capacity_kwh, price_per_kwh, drive_min_km)
 
 
 # AC (home/destination) charging routes mains power through the car's onboard
@@ -605,7 +609,8 @@ def _gap_meter_total(prev: dict, cur: dict) -> float | None:
     return cur_kwh if abs(cur_kwh - prev_kwh) > 0.05 else None
 
 
-def _split_gap_events(prev: dict, cur: dict, capacity_kwh: float, price_per_kwh: float):
+def _split_gap_events(prev: dict, cur: dict, capacity_kwh: float, price_per_kwh: float,
+                      drive_min_km: float = DRIVE_MIN_KM):
     """Reconstruct a charge immediately followed by a short drive, when both
     happened inside one unpolled gap (the car charged, then set off before
     the next poll caught it — e.g. a nap-time top-up followed by a school run).
@@ -635,7 +640,7 @@ def _split_gap_events(prev: dict, cur: dict, capacity_kwh: float, price_per_kwh:
     """
     meter_total = _gap_meter_total(prev, cur)
     moved = max(cur["odo_km"] - prev["odo_km"], 0.0)
-    if meter_total is None or moved < DRIVE_MIN_KM:
+    if meter_total is None or moved < drive_min_km:
         return None, None
 
     gained_pct = meter_total / capacity_kwh * 100.0 if capacity_kwh else 0.0
@@ -658,12 +663,12 @@ def _split_gap_events(prev: dict, cur: dict, capacity_kwh: float, price_per_kwh:
         {"ts": split_ts, "soc": split_soc, "energy_added_kwh": meter_total,
          "charger_kw": 0.0, "fast": bool(prev.get("fast") or cur.get("fast")),
          "out_temp": cur["out_temp"]},
-        capacity_kwh, price_per_kwh,
+        capacity_kwh, price_per_kwh, drive_min_km,
     )
     drive = _drive_from(
         {"ts": split_ts, "odo_km": prev["odo_km"], "soc": split_soc,
          "lat": prev.get("lat"), "lon": prev.get("lon")},
-        cur, capacity_kwh,
+        cur, capacity_kwh, drive_min_km=drive_min_km,
     )
     return charge, drive
 
@@ -675,8 +680,16 @@ def process_snapshot(
     open_charge: dict | None,
     capacity_kwh: float,
     price_per_kwh: float,
+    drive_min_km: float = DRIVE_MIN_KM,
 ) -> tuple[list[dict], list[dict], dict | None, dict | None]:
     """Advance the session state machine by one snapshot.
+
+    ``drive_min_km``: the minimum odometer movement treated as a real trip
+    rather than jitter (a car nudged while parked, GPS drift, a multi-point
+    turn) — see DRIVE_MIN_KM. Configurable (settings.drive_min_km) since it's
+    a real trade-off, not a bug fix: lower it to catch genuinely short moves
+    (a charger-to-parking-spot shuffle) at the cost of more exposure to
+    logging non-trips as tiny phantom drives.
 
     Returns (drives, charges, open_trip, open_charge) — the sessions completed
     at this snapshot plus the carried-over open sessions.
@@ -694,7 +707,8 @@ def process_snapshot(
         not open_trip and not open_charge and prev
         and not is_driving(cur) and not cur.get("charging")
     ):
-        split_charge, split_drive = _split_gap_events(prev, cur, capacity_kwh, price_per_kwh)
+        split_charge, split_drive = _split_gap_events(
+            prev, cur, capacity_kwh, price_per_kwh, drive_min_km)
 
     # --- Trips: open on power-on/in-gear, close when the car stops ---------
     if open_trip:
@@ -712,7 +726,8 @@ def process_snapshot(
             # then a new drive began. Close the first drive at the last seen point
             # and start a fresh one — two drives across a nap aren't one trip.
             d = _drive_from(open_trip, prev, capacity_kwh, open_trip.get("max_speed", 0.0),
-                            _confirmed_idle_min(open_trip, prev["ts"]), idle_tracked=True)
+                            _confirmed_idle_min(open_trip, prev["ts"]), idle_tracked=True,
+                            drive_min_km=drive_min_km)
             if d:
                 drives.append(d)
             open_trip = _open_trip_at(cur, cur, prev)
@@ -735,7 +750,7 @@ def process_snapshot(
                 # car covered the gap's distance and then parked, so estimate the
                 # real stop as the last reading plus the time to drive that
                 # distance at the trip's moving pace.
-                if prev and gap_min > PARK_END_MIN and moved >= DRIVE_MIN_KM:
+                if prev and gap_min > PARK_END_MIN and moved >= drive_min_km:
                     pace = max(open_trip.get("max_speed", 0.0) * 0.65, CITY_SPEED_KMH)
                     stop["ts"] = min(cur["ts"], prev["ts"] + moved / pace * 3600.0)
                 open_trip["stop_at"] = stop
@@ -743,7 +758,8 @@ def process_snapshot(
             parked_min = (cur["ts"] - stop_at["ts"]) / 60.0
             if is_powered_down(cur) or cur.get("charging") or parked_min >= PARK_END_MIN:
                 d = _drive_from(open_trip, stop_at, capacity_kwh, open_trip.get("max_speed", 0.0),
-                                _confirmed_idle_min(open_trip, stop_at["ts"]), idle_tracked=True)
+                                _confirmed_idle_min(open_trip, stop_at["ts"]), idle_tracked=True,
+                                drive_min_km=drive_min_km)
                 if d:
                     drives.append(d)
                 open_trip = None
@@ -764,7 +780,7 @@ def process_snapshot(
         if base is prev and prev:
             gap_min = (cur["ts"] - prev["ts"]) / 60.0
             moved = cur["odo_km"] - prev["odo_km"]
-            if gap_min > PARK_END_MIN and moved >= DRIVE_MIN_KM:
+            if gap_min > PARK_END_MIN and moved >= drive_min_km:
                 # Same pace model as the arrival-side estimate: ``cur`` is the
                 # first driving reading, so its instantaneous speed is real
                 # evidence of the pace, not just an assumption — prefer it
@@ -780,7 +796,7 @@ def process_snapshot(
         drives.append(split_drive)
     elif prev:
         # A whole drive happened between snapshots (asleep / cron gap).
-        d = _drive_from(prev, cur, capacity_kwh)
+        d = _drive_from(prev, cur, capacity_kwh, drive_min_km=drive_min_km)
         if d:
             # If prev was stale (car parked overnight, then a short morning
             # drive), the reconstructed span/energy cover the idle period too —
@@ -797,7 +813,7 @@ def process_snapshot(
             "fast": bool(open_charge.get("fast") or cur.get("fast")),
         }
         if not cur.get("charging"):
-            c = _charge_from(open_charge, cur, capacity_kwh, price_per_kwh)
+            c = _charge_from(open_charge, cur, capacity_kwh, price_per_kwh, drive_min_km)
             if c:
                 charges.append(c)
             open_charge = None
@@ -857,6 +873,7 @@ def process_snapshot(
             cur,
             capacity_kwh,
             price_per_kwh,
+            drive_min_km,
         )
         if c:
             charges.append(c)
