@@ -8,9 +8,16 @@ Chart.defaults.color = TICK;
 Chart.defaults.borderColor = GRID;
 Chart.defaults.font.family = "-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif";
 
-function fmt(n, digits = 0) {
+function fmt(n, digits = 0, fixed = false) {
   if (n === null || n === undefined) return "–";
-  return Number(n).toLocaleString(undefined, { maximumFractionDigits: digits });
+  // fixed: always show exactly `digits` decimals (e.g. "928.0", not "928")
+  // — for a handful of KPI headline numbers where consistent formatting
+  // matters more than trimming a redundant ".0". Off by default so every
+  // other existing fmt() call (charts, trip lists, ...) is untouched.
+  return Number(n).toLocaleString(undefined, {
+    maximumFractionDigits: digits,
+    minimumFractionDigits: fixed ? digits : 0,
+  });
 }
 
 function destroy(id) {
@@ -379,7 +386,7 @@ function renderKpis(d) {
     }
   }
   if (drv.available) {
-    cards.push(kpiCard("Distance", fmt(drv.total_distance_km) + " km",
+    cards.push(kpiCard("Distance", fmt(drv.total_distance_km, 1, true) + " km",
       `${fmt(drv.total_drives)} drives · ${fmt(drv.total_duration_h)} h`, "blue"));
     // Efficiency is unknown when the drive logged no energy (range gap).
     if (eff.available && eff.avg_efficiency_wh_per_km) {
@@ -433,24 +440,24 @@ function renderKpis(d) {
     }
   }
   if (chg.available) {
-    cards.push(kpiCard("Energy Charged", fmt(chg.total_energy_kwh) + " kWh",
+    cards.push(kpiCard("Energy Charged", fmt(chg.total_energy_kwh, 1, true) + " kWh",
       `${fmt(chg.total_sessions)} sessions`, "violet"));
     // AC vs DC split — compact single-line value; sub shows the actual kWh.
     const dcShare = chg.dc_energy_share_pct;
-    const acShare = Math.max(0, Math.round(100 - dcShare));
-    cards.push(kpiCard("AC / DC Energy", `${acShare} / ${fmt(dcShare, 0)}%`,
-      `${fmt(chg.ac_energy_kwh, 0)} / ${fmt(chg.dc_energy_kwh, 0)} kWh`, "red"));
+    const acShare = Math.max(0, 100 - dcShare);
+    cards.push(kpiCard("AC / DC Energy", `${fmt(acShare, 1, true)} / ${fmt(dcShare, 1, true)}%`,
+      `${fmt(chg.ac_energy_kwh, 1, true)} / ${fmt(chg.dc_energy_kwh, 1, true)} kWh`, "red"));
     // Driving Cost sits immediately left of Charging Cost so the two money
     // figures for the same window are directly comparable side by side.
     if (drv.available && drv.total_cost != null) {
-      cards.push(kpiCard("Driving Cost", `${cur} ${fmt(drv.total_cost, 2)}`,
+      cards.push(kpiCard("Driving Cost", `${cur} ${fmt(drv.total_cost, 1, true)}`,
         drv.cost_per_km != null ? `${cur} ${fmt(drv.cost_per_km, 3)} / km` : "", "violet"));
     }
     // What the window's charging cost, with the per-100km "fuel cost" figure
     // a petrol driver can compare directly.
     if (chg.total_cost != null && chg.total_cost > 0) {
       const per100 = chg.cost_per_100km != null ? ` · ${cur} ${fmt(chg.cost_per_100km, 2)}/100km` : "";
-      cards.push(kpiCard("Charging Cost", `${cur} ${fmt(chg.total_cost, 2)}`,
+      cards.push(kpiCard("Charging Cost", `${cur} ${fmt(chg.total_cost, 1, true)}`,
         `AC ${cur} ${fmt(chg.ac_cost, 2)} · DC ${cur} ${fmt(chg.dc_cost, 2)}${per100}`, "blue"));
     }
   }
