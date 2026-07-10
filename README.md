@@ -333,6 +333,12 @@ Two ways to add one:
 Self-hosted only (needs the backend database to persist against), so the
 button stays hidden in the static/demo build.
 
+Once at least one place is defined, an in-progress drive also gets a live
+**ETA** KPI card: straight-line distance and time to the nearest place you
+haven't reached yet, plus the SoC it projects on arrival at the drive's own
+current pace and efficiency. It's a gut-check, not turn-by-turn navigation —
+no map/routing service is involved.
+
 ---
 
 ## Install on iPhone / iPad (PWA) — no computer needed

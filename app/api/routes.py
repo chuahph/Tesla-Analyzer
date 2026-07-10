@@ -152,6 +152,47 @@ def _window(session: Session, vehicle_id: int, days: int, since: datetime | None
     return list(drives), list(charges)
 
 
+def _live_eta(session: Session, snap: dict, live: dict, capacity_kwh: float) -> dict | None:
+    """Distance/time/projected-SoC to the nearest named place the car isn't
+    already at, estimated from the live drive's own current position and pace.
+
+    Deliberately not a routed ETA (no map/routing service involved) — just a
+    straight-line distance at the drive's own average speed so far, which is
+    honest about what it is: a rough "will I make it, and with how much
+    battery" gut-check, not turn-by-turn navigation. Needs at least one named
+    place (see Place/_geofence_name) to have anything to project toward.
+    """
+    lat, lon = snap.get("lat"), snap.get("lon")
+    if lat is None or lon is None:
+        return None
+    cur_coords = f"{lat}, {lon}"
+    best_place, best_km = None, None
+    for p in session.query(Place).all():
+        dist = haversine_km(cur_coords, f"{p.lat}, {p.lon}")
+        if dist is None or dist <= p.radius_km:
+            continue  # unknown, or already there
+        if best_km is None or dist < best_km:
+            best_place, best_km = p, dist
+    if best_place is None:
+        return None
+    from .. import sync as sync_mod
+
+    # A just-started drive has near-zero avg speed (tiny elapsed time) — fall
+    # back to a typical city pace rather than projecting a near-infinite ETA.
+    pace = live["avg_speed_kmh"] if live.get("avg_speed_kmh", 0) >= 5.0 else sync_mod.CITY_SPEED_KMH
+    wh_per_km = live.get("driving_wh_per_km") or live.get("wh_per_km") or 0.0
+    projected_soc = None
+    if capacity_kwh and wh_per_km:
+        used_kwh = best_km * wh_per_km / 1000.0
+        projected_soc = round(max(live["soc"] - used_kwh / capacity_kwh * 100.0, 0.0), 1)
+    return {
+        "place": best_place.name,
+        "distance_km": round(best_km, 1),
+        "eta_min": round(best_km / pace * 60.0),
+        "projected_soc": projected_soc,
+    }
+
+
 _PLACE_CACHE: dict[str, tuple[str, str]] = {}
 
 
@@ -1287,6 +1328,7 @@ def summary(
         snap = _json.loads(snap_raw) if snap_raw else None
         if open_trip and snap:
             live = sync_mod.live_trip(open_trip, snap, capacity_kwh)
+            live["eta"] = _live_eta(session, snap, live, capacity_kwh)
             since = datetime.fromtimestamp(open_trip["ts"], sync_mod.MYT).replace(tzinfo=None)
             window_label = "current drive"
         else:

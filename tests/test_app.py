@@ -547,6 +547,46 @@ def test_places_crud_and_geofenced_labeling():
         settings.app_passcode = old
 
 
+def test_live_eta_projects_distance_time_and_soc_to_nearest_place():
+    """A live drive's ETA/projected SoC picks the nearest named place not
+    already reached, and returns nothing when the car is already there or no
+    place is defined at all."""
+    from app.api.routes import _live_eta
+    from app.database import SessionLocal
+    from app.models import Place
+
+    with SessionLocal() as s:
+        s.add(Place(name="Office", lat=5.4000, lon=100.4000, radius_km=0.15,
+                     created_at=datetime.now()))
+        s.add(Place(name="Home", lat=5.3300, lon=100.3000, radius_km=0.15,
+                     created_at=datetime.now()))
+        s.commit()
+
+        snap = {"lat": 5.3350, "lon": 100.3050}  # ~600 m from Home, outside its radius
+        live = {"soc": 70.0, "avg_speed_kmh": 40.0, "driving_wh_per_km": 150.0}
+        eta = _live_eta(s, snap, live, capacity_kwh=60.0)
+        assert eta is not None
+        assert eta["place"] == "Home"          # nearer than Office
+        assert eta["distance_km"] < 1.0
+        assert eta["eta_min"] >= 0
+        assert eta["projected_soc"] is not None and eta["projected_soc"] <= 70.0
+
+        # Already inside Home's radius -> Home excluded, Office (far) picked instead.
+        snap_at_home = {"lat": 5.3300, "lon": 100.3000}
+        eta2 = _live_eta(s, snap_at_home, live, capacity_kwh=60.0)
+        assert eta2 is not None and eta2["place"] == "Office"
+
+        # No GPS on the snapshot -> no projection possible.
+        assert _live_eta(s, {"lat": None, "lon": None}, live, 60.0) is None
+
+    # No places defined at all -> nothing to project toward.
+    with SessionLocal() as s:
+        for p in s.query(Place).all():
+            s.delete(p)
+        s.commit()
+        assert _live_eta(s, {"lat": 5.33, "lon": 100.30}, live, 60.0) is None
+
+
 def test_summary_current_drive_falls_back_to_last_drive():
     settings = get_settings()
     old = settings.app_passcode

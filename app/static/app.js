@@ -287,6 +287,15 @@ function renderKpis(d) {
     cards.push(kpiCard("Battery", fmt(lt.soc_used, 1) + "% used",
       `${fmt(lt.start_soc)}% → ${fmt(lt.soc)}%` +
       (lt.km_per_soc ? ` · ${fmt(lt.km_per_soc, 1)} km/1%` : ""), "teal"));
+    // Straight-line ETA to the nearest named place not already reached, with
+    // the SoC it projects to on arrival at this drive's own pace/efficiency
+    // (see /api/places — needs at least one named place to show at all).
+    if (lt.eta) {
+      const soc = lt.eta.projected_soc;
+      cards.push(kpiCard(`ETA · ${lt.eta.place}`, fmt(lt.eta.eta_min) + " min",
+        `${fmt(lt.eta.distance_km, 1)} km` + (soc != null ? ` · ~${fmt(soc, 1)}% on arrival` : ""),
+        soc != null && soc < 15 ? "amber" : "blue"));
+    }
   }
   if (drv.available) {
     cards.push(kpiCard("Distance", fmt(drv.total_distance_km) + " km",
