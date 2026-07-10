@@ -727,31 +727,25 @@ function renderLists(d) {
       return `<li class="loc"><span class="loc-name">${l}${when}</span>` +
         `<span class="count">${kwh != null ? fmt(kwh, 1) + " kWh · " : ""}${c}×</span></li>`;
     }).join("");
-  // "Since charge" / "Current drive" windows start after the last charge, so
-  // they never contain a charging session — say so instead of looking broken.
+  // The "since charge" window starts right where the last charge ends, so it
+  // never contains a charging session of its own — surface that charge as a
+  // list row (same shape as a normal location entry) instead of leaving the
+  // card looking broken.
+  const lc = d.window_label === "since last charge" ? d.last_charge : null;
+  const lastChargeRow = lc ? (() => {
+    const kwh = lc.energy_added_kwh != null ? `${fmt(lc.energy_added_kwh, 1)} kWh` : "";
+    const soc = lc.start_soc != null && lc.end_soc != null ? `${lc.start_soc}%→${lc.end_soc}%` : "";
+    const cost = lc.cost != null ? `${d.currency} ${fmt(lc.cost, 2)}` : "";
+    const when = `<span class="loc-when">ended ${tripWhen(lc.end_time)}${soc ? " · " + soc : ""}</span>`;
+    const count = [kwh, cost].filter(Boolean).join(" · ");
+    return `<li class="loc last-charge"><span class="loc-name">${lc.location || "Last charge"}${when}</span>` +
+      `<span class="count">${count}</span></li>`;
+  })() : "";
   const noChargeMsg = /charge|drive/.test(d.window_label || "")
     ? "This window starts after your last charge — pick a wider window (e.g. 7 days) to see charging spots."
     : "No charging sessions in this window";
   document.getElementById("topLocations").innerHTML =
-    locs || `<li class="empty">${noChargeMsg}</li>`;
-
-  const lastChargeEl = document.getElementById("lastChargeInfo");
-  if (lastChargeEl) {
-    if (d.window_label === "since last charge" && d.last_charge) {
-      const lc = d.last_charge;
-      const kwh = lc.energy_added_kwh != null ? `${fmt(lc.energy_added_kwh, 1)} kWh` : "";
-      const soc = lc.start_soc != null && lc.end_soc != null ? `${lc.start_soc}% → ${lc.end_soc}%` : "";
-      const cost = lc.cost != null ? `${d.currency} ${fmt(lc.cost, 2)}` : "";
-      const loc = lc.location ? ` at ${lc.location}` : "";
-      const bits = [kwh, soc, cost].filter(Boolean).join(" · ");
-      lastChargeEl.innerHTML =
-        `⚡ Last charge${loc}, ended ${tripWhen(lc.end_time)}: ${bits}` +
-        `<br><span class="loc-when">All trips below happened after this charge.</span>`;
-      lastChargeEl.classList.remove("hidden");
-    } else {
-      lastChargeEl.classList.add("hidden");
-    }
-  }
+    lastChargeRow + locs || `<li class="empty">${noChargeMsg}</li>`;
 }
 
 function renderBehaviour(d) {
