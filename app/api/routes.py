@@ -37,9 +37,9 @@ FAST_POLL_WINDOW_MIN = 3.0
 # request got triggered. /api/sync may now be called every minute or so (an
 # external cron, an uptime monitor), far more often than a car naturally needs
 # reading. Outside an active trip or a just-woke escalation window, don't read
-# more often than this — let an online-but-idle car actually reach its normal
-# sleep instead of being kept awake by our own frequent checks.
-BASE_POLL_INTERVAL_MIN = 5.0
+# more often than settings.sync_poll_interval_min (config.py) — hitting
+# /api/sync more often than that does NOT force more frequent reads, the
+# endpoint decides for itself.
 
 # If /api/sync hasn't written a last_status update in this long, something's
 # wrong upstream of the app itself — the external cron has stopped firing, or
@@ -1026,7 +1026,7 @@ def sync_now(wake: bool = Query(False), session: Session = Depends(get_session))
         last_poll_ts = float(state.get(session, poll_key) or 0)
         woke_at = float(state.get(session, state.scoped(state.WOKE_AT_KEY, vvin)) or 0)
         recently_woke = bool(woke_at) and (now_ts - woke_at) <= FAST_POLL_WINDOW_MIN * 60
-        due = (now_ts - last_poll_ts) >= BASE_POLL_INTERVAL_MIN * 60
+        due = (now_ts - last_poll_ts) >= settings.sync_poll_interval_min * 60
         trip_in_progress = bool(state.get(session, state.scoped(state.OPEN_TRIP_KEY, vvin)))
         charge_in_progress = bool(state.get(session, state.scoped(state.OPEN_CHARGE_KEY, vvin)))
         manual_sync = wake and vvin == active_target

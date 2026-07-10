@@ -531,7 +531,7 @@ def test_online_idle_car_is_not_read_again_within_base_interval(monkeypatch):
         vin = "VINAAAAAAAAAAAAAA"
         with SessionLocal() as s:
             services.link_with_token(s, "tok")
-            state.put(s, state.scoped(state.LAST_POLL_KEY, vin), str(_time.time() - 60))  # read 1 min ago
+            state.put(s, state.scoped(state.LAST_POLL_KEY, vin), str(_time.time() - 20))  # read 20s ago
 
         monkeypatch.setattr("app.tesla_client.TeslaClient", _CountingParkedClient)
         with TestClient(app) as client:
@@ -570,6 +570,45 @@ def test_online_idle_car_is_read_once_base_interval_elapses(monkeypatch):
             resp = client.post("/api/sync")
             assert resp.status_code == 200
             assert resp.json()["status"] == "parked"
+        assert _CountingParkedClient.calls == 1
+    finally:
+        settings.app_passcode = old
+        _reset_to_demo()
+
+
+def test_sync_poll_interval_defaults_to_one_minute():
+    """The whole point of this project's cron guidance ('every 1 minute')
+    is that a real read happens on close to every tick by default — so the
+    default must actually be 1, not the old 5-minute value."""
+    from app.config import Settings
+
+    assert Settings().sync_poll_interval_min == 1.0
+
+
+def test_online_idle_car_read_again_after_just_over_a_minute(monkeypatch):
+    """With the default 1-minute interval, a car last read 70s ago (just
+    past the new threshold, well short of the old 5-minute one) must be
+    read again — proving the default actually changed, not just that some
+    interval is enforced."""
+    import time as _time
+
+    from app import services, state
+
+    settings = get_settings()
+    old = settings.app_passcode
+    settings.app_passcode = ""
+    _CountingParkedClient.calls = 0
+    try:
+        monkeypatch.setattr("app.tesla_client.TeslaClient", _FakeClient)
+        vin = "VINAAAAAAAAAAAAAA"
+        with SessionLocal() as s:
+            services.link_with_token(s, "tok")
+            state.put(s, state.scoped(state.LAST_POLL_KEY, vin), str(_time.time() - 70))
+
+        monkeypatch.setattr("app.tesla_client.TeslaClient", _CountingParkedClient)
+        with TestClient(app) as client:
+            resp = client.post("/api/sync")
+            assert resp.status_code == 200
         assert _CountingParkedClient.calls == 1
     finally:
         settings.app_passcode = old

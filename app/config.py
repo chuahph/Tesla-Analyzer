@@ -18,6 +18,19 @@ class Settings(BaseSettings):
     tesla_refresh_token: str = ""
     tesla_api_base_url: str = "https://owner-api.teslamotors.com"
     poll_interval_seconds: int = 60
+    # How often /api/sync (the Render/cron path — not the standalone
+    # collector above) actually calls Tesla's vehicle_data() for an
+    # online-but-idle car, in minutes. Calling /api/sync itself more often
+    # than this (an external cron every 1 min is normal and recommended)
+    # does NOT force more frequent reads — the endpoint decides for itself,
+    # separately from how often it's hit, since a read is itself an
+    # activity signal that resets the car's own sleep timer. Lower = more
+    # up-to-date data and fewer session-reconstruction gaps, at the cost of
+    # more Tesla API calls and a mildly harder time falling asleep on its
+    # own. 1.0 matches the cadence this project's own setup guide
+    # recommends for the external cron, so a real read happens on (close
+    # to) every tick by default.
+    sync_poll_interval_min: float = 1.0
 
     # Tesla OAuth (Fleet API). Required only for the "Sign in with Tesla" button;
     # the access-token paste flow and demo/import modes do not need these.
