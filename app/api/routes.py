@@ -1630,13 +1630,30 @@ def summary(
             if last_start is not None:
                 since = last_start
                 window_label = "last drive"
-    elif since_charge:
-        last_end = session.scalar(
-            select(func.max(Charge.end_time)).where(Charge.vehicle_id == vehicle.id)
+    last_charge_summary = None
+    if since_charge:
+        last_charge = session.scalar(
+            select(Charge).where(Charge.vehicle_id == vehicle.id)
+            .order_by(Charge.end_time.desc())
         )
-        if last_end is not None:
-            since = last_end
+        if last_charge is not None:
+            since = last_charge.end_time
             window_label = "since last charge"
+            # Surfaced so the UI can show what this window is actually
+            # "since" — the charge itself is otherwise invisible in this
+            # view (it ended right at the window's start, so it's excluded
+            # from every list below by definition), which reads as "my
+            # charge went missing" rather than "this window starts after it".
+            last_charge_summary = {
+                "start_time": last_charge.start_time.isoformat(timespec="minutes"),
+                "end_time": last_charge.end_time.isoformat(timespec="minutes"),
+                "energy_added_kwh": last_charge.energy_added_kwh,
+                "start_soc": last_charge.start_soc,
+                "end_soc": last_charge.end_soc,
+                "cost": last_charge.cost,
+                "charge_type": last_charge.charge_type,
+                "location": last_charge.location,
+            }
     drives, charges = _window(session, vehicle.id, days, since=since)
 
     driving = driving_analysis.analyze(
@@ -1796,6 +1813,7 @@ def summary(
         "garage": garage,
         "window_days": days,
         "window_label": window_label,
+        "last_charge": last_charge_summary,
         "generated_at": datetime.now().isoformat(timespec="seconds"),
         "currency": settings.currency,
         "last_status": last_status,

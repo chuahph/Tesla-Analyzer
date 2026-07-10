@@ -20,7 +20,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 MILES_TO_KM = 1.60934
-DRIVE_MIN_KM = 0.5   # ignore odometer jitter below this
+DRIVE_MIN_KM = 0.1   # ignore odometer jitter below this
 CHARGE_MIN_PCT = 0.5  # ignore SoC jitter below this
 # A trip ends when the car stops moving — not only when it powers down. If the
 # driver stays aboard (A/C running) the car may sit parked for a long time, and

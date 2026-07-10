@@ -734,6 +734,24 @@ function renderLists(d) {
     : "No charging sessions in this window";
   document.getElementById("topLocations").innerHTML =
     locs || `<li class="empty">${noChargeMsg}</li>`;
+
+  const lastChargeEl = document.getElementById("lastChargeInfo");
+  if (lastChargeEl) {
+    if (d.window_label === "since last charge" && d.last_charge) {
+      const lc = d.last_charge;
+      const kwh = lc.energy_added_kwh != null ? `${fmt(lc.energy_added_kwh, 1)} kWh` : "";
+      const soc = lc.start_soc != null && lc.end_soc != null ? `${lc.start_soc}% → ${lc.end_soc}%` : "";
+      const cost = lc.cost != null ? `${d.currency} ${fmt(lc.cost, 2)}` : "";
+      const loc = lc.location ? ` at ${lc.location}` : "";
+      const bits = [kwh, soc, cost].filter(Boolean).join(" · ");
+      lastChargeEl.innerHTML =
+        `⚡ Last charge${loc}, ended ${tripWhen(lc.end_time)}: ${bits}` +
+        `<br><span class="loc-when">All trips below happened after this charge.</span>`;
+      lastChargeEl.classList.remove("hidden");
+    } else {
+      lastChargeEl.classList.add("hidden");
+    }
+  }
 }
 
 function renderBehaviour(d) {

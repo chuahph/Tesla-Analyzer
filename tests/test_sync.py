@@ -195,30 +195,40 @@ def test_trip_closes_when_charging_starts_not_merging_across_a_charge():
 
 
 def test_drive_min_km_is_configurable():
-    """A short move (e.g. charger to parking spot) sits below the default
-    0.5 km floor and is filtered as jitter — but a lower configured
-    drive_min_km must let it through as a real logged trip."""
+    """A genuinely tiny move (a car nudged while parked) sits below the
+    default 0.1 km floor and is filtered as jitter; a real short move (e.g.
+    charger to parking spot) clears the default floor and logs — but
+    raising drive_min_km must be able to filter it too, for anyone who'd
+    rather not see moves that short at all."""
     from app.sync import _drive_from
 
-    start = snap(T0, 10_000.0, 91, range_km=453.0)
-    end = snap(T0 + 180, 10_000.4, 91, range_km=452.8)  # 0.4 km, 3 min
+    jitter_start = snap(T0, 10_000.0, 91, range_km=453.0)
+    jitter_end = snap(T0 + 60, 10_000.05, 91, range_km=452.97)  # 0.05 km jitter
 
-    assert _drive_from(start, end, 75.0) is None                          # default 0.5 km floor
-    d = _drive_from(start, end, 75.0, drive_min_km=0.2)
-    assert d is not None and d["distance_km"] == 0.4                      # 0.2 km floor lets it through
+    short_start = snap(T0, 10_000.0, 91, range_km=453.0)
+    short_end = snap(T0 + 180, 10_000.4, 91, range_km=452.8)    # 0.4 km, 3 min
+
+    assert _drive_from(jitter_start, jitter_end, 75.0) is None             # default 0.1 km floor filters jitter
+    d = _drive_from(short_start, short_end, 75.0)
+    assert d is not None and d["distance_km"] == 0.4                       # default floor lets a real move through
+    assert _drive_from(short_start, short_end, 75.0, drive_min_km=0.5) is None  # raised floor filters it again
 
 
 def test_drive_min_km_threaded_through_process_snapshot():
     """The configurable floor must reach the whole-gap trip reconstruction
     that process_snapshot uses, not just _drive_from in isolation."""
+    j1 = snap(T0, 10_000.0, 91)
+    j2 = snap(T0 + 60, 10_000.05, 91)    # 0.05 km jitter, no snapshot in between
+    d, _, _, _ = process_snapshot(j1, j2, None, None, 75.0, 0.90)
+    assert d == []                        # default 0.1 km floor: filtered as jitter
+
     s1 = snap(T0, 10_000.0, 91)
-    s2 = snap(T0 + 180, 10_000.4, 91)   # 0.4 km short move, no snapshot in between
+    s2 = snap(T0 + 180, 10_000.4, 91)    # 0.4 km real short move
+    d2, _, _, _ = process_snapshot(s1, s2, None, None, 75.0, 0.90)
+    assert len(d2) == 1 and d2[0]["distance_km"] == 0.4   # default floor: logged
 
-    d, _, _, _ = process_snapshot(s1, s2, None, None, 75.0, 0.90)
-    assert d == []                       # default floor: filtered as jitter
-
-    d2, _, _, _ = process_snapshot(s1, s2, None, None, 75.0, 0.90, drive_min_km=0.2)
-    assert len(d2) == 1 and d2[0]["distance_km"] == 0.4   # lowered floor: logged
+    d3, _, _, _ = process_snapshot(s1, s2, None, None, 75.0, 0.90, drive_min_km=0.5)
+    assert d3 == []                       # raised floor: filtered again
 
 
 def test_contaminated_low_energy_drive_flagged_unknown():

@@ -422,6 +422,10 @@ canvas { max-height: 260px; }
 .plain-list li.loc { align-items: flex-start; }
 .loc-name { display: flex; flex-direction: column; gap: 1px; }
 .loc-when { color: var(--muted); font-size: 11.5px; font-variant-numeric: tabular-nums; }
+.last-charge-note {
+  font-size: 12.5px; color: var(--muted); margin: 0 0 8px; line-height: 1.5;
+  background: var(--bg-soft, rgba(127, 127, 127, 0.08)); border-radius: 8px; padding: 8px 10px;
+}
 /* Recent trips: route on the first line, the numbers on a muted second line —
    avoids the awkward mid-route wrapping of a single-line row. */
 .plain-list li.trip { flex-direction: column; align-items: flex-start; gap: 2px; }

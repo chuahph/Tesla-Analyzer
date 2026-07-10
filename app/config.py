@@ -36,7 +36,7 @@ class Settings(BaseSettings):
     # Lower it to catch genuinely short moves (e.g. a charger-to-parking-spot
     # shuffle) as logged trips; the trade-off is more exposure to logging a
     # non-trip as a tiny phantom drive. See DRIVE_MIN_KM in app/sync.py.
-    drive_min_km: float = 0.5
+    drive_min_km: float = 0.1
 
     # Tesla OAuth (Fleet API). Required only for the "Sign in with Tesla" button;
     # the access-token paste flow and demo/import modes do not need these.

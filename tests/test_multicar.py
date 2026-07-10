@@ -576,10 +576,10 @@ def test_online_idle_car_is_read_once_base_interval_elapses(monkeypatch):
         _reset_to_demo()
 
 
-def test_drive_min_km_defaults_to_half_a_km():
+def test_drive_min_km_defaults_to_0_1_km():
     from app.config import Settings
 
-    assert Settings().drive_min_km == 0.5
+    assert Settings().drive_min_km == 0.1
 
 
 def test_sync_poll_interval_defaults_to_one_minute():
