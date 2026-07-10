@@ -53,6 +53,23 @@ def delete_drives(session, ids: list[int]) -> int:
     return n
 
 
+# Fixed quick-tag categories the UI cycles through; the column itself accepts
+# any short string, so a future free-text tag entered another way still
+# round-trips fine — this is just what the one-tap cycle offers.
+TAG_CYCLE = ("", "work", "personal")
+
+
+def tag_drive(session, drive_id: int, tag: str) -> bool:
+    """Set (or clear, with tag="") a single trip's category. Returns whether
+    the trip was found."""
+    drive = session.get(Drive, drive_id)
+    if drive is None:
+        return False
+    drive.tag = tag[:20]
+    session.commit()
+    return True
+
+
 def replace_with_import(
     session, drives: list[dict], charges: list[dict], *, name: str = "Imported Tesla"
 ) -> dict:

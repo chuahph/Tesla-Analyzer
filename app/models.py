@@ -83,6 +83,10 @@ class Drive(Base):
     idle_min: Mapped[float] = mapped_column(Float, default=0.0)
     idle_tracked: Mapped[bool] = mapped_column(Boolean, default=False)
 
+    # User-assigned category ("work" / "personal", or any free text) for
+    # expense-claim/cost-splitting purposes. "" = untagged.
+    tag: Mapped[str] = mapped_column(String(20), default="")
+
     vehicle: Mapped["Vehicle"] = relationship(back_populates="drives")
 
     @property

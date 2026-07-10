@@ -232,6 +232,33 @@ function wireInfoButtons(root) {
   });
 }
 
+// Tap a trip's tag chip to cycle untagged -> work -> personal -> untagged,
+// persisting each step immediately.
+const TAG_CYCLE = ["", "work", "personal"];
+function wireTagChips(root) {
+  root.querySelectorAll(".trip-tag[data-trip-id]").forEach((btn) => {
+    btn.addEventListener("click", async (e) => {
+      e.stopPropagation();
+      const id = +btn.dataset.tripId;
+      const next = TAG_CYCLE[(TAG_CYCLE.indexOf(btn.dataset.tag) + 1) % TAG_CYCLE.length];
+      btn.disabled = true;
+      try {
+        const resp = await fetch("/api/data/tag-drive", {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ id, tag: next }),
+        });
+        if (resp.ok && lastData) {
+          const trip = (lastData.driving.recent_trips || []).find((t) => t.id === id);
+          if (trip) trip.tag = next;
+          renderLists(lastData);   // full re-render: chip label + by-tag summary
+          return;
+        }
+      } catch (err) { /* leave the chip as-is on failure */ }
+      btn.disabled = false;
+    });
+  });
+}
+
 function renderKpis(d) {
   const drv = d.driving, chg = d.charging, eff = d.efficiency, cur = d.currency;
   const cards = [];
@@ -558,18 +585,41 @@ function renderLists(d) {
           `<button class="info-btn" data-info="${condId}">!</button></span>` +
           `<span id="${condId}" class="info-pop hidden">${tripConditionWhy(t)}</span>`
         : "";
+      // Work/personal category: a tap cycles untagged -> work -> personal ->
+      // untagged. Self-hosted only (needs a real trip id to persist against).
+      const tagChip = t.id != null && !tripSelectMode
+        ? `<button class="trip-tag trip-tag-${t.tag || "none"}" data-trip-id="${t.id}" data-tag="${t.tag || ""}" title="Tap to set work/personal">` +
+          `${t.tag === "work" ? "💼 Work" : t.tag === "personal" ? "🏠 Personal" : "+ tag"}</button>`
+        : "";
       return `<li class="trip${tripSelectMode ? " selectable" : ""}">` +
         `<span class="trip-head">${check}${score}${dq}${distFlag}<span class="trip-route">${when}${t.route ? "<br>" + t.route : ""}${mapLink}</span></span>` +
-        `<span class="trip-meta">${t.distance_km} km · ${t.duration_min} min${speed}${kwh}${whkm}${soc}${cost}</span>${cond}</li>`;
+        `<span class="trip-meta">${t.distance_km} km · ${t.duration_min} min${speed}${kwh}${whkm}${soc}${cost}${tagChip}</span>${cond}</li>`;
     })
     .join("");
   const list = document.getElementById("recentTrips");
   list.innerHTML = trips || '<li class="empty">No trips in this window</li>';
   wireInfoButtons(list);
+  wireTagChips(list);
   // Only offer the trip tools when there's a real (self-hosted) DB behind them.
   const tools = document.getElementById("trip-tools");
   if (tools) tools.classList.toggle("hidden", STATIC_MODE || !recent.some((t) => t.id != null));
   updateDeleteSelectedLabel();
+
+  // Per-tag totals ("work" vs "personal" vs untagged), shown only once
+  // something's actually been tagged.
+  const byTag = d.driving.by_tag;
+  const tagSummary = document.getElementById("tag-summary");
+  if (tagSummary) {
+    if (byTag) {
+      const label = (k) => (k === "work" ? "💼 Work" : k === "personal" ? "🏠 Personal" : "Untagged");
+      tagSummary.innerHTML = Object.entries(byTag).map(([k, v]) =>
+        `<span>${label(k)}: ${v.distance_km} km` +
+        `${v.cost != null ? ` · ${d.currency} ${fmt(v.cost, 2)}` : ""}</span>`).join("");
+      tagSummary.style.display = "";
+    } else {
+      tagSummary.style.display = "none";
+    }
+  }
 
   const routes = (d.driving.top_routes || [])
     .map(([r, c]) => `<li><span>${r}</span><span class="count">${c}×</span></li>`).join("");

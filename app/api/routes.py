@@ -302,6 +302,18 @@ def delete_drives(payload: dict = Body(...), session: Session = Depends(get_sess
     return {"deleted_drives": deleted}
 
 
+@router.post("/data/tag-drive")
+def tag_drive(payload: dict = Body(...), session: Session = Depends(get_session)):
+    """Set (or clear) a single trip's work/personal/... category."""
+    drive_id = payload.get("id")
+    if not isinstance(drive_id, int):
+        raise HTTPException(400, "Missing or invalid 'id'.")
+    tag = str(payload.get("tag") or "")
+    if not services.tag_drive(session, drive_id, tag):
+        raise HTTPException(404, "Trip not found.")
+    return {"id": drive_id, "tag": tag}
+
+
 # --- Data source: link Tesla account --------------------------------------
 
 

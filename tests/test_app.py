@@ -449,6 +449,37 @@ def test_delete_selected_drives_by_id():
         seed_demo_if_empty()
 
 
+def test_tag_drive_endpoint():
+    from app.database import SessionLocal
+    from app.models import Drive
+
+    settings = get_settings()
+    old = settings.app_passcode
+    settings.app_passcode = ""
+    try:
+        with TestClient(app) as client:  # startup seeds demo data
+            with SessionLocal() as s:
+                drive_id = s.query(Drive).order_by(Drive.id).first().id
+
+            resp = client.post("/api/data/tag-drive", json={"id": drive_id, "tag": "work"})
+            assert resp.status_code == 200
+            assert resp.json() == {"id": drive_id, "tag": "work"}
+            with SessionLocal() as s:
+                assert s.get(Drive, drive_id).tag == "work"
+
+            # Clearing (empty tag) works too.
+            client.post("/api/data/tag-drive", json={"id": drive_id, "tag": ""})
+            with SessionLocal() as s:
+                assert s.get(Drive, drive_id).tag == ""
+
+            # Unknown id -> 404, not a silent no-op.
+            assert client.post("/api/data/tag-drive", json={"id": 9_999_999, "tag": "work"}).status_code == 404
+            # Missing id -> 400.
+            assert client.post("/api/data/tag-drive", json={"tag": "work"}).status_code == 400
+    finally:
+        settings.app_passcode = old
+
+
 def test_summary_current_drive_falls_back_to_last_drive():
     settings = get_settings()
     old = settings.app_passcode

@@ -273,6 +273,40 @@ def test_driving_cost_and_map_links():
     assert r2["recent_trips"][0]["map_url"] is None
 
 
+def test_by_tag_totals_and_per_trip_tag():
+    """Tagged trips roll up into a per-tag distance/energy/cost breakdown;
+    an all-untagged window reports by_tag as None (nothing to show)."""
+    from datetime import datetime
+
+    from app.analysis import driving as driving_analysis
+    from app.models import Drive
+
+    def trip(day, tag, distance=10.0, energy=1.5):
+        return Drive(
+            start_time=datetime(2026, 7, day, 8, 0), end_time=datetime(2026, 7, day, 8, 20),
+            distance_km=distance, duration_min=20.0, avg_speed_kmh=30.0, max_speed_kmh=60.0,
+            start_soc=60, end_soc=58, energy_used_kwh=energy, outside_temp_c=28.0, tag=tag,
+        )
+
+    work = trip(1, "work")
+    personal = trip(2, "personal", distance=5.0, energy=0.8)
+    untagged = trip(3, "")
+
+    r = driving_analysis.analyze([work, personal, untagged], 150.0, 75.0, energy_price=0.90)
+    assert r["recent_trips"][0]["tag"] in ("work", "personal", "")   # present on every trip
+    by_tag = {t["tag"] for t in r["recent_trips"]}
+    assert by_tag == {"work", "personal", ""}
+
+    assert r["by_tag"]["work"]["distance_km"] == 10.0
+    assert r["by_tag"]["work"]["cost"] == round(1.5 * 0.90, 2)
+    assert r["by_tag"]["personal"]["distance_km"] == 5.0
+    assert r["by_tag"]["untagged"]["distance_km"] == 10.0
+
+    # Nothing tagged -> by_tag stays None (no card worth showing).
+    r2 = driving_analysis.analyze([untagged], 150.0, 75.0, energy_price=0.90)
+    assert r2["by_tag"] is None
+
+
 def test_driving_cost_accepts_time_of_use_price_function():
     """When energy_price is a callable (TOU pricing), each trip is priced at
     its own start_time's rate, and the window total blends those rates by

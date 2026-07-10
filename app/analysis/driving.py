@@ -307,6 +307,25 @@ def analyze(drives: list[Drive], rated_wh_per_km: float = 150.0,
         else price_at(drives[-1].start_time)
     )
 
+    # Per-tag totals (distance/energy/cost), keyed by whatever's in Drive.tag
+    # ("" groups every untagged trip together) — the expense-claim view: how
+    # much of this window's driving/cost was "work" vs "personal" etc.
+    by_tag: dict[str, dict[str, float]] = defaultdict(lambda: {"distance_km": 0.0, "energy_kwh": 0.0, "cost": 0.0})
+    for d in drives:
+        row = by_tag[getattr(d, "tag", "") or ""]
+        row["distance_km"] += d.distance_km
+        if has_valid_energy(d):
+            row["energy_kwh"] += d.energy_used_kwh
+            row["cost"] += d.energy_used_kwh * price_at(d.start_time)
+    tag_totals = {
+        (tag or "untagged"): {
+            "distance_km": round(v["distance_km"], 1),
+            "energy_kwh": round(v["energy_kwh"], 1),
+            "cost": round(v["cost"], 2) if window_price else None,
+        }
+        for tag, v in by_tag.items()
+    }
+
     return {
         "available": True,
         "total_drives": len(drives),
@@ -335,6 +354,9 @@ def analyze(drives: list[Drive], rated_wh_per_km: float = 150.0,
             if window_price and total_distance else None
         ),
         "insights": _insights(drives),
+        # Only surfaced if at least one trip in the window is tagged, so an
+        # account nobody ever tags doesn't grow an "untagged: everything" card.
+        "by_tag": tag_totals if any(k != "untagged" for k in tag_totals) else None,
         "p95_speed_kmh": round(percentile([d.max_speed_kmh for d in drives], 0.95), 1),
         "max_speed_kmh": round(max((d.max_speed_kmh for d in drives), default=0.0), 1),
         "longest_trip_km": round(max(distances), 1),
@@ -408,6 +430,8 @@ def analyze(drives: list[Drive], rated_wh_per_km: float = 150.0,
                 # against the trip's own stored endpoints — an odometer/GPS
                 # glitch, independent of the energy math.
                 "distance_flag": _distance_flag(d),
+                # User-assigned category ("work"/"personal"/...); "" = untagged.
+                "tag": getattr(d, "tag", "") or "",
                 "route": f"{d.start_location} → {d.end_location}"
                 if d.start_location and d.end_location else "",
                 # Live directions link (Google Maps start -> end) when the raw

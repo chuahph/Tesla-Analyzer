@@ -750,3 +750,18 @@ footer { padding: 18px 28px; color: var(--muted); font-size: 12px; border-top: 1
 .dq-badge.dq-estimated { color: var(--amber); background: rgba(245,158,11,.14); }
 .dq-badge.dq-incomplete { color: #ff6b70; background: rgba(232,33,39,.14); }
 .dq-badge.dq-warn { color: var(--amber); background: rgba(245,158,11,.14); }
+
+/* Trip tag chip (in trip-meta) + the work/personal window summary line. */
+.trip-tag {
+  display: inline-block; margin-left: 6px; padding: 1px 8px;
+  border-radius: 999px; border: 1px solid var(--border);
+  background: var(--panel-2); color: var(--muted);
+  font-size: 11px; cursor: pointer; vertical-align: middle;
+}
+.trip-tag:hover { border-color: var(--muted); }
+.trip-tag.trip-tag-work { color: var(--accent-2); border-color: var(--accent-2); background: rgba(59,130,246,.1); }
+.trip-tag.trip-tag-personal { color: var(--teal); border-color: var(--teal); background: rgba(45,212,191,.1); }
+.tag-summary {
+  display: flex; flex-wrap: wrap; gap: 8px 16px; margin-bottom: 10px;
+  font-size: 12.5px; color: var(--muted);
+}
