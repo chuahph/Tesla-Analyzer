@@ -1312,6 +1312,32 @@ def add_manual_charge(payload: dict = Body(...), session: Session = Depends(get_
     return {"id": charge.id}
 
 
+@router.post("/charges/edit-rate")
+def edit_charge_rate(payload: dict = Body(...), session: Session = Depends(get_session)):
+    """Recalculate one charging session's cost from a per-kWh rate you
+    supply — for a session priced at something other than the configured
+    AC/DC default (a promo rate, a pricier one-off public charger, ...).
+    0 doubles as marking the session free.
+    """
+    charge_id = payload.get("id")
+    if not isinstance(charge_id, int):
+        raise HTTPException(400, "Missing or invalid 'id'.")
+    try:
+        rate = float(payload["price_per_kwh"])
+    except (KeyError, TypeError, ValueError):
+        raise HTTPException(400, "Missing or invalid 'price_per_kwh'.")
+    if rate < 0:
+        raise HTTPException(400, "'price_per_kwh' must be >= 0.")
+
+    charge = session.get(Charge, charge_id)
+    if charge is None:
+        raise HTTPException(404, "Charge not found.")
+    charge.cost = round(charge.energy_added_kwh * rate, 2)
+    charge.is_free = rate == 0
+    session.commit()
+    return {"id": charge.id, "cost": charge.cost, "is_free": charge.is_free}
+
+
 @router.get("/export")
 def export_data(
     days: int = Query(730, ge=1, le=3650), session: Session = Depends(get_session)

@@ -437,6 +437,18 @@ canvas { max-height: 260px; }
   background: rgba(59,130,246,.12);
   border-radius: 6px; padding: 1px 8px;
 }
+/* Recent charges: location/type on the first line, kWh/cost/rate below —
+   same two-line shape as a trip row. */
+.plain-list li.charge { flex-direction: column; align-items: flex-start; gap: 2px; }
+.charge-main { display: flex; flex-direction: column; gap: 1px; }
+.charge-loc { font-weight: 600; font-size: 13.5px; }
+.charge-when { color: var(--muted); font-size: 11.5px; font-variant-numeric: tabular-nums; }
+.charge-figs { color: var(--muted); font-size: 12.5px; font-variant-numeric: tabular-nums; }
+.edit-rate-btn {
+  border: none; background: none; cursor: pointer; font-size: 11px;
+  opacity: .55; padding: 0 2px; vertical-align: middle;
+}
+.edit-rate-btn:hover { opacity: 1; }
 
 #recommendations { display: flex; flex-direction: column; gap: 12px; }
 .rec {

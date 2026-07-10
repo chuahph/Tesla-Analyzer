@@ -745,6 +745,58 @@ function renderLists(d) {
   })() : "";
   document.getElementById("topLocations").innerHTML =
     lastChargeRow + locs || '<li class="empty">No charging sessions in this window</li>';
+
+  const chargesEl = document.getElementById("recentCharges");
+  if (chargesEl) {
+    const recentCharges = d.charging.recent_charges || [];
+    const rows = recentCharges.map((c) => {
+      const when = `${tripWhen(c.start_time)} → ${tripEnd(c.start_time, c.end_time)}`;
+      const loc = c.location ? `${c.location} · ${c.charge_type}` : c.charge_type;
+      const kwh = `${fmt(c.energy_added_kwh, 1)} kWh`;
+      const cost = c.is_free ? "Free" : `${d.currency} ${fmt(c.cost, 2)}`;
+      const rate = !c.is_free && c.rate_per_kwh != null ? ` (${fmt(c.rate_per_kwh, 2)}/kWh)` : "";
+      const editBtn = !STATIC_MODE && c.id != null
+        ? ` <button class="edit-rate-btn" data-charge-id="${c.id}" ` +
+          `data-kwh="${c.energy_added_kwh}" data-rate="${c.rate_per_kwh ?? ""}" ` +
+          `title="Edit this session's rate">✎</button>`
+        : "";
+      return `<li class="charge"><span class="charge-main"><span class="charge-loc">${loc}</span>` +
+        `<span class="charge-when">${when}</span></span>` +
+        `<span class="charge-figs">${kwh} · ${cost}${rate}${editBtn}</span></li>`;
+    }).join("");
+    chargesEl.innerHTML = rows || '<li class="empty">No charging sessions in this window</li>';
+    wireEditRateButtons(chargesEl);
+  }
+}
+
+// "Edit rate" (✎) on a Recent Charges row: fix a session's cost by
+// supplying its actual RM/kWh rate — for one priced differently from the
+// configured AC/DC default (a promo rate, a pricier one-off public
+// charger, ...). 0 doubles as marking the session free.
+function wireEditRateButtons(root) {
+  root.querySelectorAll(".edit-rate-btn[data-charge-id]").forEach((btn) => {
+    btn.addEventListener("click", async (e) => {
+      e.stopPropagation();
+      const current = btn.dataset.rate || "0";
+      const input = window.prompt("Actual rate for this session (per kWh):", current);
+      if (input == null || input.trim() === "") return;
+      const rate = parseFloat(input);
+      if (!Number.isFinite(rate) || rate < 0) {
+        window.alert("Enter a rate of 0 or more.");
+        return;
+      }
+      try {
+        const resp = await fetch("/api/charges/edit-rate", {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ id: +btn.dataset.chargeId, price_per_kwh: rate }),
+        });
+        if (!resp.ok) throw new Error((await resp.json()).detail || "Failed");
+        load();   // refresh KPIs/lists so the corrected cost shows immediately
+      } catch (err) {
+        window.alert(err.message);
+      }
+    });
+  });
 }
 
 function renderBehaviour(d) {

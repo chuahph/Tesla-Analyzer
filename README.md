@@ -195,6 +195,11 @@ Once linked, run `python run.py collect` to log new drives/charges over time.
    rather than auto-detected — tick **Free** in **Add Historical Charge** to
    force that session's cost to 0.
 
+   Any individual session priced differently from the configured AC/DC
+   default — a promo rate, a pricier one-off public charger — can be fixed
+   from the **Recent Charges** card: tap ✎ next to it and enter the actual
+   RM/kWh rate; the cost recalculates from that instead.
+
    Optional: time-of-use pricing instead of the flat rate above — driving
    cost, and charging cost for whichever charger type has no AC/DC rate set,
    then price each session by its own start time. Both rates must be set

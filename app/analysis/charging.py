@@ -98,6 +98,28 @@ def analyze(charges: list[Charge], drives: list[Drive] | None = None) -> dict[st
     drive_km = sum(d.distance_km for d in drives)
     cost_per_100km = round(safe_div(total_cost, drive_km) * 100.0, 2) if drive_km else None
 
+    # Most recent first, so the session someone's most likely trying to fix
+    # (the one they just noticed a wrong cost on) is right at the top.
+    recent_charges = [
+        {
+            "id": getattr(c, "id", None),
+            "start_time": c.start_time.isoformat(timespec="minutes"),
+            "end_time": c.end_time.isoformat(timespec="minutes"),
+            "charge_type": c.charge_type,
+            "energy_added_kwh": round(c.energy_added_kwh, 2),
+            "cost": round(c.cost, 2),
+            # The rate actually applied to this session — editable per-session
+            # when it doesn't match the configured AC/DC default (a promo
+            # rate, a one-off higher public-charger price, etc.).
+            "rate_per_kwh": (
+                round(c.cost / c.energy_added_kwh, 3) if c.energy_added_kwh else None
+            ),
+            "location": _place(c),
+            "is_free": bool(getattr(c, "is_free", False)),
+        }
+        for c in sorted(charges, key=lambda c: c.start_time, reverse=True)
+    ]
+
     return {
         "available": True,
         "total_sessions": len(charges),
@@ -121,4 +143,5 @@ def analyze(charges: list[Charge], drives: list[Drive] | None = None) -> dict[st
         "charges_by_hour": {str(h): by_hour.get(h, 0) for h in range(24)},
         "energy_by_hour": {str(h): round(energy_by_hour.get(h, 0.0), 2) for h in range(24)},
         "top_locations": top_locations,
+        "recent_charges": recent_charges,
     }

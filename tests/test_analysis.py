@@ -93,6 +93,34 @@ def test_charging_locations_sorted_latest_first():
     assert names == ["Office · AC", "Mall · AC", "Home · AC"]  # 5 Jul, 3 Jul, 1 Jul
 
 
+def test_recent_charges_sorted_latest_first_with_rate_and_free_flag():
+    from datetime import datetime
+
+    from app.analysis.charging import analyze
+    from app.models import Charge
+
+    older = Charge(
+        start_time=datetime(2026, 7, 1, 10, 0), end_time=datetime(2026, 7, 1, 11, 0),
+        duration_min=60, start_soc=40, end_soc=70, energy_added_kwh=20.0,
+        charge_type="AC", max_power_kw=11, location="Home", cost=18.0, outside_temp_c=30,
+    )
+    older.id = 1
+    newer_free = Charge(
+        start_time=datetime(2026, 7, 5, 10, 0), end_time=datetime(2026, 7, 5, 11, 0),
+        duration_min=60, start_soc=40, end_soc=70, energy_added_kwh=10.0,
+        charge_type="AC", max_power_kw=11, location="Hotel", cost=0.0, outside_temp_c=30,
+        is_free=True,
+    )
+    newer_free.id = 2
+
+    charges = analyze([older, newer_free])["recent_charges"]
+    assert [c["id"] for c in charges] == [2, 1]   # latest first
+    assert charges[0]["is_free"] is True
+    assert charges[0]["cost"] == 0.0
+    assert charges[1]["is_free"] is False
+    assert charges[1]["rate_per_kwh"] == round(18.0 / 20.0, 3)
+
+
 def test_charge_location_inferred_from_nearby_trip():
     from datetime import datetime
 

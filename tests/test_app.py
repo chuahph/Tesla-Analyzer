@@ -986,6 +986,62 @@ def test_manual_charge_logs_a_historical_session_additively():
         settings.app_passcode = old
 
 
+def test_edit_charge_rate_recalculates_cost():
+    """A session priced differently from the configured AC/DC default (a
+    promo rate, a pricier one-off public charger, ...) can be fixed by
+    supplying its actual per-kWh rate — the new cost is energy * that rate,
+    overriding whatever the sync/manual-entry auto-calc originally set."""
+    settings = get_settings()
+    old = settings.app_passcode
+    settings.app_passcode = ""
+    try:
+        with TestClient(app) as client:  # startup seeds demo data
+            resp = client.post("/api/charges/manual", json={
+                "start_time": "2025-03-01T20:00:00", "end_time": "2025-03-01T22:00:00",
+                "energy_added_kwh": 10.0, "charge_type": "AC",
+            })
+            charge_id = resp.json()["id"]
+
+            from app.database import SessionLocal
+            from app.models import Charge
+
+            # A promo rate of 0.5/kWh instead of the AC default.
+            edit = client.post("/api/charges/edit-rate", json={
+                "id": charge_id, "price_per_kwh": 0.5,
+            })
+            assert edit.status_code == 200
+            assert edit.json() == {"id": charge_id, "cost": 5.0, "is_free": False}
+            with SessionLocal() as s:
+                c = s.get(Charge, charge_id)
+                assert c.cost == 5.0
+                assert c.is_free is False
+
+            # 0 doubles as marking it free.
+            edit_free = client.post("/api/charges/edit-rate", json={
+                "id": charge_id, "price_per_kwh": 0,
+            })
+            assert edit_free.status_code == 200
+            with SessionLocal() as s:
+                c = s.get(Charge, charge_id)
+                assert c.cost == 0.0
+                assert c.is_free is True
+                s.delete(c)
+                s.commit()
+
+            # Validation.
+            assert client.post("/api/charges/edit-rate", json={
+                "id": 999999, "price_per_kwh": 1.0,
+            }).status_code == 404   # unknown charge
+            assert client.post("/api/charges/edit-rate", json={
+                "price_per_kwh": 1.0,
+            }).status_code == 400   # missing id
+            assert client.post("/api/charges/edit-rate", json={
+                "id": charge_id, "price_per_kwh": -1,
+            }).status_code == 400   # negative rate
+    finally:
+        settings.app_passcode = old
+
+
 def test_service_crud_and_due_status():
     """Logging a service record (a) persists and lists back, (b) feeds the
     due/overdue projection, and (c) can be deleted."""
