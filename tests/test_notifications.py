@@ -11,6 +11,7 @@ def _settings(**overrides):
     base = dict(
         vapid_private_key_pem="", vapid_public_key_pem="",
         vapid_subject_email="test@example.com",
+        event_webhook_url="",
     )
     base.update(overrides)
     return SimpleNamespace(**base)
@@ -131,3 +132,65 @@ def test_notify_survives_one_bad_subscription(session, monkeypatch):
 
     monkeypatch.setattr("app.notifications.httpx.post", flaky_post)
     assert notifications.notify(session, "t", "b") == 1
+
+
+def test_fire_webhook_noop_without_url(monkeypatch):
+    monkeypatch.setattr("app.notifications.get_settings", lambda: _settings())
+    calls = []
+    monkeypatch.setattr("app.notifications.httpx.post", lambda *a, **k: calls.append((a, k)))
+    assert notifications.fire_webhook("charge-complete", "t", "b") is False
+    assert calls == []
+
+
+def test_fire_webhook_posts_json_payload(monkeypatch):
+    monkeypatch.setattr(
+        "app.notifications.get_settings",
+        lambda: _settings(event_webhook_url="https://example.invalid/hook"),
+    )
+    sent = {}
+
+    def fake_post(url, json=None, timeout=None):
+        sent["url"], sent["json"] = url, json
+        return httpx.Response(200, request=httpx.Request("POST", url))
+
+    monkeypatch.setattr("app.notifications.httpx.post", fake_post)
+    assert notifications.fire_webhook("charge-complete", "Charging complete", "1.5 kWh added") is True
+    assert sent["url"] == "https://example.invalid/hook"
+    assert sent["json"]["event"] == "charge-complete"
+    assert sent["json"]["title"] == "Charging complete"
+    assert sent["json"]["body"] == "1.5 kWh added"
+    assert "timestamp" in sent["json"]
+
+
+def test_fire_webhook_survives_delivery_failure(monkeypatch):
+    monkeypatch.setattr(
+        "app.notifications.get_settings",
+        lambda: _settings(event_webhook_url="https://example.invalid/hook"),
+    )
+
+    def failing_post(url, json=None, timeout=None):
+        raise httpx.ConnectError("refused", request=httpx.Request("POST", url))
+
+    monkeypatch.setattr("app.notifications.httpx.post", failing_post)
+    assert notifications.fire_webhook("charge-complete", "t", "b") is False   # never raises
+
+
+def test_notify_fires_webhook_independently_of_push(session, monkeypatch):
+    """The event webhook must fire even when push isn't configured at all —
+    the two delivery channels are independent."""
+    monkeypatch.setattr(
+        "app.notifications.get_settings",
+        lambda: _settings(event_webhook_url="https://example.invalid/hook"),  # no VAPID keys
+    )
+    sent = {}
+
+    def fake_post(url, json=None, timeout=None):
+        sent["url"], sent["json"] = url, json
+        return httpx.Response(200, request=httpx.Request("POST", url))
+
+    monkeypatch.setattr("app.notifications.httpx.post", fake_post)
+    # No subscribers and no VAPID -> push delivers to 0, but the webhook still fires.
+    sent_count = notifications.notify(session, "Battery low", "20%", tag="low-soc")
+    assert sent_count == 0
+    assert sent["json"]["event"] == "low-soc"
+    assert sent["json"]["title"] == "Battery low"

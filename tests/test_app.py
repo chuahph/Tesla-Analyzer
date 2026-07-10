@@ -518,6 +518,81 @@ def test_charge_cost_uses_time_of_use_pricing_at_write_time():
         assert charge.cost == round(5.0 * 1.20, 2)   # peak rate, not the flat 0.90
 
 
+def test_drive_complete_fires_event_webhook_but_not_push(monkeypatch):
+    """Logging a drive through _process_vehicle fires the generic event
+    webhook (for home-automation consumers) without going through the push
+    channel — a push alert per every single drive would be unwanted noise
+    for anyone who already has charge/low-battery push enabled."""
+    from types import SimpleNamespace
+
+    from app.api.routes import _process_vehicle
+    from app.database import SessionLocal
+    from app.models import Vehicle
+
+    settings = SimpleNamespace(
+        energy_price_per_kwh=0.90, energy_price_peak_kwh=0.0,
+        energy_price_offpeak_kwh=0.0, tariff_peak_start_hour=8,
+        tariff_peak_end_hour=22, tariff_weekend_offpeak=True,
+        battery_capacity_kwh=0.0, battery_new_range_km=0.0, low_soc_notify_pct=0.0,
+    )
+
+    def vehicle_data(vin, ts, odo_mi, soc, shift, speed=0):
+        return {
+            "vin": vin, "display_name": "Test",
+            "vehicle_config": {},
+            "vehicle_state": {"odometer": odo_mi, "is_user_present": True, "locked": shift == "P"},
+            "drive_state": {"timestamp": ts * 1000, "shift_state": shift, "speed": speed,
+                            "latitude": None, "longitude": None},
+            "charge_state": {"battery_level": soc, "battery_range": 200.0,
+                             "charging_state": "Complete", "charger_power": 0.0,
+                             "charge_energy_added": 0.0},
+            "climate_state": {"outside_temp": 25.0},
+        }
+
+    webhook_calls = []
+    push_calls = []
+    monkeypatch.setattr(
+        "app.api.routes.notifications.fire_webhook",
+        lambda event, title, body: webhook_calls.append((event, title, body)),
+    )
+    monkeypatch.setattr(
+        "app.api.routes.notifications.notify",
+        lambda *a, **k: push_calls.append((a, k)),
+    )
+
+    try:
+        with SessionLocal() as s:
+            v = Vehicle(vin="TESTVIN-DRIVE", name="Test", model="Model 3")
+            s.add(v)
+            s.commit()
+
+            base_ts = 1_760_000_000
+            d1 = vehicle_data("TESTVIN-DRIVE", base_ts, 1000.0, 80, "P")
+            _process_vehicle(s, d1, {"vin": "TESTVIN-DRIVE"}, settings)
+            s.commit()
+            d2 = vehicle_data("TESTVIN-DRIVE", base_ts + 600, 1000.0, 80, "D", speed=40)
+            _process_vehicle(s, d2, {"vin": "TESTVIN-DRIVE"}, settings)
+            s.commit()
+            d3 = vehicle_data("TESTVIN-DRIVE", base_ts + 1800, 1010.0, 75, "P")
+            _process_vehicle(s, d3, {"vin": "TESTVIN-DRIVE"}, settings)
+            s.commit()
+
+        assert any(c[0] == "drive-complete" for c in webhook_calls)
+        assert push_calls == []   # drive completion never goes through the push channel
+    finally:
+        # This vehicle's drive rows aren't scoped out of other tests'
+        # global counts (e.g. clear-drives) — remove them so this test
+        # doesn't pollute the shared demo DB for the rest of the suite.
+        with SessionLocal() as s:
+            from app.models import Drive as _Drive
+
+            leftover = s.query(Vehicle).filter(Vehicle.vin == "TESTVIN-DRIVE").first()
+            if leftover:
+                s.query(_Drive).filter(_Drive.vehicle_id == leftover.id).delete()
+                s.delete(leftover)
+                s.commit()
+
+
 def test_clear_drives_keeps_charges_and_respects_gate():
     settings = get_settings()
     old = settings.app_passcode

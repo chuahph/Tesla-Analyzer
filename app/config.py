@@ -49,6 +49,12 @@ class Settings(BaseSettings):
     # backup_webhook_url: call it on whatever cadence you want the report at
     # (monthly is the intended use, but the endpoint itself is period-agnostic).
     report_webhook_url: str = ""
+    # Optional generic event webhook: POSTs a small JSON payload
+    # ({event, title, body, timestamp}) for charge-complete, low-battery and
+    # drive-complete events — for home automation (Home Assistant, IFTTT,
+    # Zapier, n8n, ...) to react to, independent of web push (works even
+    # without VAPID configured, and vice versa). Empty = disabled.
+    event_webhook_url: str = ""
 
     # Web push notifications (charge complete, low battery, ...). Generate a
     # keypair once with `python -m app.push_keys` and set both here — empty

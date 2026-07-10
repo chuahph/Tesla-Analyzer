@@ -62,16 +62,47 @@ def unsubscribe(session: Session, endpoint: str) -> None:
     session.commit()
 
 
+def fire_webhook(event: str, title: str, body: str) -> bool:
+    """POST a generic JSON event ({event, title, body, timestamp}) to
+    EVENT_WEBHOOK_URL, if configured — lets external automation (Home
+    Assistant, IFTTT, Zapier, n8n, ...) react to the same events push
+    notifications cover, without a browser needing to be subscribed.
+    Independent of push: fires even when VAPID isn't configured, and a
+    delivery failure here never raises — this is always called from inside
+    the sync loop, which must not be blocked by a flaky third-party
+    endpoint. Returns whether delivery succeeded, for callers that want to
+    know (most don't; see notify(), which calls this unconditionally and
+    ignores the result).
+    """
+    url = get_settings().event_webhook_url.strip()
+    if not url:
+        return False
+    try:
+        resp = httpx.post(
+            url,
+            json={"event": event, "title": title, "body": body,
+                  "timestamp": datetime.now().isoformat(timespec="seconds")},
+            timeout=10.0,
+        )
+        return resp.status_code < 300
+    except Exception:  # noqa: BLE001 — a flaky third-party endpoint must
+        # never block the sync loop that triggered this.
+        return False
+
+
 def notify(session: Session, title: str, body: str, tag: str | None = None) -> int:
-    """Send a notification to every subscribed device. Returns how many
-    subscriptions were actually delivered to. A no-op (returns 0) when
-    push isn't configured or nobody's subscribed — safe to call
-    unconditionally from the sync loop.
+    """Send a notification to every subscribed device, and fire the generic
+    event webhook if configured (see fire_webhook — independent of push).
+    Returns how many push subscriptions were actually delivered to; the
+    webhook's own success/failure isn't reflected in the return value, only
+    push's. A no-op push-wise (returns 0) when push isn't configured or
+    nobody's subscribed — safe to call unconditionally from the sync loop.
 
     Expired/invalid subscriptions (the push service returns 404/410) are
     deleted so the subscriber list stays clean without a separate sweep.
     """
     settings = get_settings()
+    fire_webhook(tag or "notification", title, body)
     if not enabled(settings):
         return 0
     subs = session.scalars(select(PushSubscription)).all()

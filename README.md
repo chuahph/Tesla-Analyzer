@@ -314,6 +314,22 @@ wants to parse it instead.
 
 ---
 
+## Generic event webhook
+
+Set `EVENT_WEBHOOK_URL` to have Tesla Analyzer POST a small JSON payload —
+`{"event", "title", "body", "timestamp"}` — whenever a **charge completes**,
+the **battery goes low**, or a **drive finishes**, for home automation (Home
+Assistant, IFTTT, Zapier, n8n, a webhook-triggered Shortcut, ...) to react to.
+Independent of [push notifications](#push-notifications) below — it fires
+even without VAPID keys configured, and vice versa, so you can use either,
+both, or neither. Drive-complete only fires here, not as a push notification
+(a push alert per every single trip would be unwanted noise for anyone who
+already has charge/low-battery push enabled). A delivery failure is silently
+ignored — a flaky third-party endpoint never blocks the sync loop that
+triggered it.
+
+---
+
 ## Push notifications
 
 Get an alert on your phone/desktop the moment a charge finishes or the

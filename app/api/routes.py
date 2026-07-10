@@ -755,6 +755,16 @@ def _process_vehicle(
         d["start_location"], d["start_area"] = _place_and_area(d["start_location"], session)
         d["end_location"], d["end_area"] = _place_and_area(d["end_location"], session)
         session.add(Drive(vehicle_id=vehicle.id, **d))
+        # Webhook-only (not routed through notify()'s push channel) — a
+        # push alert per every single drive would be unwanted noise for
+        # anyone who already has charge-complete/low-battery push enabled,
+        # but a home-automation webhook consumer (arrive-home triggers,
+        # trip logging, ...) very much wants this event.
+        notifications.fire_webhook(
+            "drive-complete", "Drive completed",
+            f"{vehicle.name}: {d['distance_km']:.1f} km, {d['duration_min']:.0f} min, "
+            f"{d['start_soc']:.0f}% → {d['end_soc']:.0f}%.",
+        )
     for c in charges:
         cap = sync_mod.implied_capacity_kwh(c)
         c.pop("energy_measured", None)  # transient flag, not a DB column
@@ -952,6 +962,12 @@ def sync_now(wake: bool = Query(False), session: Session = Depends(get_session))
                         session.add(Drive(vehicle_id=vehicle_row.id, **d))
                         session.commit()
                         total["drives"] += 1
+                        notifications.fire_webhook(
+                            "drive-complete", "Drive completed",
+                            f"{vehicle_row.name}: {d['distance_km']:.1f} km, "
+                            f"{d['duration_min']:.0f} min, {d['start_soc']:.0f}% → "
+                            f"{d['end_soc']:.0f}% (car went offline/asleep).",
+                        )
                 if trip_raw:
                     state.put(session, trip_key, "")
                 # Charging usually keeps the car awake, so this rarely fires —
