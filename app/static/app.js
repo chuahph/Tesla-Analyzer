@@ -338,6 +338,17 @@ function renderKpis(d) {
       cards.push(kpiCard("Driving Cost", `${cur} ${fmt(drv.total_cost, 2)}`,
         drv.cost_per_km != null ? `${cur} ${fmt(drv.cost_per_km, 3)} / km` : "", "violet"));
     }
+    // TCO: what this window's distance would have cost in an equivalent
+    // petrol car, vs. what it actually cost to charge. Hidden entirely
+    // unless both petrol inputs are configured (see PETROL_PRICE_PER_LITER /
+    // PETROL_L_PER_100KM) — no assumed "average car" figure is guessed.
+    const pc = d.petrol_comparison;
+    if (pc && pc.savings != null) {
+      cards.push(kpiCard("vs Petrol", `${cur} ${fmt(Math.abs(pc.savings), 2)}`,
+        `${pc.savings >= 0 ? "saved" : "cost more"} vs ${cur} ${fmt(pc.petrol_cost, 2)} ` +
+        `petrol equivalent (${fmt(pc.petrol_l_per_100km, 1)} L/100km)`,
+        pc.savings >= 0 ? "green" : "red"));
+    }
   }
   if (chg.available) {
     cards.push(kpiCard("Energy Charged", fmt(chg.total_energy_kwh) + " kWh",

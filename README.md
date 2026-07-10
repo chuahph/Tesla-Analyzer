@@ -52,6 +52,10 @@ python scripts/build_site.py --out site   # → ./site (open site/index.html)
   the same mileage (a rough yardstick from widely-cited aggregate studies,
   not per-VIN precision), so "6% degradation" reads as *ahead of* or
   *behind* what's normal at that distance rather than in isolation.
+- **vs Petrol (TCO)** — optional: set `PETROL_PRICE_PER_LITER` and
+  `PETROL_L_PER_100KM` for a "vs Petrol" KPI card showing what this window's
+  distance would have cost in an equivalent petrol car, vs. what it actually
+  cost to charge. Hidden until both are configured.
 
 **Recommendations engine**
 Turns the analysis into actionable advice with estimated savings, e.g.:

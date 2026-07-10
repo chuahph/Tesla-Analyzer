@@ -430,6 +430,36 @@ def test_summary_reports_week_compare_and_costs():
         settings.app_passcode = old
 
 
+def test_petrol_comparison_hidden_unless_configured_then_reflects_settings():
+    settings = get_settings()
+    old_pc = settings.app_passcode
+    old_price, old_l100 = settings.petrol_price_per_liter, settings.petrol_l_per_100km
+    settings.app_passcode = ""
+    try:
+        with TestClient(app) as client:  # startup seeds demo data
+            # Disabled by default (both 0) -> no assumed "average car" figure.
+            settings.petrol_price_per_liter = 0.0
+            settings.petrol_l_per_100km = 0.0
+            body = client.get("/api/summary?days=365").json()
+            assert body["petrol_comparison"] is None
+
+            settings.petrol_price_per_liter = 2.05
+            settings.petrol_l_per_100km = 7.0
+            body = client.get("/api/summary?days=365").json()
+            pc = body["petrol_comparison"]
+            assert pc is not None
+            distance_km = body["driving"]["total_distance_km"]
+            expected_petrol_cost = round(distance_km / 100.0 * 7.0 * 2.05, 2)
+            assert pc["petrol_cost"] == expected_petrol_cost
+            assert pc["distance_km"] == distance_km
+            ev_cost = body["driving"]["total_cost"]
+            assert pc["ev_cost"] == ev_cost
+            assert pc["savings"] == round(expected_petrol_cost - ev_cost, 2)
+    finally:
+        settings.app_passcode = old_pc
+        settings.petrol_price_per_liter, settings.petrol_l_per_100km = old_price, old_l100
+
+
 def test_charge_cost_uses_time_of_use_pricing_at_write_time():
     """A charge session logged through _process_vehicle is re-priced at its
     own start time under configured TOU rates, not the flat default."""

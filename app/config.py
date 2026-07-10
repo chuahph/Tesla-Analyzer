@@ -76,6 +76,11 @@ class Settings(BaseSettings):
     tariff_weekend_offpeak: bool = True
     currency: str = "RM"
     rated_wh_per_km: float = 150.0
+    # Petrol-comparison (TCO) inputs: what an equivalent petrol car would have
+    # cost to run the same distance, at this price per litre and consumption.
+    # Either at 0 disables the comparison entirely (hidden, not a false $0).
+    petrol_price_per_liter: float = 0.0
+    petrol_l_per_100km: float = 0.0
     # When-new full range (km) used as the battery-health 100% reference.
     # 0 = auto-detect from the car's variant badge (e.g. 74D -> 549 km).
     battery_new_range_km: float = 0.0

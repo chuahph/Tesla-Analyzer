@@ -1542,6 +1542,29 @@ def summary(
         "current_soc_pct": round(current_soc, 1) if current_soc is not None else None,
     }
 
+    # Petrol comparator (TCO): what an equivalent petrol car would have cost
+    # to run this window's distance, at the configured price/consumption.
+    # Both settings default to 0 (disabled) — no assumed "average car" figure
+    # is guessed, since a wrong one would misinform rather than just be absent.
+    petrol_comparison = None
+    if (
+        settings.petrol_price_per_liter > 0 and settings.petrol_l_per_100km > 0
+        and driving.get("available")
+    ):
+        distance_km = driving["total_distance_km"]
+        petrol_cost = round(
+            distance_km / 100.0 * settings.petrol_l_per_100km * settings.petrol_price_per_liter, 2
+        )
+        ev_cost = driving.get("total_cost")
+        petrol_comparison = {
+            "distance_km": distance_km,
+            "petrol_cost": petrol_cost,
+            "ev_cost": ev_cost,
+            "savings": round(petrol_cost - ev_cost, 2) if ev_cost is not None else None,
+            "petrol_price_per_liter": settings.petrol_price_per_liter,
+            "petrol_l_per_100km": settings.petrol_l_per_100km,
+        }
+
     # Battery health uses the full reading history, not the display window.
     readings = session.scalars(
         select(BatteryReading)
@@ -1605,6 +1628,7 @@ def summary(
         "efficiency": efficiency,
         "battery": battery,
         "battery_balance": battery_balance,
+        "petrol_comparison": petrol_comparison,
         "week_compare": week_compare,
         "recommendations": recs,
     }
