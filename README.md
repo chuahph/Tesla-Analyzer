@@ -375,6 +375,17 @@ no map/routing service is involved.
 
 ---
 
+## Compare Cars
+
+With more than one real car linked to the account, **⚖ Compare Cars** on the
+garage page shows every car's driving distance, efficiency, cost, charging
+and battery-health figures for the same window, side by side — useful for a
+household with more than one Tesla to see at a glance which car is driven
+more, costs more to run, or is degrading faster, without switching the
+active car back and forth. Hidden with a single car (nothing to compare).
+
+---
+
 ## Service & tyre tracker
 
 Tap **🔧 Service & Tyres** to log maintenance (tyre rotation, cabin air

@@ -153,6 +153,9 @@ async function renderHome() {
   const badge = document.getElementById("home-badge");
   if (badge) { badge.textContent = mode; badge.className = "badge " + mode; }
   document.getElementById("btn-unlink")?.classList.toggle("hidden", mode !== "live");
+  // Compare is only meaningful with more than one real car on the account.
+  document.getElementById("btn-compare")?.classList.toggle(
+    "hidden", STATIC_MODE || mode !== "live" || list.length < 2);
 
   cars.innerHTML = "";
   if (!list.length) {
@@ -179,6 +182,55 @@ document.getElementById("btn-unlink")?.addEventListener("click", async () => {
   } catch (e) { alert("Unlink failed: " + e.message); return; }
   renderHome();
 });
+
+// Compare Cars: every real (linked) car's driving/cost/battery figures for
+// the same window, side by side — button only shows with >1 real car (see
+// renderHome). Rows = metrics, columns = cars, so scanning across a row
+// compares the same thing rather than reading one car's whole column first.
+const COMPARE_ROWS = [
+  { label: "Distance", key: "distance_km", fmt: (v) => v != null ? `${fmt(v)} km` : "—" },
+  { label: "Drives", key: "drives", fmt: (v) => v != null ? fmt(v) : "—" },
+  { label: "Avg Efficiency", key: "avg_wh_per_km", fmt: (v) => v != null ? `${fmt(v)} Wh/km` : "—" },
+  { label: "Driving Cost", key: "driving_cost",
+    fmt: (v, cur) => v != null ? `${cur} ${fmt(v, 2)}` : "—" },
+  { label: "Cost / km", key: "cost_per_km",
+    fmt: (v, cur) => v != null ? `${cur} ${fmt(v, 3)}` : "—" },
+  { label: "Energy Charged", key: "energy_charged_kwh", fmt: (v) => v != null ? `${fmt(v)} kWh` : "—" },
+  { label: "Charging Cost", key: "charging_cost",
+    fmt: (v, cur) => v != null ? `${cur} ${fmt(v, 2)}` : "—" },
+  { label: "Battery Health", key: "health_pct", fmt: (v) => v != null ? `${fmt(v, 1)}%` : "—" },
+  { label: "vs Fleet Degradation", key: "vs_fleet_pct",
+    fmt: (v) => v != null ? `${v > 0 ? "+" : ""}${fmt(v, 1)}pp` : "—" },
+];
+
+async function renderCompareTable() {
+  const table = document.getElementById("compare-table");
+  const days = document.getElementById("compare-range").value;
+  table.innerHTML = "<tr><td>Loading…</td></tr>";
+  let data;
+  try {
+    data = await (await fetch(`/api/compare?days=${days}`)).json();
+  } catch (e) {
+    table.innerHTML = "<tr><td>Couldn't load — try again.</td></tr>";
+    return;
+  }
+  const cars = data.vehicles || [];
+  if (!cars.length) {
+    table.innerHTML = "<tr><td>No linked cars to compare.</td></tr>";
+    return;
+  }
+  const head = `<tr><th></th>${cars.map((c) => `<th>${c.name || c.model || "Car"}</th>`).join("")}</tr>`;
+  const body = COMPARE_ROWS.map((row) =>
+    `<tr><th>${row.label}</th>${cars.map((c) => `<td>${row.fmt(c[row.key], data.currency)}</td>`).join("")}</tr>`
+  ).join("");
+  table.innerHTML = head + body;
+}
+
+document.getElementById("btn-compare")?.addEventListener("click", () => {
+  openModal("compare-modal");
+  renderCompareTable();
+});
+document.getElementById("compare-range")?.addEventListener("change", renderCompareTable);
 
 // Full car-info panel (opened by the "!" after the VIN in the header).
 function fillCarInfo(v) {

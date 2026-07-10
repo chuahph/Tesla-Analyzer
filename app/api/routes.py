@@ -1135,6 +1135,55 @@ def list_vehicles(session: Session = Depends(get_session)):
     return session.scalars(select(Vehicle).order_by(Vehicle.id)).all()
 
 
+@router.get("/compare")
+def compare_vehicles(days: int = Query(30, ge=1, le=730), session: Session = Depends(get_session)):
+    """One summary row per real (non-demo/import) car on the account, over
+    the same window — a household with more than one Tesla can see at a
+    glance which car is driven more, costs more to run, or is degrading
+    faster, without switching the active car back and forth."""
+    settings = get_settings()
+    vehicles = session.scalars(
+        select(Vehicle).where(~Vehicle.vin.startswith("DEMO"), ~Vehicle.vin.startswith("IMPORT"))
+        .order_by(Vehicle.id)
+    ).all()
+
+    rows = []
+    for vehicle in vehicles:
+        capacity_kwh, _ = _usable_capacity(session, vehicle, settings)
+        drives, charges = _window(session, vehicle.id, days)
+        driving = driving_analysis.analyze(
+            drives, settings.rated_wh_per_km, capacity_kwh, tariff.price_fn_from_settings(settings))
+        charging = charging_analysis.analyze(charges, drives)
+        readings = session.scalars(
+            select(BatteryReading)
+            .where(BatteryReading.vehicle_id == vehicle.id)
+            .order_by(BatteryReading.ts)
+            .limit(2000)
+        ).all()
+        vin_info = vin_mod.decode(vehicle.vin)
+        spec_km = settings.battery_new_range_km or battery_analysis.new_range_for(
+            vehicle.model, vehicle.trim, year=vin_info.get("year"))
+        battery = battery_analysis.analyze(
+            [{"soc": r.soc, "range_km": r.range_km, "ts": r.ts, "odo_km": r.odo_km} for r in readings],
+            new_range_km=spec_km,
+        )
+        rows.append({
+            "vin": vehicle.vin,
+            "name": vehicle.name,
+            "model": vehicle.model,
+            "distance_km": driving.get("total_distance_km") if driving.get("available") else 0.0,
+            "drives": driving.get("total_drives") if driving.get("available") else 0,
+            "avg_wh_per_km": driving.get("avg_efficiency_wh_per_km") if driving.get("available") else None,
+            "driving_cost": driving.get("total_cost") if driving.get("available") else None,
+            "cost_per_km": driving.get("cost_per_km") if driving.get("available") else None,
+            "charging_cost": charging.get("total_cost") if charging.get("available") else None,
+            "energy_charged_kwh": charging.get("total_energy_kwh") if charging.get("available") else None,
+            "health_pct": battery.get("health_pct") if battery.get("available") else None,
+            "vs_fleet_pct": battery.get("vs_fleet_pct") if battery.get("available") else None,
+        })
+    return {"window_days": days, "currency": settings.currency, "vehicles": rows}
+
+
 @router.post("/unlink")
 def unlink_account(session: Session = Depends(get_session)):
     """Disconnect the linked Tesla account so a different one can be linked

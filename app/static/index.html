@@ -45,6 +45,7 @@
         <button id="btn-unlink" class="btn hidden"
                 title="Disconnect this Tesla so you can link a different account">🔌 Unlink / switch account</button>
         <button id="btn-import" class="btn">📁 Load Tesla Data</button>
+        <button id="btn-compare" class="btn hidden">⚖ Compare Cars</button>
         <button id="btn-guide" class="btn">❓ Setup Guide</button>
       </div>
 
@@ -582,6 +583,29 @@
       </form>
       <span id="service-status" class="status"></span>
       <ul id="service-list" class="places-list"></ul>
+    </div>
+  </div>
+
+  <!-- Modal: compare all linked cars side by side -->
+  <div id="compare-modal" class="modal hidden">
+    <div class="modal-card modal-wide">
+      <button class="modal-close" data-close>×</button>
+      <h2>⚖ Compare Cars</h2>
+      <p class="modal-sub">
+        Every linked car's driving, cost and battery figures for the same window,
+        side by side.
+      </p>
+      <label class="compare-range-label">Window
+        <select id="compare-range">
+          <option value="7">Last 7 days</option>
+          <option value="30" selected>Last 30 days</option>
+          <option value="90">Last 90 days</option>
+          <option value="365">Last 365 days</option>
+        </select>
+      </label>
+      <div class="compare-scroll">
+        <table id="compare-table" class="compare-table"></table>
+      </div>
     </div>
   </div>
 

@@ -979,3 +979,50 @@ def test_single_car_summary_has_no_garage_picker():
             assert body["garage"] == []      # demo isn't a linked account
     finally:
         settings.app_passcode = old
+
+
+def test_compare_endpoint_covers_only_real_cars(monkeypatch):
+    """/api/compare returns one row per real (linked) car, skipping demo/
+    import placeholders, each with its own driving/charging/battery figures."""
+    from datetime import datetime, timedelta
+
+    from app import services
+    from app.models import Charge, Drive
+
+    monkeypatch.setattr("app.tesla_client.TeslaClient", _FakeClient)
+    settings = get_settings()
+    old_pc = settings.app_passcode
+    settings.app_passcode = ""
+    try:
+        with SessionLocal() as s:
+            services.link_with_token(s, "tok")
+            car_a = s.query(Vehicle).filter(Vehicle.vin == "VINAAAAAAAAAAAAAA").first()
+            car_b = s.query(Vehicle).filter(Vehicle.vin == "VINBBBBBBBBBBBBBB").first()
+            now = datetime.now()
+            s.add(Drive(
+                vehicle_id=car_a.id, start_time=now - timedelta(hours=1), end_time=now,
+                distance_km=20.0, duration_min=20.0, start_soc=80, end_soc=70,
+                energy_used_kwh=3.0,
+            ))
+            s.add(Charge(
+                vehicle_id=car_a.id, start_time=now - timedelta(hours=2),
+                end_time=now - timedelta(hours=1, minutes=30), start_soc=70, end_soc=90,
+                energy_added_kwh=15.0, cost=13.5,
+            ))
+            # Car B has no history at all this window.
+            s.commit()
+
+        with TestClient(app) as client:
+            body = client.get("/api/compare?days=7").json()
+            vins = {row["vin"] for row in body["vehicles"]}
+            assert vins == {"VINAAAAAAAAAAAAAA", "VINBBBBBBBBBBBBBB"}   # no DEMO/IMPORT rows
+            row_a = next(r for r in body["vehicles"] if r["vin"] == "VINAAAAAAAAAAAAAA")
+            row_b = next(r for r in body["vehicles"] if r["vin"] == "VINBBBBBBBBBBBBBB")
+            assert row_a["distance_km"] == 20.0
+            assert row_a["drives"] == 1
+            assert row_a["energy_charged_kwh"] == 15.0
+            assert row_b["distance_km"] == 0.0
+            assert row_b["drives"] == 0
+    finally:
+        settings.app_passcode = old_pc
+        _reset_to_demo()
