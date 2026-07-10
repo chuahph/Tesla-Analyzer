@@ -37,6 +37,11 @@ class Settings(BaseSettings):
     # Optional secret that lets an external cron service trigger /api/sync
     # (as ?key=...) without the passcode cookie, for hands-off logging.
     sync_key: str = ""
+    # Optional URL that GET /api/backup (also cron-callable via sync_key)
+    # POSTs a full-history export ZIP to. Empty = the endpoint is disabled.
+    # Point it at your own upload endpoint, a cloud-storage presigned PUT
+    # URL, or a relay that forwards to email/Slack/Discord.
+    backup_webhook_url: str = ""
 
     # Analysis parameters
     energy_price_per_kwh: float = 0.90

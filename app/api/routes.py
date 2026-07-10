@@ -917,51 +917,13 @@ def export_data(
     }
 
 
-@router.get("/export/csv")
-def export_csv(
-    days: int = Query(3650, ge=1, le=3650),
-    since_charge: bool = Query(False),
-    current_drive: bool = Query(False),
-    session: Session = Depends(get_session),
-):
-    """Download drives & charges as a ZIP of CSVs (re-importable).
-
-    Defaults to everything; pass ``days``, ``since_charge`` or
-    ``current_drive`` to export only the currently viewed window.
-    """
+def _build_export_zip(drives: list[Drive], charges: list[Charge]) -> bytes:
+    """The drives.csv + charges.csv ZIP bytes, shared by the download
+    endpoint and the backup webhook so both produce an identically
+    re-importable archive."""
     import csv
     import io
-    import json as _json
     import zipfile
-
-    from fastapi.responses import Response
-
-    vehicle = _first_vehicle(session)
-    since = None
-    label = "all"
-    if current_drive:
-        open_trip = _json.loads(
-            state.get(session, state.scoped(state.OPEN_TRIP_KEY, vehicle.vin)) or "null")
-        if open_trip:
-            from .. import sync as sync_mod
-
-            since = datetime.fromtimestamp(open_trip["ts"], sync_mod.MYT).replace(tzinfo=None)
-        else:
-            since = session.scalar(
-                select(func.max(Drive.start_time)).where(Drive.vehicle_id == vehicle.id)
-            )
-        if since is not None:
-            label = "current-drive"
-    elif since_charge:
-        last_end = session.scalar(
-            select(func.max(Charge.end_time)).where(Charge.vehicle_id == vehicle.id)
-        )
-        if last_end is not None:
-            since = last_end
-            label = "since-charge"
-    elif days < 3650:
-        label = f"{days}d"
-    drives, charges = _window(session, vehicle.id, days, since=since)
 
     def sheet(headers, rows):
         buf = io.StringIO()
@@ -993,12 +955,97 @@ def export_csv(
     with zipfile.ZipFile(zbuf, "w", zipfile.ZIP_DEFLATED) as z:
         z.writestr("drives.csv", drives_csv)
         z.writestr("charges.csv", charges_csv)
+    return zbuf.getvalue()
+
+
+@router.get("/export/csv")
+def export_csv(
+    days: int = Query(3650, ge=1, le=3650),
+    since_charge: bool = Query(False),
+    current_drive: bool = Query(False),
+    session: Session = Depends(get_session),
+):
+    """Download drives & charges as a ZIP of CSVs (re-importable).
+
+    Defaults to everything; pass ``days``, ``since_charge`` or
+    ``current_drive`` to export only the currently viewed window.
+    """
+    import json as _json
+
+    from fastapi.responses import Response
+
+    vehicle = _first_vehicle(session)
+    since = None
+    label = "all"
+    if current_drive:
+        open_trip = _json.loads(
+            state.get(session, state.scoped(state.OPEN_TRIP_KEY, vehicle.vin)) or "null")
+        if open_trip:
+            from .. import sync as sync_mod
+
+            since = datetime.fromtimestamp(open_trip["ts"], sync_mod.MYT).replace(tzinfo=None)
+        else:
+            since = session.scalar(
+                select(func.max(Drive.start_time)).where(Drive.vehicle_id == vehicle.id)
+            )
+        if since is not None:
+            label = "current-drive"
+    elif since_charge:
+        last_end = session.scalar(
+            select(func.max(Charge.end_time)).where(Charge.vehicle_id == vehicle.id)
+        )
+        if last_end is not None:
+            since = last_end
+            label = "since-charge"
+    elif days < 3650:
+        label = f"{days}d"
+    drives, charges = _window(session, vehicle.id, days, since=since)
+
+    zip_bytes = _build_export_zip(drives, charges)
     name = f"tesla-analyzer-{vehicle.vin[-6:]}-{label}.zip"
     return Response(
-        zbuf.getvalue(),
+        zip_bytes,
         media_type="application/zip",
         headers={"Content-Disposition": f'attachment; filename="{name}"'},
     )
+
+
+@router.get("/backup")
+def backup_now(session: Session = Depends(get_session)):
+    """POST the full-history export ZIP to the configured backup webhook.
+
+    Cron-callable the same way /api/sync is (the sync_key query param passes
+    the passcode gate) — call this on whatever schedule you want a backup
+    (daily/weekly) from the same external cron that already hits /api/sync.
+    No internal scheduling: every call sends a fresh full backup, so the
+    calling cron's own interval is the backup interval.
+    """
+    settings = get_settings()
+    url = settings.backup_webhook_url.strip()
+    if not url:
+        raise HTTPException(400, "No BACKUP_WEBHOOK_URL configured.")
+
+    vehicle = _first_vehicle(session)
+    drives, charges = _window(session, vehicle.id, days=3650)
+    zip_bytes = _build_export_zip(drives, charges)
+    name = f"tesla-analyzer-{vehicle.vin[-6:]}-backup.zip"
+
+    try:
+        resp = httpx.post(
+            url, content=zip_bytes,
+            headers={"Content-Type": "application/zip",
+                    "Content-Disposition": f'attachment; filename="{name}"'},
+            timeout=30.0,
+        )
+        resp.raise_for_status()
+    except httpx.HTTPError as exc:
+        raise HTTPException(502, f"Backup webhook delivery failed: {exc}") from exc
+
+    return {
+        "sent": True, "bytes": len(zip_bytes),
+        "drives": len(drives), "charges": len(charges),
+        "webhook_status": resp.status_code,
+    }
 
 
 @router.get("/summary")

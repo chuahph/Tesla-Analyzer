@@ -247,6 +247,34 @@ It will work, just with the delay/reliability caveat above.
 
 ---
 
+## Automated backups
+
+`GET /api/backup` builds a full-history export (the same ZIP as **⬇ Export
+CSV**) and POSTs it to a webhook you configure — a safety net for the free-tier
+Neon database, without setting up an SMTP server.
+
+1. Set `BACKUP_WEBHOOK_URL` in Render's environment variables to wherever you
+   want the ZIP delivered: your own small receiving endpoint, a cloud-storage
+   presigned upload URL (S3, Cloudflare R2, Backblaze B2), or a relay service
+   (e.g. [Pipedream](https://pipedream.com) or [Make](https://www.make.com))
+   that forwards it to email.
+2. Add a **second** cron job pointed at:
+   ```
+   https://<your-app>.onrender.com/api/backup?key=<SYNC_KEY>
+   ```
+   on whatever schedule you want a backup — daily or weekly is plenty; unlike
+   `/api/sync`, there's no reason to call this often. It reuses the same
+   `SYNC_KEY` as the sync cron job.
+3. Without `BACKUP_WEBHOOK_URL` set, the endpoint returns a 400 explaining
+   that — it never silently no-ops.
+
+The posted body is `Content-Type: application/zip`, raw bytes (not
+multipart) — a generic HTTP endpoint or presigned PUT URL can consume it
+directly. Slack/Discord's own incoming webhooks expect multipart file
+uploads, so those need a small relay in between rather than the URL directly.
+
+---
+
 ## Install on iPhone / iPad (PWA) — no computer needed
 
 Tesla Analyzer is an installable **Progressive Web App** — it adds to your home

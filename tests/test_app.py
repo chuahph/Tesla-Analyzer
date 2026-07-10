@@ -67,10 +67,84 @@ def test_sync_key_lets_cron_through_the_gate():
             resp = client.get("/api/sync?key=cron-key-42")
             assert resp.status_code == 400
             assert "link" in resp.json()["detail"].lower()
-            # The key opens only /api/sync, nothing else.
+            # The key opens /api/sync and /api/backup (both cron-callable), not
+            # arbitrary other endpoints.
             assert client.get("/api/summary?key=cron-key-42").status_code == 401
+            assert client.get("/api/export/csv?key=cron-key-42").status_code == 401
+            # 400 here means it passed the gate and reached the endpoint (no
+            # BACKUP_WEBHOOK_URL configured in this test).
+            assert client.get("/api/backup?key=cron-key-42").status_code == 400
     finally:
         settings.app_passcode, settings.sync_key = old_pc, old_sk
+
+
+def test_backup_requires_webhook_url_and_posts_the_export():
+    settings = get_settings()
+    old_pc, old_url = settings.app_passcode, settings.backup_webhook_url
+    settings.app_passcode = ""
+    try:
+        with TestClient(app) as client:  # startup seeds demo data
+            # No webhook configured -> a clear 400, not a silent no-op.
+            settings.backup_webhook_url = ""
+            resp = client.get("/api/backup")
+            assert resp.status_code == 400
+            assert "BACKUP_WEBHOOK_URL" in resp.json()["detail"]
+
+            # Configured -> POSTs the export ZIP to it.
+            settings.backup_webhook_url = "https://example.invalid/upload"
+            sent = {}
+
+            def fake_post(url, content=None, headers=None, timeout=None):
+                sent["url"], sent["content"], sent["headers"] = url, content, headers
+                import httpx as _httpx
+                return _httpx.Response(200, request=_httpx.Request("POST", url))
+
+            import app.api.routes as routes_mod
+            orig_post = routes_mod.httpx.post
+            routes_mod.httpx.post = fake_post
+            try:
+                resp = client.get("/api/backup")
+            finally:
+                routes_mod.httpx.post = orig_post
+
+            assert resp.status_code == 200
+            body = resp.json()
+            assert body["sent"] is True
+            assert body["bytes"] > 0
+            assert sent["url"] == "https://example.invalid/upload"
+            assert sent["headers"]["Content-Type"] == "application/zip"
+            # The posted bytes are a real, re-importable export.
+            from app.importer import parse_upload
+            drives, charges = parse_upload("backup.zip", sent["content"])
+            assert len(drives) == body["drives"]
+            assert len(charges) == body["charges"]
+    finally:
+        settings.app_passcode, settings.backup_webhook_url = old_pc, old_url
+
+
+def test_backup_surfaces_webhook_delivery_failure():
+    settings = get_settings()
+    old_pc, old_url = settings.app_passcode, settings.backup_webhook_url
+    settings.app_passcode = ""
+    settings.backup_webhook_url = "https://example.invalid/upload"
+    try:
+        with TestClient(app) as client:  # startup seeds demo data
+            def failing_post(url, content=None, headers=None, timeout=None):
+                import httpx as _httpx
+                raise _httpx.ConnectError("connection refused", request=_httpx.Request("POST", url))
+
+            import app.api.routes as routes_mod
+            orig_post = routes_mod.httpx.post
+            routes_mod.httpx.post = failing_post
+            try:
+                resp = client.get("/api/backup")
+            finally:
+                routes_mod.httpx.post = orig_post
+
+            assert resp.status_code == 502
+            assert "webhook" in resp.json()["detail"].lower()
+    finally:
+        settings.app_passcode, settings.backup_webhook_url = old_pc, old_url
 
 
 def test_health_reports_build_info():
