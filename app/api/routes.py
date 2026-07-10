@@ -16,10 +16,11 @@ from ..analysis import charging as charging_analysis
 from ..analysis import driving as driving_analysis
 from ..analysis import efficiency as efficiency_analysis
 from ..analysis import recommendations as recommendations_engine
+from ..analysis import service as service_analysis
 from ..config import get_settings
 from ..database import get_session
 from ..importer import ImportError_, parse_upload
-from ..models import BatteryReading, Charge, Drive, Place, Vehicle
+from ..models import BatteryReading, Charge, Drive, Place, ServiceRecord, Vehicle
 from ..schemas import ChargeOut, DriveOut, VehicleOut
 
 router = APIRouter(prefix="/api", tags=["analytics"])
@@ -466,6 +467,79 @@ def delete_place(place_id: int, session: Session = Depends(get_session)):
     if place is None:
         raise HTTPException(404, "Place not found.")
     session.delete(place)
+    session.commit()
+    return {"deleted": True}
+
+
+# --- Service & tyre tracker -------------------------------------------------
+
+
+@router.get("/service")
+def list_service(session: Session = Depends(get_session)):
+    """Logged maintenance history plus a due/overdue reading for each known
+    service type (see app/analysis/service.py)."""
+    vehicle = _first_vehicle(session)
+    records = session.scalars(
+        select(ServiceRecord)
+        .where(ServiceRecord.vehicle_id == vehicle.id)
+        .order_by(ServiceRecord.date.desc())
+    ).all()
+    current_odo = session.scalar(
+        select(func.max(BatteryReading.odo_km)).where(BatteryReading.vehicle_id == vehicle.id)
+    )
+    due = service_analysis.due_status(
+        [{"type": r.type, "date": r.date, "odo_km": r.odo_km} for r in records],
+        current_odo_km=current_odo,
+    )
+    for row in due:
+        row["last_date"] = row["last_date"].isoformat() if row["last_date"] else None
+        row["due_date"] = row["due_date"].isoformat() if row["due_date"] else None
+    return {
+        "current_odo_km": round(current_odo, 1) if current_odo is not None else None,
+        "types": list(service_analysis.SERVICE_INTERVALS.keys()),
+        "due": due,
+        "records": [
+            {"id": r.id, "type": r.type, "date": r.date.isoformat(), "odo_km": r.odo_km,
+             "cost": r.cost, "notes": r.notes}
+            for r in records
+        ],
+    }
+
+
+@router.post("/service")
+def add_service(payload: dict = Body(...), session: Session = Depends(get_session)):
+    """Log a maintenance event. ``type`` can be any of the known tracked
+    types (gets a due-date/odometer projection) or free text (logged for the
+    record but never shows as due/overdue)."""
+    vehicle = _first_vehicle(session)
+    type_ = str(payload.get("type") or "").strip()[:40]
+    if not type_:
+        raise HTTPException(400, "Missing 'type'.")
+    try:
+        date = datetime.fromisoformat(payload["date"]) if payload.get("date") else datetime.now()
+    except (KeyError, ValueError):
+        raise HTTPException(400, "Invalid 'date' (expected ISO format).")
+    try:
+        odo_km = float(payload.get("odo_km") or 0.0)
+        cost = float(payload.get("cost") or 0.0)
+    except (TypeError, ValueError):
+        raise HTTPException(400, "Invalid 'odo_km'/'cost'.")
+    notes = str(payload.get("notes") or "")[:200]
+
+    record = ServiceRecord(
+        vehicle_id=vehicle.id, type=type_, date=date, odo_km=odo_km, cost=cost, notes=notes,
+    )
+    session.add(record)
+    session.commit()
+    return {"id": record.id}
+
+
+@router.delete("/service/{record_id}")
+def delete_service(record_id: int, session: Session = Depends(get_session)):
+    record = session.get(ServiceRecord, record_id)
+    if record is None:
+        raise HTTPException(404, "Record not found.")
+    session.delete(record)
     session.commit()
     return {"deleted": True}
 

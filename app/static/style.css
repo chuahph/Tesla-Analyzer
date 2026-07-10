@@ -788,3 +788,28 @@ footer { padding: 18px 28px; color: var(--muted); font-size: 12px; border-top: 1
 }
 .places-list button.place-del:hover { color: #ff6b70; }
 .places-empty { color: var(--muted); font-size: 13px; margin: 0 0 12px; }
+
+/* Service & tyre tracker: due-status list + logging form. */
+.service-due { list-style: none; margin: 0 0 14px; padding: 0; }
+.service-due li {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 8px; padding: 6px 0; border-bottom: 1px solid var(--border); font-size: 13.5px;
+}
+.service-due .svc-meta { color: var(--muted); font-size: 12px; }
+.svc-status {
+  display: inline-block; padding: 1px 8px; border-radius: 999px;
+  font-size: 11px; font-weight: 700; white-space: nowrap;
+}
+.svc-status.ok { color: var(--green); background: rgba(45,212,191,.12); }
+.svc-status.due_soon { color: var(--amber); background: rgba(245,158,11,.14); }
+.svc-status.overdue { color: #ff6b70; background: rgba(232,33,39,.14); }
+.svc-status.unknown { color: var(--muted); background: var(--panel-2); }
+.service-form {
+  display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 8px;
+}
+.service-form select, .service-form input {
+  flex: 1 1 120px; min-width: 0; padding: 6px 8px; border-radius: 8px;
+  border: 1px solid var(--border); background: var(--panel-2); color: var(--text);
+  font-size: 13px;
+}
+.service-form button { flex: 0 0 auto; }

@@ -643,6 +643,45 @@ def test_places_crud_and_geofenced_labeling():
         settings.app_passcode = old
 
 
+def test_service_crud_and_due_status():
+    """Logging a service record (a) persists and lists back, (b) feeds the
+    due/overdue projection, and (c) can be deleted."""
+    settings = get_settings()
+    old = settings.app_passcode
+    settings.app_passcode = ""
+    try:
+        with TestClient(app) as client:  # startup seeds demo data
+            body = client.get("/api/service").json()
+            assert body["records"] == []
+            assert all(r["status"] == "unknown" for r in body["due"])
+            assert "Tire Rotation" in body["types"]
+
+            resp = client.post("/api/service", json={
+                "type": "Tire Rotation", "date": "2026-01-01T00:00:00",
+                "odo_km": 15000, "cost": 40.0, "notes": "Front to back",
+            })
+            assert resp.status_code == 200
+            record_id = resp.json()["id"]
+
+            body = client.get("/api/service").json()
+            assert len(body["records"]) == 1
+            assert body["records"][0]["type"] == "Tire Rotation"
+            assert body["records"][0]["cost"] == 40.0
+            rotation = next(r for r in body["due"] if r["type"] == "Tire Rotation")
+            assert rotation["status"] != "unknown"
+            assert rotation["due_odo_km"] == 25000.0
+
+            # Validation.
+            assert client.post("/api/service", json={"odo_km": 1}).status_code == 400
+            assert client.post("/api/service", json={"type": "X", "date": "not-a-date"}).status_code == 400
+
+            assert client.delete(f"/api/service/{record_id}").status_code == 200
+            assert client.get("/api/service").json()["records"] == []
+            assert client.delete(f"/api/service/{record_id}").status_code == 404
+    finally:
+        settings.app_passcode = old
+
+
 def test_live_eta_projects_distance_time_and_soc_to_nearest_place():
     """A live drive's ETA/projected SoC picks the nearest named place not
     already reached, and returns nothing when the car is already there or no

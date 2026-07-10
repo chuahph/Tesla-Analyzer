@@ -158,6 +158,25 @@ class Place(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime)
 
 
+class ServiceRecord(Base):
+    """A logged maintenance event (tyre rotation, brake fluid, ...).
+
+    Purely user-logged — the car doesn't report service history over the
+    API, so due/overdue tracking (app/analysis/service.py) only knows what's
+    been entered here.
+    """
+
+    __tablename__ = "service_records"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    vehicle_id: Mapped[int] = mapped_column(ForeignKey("vehicles.id"), index=True)
+    type: Mapped[str] = mapped_column(String(40))
+    date: Mapped[datetime] = mapped_column(DateTime, index=True)
+    odo_km: Mapped[float] = mapped_column(Float, default=0.0)
+    cost: Mapped[float] = mapped_column(Float, default=0.0)
+    notes: Mapped[str] = mapped_column(String(200), default="")
+
+
 class PushSubscription(Base):
     """A browser's Web Push subscription (one row per device/browser that
     tapped "Enable notifications"). Not per-vehicle — a device gets notified

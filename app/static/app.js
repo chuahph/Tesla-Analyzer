@@ -1695,6 +1695,110 @@ function setupPlacesButton() {
 }
 if (!STATIC_MODE) setupPlacesButton();
 
+// Service & tyre tracker: same self-hosted-only gating as Places/push.
+const SERVICE_STATUS_LABEL = {
+  ok: "OK", due_soon: "Due soon", overdue: "Overdue", unknown: "Not logged",
+};
+
+function fmtServiceDate(iso) {
+  if (!iso) return "";
+  const d = new Date(iso);
+  return d.toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" });
+}
+
+async function renderServicePanel() {
+  const dueEl = document.getElementById("service-due");
+  const listEl = document.getElementById("service-list");
+  const typeSelect = document.getElementById("service-type");
+  dueEl.innerHTML = '<li class="places-empty">Loading…</li>';
+  let data;
+  try {
+    data = await (await fetch("/api/service")).json();
+  } catch (e) {
+    dueEl.innerHTML = '<li class="places-empty">Couldn’t load — try again.</li>';
+    return;
+  }
+
+  // Populate the type dropdown once per open (keeps any free-text option a
+  // user typed before a refresh from being clobbered mid-edit).
+  if (typeSelect.options.length <= 1) {
+    data.types.forEach((t) => {
+      const opt = document.createElement("option");
+      opt.value = t; opt.textContent = t;
+      typeSelect.appendChild(opt);
+    });
+  }
+  if (data.current_odo_km != null) {
+    const odoInput = document.getElementById("service-odo");
+    if (!odoInput.value) odoInput.value = Math.round(data.current_odo_km);
+  }
+
+  dueEl.innerHTML = data.due.map((r) => {
+    const meta = r.status === "unknown"
+      ? "never logged"
+      : `last ${fmtServiceDate(r.last_date)}` +
+        (r.due_date ? ` · due ${fmtServiceDate(r.due_date)}` : "") +
+        (r.due_odo_km != null ? ` · due ${fmt(r.due_odo_km)} km` : "");
+    return `<li><span>${r.type}<span class="svc-meta"><br>${meta}</span></span>` +
+      `<span class="svc-status ${r.status}">${SERVICE_STATUS_LABEL[r.status]}</span></li>`;
+  }).join("");
+
+  if (!data.records.length) {
+    listEl.innerHTML = '<li class="places-empty">No service history logged yet.</li>';
+  } else {
+    listEl.innerHTML = data.records.map((r) =>
+      `<li><span>${r.type} · ${fmtServiceDate(r.date)}` +
+      `<span class="place-meta">${r.odo_km ? ` · ${fmt(r.odo_km)} km` : ""}` +
+      `${r.cost ? ` · ${fmt(r.cost, 2)}` : ""}${r.notes ? ` · ${r.notes}` : ""}</span></span>` +
+      `<button class="place-del" data-id="${r.id}" title="Remove this record">✕</button></li>`
+    ).join("");
+    listEl.querySelectorAll(".place-del").forEach((btn) => {
+      btn.addEventListener("click", async () => {
+        await fetch(`/api/service/${btn.dataset.id}`, { method: "DELETE" });
+        renderServicePanel();
+      });
+    });
+  }
+}
+
+function setupServiceButton() {
+  const btn = document.getElementById("btn-service");
+  if (!btn) return;
+  btn.classList.remove("hidden");
+  btn.addEventListener("click", () => {
+    openModal("service-modal");
+    renderServicePanel();
+  });
+
+  const form = document.getElementById("service-form");
+  const statusEl = document.getElementById("service-status");
+  form.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const type = document.getElementById("service-type").value;
+    const date = document.getElementById("service-date").value;
+    if (!type || !date) return;
+    const payload = {
+      type, date,
+      odo_km: +document.getElementById("service-odo").value || 0,
+      cost: +document.getElementById("service-cost").value || 0,
+      notes: document.getElementById("service-notes").value || "",
+    };
+    try {
+      const resp = await fetch("/api/service", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      if (!resp.ok) throw new Error(await resp.text());
+      setStatus(statusEl, "Logged.", "ok");
+      form.reset();
+      renderServicePanel();
+    } catch (err) {
+      setStatus(statusEl, "Couldn't save — try again.", "err");
+    }
+  });
+}
+if (!STATIC_MODE) setupServiceButton();
+
 // Wire the static chart "!" explainers once (dynamic panels wire themselves).
 wireInfoButtons(document);
 

@@ -537,6 +537,7 @@
       <button id="btn-report" class="btn" title="Print or save a summary report (PDF via the print dialog)">📄 Report</button>
       <button id="btn-notify" class="btn hidden">🔔 Notifications</button>
       <button id="btn-places" class="btn hidden">📍 Places</button>
+      <button id="btn-service" class="btn hidden">🔧 Service &amp; Tyres</button>
     </section>
   </main>
 
@@ -555,6 +556,32 @@
         <button id="places-use-location" class="btn" title="Use this device's current GPS location">📡 Use my location</button>
         <span id="places-status" class="status"></span>
       </div>
+    </div>
+  </div>
+
+  <!-- Modal: service & tyre tracker -->
+  <div id="service-modal" class="modal hidden">
+    <div class="modal-card">
+      <button class="modal-close" data-close>×</button>
+      <h2>🔧 Service &amp; Tyres</h2>
+      <p class="modal-sub">
+        Log maintenance you've had done — tyre rotations, filters, brake fluid — and
+        this tracks when each is next due, from Tesla's own published intervals.
+        Purely what you log here; the car doesn't report service history itself.
+      </p>
+      <ul id="service-due" class="service-due"></ul>
+      <form id="service-form" class="service-form">
+        <select id="service-type" required>
+          <option value="" disabled selected>Type…</option>
+        </select>
+        <input type="date" id="service-date" required>
+        <input type="number" id="service-odo" placeholder="Odometer (km)" min="0" step="1">
+        <input type="number" id="service-cost" placeholder="Cost" min="0" step="0.01">
+        <input type="text" id="service-notes" placeholder="Notes (optional)" maxlength="200">
+        <button type="submit" class="btn btn-accent">+ Log</button>
+      </form>
+      <span id="service-status" class="status"></span>
+      <ul id="service-list" class="places-list"></ul>
     </div>
   </div>
 

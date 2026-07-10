@@ -371,6 +371,18 @@ no map/routing service is involved.
 
 ---
 
+## Service & tyre tracker
+
+Tap **🔧 Service & Tyres** to log maintenance (tyre rotation, cabin air
+filter, brake fluid, ...) and see when each is next due, from Tesla's own
+published general intervals — e.g. tyre rotation every 10,000 km or 12
+months, whichever comes first. A type never logged shows **Not logged**
+rather than a false "overdue" (it may well have been done before you started
+tracking); logging it once starts the countdown. Purely what you enter here
+— the car doesn't report service history over the API. Self-hosted only.
+
+---
+
 ## Install on iPhone / iPad (PWA) — no computer needed
 
 Tesla Analyzer is an installable **Progressive Web App** — it adds to your home
