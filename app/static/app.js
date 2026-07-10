@@ -1897,21 +1897,28 @@ function setupAddChargeButton() {
 
   const form = document.getElementById("add-charge-form");
   const statusEl = document.getElementById("add-charge-status");
+  const costInput = document.getElementById("charge-cost");
+  document.getElementById("charge-free").addEventListener("change", (e) => {
+    costInput.disabled = e.target.checked;
+    if (e.target.checked) costInput.value = "";
+  });
   form.addEventListener("submit", async (e) => {
     e.preventDefault();
     const start = document.getElementById("charge-start").value;
     const end = document.getElementById("charge-end").value;
     const energy = document.getElementById("charge-energy").value;
     if (!start || !end || !energy) return;
+    const isFree = document.getElementById("charge-free").checked;
     const payload = {
       start_time: start, end_time: end, energy_added_kwh: +energy,
       charge_type: document.getElementById("charge-type").value,
       start_soc: +document.getElementById("charge-start-soc").value || 0,
       end_soc: +document.getElementById("charge-end-soc").value || 0,
       location: document.getElementById("charge-location").value || "",
+      is_free: isFree,
     };
     const costVal = document.getElementById("charge-cost").value;
-    if (costVal) payload.cost = +costVal;
+    if (costVal && !isFree) payload.cost = +costVal;
     try {
       const resp = await fetch("/api/charges/manual", {
         method: "POST", headers: { "Content-Type": "application/json" },
@@ -1920,6 +1927,7 @@ function setupAddChargeButton() {
       if (!resp.ok) throw new Error((await resp.json()).detail || "Failed");
       setStatus(statusEl, "Added.", "ok");
       form.reset();
+      costInput.disabled = false;   // form.reset() unchecks "Free" but doesn't re-enable this
       load();   // refresh KPIs/lists so the new session shows immediately
     } catch (err) {
       setStatus(statusEl, err.message, "err");

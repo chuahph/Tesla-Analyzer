@@ -186,9 +186,14 @@ Once linked, run `python run.py collect` to log new drives/charges over time.
    charging. Set either to 0 to fall back to the flat/ToU rate for that type.
 
    ```env
-   ENERGY_PRICE_AC_KWH=0.99   # RM/kWh, AC / home charging
-   ENERGY_PRICE_DC_KWH=1.29   # RM/kWh, DC fast charging
+   ENERGY_PRICE_AC_KWH=0.90   # RM/kWh, AC / home charging
+   ENERGY_PRICE_DC_KWH=1.13   # RM/kWh, DC fast charging
    ```
+
+   A genuinely free AC session (e.g. a Tesla Destination Charger) has no
+   telemetry field distinguishing it from a paid one, so it's a manual flag
+   rather than auto-detected — tick **Free** in **Add Historical Charge** to
+   force that session's cost to 0.
 
    Optional: time-of-use pricing instead of the flat rate above — driving
    cost, and charging cost for whichever charger type has no AC/DC rate set,

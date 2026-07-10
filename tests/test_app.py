@@ -596,7 +596,7 @@ def test_charge_cost_uses_ac_dc_rate_at_write_time():
     from app.models import Charge, Vehicle
 
     settings = SimpleNamespace(
-        energy_price_per_kwh=0.90, energy_price_ac_kwh=0.99, energy_price_dc_kwh=1.29,
+        energy_price_per_kwh=0.90, energy_price_ac_kwh=0.90, energy_price_dc_kwh=1.13,
         # ToU also configured, to prove AC/DC wins over it too.
         energy_price_peak_kwh=1.20, energy_price_offpeak_kwh=0.45,
         tariff_peak_start_hour=8, tariff_peak_end_hour=22, tariff_weekend_offpeak=True,
@@ -652,9 +652,9 @@ def test_charge_cost_uses_ac_dc_rate_at_write_time():
         charges = s.query(Charge).filter(Charge.vehicle_id == v.id).order_by(Charge.start_time).all()
         assert len(charges) == 2
         assert charges[0].charge_type == "AC"
-        assert charges[0].cost == round(5.0 * 0.99, 2)
+        assert charges[0].cost == round(5.0 * 0.90, 2)
         assert charges[1].charge_type == "DC"
-        assert charges[1].cost == round(10.0 * 1.29, 2)
+        assert charges[1].cost == round(10.0 * 1.13, 2)
 
 
 def test_drive_complete_fires_event_webhook_but_not_push(monkeypatch):
@@ -936,6 +936,22 @@ def test_manual_charge_logs_a_historical_session_additively():
                 c_dc = s.get(Charge, resp_dc.json()["id"])
                 assert c_dc.cost == round(20.0 * settings.energy_price_dc_kwh, 2)
                 s.delete(c_dc)
+                s.commit()
+
+            # is_free (e.g. a Tesla Destination Charger) overrides the auto
+            # rate AND an explicit cost — no telemetry field distinguishes
+            # these from a paid AC charger, so it's a manual flag.
+            resp_free = client.post("/api/charges/manual", json={
+                "start_time": "2025-01-10T18:00:00", "end_time": "2025-01-10T20:00:00",
+                "energy_added_kwh": 15.0, "charge_type": "AC", "is_free": True,
+                "cost": 99.0, "location": "Hotel Destination Charger",
+            })
+            assert resp_free.status_code == 200
+            with SessionLocal() as s:
+                c_free = s.get(Charge, resp_free.json()["id"])
+                assert c_free.is_free is True
+                assert c_free.cost == 0.0
+                s.delete(c_free)
                 s.commit()
 
             # Validation.

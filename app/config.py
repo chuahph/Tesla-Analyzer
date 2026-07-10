@@ -94,8 +94,8 @@ class Settings(BaseSettings):
     # take priority over the flat/ToU rate below for completed charging
     # sessions. Set either to 0 to fall back to flat/ToU pricing for that
     # type instead.
-    energy_price_ac_kwh: float = 0.99
-    energy_price_dc_kwh: float = 1.29
+    energy_price_ac_kwh: float = 0.90
+    energy_price_dc_kwh: float = 1.13
     # Optional time-of-use pricing: when both are set (> 0), driving/charging
     # cost uses the peak or off-peak rate for each timestamp instead of the
     # flat price above. 0 = disabled (flat rate everywhere).

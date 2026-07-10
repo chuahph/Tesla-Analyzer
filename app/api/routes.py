@@ -1288,8 +1288,14 @@ def add_manual_charge(payload: dict = Body(...), session: Session = Depends(get_
     except (TypeError, ValueError):
         raise HTTPException(400, "Invalid numeric field.")
     location = str(payload.get("location") or "")[:120]
+    # No telemetry field reliably marks a free session (e.g. a Tesla
+    # Destination Charger) apart from a paid AC charger, so this is a
+    # manual flag rather than something auto-detected.
+    is_free = bool(payload.get("is_free"))
 
-    if cost is None:
+    if is_free:
+        cost = 0.0
+    elif cost is None:
         rate = tariff.charge_price_at(settings, charge_type == "DC", start_time)
         cost = round(energy_added_kwh * rate, 2)
 
@@ -1299,7 +1305,7 @@ def add_manual_charge(payload: dict = Body(...), session: Session = Depends(get_
         duration_min=round((end_time - start_time).total_seconds() / 60.0, 1),
         start_soc=start_soc, end_soc=end_soc, energy_added_kwh=round(energy_added_kwh, 2),
         charge_type=charge_type, max_power_kw=max_power_kw, location=location,
-        cost=cost, outside_temp_c=outside_temp_c,
+        cost=cost, outside_temp_c=outside_temp_c, is_free=is_free,
     )
     session.add(charge)
     session.commit()

@@ -595,8 +595,8 @@ def test_ac_dc_charge_price_defaults():
     from app.config import Settings
 
     s = Settings()
-    assert s.energy_price_ac_kwh == 0.99
-    assert s.energy_price_dc_kwh == 1.29
+    assert s.energy_price_ac_kwh == 0.90
+    assert s.energy_price_dc_kwh == 1.13
 
 
 def test_online_idle_car_read_again_after_just_over_a_minute(monkeypatch):

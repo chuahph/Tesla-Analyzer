@@ -641,6 +641,10 @@
           <span class="field-label">Cost (optional — auto-calculated if blank)</span>
           <input type="number" id="charge-cost" min="0" step="0.01">
         </label>
+        <label class="field field-checkbox">
+          <input type="checkbox" id="charge-free">
+          <span class="field-label">Free (e.g. Tesla Destination Charger) — sets cost to 0</span>
+        </label>
         <button type="submit" class="btn btn-accent">+ Add charge</button>
       </form>
       <span id="add-charge-status" class="status"></span>

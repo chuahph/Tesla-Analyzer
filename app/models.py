@@ -136,6 +136,10 @@ class Charge(Base):
     location: Mapped[str] = mapped_column(String(120), default="")
     cost: Mapped[float] = mapped_column(Float, default=0.0)
     outside_temp_c: Mapped[float] = mapped_column(Float, default=20.0)
+    # Manually flagged free session (e.g. a Tesla Destination Charger) — no
+    # telemetry field reliably distinguishes these from a paid AC charger, so
+    # this is set by hand rather than auto-detected. Forces cost to 0.
+    is_free: Mapped[bool] = mapped_column(Boolean, default=False)
 
     vehicle: Mapped["Vehicle"] = relationship(back_populates="charges")
 

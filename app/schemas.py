@@ -53,6 +53,7 @@ class ChargeOut(BaseModel):
     max_power_kw: float
     location: str
     cost: float
+    is_free: bool
 
     class Config:
         from_attributes = True
