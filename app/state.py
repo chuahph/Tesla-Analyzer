@@ -32,6 +32,10 @@ LAST_STATUS_KEY = "last_status"  # JSON: {status, ts, soc, odo_km, speed_kmh, no
 UNREACHABLE_SINCE_KEY = "unreachable_since_ts"  # epoch a car was first seen not
 # "online" (asleep or offline) this episode, per VIN — cleared once it's back
 # online. Used to close an open trip after sustained "offline", not just "asleep".
+LOW_SOC_NOTIFIED_KEY = "low_soc_notified"  # "1" once the low-SoC push has fired
+# for the current low-battery episode, per VIN — cleared once SoC recovers
+# above the threshold, so plugging in and charging re-arms it instead of
+# firing once ever.
 
 
 def get(session: Session, key: str, default: str = "") -> str:

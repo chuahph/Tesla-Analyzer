@@ -134,3 +134,19 @@ class Charge(Base):
     outside_temp_c: Mapped[float] = mapped_column(Float, default=20.0)
 
     vehicle: Mapped["Vehicle"] = relationship(back_populates="charges")
+
+
+class PushSubscription(Base):
+    """A browser's Web Push subscription (one row per device/browser that
+    tapped "Enable notifications"). Not per-vehicle — a device gets notified
+    about whichever car is currently the account's active pick."""
+
+    __tablename__ = "push_subscriptions"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    # The push service URL (unique per browser subscription) — the natural
+    # dedupe key when the same device re-subscribes.
+    endpoint: Mapped[str] = mapped_column(String(500), unique=True, index=True)
+    p256dh: Mapped[str] = mapped_column(String(255))
+    auth: Mapped[str] = mapped_column(String(255))
+    created_at: Mapped[datetime] = mapped_column(DateTime)

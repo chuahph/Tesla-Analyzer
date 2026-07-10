@@ -7,6 +7,7 @@ Usage:
     python run.py collect            Run the live Tesla API collector
     python run.py report [--days N]  Print a text analysis report to stdout
     python run.py reset              Drop and recreate the database schema
+    python run.py push-keys          Generate a VAPID keypair for web push
 """
 from __future__ import annotations
 
@@ -64,6 +65,25 @@ def cmd_reset(args):
     Base.metadata.drop_all(bind=engine)
     init_db()
     print("Database schema reset.")
+
+
+def cmd_push_keys(args):
+    from webpush.vapid import VAPID
+
+    # Stored as a single-line env var with literal "\n" sequences (the same
+    # trick used for multi-line PEM/JSON secrets on most hosts); config.py
+    # converts them back to real newlines before handing the PEM to the
+    # crypto library.
+    private_pem, public_pem, _ = VAPID.generate_keys()
+    private_line = private_pem.decode().strip().replace("\n", "\\n")
+    public_line = public_pem.decode().strip().replace("\n", "\\n")
+    print("Generated a new VAPID keypair for web push notifications.")
+    print("Set these in your environment (Render → Environment, or .env):\n")
+    print(f"VAPID_PRIVATE_KEY_PEM={private_line}")
+    print(f"VAPID_PUBLIC_KEY_PEM={public_line}")
+    print("VAPID_SUBJECT_EMAIL=you@example.com   # a contact address; never emailed to you")
+    print("\nKeep the private key secret — anyone with it can send push "
+          "messages impersonating this app to your subscribed devices.")
 
 
 def _print_report(d):
@@ -125,6 +145,9 @@ def main(argv=None):
 
     p = sub.add_parser("reset", help="Reset the database schema")
     p.set_defaults(func=cmd_reset)
+
+    p = sub.add_parser("push-keys", help="Generate a VAPID keypair for web push notifications")
+    p.set_defaults(func=cmd_push_keys)
 
     args = parser.parse_args(argv)
     if not getattr(args, "command", None):

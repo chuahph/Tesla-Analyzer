@@ -147,6 +147,72 @@ def test_backup_surfaces_webhook_delivery_failure():
         settings.app_passcode, settings.backup_webhook_url = old_pc, old_url
 
 
+def test_push_endpoints_404_when_not_configured():
+    settings = get_settings()
+    old_pc = settings.app_passcode
+    old_priv, old_pub = settings.vapid_private_key_pem, settings.vapid_public_key_pem
+    settings.app_passcode = ""
+    settings.vapid_private_key_pem = settings.vapid_public_key_pem = ""
+    try:
+        with TestClient(app) as client:
+            assert client.get("/api/push/vapid-public-key").status_code == 404
+            resp = client.post("/api/push/subscribe", json={
+                "endpoint": "https://push.example.com/x",
+                "keys": {"p256dh": "a", "auth": "b"},
+            })
+            assert resp.status_code == 404
+    finally:
+        settings.app_passcode = old_pc
+        settings.vapid_private_key_pem, settings.vapid_public_key_pem = old_priv, old_pub
+
+
+def test_push_subscribe_and_unsubscribe_round_trip():
+    from webpush.vapid import VAPID
+
+    from app.database import SessionLocal
+    from app.models import PushSubscription
+
+    settings = get_settings()
+    old_pc = settings.app_passcode
+    old_priv, old_pub = settings.vapid_private_key_pem, settings.vapid_public_key_pem
+    settings.app_passcode = ""
+    priv, pub, appkey = VAPID.generate_keys()
+    settings.vapid_private_key_pem = priv.decode().strip().replace("\n", "\\n")
+    settings.vapid_public_key_pem = pub.decode().strip().replace("\n", "\\n")
+    try:
+        with TestClient(app) as client:
+            resp = client.get("/api/push/vapid-public-key")
+            assert resp.status_code == 200
+            assert resp.json()["key"] == appkey
+
+            sub_body = {
+                "endpoint": "https://push.example.com/round-trip",
+                "keys": {"p256dh": "fake-p256dh", "auth": "fake-auth"},
+            }
+            assert client.post("/api/push/subscribe", json=sub_body).status_code == 200
+            with SessionLocal() as s:
+                assert s.query(PushSubscription).filter(
+                    PushSubscription.endpoint == sub_body["endpoint"]).count() == 1
+
+            # Malformed payload -> 400, not a silent no-op.
+            resp = client.post("/api/push/subscribe", json={"endpoint": "https://x"})
+            assert resp.status_code == 400
+
+            assert client.post("/api/push/unsubscribe", json={
+                "endpoint": sub_body["endpoint"]}).status_code == 200
+            with SessionLocal() as s:
+                assert s.query(PushSubscription).filter(
+                    PushSubscription.endpoint == sub_body["endpoint"]).count() == 0
+    finally:
+        settings.app_passcode = old_pc
+        settings.vapid_private_key_pem, settings.vapid_public_key_pem = old_priv, old_pub
+        from app.database import SessionLocal as SL
+        from app.models import PushSubscription as PS
+        with SL() as s:
+            s.query(PS).delete()
+            s.commit()
+
+
 def test_health_reports_build_info():
     with TestClient(app) as client:
         body = client.get("/api/health").json()
@@ -279,7 +345,7 @@ def test_charge_cost_uses_time_of_use_pricing_at_write_time():
         energy_price_per_kwh=0.90, energy_price_peak_kwh=1.20,
         energy_price_offpeak_kwh=0.45, tariff_peak_start_hour=8,
         tariff_peak_end_hour=22, tariff_weekend_offpeak=True,
-        battery_capacity_kwh=0.0, battery_new_range_km=0.0,
+        battery_capacity_kwh=0.0, battery_new_range_km=0.0, low_soc_notify_pct=0.0,
     )
 
     def vehicle_data(vin, ts, odo_mi, soc, added_kwh, charging, lat=None, lon=None):

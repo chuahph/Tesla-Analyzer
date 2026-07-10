@@ -275,6 +275,46 @@ uploads, so those need a small relay in between rather than the URL directly.
 
 ---
 
+## Push notifications
+
+Get an alert on your phone/desktop the moment a charge finishes or the
+battery drops low — no app-store app, this uses the standard [Web Push
+API](https://web.dev/articles/push-notifications-web-push-protocol), the same
+mechanism sites like Twitter/Gmail use for browser notifications, delivered
+through the PWA you already installed.
+
+1. Generate a keypair:
+   ```bash
+   python run.py push-keys
+   ```
+   Paste the three printed lines (`VAPID_PRIVATE_KEY_PEM`,
+   `VAPID_PUBLIC_KEY_PEM`, `VAPID_SUBJECT_EMAIL`) into Render's environment
+   variables (or `.env` for self-hosting). The subject email is a contact
+   address a push service could use if a subscription misbehaves — it's
+   never emailed to you and doesn't need to be a real inbox you check.
+2. Optionally set `LOW_SOC_NOTIFY_PCT` (e.g. `20`) to also get a one-time
+   "Battery low" alert when SoC drops to/below that level — it re-arms once
+   the battery recovers above the threshold (+5% hysteresis), so plugging in
+   and charging resets it rather than it firing once ever.
+3. Redeploy, open the dashboard, and tap **🔔 Enable notifications** at the
+   bottom of the page (only appears once VAPID keys are configured). Your
+   browser will ask for notification permission once.
+
+That's it — every device that taps the button gets notified independently
+(subscriptions aren't tied to a single browser/phone). Tap the button again
+on a device to turn its notifications off. Currently wired up: **charging
+complete** and **battery low**; the delivery mechanism (`app/notifications.py`
+— a single `notify(session, title, body)` call) is meant to be easy to hook
+up to more events later (car left unlocked, sync gone stale, ...).
+
+> Uses the `webpush` package rather than the more commonly-referenced
+> `pywebpush` — the latter depends on `http-ece`, which fails to build with
+> current Python/setuptools and would break the Docker build. `webpush` is a
+> pure `cryptography` + `pydantic` + `PyJWT` implementation of the same
+> RFC 8291/8292 protocol, with no C-extension dependency.
+
+---
+
 ## Install on iPhone / iPad (PWA) — no computer needed
 
 Tesla Analyzer is an installable **Progressive Web App** — it adds to your home

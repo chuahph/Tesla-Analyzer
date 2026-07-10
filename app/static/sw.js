@@ -6,7 +6,7 @@
  *   - navigations & data  -> network-first, fall back to cache when offline
  *   - other assets        -> cache-first, fall back to network
  */
-const CACHE = "tesla-analyzer-v97"; // bump to invalidate cached assets on update
+const CACHE = "tesla-analyzer-v98"; // bump to invalidate cached assets on update
 
 self.addEventListener("install", (event) => {
   self.skipWaiting();
@@ -57,6 +57,39 @@ async function cacheFirst(request) {
   if (fresh && fresh.status === 200) cache.put(request, fresh.clone());
   return fresh;
 }
+
+// Web push: show the notification the server's payload describes. The
+// payload shape is {title, body, tag} (see app/notifications.py).
+self.addEventListener("push", (event) => {
+  let data = { title: "Tesla Analyzer", body: "" };
+  try {
+    if (event.data) data = { ...data, ...event.data.json() };
+  } catch (err) {
+    data.body = event.data ? event.data.text() : "";
+  }
+  event.waitUntil(
+    self.registration.showNotification(data.title, {
+      body: data.body,
+      tag: data.tag || "tesla-analyzer",
+      icon: "/static/icons/icon-192.png",
+      badge: "/static/icons/icon-192.png",
+    })
+  );
+});
+
+// Tapping a notification focuses an already-open tab if there is one,
+// otherwise opens a new one at the app root.
+self.addEventListener("notificationclick", (event) => {
+  event.notification.close();
+  event.waitUntil(
+    self.clients.matchAll({ type: "window", includeUncontrolled: true }).then((clients) => {
+      for (const client of clients) {
+        if ("focus" in client) return client.focus();
+      }
+      if (self.clients.openWindow) return self.clients.openWindow("/");
+    })
+  );
+});
 
 self.addEventListener("fetch", (event) => {
   const { request } = event;

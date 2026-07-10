@@ -9,7 +9,7 @@ from fastapi.responses import RedirectResponse
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from .. import auth, services, state, tariff, vin as vin_mod
+from .. import auth, notifications, services, state, tariff, vin as vin_mod
 from ..analysis import battery as battery_analysis
 from ..analysis import charging as charging_analysis
 from ..analysis import driving as driving_analysis
@@ -524,6 +524,11 @@ def _process_vehicle(
         # (falls back to the flat rate when TOU isn't configured).
         c["cost"] = round(c["energy_added_kwh"] * tariff_price(c["start_time"]), 2)
         session.add(Charge(vehicle_id=vehicle.id, **c))
+        notifications.notify(
+            session, "Charging complete",
+            f"{vehicle.name}: {c['energy_added_kwh']:.1f} kWh added, now at {c['end_soc']:.0f}%.",
+            tag="charge-complete",
+        )
     if snap["soc"] > 0 and snap.get("range_km", 0) > 0:
         last_reading = session.scalars(
             select(BatteryReading)
@@ -538,6 +543,23 @@ def _process_vehicle(
                 range_km=round(snap["range_km"], 1),
                 odo_km=round(snap["odo_km"], 1),
             ))
+        # Low-battery alert: fires once per low episode (a state.py flag,
+        # cleared once SoC recovers past the threshold + a small hysteresis
+        # band so it doesn't flicker on/off right at the line), not on every
+        # sync tick while it stays low.
+        threshold = settings.low_soc_notify_pct
+        if threshold > 0:
+            notified_key = state.scoped(state.LOW_SOC_NOTIFIED_KEY, vin)
+            already_notified = state.get(session, notified_key) == "1"
+            if snap["soc"] <= threshold and not already_notified:
+                notifications.notify(
+                    session, "Battery low",
+                    f"{vehicle.name} is at {snap['soc']:.0f}% — time to plug in.",
+                    tag="low-soc",
+                )
+                state.put(session, notified_key, "1")
+            elif snap["soc"] > threshold + 5 and already_notified:
+                state.put(session, notified_key, "")
 
     session.commit()
     state.put(session, sk, _json.dumps(snap))
@@ -710,6 +732,15 @@ def sync_now(wake: bool = Query(False), session: Session = Depends(get_session))
                         session.add(Charge(vehicle_id=vehicle_row.id, **c))
                         session.commit()
                         total["charges"] += 1
+                        # Closed via the car going offline/asleep rather than a
+                        # clean "stopped charging" reading — could be complete
+                        # or genuinely interrupted, so the message stays neutral.
+                        notifications.notify(
+                            session, "Charging session ended",
+                            f"{vehicle_row.name}: {c['energy_added_kwh']:.1f} kWh added, "
+                            f"now at {c['end_soc']:.0f}% (car went offline/asleep).",
+                            tag="charge-complete",
+                        )
                 if charge_raw:
                     state.put(session, charge_key, "")
             continue  # asleep/offline — nothing readable right now
@@ -1046,6 +1077,43 @@ def backup_now(session: Session = Depends(get_session)):
         "drives": len(drives), "charges": len(charges),
         "webhook_status": resp.status_code,
     }
+
+
+# --- Web push notifications -------------------------------------------------
+
+
+@router.get("/push/vapid-public-key")
+def push_vapid_public_key():
+    """The VAPID application server key the browser needs to call
+    PushManager.subscribe(). 404 (not just an empty value) when push isn't
+    configured, so the frontend can cleanly hide the "Enable notifications"
+    control rather than offer a subscribe button that would fail."""
+    key = notifications.public_key_b64()
+    if not key:
+        raise HTTPException(404, "Push notifications aren't configured on this server.")
+    return {"key": key}
+
+
+@router.post("/push/subscribe")
+def push_subscribe(payload: dict = Body(...), session: Session = Depends(get_session)):
+    """Register a browser's push subscription. Body matches the browser's
+    own PushSubscription.toJSON() shape: {endpoint, keys: {p256dh, auth}}."""
+    if not notifications.enabled():
+        raise HTTPException(404, "Push notifications aren't configured on this server.")
+    endpoint = payload.get("endpoint")
+    keys = payload.get("keys") or {}
+    if not endpoint or not keys.get("p256dh") or not keys.get("auth"):
+        raise HTTPException(400, "Malformed subscription payload.")
+    notifications.subscribe(session, endpoint, keys["p256dh"], keys["auth"])
+    return {"subscribed": True}
+
+
+@router.post("/push/unsubscribe")
+def push_unsubscribe(payload: dict = Body(...), session: Session = Depends(get_session)):
+    endpoint = payload.get("endpoint")
+    if endpoint:
+        notifications.unsubscribe(session, endpoint)
+    return {"unsubscribed": True}
 
 
 @router.get("/summary")

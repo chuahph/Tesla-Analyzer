@@ -1452,6 +1452,75 @@ if ("serviceWorker" in navigator) {
   );
 }
 
+// Web push: needs the self-hosted backend (subscriptions are stored there
+// and it's what sends the pushes), so the button stays hidden in the
+// on-device/GitHub Pages build, same as the Tesla-account link button.
+function urlBase64ToUint8Array(base64) {
+  const padded = base64 + "=".repeat((4 - (base64.length % 4)) % 4);
+  const raw = atob(padded.replace(/-/g, "+").replace(/_/g, "/"));
+  return Uint8Array.from([...raw].map((c) => c.charCodeAt(0)));
+}
+
+async function setupPushButton() {
+  const btn = document.getElementById("btn-notify");
+  if (!btn || STATIC_MODE || !("serviceWorker" in navigator) || !("PushManager" in window)) return;
+
+  let vapidKey;
+  try {
+    const resp = await fetch("/api/push/vapid-public-key");
+    if (!resp.ok) return;   // not configured server-side — stay hidden
+    vapidKey = (await resp.json()).key;
+  } catch (e) {
+    return;
+  }
+
+  btn.classList.remove("hidden");
+  const reg = await navigator.serviceWorker.ready;
+
+  async function refresh() {
+    const sub = await reg.pushManager.getSubscription();
+    const on = !!sub && Notification.permission === "granted";
+    btn.textContent = on ? "🔔 Notifications on" : "🔕 Enable notifications";
+    btn.title = on ? "Tap to turn off charge/battery alerts on this device"
+                   : "Get alerts here for charge complete and low battery";
+    return sub;
+  }
+
+  let current = await refresh();
+
+  btn.addEventListener("click", async () => {
+    btn.disabled = true;
+    try {
+      if (current) {
+        await current.unsubscribe();
+        await fetch("/api/push/unsubscribe", {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ endpoint: current.endpoint }),
+        });
+      } else {
+        const permission = await Notification.requestPermission();
+        if (permission !== "granted") { btn.disabled = false; return; }
+        const sub = await reg.pushManager.subscribe({
+          userVisibleOnly: true,
+          applicationServerKey: urlBase64ToUint8Array(vapidKey),
+        });
+        await fetch("/api/push/subscribe", {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(sub.toJSON()),
+        });
+      }
+    } catch (e) {
+      // Permission denied, or the browser/OS blocked it — leave the button
+      // as-is rather than claim a state that didn't actually take.
+    }
+    current = await refresh();
+    btn.disabled = false;
+  });
+}
+if (!STATIC_MODE) {
+  window.addEventListener("load", () => setupPushButton().catch(() => {}));
+}
+
 // Wire the static chart "!" explainers once (dynamic panels wire themselves).
 wireInfoButtons(document);
 

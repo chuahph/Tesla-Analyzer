@@ -43,6 +43,18 @@ class Settings(BaseSettings):
     # URL, or a relay that forwards to email/Slack/Discord.
     backup_webhook_url: str = ""
 
+    # Web push notifications (charge complete, low battery, ...). Generate a
+    # keypair once with `python -m app.push_keys` and set both here — empty
+    # (either) disables notifications entirely; the subscribe UI stays
+    # hidden and /api/push/* returns 404. VAPID requires a contact address
+    # (never emailed to you — it's only what a push service could use to
+    # reach the app operator if a subscription misbehaves).
+    vapid_private_key_pem: str = ""
+    vapid_public_key_pem: str = ""
+    vapid_subject_email: str = "admin@example.com"
+    # Notify when SoC drops to/below this on a synced reading. 0 = disabled.
+    low_soc_notify_pct: float = 0.0
+
     # Analysis parameters
     energy_price_per_kwh: float = 0.90
     # Optional time-of-use pricing: when both are set (> 0), driving/charging
