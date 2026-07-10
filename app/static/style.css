@@ -129,14 +129,16 @@ header {
 .bat-info.hidden { display: none; }
 .bat-comp { margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--border); line-height: 1.8; }
 
-/* Window driving score banner at the top of the dashboard. */
+/* Window driving score banner at the top of the dashboard — also carries
+   the driving-behaviour breakdown, so there's one score, not two. */
 .score-banner {
-  display: flex; align-items: center; gap: 16px;
+  display: flex; align-items: flex-start; gap: 16px;
   background: linear-gradient(180deg, #1a1f28, var(--panel));
   border: 1px solid var(--border); border-left: 4px solid var(--muted);
   border-radius: 12px; padding: 14px 18px; margin-bottom: 16px;
   box-shadow: 0 1px 3px rgba(0, 0, 0, .3);
 }
+.score-behaviour { margin-top: 10px; padding-top: 8px; border-top: 1px solid var(--border); }
 .score-banner.tone-green  { border-left-color: var(--green); }
 .score-banner.tone-blue   { border-left-color: var(--accent-2); }
 .score-banner.tone-amber  { border-left-color: var(--amber); }

@@ -41,8 +41,36 @@ function effTone(vsRatedPct) {
   return vsRatedPct <= 2 ? "green" : vsRatedPct <= 15 ? "amber" : "red";
 }
 
+// Driving Behaviour breakdown (habit costs vs. this driver's own best
+// quartile) as supporting detail under the one driving score — not a
+// second competing "/100" number, which used to read as a mismatch
+// against the main score above it (they grade different things: this
+// window vs. rated efficiency, vs. this window's drives vs. each other).
+function behaviourHtml(b) {
+  if (!b || !b.available) return "";
+  const rows = [
+    ["Highway >110 km/h", b.speeding_share_pct, b.speeding_penalty_wh],
+    ["Stop-and-go", b.stopgo_share_pct, b.stopgo_penalty_wh],
+    ["Short trips <3 km", b.short_trip_share_pct, b.short_trip_penalty_wh],
+    ["Peak hours", b.peak_hour_share_pct, b.peak_hour_penalty_wh],
+    ["Hot weather 33°C+", b.hot_weather_share_pct, b.hot_weather_penalty_wh],
+  ].filter(([, share, pen]) => share >= 5 && pen > 0)
+   .map(([label, share, pen]) =>
+     `<div class="bat-line">${label}: <strong>${share}%</strong> of km · +${pen} Wh/km</div>`)
+   .join("");
+  return `<div class="score-behaviour">
+    <div class="bat-line">Typical driving vs your own best quartile
+      (<strong>${Math.round(b.best_quartile_wh_per_km)} Wh/km</strong>)</div>
+    ${rows || '<div class="bat-line">No costly habits detected in this window 🎉</div>'}
+    ${b.potential_saving_kwh >= 1
+      ? `<div class="bat-line">Potential if all drives matched your best: <strong>${b.potential_saving_kwh} kWh</strong></div>`
+      : ""}
+  </div>`;
+}
+
 // Prominent window driving score at the top, with an info popover explaining
-// how it's computed.
+// how it's computed, plus the behaviour breakdown underneath — one box, one
+// score.
 function renderScore(d) {
   const el = document.getElementById("score-banner");
   if (!el) return;
@@ -75,6 +103,7 @@ function renderScore(d) {
     `<div class="score-sub">${drv.avg_efficiency_wh_per_km} Wh/km this ${d.window_label || "window"} · ` +
     `${drv.total_distance_km} km over ${drv.total_drives} drives</div>` +
     `<div id="score-info" class="info-pop hidden">${info}</div>` +
+    behaviourHtml(drv.behaviour) +
     `</div>`;
   wireInfoButtons(el);
 }
@@ -383,12 +412,13 @@ function renderKpis(d) {
             `${fmt(bal.used_kwh, 1)} kWh of ${fmt(bal.full_charge_kwh, 1)} kWh full charge`, "amber")
         : kpiCard("Battery Used", `${fmt(bal.used_pct / 100, 1)}× pack`,
             `${fmt(bal.used_kwh, 1)} kWh ≈ ${fmt(bal.used_pct / 100, 1)} full charges`, "amber"));
-    }
-    // The petrol-money view of the same energy: what this window's driving
-    // cost at the configured tariff, and per km.
-    if (drv.total_cost != null) {
-      cards.push(kpiCard("Driving Cost", `${cur} ${fmt(drv.total_cost, 2)}`,
-        drv.cost_per_km != null ? `${cur} ${fmt(drv.cost_per_km, 3)} / km` : "", "violet"));
+      // Net Battery: charged minus used this window — Battery Used only shows
+      // the drain side, this is the "am I keeping up with it" complement,
+      // straight from the same battery_balance figures.
+      const net = bal.charged_kwh - bal.used_kwh;
+      cards.push(kpiCard("Net Battery", `${net >= 0 ? "+" : ""}${fmt(net, 1)} kWh`,
+        `charged ${fmt(bal.charged_kwh, 1)} kWh · used ${fmt(bal.used_kwh, 1)} kWh`,
+        net >= 0 ? "green" : "red"));
     }
     // TCO: what this window's distance would have cost in an equivalent
     // petrol car, vs. what it actually cost to charge. Hidden entirely
@@ -410,6 +440,12 @@ function renderKpis(d) {
     const acShare = Math.max(0, Math.round(100 - dcShare));
     cards.push(kpiCard("AC / DC Energy", `${acShare} / ${fmt(dcShare, 0)}%`,
       `${fmt(chg.ac_energy_kwh, 0)} / ${fmt(chg.dc_energy_kwh, 0)} kWh`, "red"));
+    // Driving Cost sits immediately left of Charging Cost so the two money
+    // figures for the same window are directly comparable side by side.
+    if (drv.available && drv.total_cost != null) {
+      cards.push(kpiCard("Driving Cost", `${cur} ${fmt(drv.total_cost, 2)}`,
+        drv.cost_per_km != null ? `${cur} ${fmt(drv.cost_per_km, 3)} / km` : "", "violet"));
+    }
     // What the window's charging cost, with the per-100km "fuel cost" figure
     // a petrol driver can compare directly.
     if (chg.total_cost != null && chg.total_cost > 0) {
@@ -830,34 +866,6 @@ function setupEditChargeModal() {
   });
 }
 
-function renderBehaviour(d) {
-  const card = document.getElementById("behaviour-card");
-  const body = document.getElementById("behaviour-body");
-  if (!card || !body) return;
-  const b = (d.driving || {}).behaviour;
-  if (!b || !b.available) { card.style.display = "none"; return; }
-  card.style.display = "";
-  const rows = [
-    ["Highway >110 km/h", b.speeding_share_pct, b.speeding_penalty_wh],
-    ["Stop-and-go", b.stopgo_share_pct, b.stopgo_penalty_wh],
-    ["Short trips <3 km", b.short_trip_share_pct, b.short_trip_penalty_wh],
-    ["Peak hours", b.peak_hour_share_pct, b.peak_hour_penalty_wh],
-    ["Hot weather 33°C+", b.hot_weather_share_pct, b.hot_weather_penalty_wh],
-  ].filter(([, share, pen]) => share >= 5 && pen > 0)
-   .map(([label, share, pen]) =>
-     `<div class="bat-line">${label}: <strong>${share}%</strong> of km · +${pen} Wh/km</div>`)
-   .join("");
-  const scoreCls = b.score >= 80 ? "" : b.score >= 60 ? " warn" : " bad";
-  body.innerHTML = `
-    <div class="bat-health${scoreCls}">${b.score}<span style="font-size:20px">/100</span></div>
-    <div class="bat-line">Typical driving vs your own best quartile
-      (<strong>${Math.round(b.best_quartile_wh_per_km)} Wh/km</strong>)</div>
-    ${rows || '<div class="bat-line">No costly habits detected in this window 🎉</div>'}
-    ${b.potential_saving_kwh >= 1
-      ? `<div class="bat-line">Potential if all drives matched your best: <strong>${b.potential_saving_kwh} kWh</strong></div>`
-      : ""}`;
-}
-
 function renderBattery(d) {
   const card = document.getElementById("battery-card");
   const body = document.getElementById("battery-body");
@@ -1099,7 +1107,6 @@ async function load() {
     renderKpis(d);
     renderWeekCompare(d);
     renderCharts(d);
-    renderBehaviour(d);
     renderBattery(d);
     renderLists(d);
     renderInsights(d);
