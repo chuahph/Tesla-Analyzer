@@ -469,17 +469,38 @@ def live_trip(
 
 
 def _charge_from(start: dict, cur: dict, capacity_kwh: float, price_per_kwh: float):
-    gain = cur["soc"] - start["soc"]
-    if gain < CHARGE_MIN_PCT:
-        return None
     dt_min = max((cur["ts"] - start["ts"]) / 60.0, 0.0)
     # Prefer Tesla's own measured energy for the session (charge_energy_added,
     # which accumulates during charging). Fall back to the range/SoC estimate
     # when the meter isn't available (e.g. a session missed between snapshots).
     measured = (cur.get("energy_added_kwh") or 0.0) - (start.get("energy_added_kwh") or 0.0)
-    energy = measured if measured > 0 else _energy_kwh(cur, start, capacity_kwh)
-    dc = bool(start.get("fast") or cur.get("fast"))
     energy_measured = measured > 0
+
+    # If the odometer moved since the charge opened, a drive happened before
+    # this close poll ever got a chance to see "charging just stopped" — so
+    # cur's SoC/range no longer reflect the charge alone, they've already
+    # had the drive's consumption folded in. The plain SoC-gain gate below
+    # would then judge a real, fully-measured charge as "too small" (or
+    # even negative) purely because of what happened *after* it, and drop
+    # the whole session despite good meter data. Tesla's own session meter
+    # doesn't move for driving, so it stays trustworthy regardless; use it
+    # for both the "was this real" gate and the end-SoC estimate in that
+    # case, instead of the now-contaminated raw reading.
+    moved = (
+        start.get("odo_km") is not None and cur.get("odo_km") is not None
+        and (cur["odo_km"] - start["odo_km"]) >= DRIVE_MIN_KM
+    )
+    if moved and energy_measured:
+        gain = measured / capacity_kwh * 100.0 if capacity_kwh else 0.0
+        end_soc = min(start["soc"] + gain, 100.0)
+    else:
+        gain = cur["soc"] - start["soc"]
+        end_soc = cur["soc"]
+    if gain < CHARGE_MIN_PCT:
+        return None
+
+    energy = measured if energy_measured else _energy_kwh(cur, start, capacity_kwh)
+    dc = bool(start.get("fast") or cur.get("fast"))
     # Where the car was charging: GPS coords (named later in the API layer).
     # Without location access, fall back to the charger type so the Charging
     # Locations card still groups sessions meaningfully instead of being blank.
@@ -490,7 +511,7 @@ def _charge_from(start: dict, cur: dict, capacity_kwh: float, price_per_kwh: flo
         "end_time": _dt(cur["ts"]),
         "duration_min": round(dt_min, 1),
         "start_soc": start["soc"],
-        "end_soc": cur["soc"],
+        "end_soc": end_soc,
         "energy_added_kwh": round(energy, 2),
         "charge_type": "DC" if dc else "AC",
         "max_power_kw": max(start.get("max_kw", 0.0), cur.get("charger_kw", 0.0)),
@@ -754,6 +775,10 @@ def process_snapshot(
             "ts": base["ts"],
             "soc": base["soc"],
             "range_km": base.get("range_km"),
+            # Captured only to detect a drive slipping in before the close
+            # poll notices charging stopped (see _charge_from) — not used
+            # for anything else here.
+            "odo_km": base.get("odo_km"),
             # Baseline is 0, not cur's already-accumulated meter reading. Tesla
             # resets charge_energy_added to ~0 at the true plug-in moment, so
             # by the time we first observe charging=True, cur's value already

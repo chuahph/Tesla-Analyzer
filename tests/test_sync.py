@@ -228,6 +228,46 @@ def test_charge_stays_open_until_it_stops():
     assert chg["duration_min"] == 60.0
 
 
+def test_live_tracked_charge_survives_a_drive_before_the_close_poll():
+    """A charge opened live (via a real poll) must not be dropped just
+    because the *next* poll — the one that finally notices charging
+    stopped — only arrives after a short drive has already happened too.
+
+    Regression: the close-time SoC gate (`cur.soc - start.soc`) used cur's
+    SoC as-is, but a drive after the charge finished consumes SoC on top of
+    what the charge added — here enough to net the SoC right back to where
+    it started. The old gate then saw ~0% net gain and silently dropped a
+    real, fully Tesla-meter-measured 7.2 kWh session. Tesla's own session
+    meter doesn't move for driving, so it's used to detect the gain (and to
+    estimate the true end-of-charge SoC) whenever the odometer shows a
+    drive happened before the close poll caught up.
+    """
+    before = snap(T0, 10_000.0, 40)                                    # parked, pre-charge
+    opened = snap(T0 + 600, 10_000.0, 40, charging=True, kw=7)          # plugged in, charging
+    # By the time the cron catches "charging stopped", a 4 km errand has
+    # already happened too: the charge added 12% (7.2 kWh of 60 kWh) but
+    # the drive used it right back down, so soc reads unchanged overall.
+    closed = snap(T0 + 7200, 10_004.0, 40, energy_added=7.2)
+
+    _, _, _, charge = step(None, before)
+    _, c, _, charge = step(before, opened, charge=charge)
+    assert c == [] and charge is not None                              # opened normally
+
+    d, c, trip, charge = step(opened, closed, charge=charge)
+    assert charge is None                                               # closed, not left open
+    assert len(c) == 1                                                  # NOT silently dropped
+    (chg,) = c
+    assert abs(chg["energy_added_kwh"] - 7.2) < 1e-6                    # the real meter reading
+    assert chg["start_soc"] == 40
+    assert abs(chg["end_soc"] - 52.0) < 1e-6                            # 40% + 12% implied by the meter
+    assert abs(chg["cost"] - 7.2 * 0.90) < 1e-6
+
+    # The drive itself is still reconstructed independently from the same
+    # gap (odometer delta is unaffected by any of the charge confusion).
+    assert len(d) == 1
+    assert d[0]["distance_km"] == 4.0
+
+
 def test_energy_prefers_fine_grained_range_delta():
     """A short trip must not be quantised to whole battery percents.
 
