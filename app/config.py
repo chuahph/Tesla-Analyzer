@@ -40,6 +40,16 @@ class Settings(BaseSettings):
 
     # Analysis parameters
     energy_price_per_kwh: float = 0.90
+    # Optional time-of-use pricing: when both are set (> 0), driving/charging
+    # cost uses the peak or off-peak rate for each timestamp instead of the
+    # flat price above. 0 = disabled (flat rate everywhere).
+    energy_price_peak_kwh: float = 0.0
+    energy_price_offpeak_kwh: float = 0.0
+    tariff_peak_start_hour: int = 8
+    tariff_peak_end_hour: int = 22
+    # Malaysian residential TOU tariffs (e.g. TNB) typically treat the whole
+    # weekend as off-peak regardless of hour.
+    tariff_weekend_offpeak: bool = True
     currency: str = "RM"
     rated_wh_per_km: float = 150.0
     # When-new full range (km) used as the battery-health 100% reference.

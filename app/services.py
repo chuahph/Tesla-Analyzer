@@ -5,12 +5,13 @@ from sqlalchemy import delete
 
 from . import state
 from .config import get_settings
-from .models import Charge, Drive, Vehicle
+from .models import BatteryReading, Charge, Drive, Vehicle
 
 
 def _wipe(session) -> None:
     session.execute(delete(Drive))
     session.execute(delete(Charge))
+    session.execute(delete(BatteryReading))
     session.execute(delete(Vehicle))
     session.commit()
 
@@ -24,6 +25,7 @@ def purge_demo(session) -> None:
         return
     session.execute(delete(Drive).where(Drive.vehicle_id.in_(demo_ids)))
     session.execute(delete(Charge).where(Charge.vehicle_id.in_(demo_ids)))
+    session.execute(delete(BatteryReading).where(BatteryReading.vehicle_id.in_(demo_ids)))
     session.execute(delete(Vehicle).where(Vehicle.id.in_(demo_ids)))
     session.commit()
 

@@ -157,6 +157,18 @@ Once linked, run `python run.py collect` to log new drives/charges over time.
    ENERGY_PRICE_PER_KWH=0.30
    ```
 
+   Optional: time-of-use pricing instead of the flat rate above — driving and
+   charging cost then price each session by its own start time. Both rates
+   must be set (> 0) to enable it; leaving either at 0 keeps the flat rate.
+
+   ```env
+   ENERGY_PRICE_PEAK_KWH=1.20      # RM/kWh during peak hours
+   ENERGY_PRICE_OFFPEAK_KWH=0.45   # RM/kWh outside them
+   TARIFF_PEAK_START_HOUR=8        # 24h, default 8
+   TARIFF_PEAK_END_HOUR=22         # 24h, default 22
+   TARIFF_WEEKEND_OFFPEAK=true     # whole weekend at the off-peak rate (default)
+   ```
+
 3. Run the collector to start logging sessions, and serve the dashboard:
 
    ```bash

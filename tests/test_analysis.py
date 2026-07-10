@@ -260,6 +260,39 @@ def test_driving_cost_and_map_links():
     assert r2["recent_trips"][0]["map_url"] is None
 
 
+def test_driving_cost_accepts_time_of_use_price_function():
+    """When energy_price is a callable (TOU pricing), each trip is priced at
+    its own start_time's rate, and the window total blends those rates by
+    energy — not a single flat number applied everywhere."""
+    from datetime import datetime
+
+    from app.analysis import driving as driving_analysis
+    from app.models import Drive
+
+    def price_at(dt):
+        return 1.20 if 8 <= dt.hour < 22 else 0.45   # peak / off-peak
+
+    peak_trip = Drive(
+        start_time=datetime(2026, 7, 9, 14, 0), end_time=datetime(2026, 7, 9, 14, 20),
+        distance_km=10.0, duration_min=20.0, avg_speed_kmh=30.0, max_speed_kmh=60.0,
+        start_soc=60, end_soc=58, energy_used_kwh=1.5, outside_temp_c=28.0,
+    )
+    night_trip = Drive(
+        start_time=datetime(2026, 7, 9, 23, 0), end_time=datetime(2026, 7, 9, 23, 20),
+        distance_km=10.0, duration_min=20.0, avg_speed_kmh=30.0, max_speed_kmh=60.0,
+        start_soc=60, end_soc=58, energy_used_kwh=1.5, outside_temp_c=28.0,
+    )
+    r = driving_analysis.analyze([peak_trip], 150.0, 75.0, energy_price=price_at)
+    assert r["recent_trips"][0]["cost"] == round(1.5 * 1.20, 2)
+    r2 = driving_analysis.analyze([night_trip], 150.0, 75.0, energy_price=price_at)
+    assert r2["recent_trips"][0]["cost"] == round(1.5 * 0.45, 2)
+
+    # Mixed window: the blended rate sits between peak and off-peak, not at
+    # either extreme, and matches the actual weighted cost.
+    r3 = driving_analysis.analyze([peak_trip, night_trip], 150.0, 75.0, energy_price=price_at)
+    assert 0.45 < r3["total_cost"] / r3["total_energy_used_kwh"] < 1.20
+
+
 def test_insights_report_material_patterns_only():
     """Peak-hour drives consistently 25% worse than off-peak (3+ each side)
     produce an insight; too few drives or immaterial differences stay silent."""

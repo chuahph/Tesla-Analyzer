@@ -192,6 +192,64 @@ def test_summary_reports_week_compare_and_costs():
         settings.app_passcode = old
 
 
+def test_charge_cost_uses_time_of_use_pricing_at_write_time():
+    """A charge session logged through _process_vehicle is re-priced at its
+    own start time under configured TOU rates, not the flat default."""
+    from types import SimpleNamespace
+
+    from app.api.routes import _process_vehicle
+    from app.database import SessionLocal
+    from app.models import Charge, Vehicle
+
+    settings = SimpleNamespace(
+        energy_price_per_kwh=0.90, energy_price_peak_kwh=1.20,
+        energy_price_offpeak_kwh=0.45, tariff_peak_start_hour=8,
+        tariff_peak_end_hour=22, tariff_weekend_offpeak=True,
+        battery_capacity_kwh=0.0, battery_new_range_km=0.0,
+    )
+
+    def vehicle_data(vin, ts, odo_mi, soc, added_kwh, charging, lat=None, lon=None):
+        return {
+            "vin": vin, "display_name": "Test",
+            "vehicle_config": {},
+            "vehicle_state": {"odometer": odo_mi, "is_user_present": True, "locked": False},
+            "drive_state": {"timestamp": ts * 1000, "shift_state": "P", "speed": 0,
+                            "latitude": lat, "longitude": lon},
+            "charge_state": {
+                "battery_level": soc, "battery_range": 200.0,
+                "charging_state": "Charging" if charging else "Complete",
+                "charger_power": 7.0 if charging else 0.0,
+                "charge_energy_added": added_kwh,
+            },
+            "climate_state": {"outside_temp": 25.0},
+        }
+
+    with SessionLocal() as s:
+        v = Vehicle(vin="TESTVIN-TOU", name="Test", model="Model 3")
+        s.add(v)
+        s.commit()
+
+        # Monday 2pm MYT (peak, per the settings above): start charging.
+        # Built as a UTC epoch (MYT is UTC+8, no DST) so the result doesn't
+        # depend on the test runner's own local timezone.
+        import calendar
+        from datetime import datetime as _dt, timedelta as _td
+
+        base_ts = calendar.timegm((_dt(2026, 7, 6, 14, 0, 0) - _td(hours=8)).timetuple())
+        d1 = vehicle_data("TESTVIN-TOU", base_ts, 1000.0, 40, 0.0, True)
+        _process_vehicle(s, d1, {"vin": "TESTVIN-TOU"}, settings)
+        s.commit()
+        # 10 minutes later, charging stops with 5 kWh added.
+        d2 = vehicle_data("TESTVIN-TOU", base_ts + 600, 1000.0, 47, 5.0, False)
+        _process_vehicle(s, d2, {"vin": "TESTVIN-TOU"}, settings)
+        s.commit()
+
+        charge = s.query(Charge).filter(Charge.vehicle_id == v.id).first()
+        assert charge is not None
+        assert charge.energy_added_kwh == 5.0
+        assert charge.cost == round(5.0 * 1.20, 2)   # peak rate, not the flat 0.90
+
+
 def test_clear_drives_keeps_charges_and_respects_gate():
     settings = get_settings()
     old = settings.app_passcode

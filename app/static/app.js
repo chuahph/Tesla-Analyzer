@@ -206,6 +206,7 @@ function fillCarInfo(v) {
     v.usable_capacity_kwh
       ? `Usable capacity: <strong>${fmt(v.usable_capacity_kwh, 1)} kWh</strong>` +
         (v.capacity_source ? ` <span class="muted">(${v.capacity_source})</span>` : "") : null,
+    v.tou_enabled ? `Tariff: <strong>time-of-use</strong> <span class="muted">(peak/off-peak)</span>` : null,
   ].filter(Boolean);
   el.innerHTML = rows.map((r) => `<div>${r}</div>`).join("")
     || "<div>No linked car yet.</div>";

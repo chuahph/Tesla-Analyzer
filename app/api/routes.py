@@ -9,7 +9,7 @@ from fastapi.responses import RedirectResponse
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from .. import auth, services, state, vin as vin_mod
+from .. import auth, services, state, tariff, vin as vin_mod
 from ..analysis import battery as battery_analysis
 from ..analysis import charging as charging_analysis
 from ..analysis import driving as driving_analysis
@@ -408,6 +408,7 @@ def _process_vehicle(
 
     from .. import sync as sync_mod
 
+    tariff_price = tariff.price_fn_from_settings(settings)
     vin = data.get("vin") or v_summary.get("vin") or "LINKED-UNKNOWN"
     vehicle = session.query(Vehicle).filter(Vehicle.vin == vin).first()
     if vehicle is None:
@@ -519,6 +520,9 @@ def _process_vehicle(
             old = vehicle.battery_capacity_kwh or 75.0
             vehicle.battery_capacity_kwh = round(0.8 * old + 0.2 * cap, 1)
         c["location"] = _place(c.get("location", ""))
+        # Re-price at the session's own start time under time-of-use pricing
+        # (falls back to the flat rate when TOU isn't configured).
+        c["cost"] = round(c["energy_added_kwh"] * tariff_price(c["start_time"]), 2)
         session.add(Charge(vehicle_id=vehicle.id, **c))
     if snap["soc"] > 0 and snap.get("range_km", 0) > 0:
         last_reading = session.scalars(
@@ -557,6 +561,7 @@ def sync_now(wake: bool = Query(False), session: Session = Depends(get_session))
     import json as _json
 
     settings = get_settings()
+    tariff_price = tariff.price_fn_from_settings(settings)
     token = state.active_token(session)
     if not token:
         raise HTTPException(400, "No linked Tesla account — link your account first.")
@@ -701,6 +706,7 @@ def sync_now(wake: bool = Query(False), session: Session = Depends(get_session))
                             old_cap = vehicle_row.battery_capacity_kwh or 75.0
                             vehicle_row.battery_capacity_kwh = round(0.8 * old_cap + 0.2 * cap, 1)
                         c["location"] = _place(c.get("location", ""))
+                        c["cost"] = round(c["energy_added_kwh"] * tariff_price(c["start_time"]), 2)
                         session.add(Charge(vehicle_id=vehicle_row.id, **c))
                         session.commit()
                         total["charges"] += 1
@@ -1058,7 +1064,7 @@ def summary(
     drives, charges = _window(session, vehicle.id, days, since=since)
 
     driving = driving_analysis.analyze(
-        drives, settings.rated_wh_per_km, capacity_kwh, settings.energy_price_per_kwh)
+        drives, settings.rated_wh_per_km, capacity_kwh, tariff.price_fn_from_settings(settings))
     charging = charging_analysis.analyze(charges, drives)
     efficiency = efficiency_analysis.analyze(drives, settings.rated_wh_per_km)
 
@@ -1140,6 +1146,10 @@ def summary(
     # kWh) is visible and diagnosable rather than hidden.
     vehicle_out["usable_capacity_kwh"] = round(capacity_kwh, 1)
     vehicle_out["capacity_source"] = capacity_source
+    # Whether time-of-use pricing is active, so it's clear why cost figures
+    # vary by time of day instead of using the flat rate.
+    vehicle_out["tou_enabled"] = bool(
+        settings.energy_price_peak_kwh > 0 and settings.energy_price_offpeak_kwh > 0)
     # The account's cars, so the header can offer a picker when more than one is
     # linked. Only real (account-linked) cars, not demo/imported placeholders.
     garage = []

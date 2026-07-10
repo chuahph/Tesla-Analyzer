@@ -6,7 +6,7 @@ from typing import Any
 
 from .. import sync as sync_mod
 from ..models import Drive
-from . import has_valid_energy, linregress, mean, percentile
+from . import has_valid_energy, linregress, mean, percentile, safe_div
 
 
 def _speed_bucket(speed: float) -> str:
@@ -173,8 +173,12 @@ def _insights(drives: list[Drive]) -> list[str]:
 
 def analyze(drives: list[Drive], rated_wh_per_km: float = 150.0,
             capacity_kwh: float = 75.0, energy_price: float = 0.0) -> dict[str, Any]:
+    """``energy_price`` is either a flat RM/kWh float, or a
+    ``datetime -> RM/kWh`` callable (time-of-use pricing — see app.tariff) for
+    per-trip rates by when each drive happened."""
     if not drives:
         return {"available": False}
+    price_at = energy_price if callable(energy_price) else (lambda _dt: energy_price)
 
     distances = [d.distance_km for d in drives]
     durations = [d.duration_min for d in drives]
@@ -256,6 +260,18 @@ def analyze(drives: list[Drive], rated_wh_per_km: float = 150.0,
     window_eff = round(eff_energy * 1000.0 / eff_distance, 1) if eff_distance and eff_energy > 0 else None
     window_score = eco_score(window_eff, rated_wh_per_km) if window_eff else None
 
+    # Blended RM/kWh actually paid across the window's priceable trips (each
+    # priced at its own start_time under time-of-use), used for the window
+    # cost total. Falls back to the flat rate (price_at applied to "now") when
+    # there's no priceable energy yet, so a window with only a data-gap drive
+    # doesn't silently show no cost.
+    priced = [(d.energy_used_kwh, price_at(d.start_time)) for d in eff_drives]
+    priced_energy = sum(e for e, _ in priced)
+    window_price = (
+        safe_div(sum(e * p for e, p in priced), priced_energy) if priced_energy
+        else price_at(drives[-1].start_time)
+    )
+
     return {
         "available": True,
         "total_drives": len(drives),
@@ -270,12 +286,18 @@ def analyze(drives: list[Drive], rated_wh_per_km: float = 150.0,
         "avg_speed_kmh": round(mean(speeds), 1),
         "km_per_soc_pct": km_per_soc,
         "soc_used_pct": round(soc_used, 1),
-        # What the window's gross battery drain cost at the configured tariff,
-        # and per km driven — the "petrol money" view of the same energy.
-        "total_cost": round(total_energy_used * energy_price, 2) if energy_price else None,
+        # What the window's gross battery drain cost. Priced at the blended
+        # rate actually paid across the window's trips (their own energy at
+        # their own timestamps' rates) rather than a single flat number — so
+        # under time-of-use pricing, a window heavy on peak-hour driving costs
+        # more per kWh here than one that's mostly off-peak, matching what a
+        # driver actually paid. Vampire/idle-between-trips energy (the gap
+        # between total_energy_used and the driving-only sum) isn't tied to a
+        # specific timestamp, so it's priced at that same blended rate.
+        "total_cost": round(total_energy_used * window_price, 2) if window_price else None,
         "cost_per_km": (
-            round(total_energy_used * energy_price / total_distance, 3)
-            if energy_price and total_distance else None
+            round(total_energy_used * window_price / total_distance, 3)
+            if window_price and total_distance else None
         ),
         "insights": _insights(drives),
         "p95_speed_kmh": round(percentile([d.max_speed_kmh for d in drives], 0.95), 1),
@@ -336,10 +358,11 @@ def analyze(drives: list[Drive], rated_wh_per_km: float = 150.0,
                     (round(d.energy_used_kwh, 2) if has_valid_energy(d) else None)
                 ),
                 "eco_score": eco_score(driving_wh_val, rated_wh_per_km) if has_valid_energy(d) and driving_wh_val else None,
-                # What this trip's energy cost at the configured tariff.
+                # What this trip's energy cost — at its own start time's rate
+                # under time-of-use pricing, else the flat tariff.
                 "cost": (
-                    round(d.energy_used_kwh * energy_price, 2)
-                    if has_valid_energy(d) and energy_price else None
+                    round(d.energy_used_kwh * price_at(d.start_time), 2)
+                    if has_valid_energy(d) and price_at(d.start_time) else None
                 ),
                 "conditions": _trip_conditions(d),
                 "route": f"{d.start_location} → {d.end_location}"
