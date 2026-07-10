@@ -358,6 +358,62 @@ def test_gap_fallback_splits_charge_then_short_drive():
     assert d[0]["end_time"] == d[0]["end_time"]  # anchored at cur, sanity
 
 
+def test_gap_charge_survives_stale_meter_from_a_bigger_previous_session():
+    """The exact reported failure: the car was unreachable for the whole
+    charge AND the drive after it, so both had to be reconstructed from one
+    gap — and the charge vanished whenever the PREVIOUS session had added
+    more kWh than this one.
+
+    charge_energy_added resets at plug-in, so the parked pre-charge snapshot
+    still carries the previous session's total (here 30.0). The old detector
+    computed this session's energy as cur - prev = 12.0 - 30.0 < 0 and
+    concluded "no meter evidence of a charge" — then the plain fallback
+    dropped the session outright because the post-charge drive had eaten the
+    net SoC gain. A changed meter on a parked-gap IS this session's total.
+    """
+    # Previous session (long ago) left 30.0 on the meter; car parked at 40%.
+    prev = snap(T0, 10_000.0, 40, energy_added=30.0)
+    # Unreachable gap: charged 12 kWh (+20% of the 60 kWh pack), then a 4 km
+    # errand used most of it back down — SoC nets out at 42%.
+    cur = snap(T0 + 7200, 10_004.0, 42, energy_added=12.0)
+
+    d, c, trip, charge = step(prev, cur)
+    assert len(c) == 1, "charge must not vanish behind the stale meter value"
+    assert abs(c[0]["energy_added_kwh"] - 12.0) < 1e-6   # THIS session's total
+    assert c[0]["start_soc"] == 40 and c[0]["end_soc"] == 60
+    assert len(d) == 1
+    assert d[0]["distance_km"] == 4.0
+    assert trip is None and charge is None
+
+
+def test_gap_charge_only_uses_meter_total_not_estimate_despite_stale_prev():
+    """Charge-only gap (no drive): a changed meter across a parked gap gives
+    the session's real measured total — better than the SoC estimate, and
+    never the bogus (cur - stale_prev) difference."""
+    prev = snap(T0, 10_000.0, 40, energy_added=30.0)   # stale meter from an old session
+    cur = snap(T0 + 7200, 10_000.0, 52, energy_added=7.4)
+
+    d, c, trip, charge = step(prev, cur)
+    assert d == []
+    (chg,) = c
+    assert abs(chg["energy_added_kwh"] - 7.4) < 1e-6    # measured, not 12% * 60 = 7.2 estimate
+    assert abs(chg["cost"] - 7.4 * 0.90) < 1e-6
+
+
+def test_gap_after_sleep_closed_charge_logs_only_the_remainder():
+    """If the last snapshot before the gap was taken MID-charge (the open
+    session got sleep-closed at that reading), the meter never reset since —
+    only the portion beyond that reading is new. Logging cur's full total
+    again would double-count what the sleep-close already recorded."""
+    prev = snap(T0, 10_000.0, 50, charging=True, kw=7, energy_added=9.0)
+    cur = snap(T0 + 7200, 10_004.0, 53, energy_added=12.0)   # finished + short drive
+
+    d, c, trip, charge = step(prev, cur)
+    (chg,) = c
+    assert abs(chg["energy_added_kwh"] - 3.0) < 1e-6    # 12.0 - 9.0, not 12.0 again
+    assert len(d) == 1 and d[0]["distance_km"] == 4.0
+
+
 def test_gap_fallback_plain_drive_and_charge_unaffected_without_meter():
     """Without a usable energy_added_kwh signal (e.g. legacy/imported data),
     the original net-delta whole-gap reconstruction still applies."""

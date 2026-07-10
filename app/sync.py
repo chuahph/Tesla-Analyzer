@@ -571,6 +571,40 @@ def implied_capacity_kwh(charge: dict) -> float | None:
     return round(cap, 1) if 45.0 <= cap <= 95.0 else None
 
 
+def _gap_meter_total(prev: dict, cur: dict) -> float | None:
+    """Unlogged kWh that Tesla's session meter proves was charged inside an
+    unpolled ``prev -> cur`` gap, or None when the meter shows nothing new.
+
+    ``charge_energy_added`` resets to ~0 at plug-in, accumulates while
+    charging, and then PERSISTS untouched until the next plug-in. So what a
+    changed value means depends entirely on what ``prev`` was doing:
+
+      * ``prev`` parked/idle: its meter value is a stale leftover from some
+        earlier session, so it must NOT be subtracted — a changed value
+        means a new session ran inside the gap and ``cur``'s value IS that
+        session's full total. (Subtracting the stale value was a real bug:
+        whenever the previous session had added MORE than this one, the
+        difference came out negative and the whole charge was treated as
+        "no meter evidence" — then dropped outright if a post-charge drive
+        had eaten the net SoC gain.)
+      * ``prev`` mid-charge: same session, no reset in between — the
+        portion up to ``prev`` was already tracked live (or logged by a
+        sleep-close), so only the delta beyond it is new.
+
+    A plugged-in-but-never-charged gap resets the meter to ~0 without
+    adding anything; ``cur`` <= the noise floor returns None so that case
+    can't fabricate a session.
+    """
+    cur_kwh = cur.get("energy_added_kwh") or 0.0
+    prev_kwh = prev.get("energy_added_kwh") or 0.0
+    if cur_kwh <= 0.05:
+        return None
+    if prev.get("charging"):
+        delta = cur_kwh - prev_kwh
+        return delta if delta > 0.05 else None
+    return cur_kwh if abs(cur_kwh - prev_kwh) > 0.05 else None
+
+
 def _split_gap_events(prev: dict, cur: dict, capacity_kwh: float, price_per_kwh: float):
     """Reconstruct a charge immediately followed by a short drive, when both
     happened inside one unpolled gap (the car charged, then set off before
@@ -599,14 +633,12 @@ def _split_gap_events(prev: dict, cur: dict, capacity_kwh: float, price_per_kwh:
     Order is assumed charge-first (plug in, charge, then depart) — the common
     case, and the only one there's any evidence for from just two snapshots.
     """
-    meter_delta = max(
-        (cur.get("energy_added_kwh") or 0.0) - (prev.get("energy_added_kwh") or 0.0), 0.0
-    )
+    meter_total = _gap_meter_total(prev, cur)
     moved = max(cur["odo_km"] - prev["odo_km"], 0.0)
-    if meter_delta <= 0 or moved < DRIVE_MIN_KM:
+    if meter_total is None or moved < DRIVE_MIN_KM:
         return None, None
 
-    gained_pct = meter_delta / capacity_kwh * 100.0 if capacity_kwh else 0.0
+    gained_pct = meter_total / capacity_kwh * 100.0 if capacity_kwh else 0.0
     split_soc = min(prev["soc"] + gained_pct, 100.0)
 
     # The charge dominates the gap in the common case (a multi-hour AC
@@ -623,7 +655,7 @@ def _split_gap_events(prev: dict, cur: dict, capacity_kwh: float, price_per_kwh:
         {"ts": prev["ts"], "soc": prev["soc"], "range_km": prev.get("range_km"),
          "energy_added_kwh": 0.0, "max_kw": prev.get("charger_kw", 0.0),
          "fast": prev.get("fast"), "lat": prev.get("lat"), "lon": prev.get("lon")},
-        {"ts": split_ts, "soc": split_soc, "energy_added_kwh": meter_delta,
+        {"ts": split_ts, "soc": split_soc, "energy_added_kwh": meter_total,
          "charger_kw": 0.0, "fast": bool(prev.get("fast") or cur.get("fast")),
          "out_temp": cur["out_temp"]},
         capacity_kwh, price_per_kwh,
@@ -801,15 +833,22 @@ def process_snapshot(
         # below would drop or shrink this session.
         charges.append(split_charge)
     elif prev:
-        # A whole charge happened between snapshots — the session meter is
-        # unreliable across the gap, so match cur's value to force the
-        # range/SoC estimate instead of a spurious measured delta.
+        # A whole charge happened between snapshots. When the session meter
+        # proves how much (see _gap_meter_total — it resets at plug-in, so a
+        # changed value across a parked gap IS this session's total), use
+        # that real measurement; otherwise match cur's value to force the
+        # range/SoC estimate instead of a spurious stale-meter delta.
+        meter_total = _gap_meter_total(prev, cur)
+        cur_kwh = cur.get("energy_added_kwh") or 0.0
         c = _charge_from(
             {
                 "ts": prev["ts"],
                 "soc": prev["soc"],
                 "range_km": prev.get("range_km"),
-                "energy_added_kwh": cur.get("energy_added_kwh") or 0.0,
+                # start baseline chosen so _charge_from's (cur - start)
+                # difference yields exactly the proven total — or zero
+                # (forcing the SoC estimate) when the meter proves nothing.
+                "energy_added_kwh": (cur_kwh - meter_total) if meter_total is not None else cur_kwh,
                 "max_kw": prev.get("charger_kw", 0.0),
                 "fast": prev.get("fast"),
                 "lat": prev.get("lat"),
