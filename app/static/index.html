@@ -536,8 +536,28 @@
       <button id="btn-export" class="btn" title="Download this car's data as CSV">⬇ Export CSV</button>
       <button id="btn-report" class="btn" title="Print or save a summary report (PDF via the print dialog)">📄 Report</button>
       <button id="btn-notify" class="btn hidden">🔔 Notifications</button>
+      <button id="btn-places" class="btn hidden">📍 Places</button>
     </section>
   </main>
+
+  <!-- Modal: named places (Home/Office geofences) -->
+  <div id="places-modal" class="modal hidden">
+    <div class="modal-card">
+      <button class="modal-close" data-close>×</button>
+      <h2>📍 Named places</h2>
+      <p class="modal-sub">
+        Give a spot a name (e.g. "Home", "Office") and any trip starting or ending
+        within its radius shows that name instead of the geocoded address —
+        including trips already logged.
+      </p>
+      <ul id="places-list" class="places-list"></ul>
+      <div class="modal-actions">
+        <button id="places-use-location" class="btn" title="Use this device's current GPS location">📡 Use my location</button>
+        <span id="places-status" class="status"></span>
+      </div>
+    </div>
+  </div>
+
 
   <!-- Print-only summary report, rebuilt from the current data on demand. -->
   <div id="print-report" class="print-report"></div>

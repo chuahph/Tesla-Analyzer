@@ -564,6 +564,16 @@ function renderLists(d) {
       const mapLink = t.map_url
         ? ` <a class="trip-map" href="${t.map_url}" target="_blank" rel="noopener" title="Open route in Google Maps">🗺</a>`
         : "";
+      // "Name this place" pins: turn a trip's own start/end coords into a
+      // reusable geofence (self-hosted only — needs real coords + a place
+      // to persist against). A route like "12 Main St, George Town → Home"
+      // reads as start → end, so the two pins sit either side of the arrow.
+      const routeParts = t.route ? t.route.split(" → ") : [];
+      const pin = (coords) => coords && !STATIC_MODE
+        ? `<button class="place-pin" data-coords="${coords}" title="Name this place">📍</button>` : "";
+      const routeHtml = t.route
+        ? `${routeParts[0] || ""}${pin(t.start_coords)} → ${routeParts.slice(1).join(" → ")}${pin(t.end_coords)}`
+        : "";
       // Data-quality badge: silent when the trip's figures are a real
       // measurement (the expected default); a small marker only when they're
       // a fallback estimate or genuinely unavailable, so a glance at the list
@@ -592,7 +602,7 @@ function renderLists(d) {
           `${t.tag === "work" ? "💼 Work" : t.tag === "personal" ? "🏠 Personal" : "+ tag"}</button>`
         : "";
       return `<li class="trip${tripSelectMode ? " selectable" : ""}">` +
-        `<span class="trip-head">${check}${score}${dq}${distFlag}<span class="trip-route">${when}${t.route ? "<br>" + t.route : ""}${mapLink}</span></span>` +
+        `<span class="trip-head">${check}${score}${dq}${distFlag}<span class="trip-route">${when}${t.route ? "<br>" + routeHtml : ""}${mapLink}</span></span>` +
         `<span class="trip-meta">${t.distance_km} km · ${t.duration_min} min${speed}${kwh}${whkm}${soc}${cost}${tagChip}</span>${cond}</li>`;
     })
     .join("");
@@ -600,6 +610,7 @@ function renderLists(d) {
   list.innerHTML = trips || '<li class="empty">No trips in this window</li>';
   wireInfoButtons(list);
   wireTagChips(list);
+  wirePlacePins(list);
   // Only offer the trip tools when there's a real (self-hosted) DB behind them.
   const tools = document.getElementById("trip-tools");
   if (tools) tools.classList.toggle("hidden", STATIC_MODE || !recent.some((t) => t.id != null));
@@ -1570,6 +1581,98 @@ async function setupPushButton() {
 if (!STATIC_MODE) {
   window.addEventListener("load", () => setupPushButton().catch(() => {}));
 }
+
+// Named places (Home/Office geofences): needs the self-hosted backend to
+// persist against, same as push notifications and the Tesla-account link
+// button, so the whole feature stays hidden in the static/demo build.
+async function savePlace(coords, name) {
+  const [lat, lon] = coords.split(",").map((s) => parseFloat(s.trim()));
+  if (!isFinite(lat) || !isFinite(lon) || !name || !name.trim()) return false;
+  try {
+    const resp = await fetch("/api/places", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name: name.trim(), lat, lon, radius_km: 0.15 }),
+    });
+    return resp.ok;
+  } catch (e) {
+    return false;
+  }
+}
+
+// A pin's coords come straight from a logged trip, so no prompt is needed
+// for the *location* — just the name — matching the tag chip's one-tap feel.
+function wirePlacePins(root) {
+  root.querySelectorAll(".place-pin[data-coords]").forEach((btn) => {
+    btn.addEventListener("click", async (e) => {
+      e.stopPropagation();
+      const name = window.prompt("Name this place (e.g. Home, Office):", "");
+      if (!name || !name.trim()) return;
+      // Naming a place relabels every matching trip, not just this one —
+      // a full reload (not a cached re-render) picks all of them up.
+      if (await savePlace(btn.dataset.coords, name)) load();
+    });
+  });
+}
+
+async function renderPlacesList() {
+  const listEl = document.getElementById("places-list");
+  listEl.innerHTML = '<li class="places-empty">Loading…</li>';
+  let places = [];
+  try {
+    places = await (await fetch("/api/places")).json();
+  } catch (e) {
+    // leave the loading message — the modal is still usable to add a place
+  }
+  if (!places.length) {
+    listEl.innerHTML = '<li class="places-empty">No named places yet — tap 📍 next to '
+      + 'a trip below, or "Use my location" here.</li>';
+    return;
+  }
+  listEl.innerHTML = places.map((p) =>
+    `<li><span>${p.name}<span class="place-meta"> · ${p.radius_km} km radius</span></span>` +
+    `<button class="place-del" data-id="${p.id}" title="Remove this place">✕</button></li>`
+  ).join("");
+  listEl.querySelectorAll(".place-del").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      await fetch(`/api/places/${btn.dataset.id}`, { method: "DELETE" });
+      renderPlacesList();
+      load();   // trips this place used to relabel go back to their geocoded name
+    });
+  });
+}
+
+function setupPlacesButton() {
+  const btn = document.getElementById("btn-places");
+  if (!btn) return;
+  btn.classList.remove("hidden");
+  btn.addEventListener("click", () => {
+    openModal("places-modal");
+    renderPlacesList();
+  });
+  const useLocationBtn = document.getElementById("places-use-location");
+  const statusEl = document.getElementById("places-status");
+  useLocationBtn.addEventListener("click", () => {
+    if (!("geolocation" in navigator)) {
+      setStatus(statusEl, "Geolocation isn't available in this browser.", "err");
+      return;
+    }
+    setStatus(statusEl, "Locating…", "");
+    navigator.geolocation.getCurrentPosition(
+      async (pos) => {
+        setStatus(statusEl, "", "");
+        const name = window.prompt("Name this place (e.g. Home, Office):", "");
+        if (!name || !name.trim()) return;
+        const ok = await savePlace(`${pos.coords.latitude}, ${pos.coords.longitude}`, name);
+        setStatus(statusEl, ok ? `Saved "${name.trim()}".` : "Couldn't save — try again.", ok ? "ok" : "err");
+        renderPlacesList();
+        if (ok) load();
+      },
+      () => setStatus(statusEl, "Location permission denied.", "err"),
+      { enableHighAccuracy: true, timeout: 8000 },
+    );
+  });
+}
+if (!STATIC_MODE) setupPlacesButton();
 
 // Wire the static chart "!" explainers once (dynamic panels wire themselves).
 wireInfoButtons(document);

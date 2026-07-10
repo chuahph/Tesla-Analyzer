@@ -765,3 +765,24 @@ footer { padding: 18px 28px; color: var(--muted); font-size: 12px; border-top: 1
   display: flex; flex-wrap: wrap; gap: 8px 16px; margin-bottom: 10px;
   font-size: 12.5px; color: var(--muted);
 }
+
+/* "Name this place" pin on a trip's start/end location (route line). */
+.place-pin {
+  border: none; background: none; cursor: pointer; font-size: 11px;
+  opacity: .55; padding: 0 2px; vertical-align: middle;
+}
+.place-pin:hover { opacity: 1; }
+
+/* Places (geofence) manager modal list. */
+.places-list { list-style: none; margin: 0 0 12px; padding: 0; }
+.places-list li {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 8px; padding: 6px 0; border-bottom: 1px solid var(--border);
+  font-size: 13.5px;
+}
+.places-list .place-meta { color: var(--muted); font-size: 12px; }
+.places-list button.place-del {
+  border: none; background: none; color: var(--muted); cursor: pointer; font-size: 13px;
+}
+.places-list button.place-del:hover { color: #ff6b70; }
+.places-empty { color: var(--muted); font-size: 13px; margin: 0 0 12px; }

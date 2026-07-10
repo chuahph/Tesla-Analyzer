@@ -10,6 +10,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from .. import auth, notifications, services, state, tariff, vin as vin_mod
+from ..analysis import haversine_km
 from ..analysis import battery as battery_analysis
 from ..analysis import charging as charging_analysis
 from ..analysis import driving as driving_analysis
@@ -18,7 +19,7 @@ from ..analysis import recommendations as recommendations_engine
 from ..config import get_settings
 from ..database import get_session
 from ..importer import ImportError_, parse_upload
-from ..models import BatteryReading, Charge, Drive, Vehicle
+from ..models import BatteryReading, Charge, Drive, Place, Vehicle
 from ..schemas import ChargeOut, DriveOut, VehicleOut
 
 router = APIRouter(prefix="/api", tags=["analytics"])
@@ -193,13 +194,33 @@ def _label_from_geocode(data: dict) -> tuple[str, str]:
     return label[:120], area[:120]
 
 
-def _place_and_area(coords: str) -> tuple[str, str]:
+def _geofence_name(coords: str, session: Session | None) -> str | None:
+    """Nearest user-defined Place (e.g. "Home", "Office") whose radius
+    contains these coords, if any — checked before any network geocode so a
+    user's own name for a place always wins over OSM's, and a well-known
+    driveway/office never needs a lookup at all."""
+    if not session or not coords or "," not in coords:
+        return None
+    best_name, best_km = None, None
+    for p in session.query(Place).all():
+        d = haversine_km(coords, f"{p.lat}, {p.lon}")
+        if d is not None and d <= p.radius_km and (best_km is None or d < best_km):
+            best_name, best_km = p.name, d
+    return best_name
+
+
+def _place_and_area(coords: str, session: Session | None = None) -> tuple[str, str]:
     """Best-effort reverse geocode of a 'lat, lon' string to (label, area).
 
     Uses OpenStreetMap's Nominatim (a couple of lookups per completed trip is
     well within its usage policy). Any failure falls back to the raw
-    coordinates for both, which stay searchable in a maps app.
+    coordinates for both, which stay searchable in a maps app. A coordinate
+    inside a user-defined geofence (see _geofence_name) short-circuits this
+    entirely and uses the user's own name for both label and area.
     """
+    geofenced = _geofence_name(coords, session)
+    if geofenced:
+        return geofenced, geofenced
     if not coords or "," not in coords:
         return coords, coords
     if coords in _PLACE_CACHE:
@@ -227,10 +248,10 @@ def _place_and_area(coords: str) -> tuple[str, str]:
     return result
 
 
-def _place(coords: str) -> str:
+def _place(coords: str, session: Session | None = None) -> str:
     """Specific place label only — for callers (Charge locations) that don't
     need the coarser route-grouping key."""
-    return _place_and_area(coords)[0]
+    return _place_and_area(coords, session)[0]
 
 
 def _build_info() -> dict:
@@ -312,6 +333,100 @@ def tag_drive(payload: dict = Body(...), session: Session = Depends(get_session)
     if not services.tag_drive(session, drive_id, tag):
         raise HTTPException(404, "Trip not found.")
     return {"id": drive_id, "tag": tag}
+
+
+# --- Named places (geofenced Home/Office/... trip labels) -----------------
+
+
+def _relabel_existing(session: Session, place: Place) -> int:
+    """Retroactively apply a new/changed geofence's name to already-logged
+    trips (and charges, where the raw coords are still recoverable) whose
+    stored coordinates fall inside its radius — so defining "Home" today
+    renames the driveway on last month's trips too, not just future ones.
+
+    Charge rows don't keep a separate raw-coords column (only the already-
+    resolved ``location`` label), so a charge can only be relabeled here when
+    that label still looks like coordinates — i.e. the geocode never
+    resolved it to a name. Charges already labeled by Nominatim are left as
+    they are; only new charges going through ``_place`` pick up the geofence
+    from here on.
+    """
+    changed = 0
+    place_coords = f"{place.lat}, {place.lon}"
+    drives = session.scalars(
+        select(Drive).where((Drive.start_coords != "") | (Drive.end_coords != ""))
+    ).all()
+    for d in drives:
+        if d.start_coords:
+            dist = haversine_km(d.start_coords, place_coords)
+            if dist is not None and dist <= place.radius_km:
+                d.start_location = place.name
+                d.start_area = place.name
+                changed += 1
+        if d.end_coords:
+            dist = haversine_km(d.end_coords, place_coords)
+            if dist is not None and dist <= place.radius_km:
+                d.end_location = place.name
+                d.end_area = place.name
+                changed += 1
+    for c in session.scalars(select(Charge)).all():
+        if c.location and "," in c.location:
+            dist = haversine_km(c.location, place_coords)
+            if dist is not None and dist <= place.radius_km:
+                c.location = place.name
+                changed += 1
+    return changed
+
+
+@router.get("/places")
+def list_places(session: Session = Depends(get_session)):
+    """User-defined geofences that override trip/charge location names."""
+    places = session.scalars(select(Place).order_by(Place.name)).all()
+    return [
+        {"id": p.id, "name": p.name, "lat": p.lat, "lon": p.lon, "radius_km": p.radius_km}
+        for p in places
+    ]
+
+
+@router.post("/places")
+def create_place(payload: dict = Body(...), session: Session = Depends(get_session)):
+    """Add (or, by name, update) a named geofence and relabel matching history."""
+    name = str(payload.get("name") or "").strip()[:60]
+    if not name:
+        raise HTTPException(400, "Missing 'name'.")
+    try:
+        lat = float(payload["lat"])
+        lon = float(payload["lon"])
+    except (KeyError, TypeError, ValueError):
+        raise HTTPException(400, "Missing or invalid 'lat'/'lon'.")
+    radius_km = float(payload.get("radius_km") or 0.15)
+    radius_km = max(0.02, min(radius_km, 5.0))  # sane bounds: 20 m to 5 km
+
+    place = session.scalars(select(Place).where(Place.name == name)).first()
+    if place:
+        place.lat, place.lon, place.radius_km = lat, lon, radius_km
+    else:
+        place = Place(name=name, lat=lat, lon=lon, radius_km=radius_km,
+                      created_at=datetime.now())
+        session.add(place)
+    session.flush()
+    relabeled = _relabel_existing(session, place)
+    session.commit()
+    _PLACE_CACHE.clear()  # a newly-named geofence can relabel already-cached coords
+    return {"id": place.id, "name": place.name, "lat": place.lat, "lon": place.lon,
+            "radius_km": place.radius_km, "relabeled": relabeled}
+
+
+@router.delete("/places/{place_id}")
+def delete_place(place_id: int, session: Session = Depends(get_session)):
+    """Remove a geofence. Already-relabeled trips keep the place's name —
+    only new processing stops applying it."""
+    place = session.get(Place, place_id)
+    if place is None:
+        raise HTTPException(404, "Place not found.")
+    session.delete(place)
+    session.commit()
+    return {"deleted": True}
 
 
 # --- Data source: link Tesla account --------------------------------------
@@ -522,8 +637,8 @@ def _process_vehicle(
     for d in drives:
         # Keep the raw coords (for map links) before geocoding replaces them.
         d["start_coords"], d["end_coords"] = d["start_location"], d["end_location"]
-        d["start_location"], d["start_area"] = _place_and_area(d["start_location"])
-        d["end_location"], d["end_area"] = _place_and_area(d["end_location"])
+        d["start_location"], d["start_area"] = _place_and_area(d["start_location"], session)
+        d["end_location"], d["end_area"] = _place_and_area(d["end_location"], session)
         session.add(Drive(vehicle_id=vehicle.id, **d))
     for c in charges:
         cap = sync_mod.implied_capacity_kwh(c)
@@ -531,7 +646,7 @@ def _process_vehicle(
         if cap:
             old = vehicle.battery_capacity_kwh or 75.0
             vehicle.battery_capacity_kwh = round(0.8 * old + 0.2 * cap, 1)
-        c["location"] = _place(c.get("location", ""))
+        c["location"] = _place(c.get("location", ""), session)
         # Re-price at the session's own start time under time-of-use pricing
         # (falls back to the flat rate when TOU isn't configured).
         c["cost"] = round(c["energy_added_kwh"] * tariff_price(c["start_time"]), 2)
@@ -717,8 +832,8 @@ def sync_now(wake: bool = Query(False), session: Session = Depends(get_session))
                     )
                     if d:
                         d["start_coords"], d["end_coords"] = d["start_location"], d["end_location"]
-                        d["start_location"], d["start_area"] = _place_and_area(d["start_location"])
-                        d["end_location"], d["end_area"] = _place_and_area(d["end_location"])
+                        d["start_location"], d["start_area"] = _place_and_area(d["start_location"], session)
+                        d["end_location"], d["end_area"] = _place_and_area(d["end_location"], session)
                         session.add(Drive(vehicle_id=vehicle_row.id, **d))
                         session.commit()
                         total["drives"] += 1
@@ -739,7 +854,7 @@ def sync_now(wake: bool = Query(False), session: Session = Depends(get_session))
                         if cap:
                             old_cap = vehicle_row.battery_capacity_kwh or 75.0
                             vehicle_row.battery_capacity_kwh = round(0.8 * old_cap + 0.2 * cap, 1)
-                        c["location"] = _place(c.get("location", ""))
+                        c["location"] = _place(c.get("location", ""), session)
                         c["cost"] = round(c["energy_added_kwh"] * tariff_price(c["start_time"]), 2)
                         session.add(Charge(vehicle_id=vehicle_row.id, **c))
                         session.commit()

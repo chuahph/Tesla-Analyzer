@@ -434,6 +434,11 @@ def analyze(drives: list[Drive], rated_wh_per_km: float = 150.0,
                 "tag": getattr(d, "tag", "") or "",
                 "route": f"{d.start_location} → {d.end_location}"
                 if d.start_location and d.end_location else "",
+                # Raw endpoints, so the UI can offer "name this place" (a
+                # geofence) without a separate lookup. Empty for rows logged
+                # before coords were stored.
+                "start_coords": getattr(d, "start_coords", "") or "",
+                "end_coords": getattr(d, "end_coords", "") or "",
                 # Live directions link (Google Maps start -> end) when the raw
                 # endpoints were kept; empty for rows logged before coords
                 # were stored.

@@ -315,6 +315,26 @@ up to more events later (car left unlocked, sync gone stale, ...).
 
 ---
 
+## Named places (Home/Office)
+
+Trip locations are reverse-geocoded automatically, but a street address isn't
+as useful as "Home". Tap **📍 Places** at the bottom of the dashboard (or the
+small 📍 next to a trip's own start/end location) to name a spot — any trip
+starting or ending within its radius (default 150 m) then shows that name
+instead, **including trips already logged**. Delete a place any time; it only
+stops applying to new trips going forward.
+
+Two ways to add one:
+- **📍 next to a trip** — uses that trip's own coordinates, so you only type
+  the name.
+- **📡 Use my location** in the Places panel — uses the device's GPS (asks for
+  browser location permission once).
+
+Self-hosted only (needs the backend database to persist against), so the
+button stays hidden in the static/demo build.
+
+---
+
 ## Install on iPhone / iPad (PWA) — no computer needed
 
 Tesla Analyzer is an installable **Progressive Web App** — it adds to your home

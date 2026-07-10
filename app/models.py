@@ -140,6 +140,24 @@ class Charge(Base):
     vehicle: Mapped["Vehicle"] = relationship(back_populates="charges")
 
 
+class Place(Base):
+    """A user-named geofence (e.g. "Home", "Office") for trip display.
+
+    A trip endpoint within ``radius_km`` of a place's centre shows this
+    name instead of the geocoded POI/street name, since a user's own name
+    for their driveway is more useful than whatever OSM happens to call it.
+    """
+
+    __tablename__ = "places"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    name: Mapped[str] = mapped_column(String(60))
+    lat: Mapped[float] = mapped_column(Float)
+    lon: Mapped[float] = mapped_column(Float)
+    radius_km: Mapped[float] = mapped_column(Float, default=0.15)
+    created_at: Mapped[datetime] = mapped_column(DateTime)
+
+
 class PushSubscription(Base):
     """A browser's Web Push subscription (one row per device/browser that
     tapped "Enable notifications"). Not per-vehicle — a device gets notified

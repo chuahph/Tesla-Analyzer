@@ -1,4 +1,6 @@
 """App-level tests: passcode gate boundaries and the Tesla partner key path."""
+from datetime import datetime
+
 from fastapi.testclient import TestClient
 
 from app.config import get_settings
@@ -476,6 +478,71 @@ def test_tag_drive_endpoint():
             assert client.post("/api/data/tag-drive", json={"id": 9_999_999, "tag": "work"}).status_code == 404
             # Missing id -> 400.
             assert client.post("/api/data/tag-drive", json={"tag": "work"}).status_code == 400
+    finally:
+        settings.app_passcode = old
+
+
+def test_places_crud_and_geofenced_labeling():
+    """Defining a named place (a) is usable going forward via _place_and_area
+    and (b) retroactively relabels already-logged trips whose stored coords
+    fall inside its radius, without touching trips elsewhere."""
+    from app.database import SessionLocal
+    from app.models import Drive, Place, Vehicle
+
+    settings = get_settings()
+    old = settings.app_passcode
+    settings.app_passcode = ""
+    try:
+        with TestClient(app) as client:  # startup seeds demo data
+            assert client.get("/api/places").json() == []
+
+            with SessionLocal() as s:
+                vehicle_id = s.query(Vehicle).order_by(Vehicle.id).first().id
+                near = Drive(
+                    vehicle_id=vehicle_id, start_time=datetime.now(), end_time=datetime.now(),
+                    distance_km=5.0, start_coords="5.3300, 100.3000", end_coords="",
+                    start_location="Some Street", start_area="Some Street",
+                )
+                far = Drive(
+                    vehicle_id=vehicle_id, start_time=datetime.now(), end_time=datetime.now(),
+                    distance_km=5.0, start_coords="5.5000, 100.5000", end_coords="",
+                    start_location="Far Street", start_area="Far Street",
+                )
+                s.add_all([near, far])
+                s.commit()
+                near_id, far_id = near.id, far.id
+
+            resp = client.post("/api/places", json={
+                "name": "Home", "lat": 5.3301, "lon": 100.3001, "radius_km": 0.2,
+            })
+            assert resp.status_code == 200
+            body = resp.json()
+            assert body["name"] == "Home"
+            assert body["relabeled"] == 1     # only the nearby trip
+
+            with SessionLocal() as s:
+                assert s.get(Drive, near_id).start_location == "Home"
+                assert s.get(Drive, near_id).start_area == "Home"
+                assert s.get(Drive, far_id).start_location == "Far Street"  # untouched
+
+            places = client.get("/api/places").json()
+            assert len(places) == 1 and places[0]["name"] == "Home"
+
+            # A coordinate inside the geofence resolves to the place name
+            # without any network geocode.
+            from app.api.routes import _place_and_area
+            with SessionLocal() as s:
+                label, area = _place_and_area("5.3300, 100.3000", s)
+            assert label == "Home" and area == "Home"
+
+            place_id = places[0]["id"]
+            assert client.delete(f"/api/places/{place_id}").status_code == 200
+            assert client.get("/api/places").json() == []
+            assert client.delete(f"/api/places/{place_id}").status_code == 404
+
+            # Validation.
+            assert client.post("/api/places", json={"lat": 1.0, "lon": 2.0}).status_code == 400
+            assert client.post("/api/places", json={"name": "X", "lat": "nope", "lon": 2.0}).status_code == 400
     finally:
         settings.app_passcode = old
 
