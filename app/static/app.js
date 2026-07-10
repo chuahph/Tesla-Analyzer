@@ -499,6 +499,18 @@ function renderInsights(d) {
   body.innerHTML = ins.map((s) => `<li>💡 ${s}</li>`).join("");
 }
 
+// A short data-driven narrative for the window (see /api/summary's
+// "narrative" — only present for a plain days-based window of >= 14 days,
+// where a natural "period before" exists to compare against).
+function renderNarrative(d) {
+  const card = document.getElementById("narrative-card");
+  const body = document.getElementById("narrative-body");
+  if (!card || !body) return;
+  const lines = d.narrative || [];
+  card.style.display = lines.length ? "" : "none";
+  body.textContent = lines.join(" ");
+}
+
 function renderCharts(d) {
   const eff = d.efficiency, drv = d.driving, chg = d.charging;
 
@@ -997,6 +1009,7 @@ async function load() {
     renderBattery(d);
     renderLists(d);
     renderInsights(d);
+    renderNarrative(d);
     renderRecommendations(d.recommendations);
 
     const now = new Date();

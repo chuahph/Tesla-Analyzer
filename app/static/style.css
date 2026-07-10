@@ -408,6 +408,8 @@ main { padding: 24px 28px 60px; max-width: 1280px; margin: 0 auto; }
 .card h2 .info-btn { width: 18px; height: 18px; font-size: 11px; vertical-align: 1px; }
 canvas { max-height: 260px; }
 
+.narrative-body { margin: 0; font-size: 14.5px; line-height: 1.7; color: var(--text); }
+
 .plain-list { list-style: none; margin: 0; padding: 0; }
 .plain-list li {
   display: flex; justify-content: space-between;

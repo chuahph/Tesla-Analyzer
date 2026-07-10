@@ -74,6 +74,16 @@ A dark, responsive single-page dashboard (Chart.js) with KPI cards, six charts
 and the recommendation feed. Installs on iOS/Android as a **PWA** (home-screen
 app, full-screen, offline). Plus a CLI text/JSON report.
 
+**📝 Your Month, In Words** — on a plain days-based window of 14+ days, a
+short data-driven narrative (not a stats table) comparing the window against
+the equal-length period immediately before it, e.g. *"You drove 6,364 km
+across 255 trips. Average efficiency was 162 Wh/km, 8% above the rated
+figure. Your most frequent route was Home → Office (116 times)."* Every
+figure is pulled straight from the same analysis the KPI cards use — this
+just picks which facts are worth saying and phrases them. The same narrative
+also enriches the [scheduled monthly report](#scheduled-reports)'s webhook
+payload.
+
 **Two ways to load your own data** (buttons in the dashboard header)
 1. **📁 Load Tesla Data** — upload a Tesla *Download Your Data* export
    (CSV / JSON / ZIP). The importer matches columns loosely, converts miles→km,

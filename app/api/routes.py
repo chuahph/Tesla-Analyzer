@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 
 from .. import auth, notifications, services, state, tariff, vin as vin_mod
 from ..analysis import haversine_km
+from ..analysis import narrative as narrative_engine
 from ..analysis import battery as battery_analysis
 from ..analysis import charging as charging_analysis
 from ..analysis import driving as driving_analysis
@@ -137,19 +138,19 @@ def _usable_capacity(session: Session, vehicle: Vehicle, settings) -> tuple[floa
     return (spec or vehicle.battery_capacity_kwh or 75.0), ("variant spec" if spec else "default")
 
 
-def _window(session: Session, vehicle_id: int, days: int, since: datetime | None = None):
+def _window(
+    session: Session, vehicle_id: int, days: int,
+    since: datetime | None = None, until: datetime | None = None,
+):
     if since is None:
         since = datetime.now() - timedelta(days=days)
-    drives = session.scalars(
-        select(Drive)
-        .where(Drive.vehicle_id == vehicle_id, Drive.start_time >= since)
-        .order_by(Drive.start_time)
-    ).all()
-    charges = session.scalars(
-        select(Charge)
-        .where(Charge.vehicle_id == vehicle_id, Charge.start_time >= since)
-        .order_by(Charge.start_time)
-    ).all()
+    drive_q = select(Drive).where(Drive.vehicle_id == vehicle_id, Drive.start_time >= since)
+    charge_q = select(Charge).where(Charge.vehicle_id == vehicle_id, Charge.start_time >= since)
+    if until is not None:
+        drive_q = drive_q.where(Drive.start_time < until)
+        charge_q = charge_q.where(Charge.start_time < until)
+    drives = session.scalars(drive_q.order_by(Drive.start_time)).all()
+    charges = session.scalars(charge_q.order_by(Charge.start_time)).all()
     return list(drives), list(charges)
 
 
@@ -1423,8 +1424,25 @@ def _monthly_report_payload(session: Session, vehicle: Vehicle, settings, days: 
     else:
         lines.append("⚡ No charging sessions logged in this period.")
 
+    # Data-driven narrative: this period vs the equal-length one immediately
+    # before it, so "you drove more/less than usual" is a real comparison
+    # instead of a stats table with no context.
+    now = datetime.now()
+    since = now - timedelta(days=days)
+    prev_since = since - timedelta(days=days)
+    prev_drives, prev_charges = _window(session, vehicle.id, days, since=prev_since, until=since)
+    prev_driving = driving_analysis.analyze(prev_drives, settings.rated_wh_per_km, capacity_kwh, price_fn)
+    prev_charging = charging_analysis.analyze(prev_charges, prev_drives)
+    prev_efficiency = efficiency_analysis.analyze(prev_drives, settings.rated_wh_per_km)
+    narrative_lines = narrative_engine.build(
+        {"driving": driving, "charging": charging, "efficiency": efficiency},
+        {"driving": prev_driving, "charging": prev_charging, "efficiency": prev_efficiency},
+        cur,
+    )
+
     return {
-        "text": "\n".join(lines),
+        "text": "\n".join(lines) + "\n\n📝 " + " ".join(narrative_lines),
+        "narrative": narrative_lines,
         "vehicle": vehicle.name,
         "period_days": days,
         "driving": driving,
@@ -1585,6 +1603,25 @@ def summary(
                 }
             week_compare = {"this": _wk(wk_drives), "last": _wk(last_wk)}
 
+    # Data-driven narrative: this window vs the equal-length one immediately
+    # before it. Same gating as week_compare — only meaningful for a plain
+    # days-based window (not "since last charge"/"current drive", which have
+    # no natural "period before" to compare against).
+    narrative_lines = None
+    if since is None and days >= 14:
+        cur_since = now - timedelta(days=days)
+        prev_since = cur_since - timedelta(days=days)
+        prev_drives, prev_charges = _window(session, vehicle.id, days, since=prev_since, until=cur_since)
+        prev_driving = driving_analysis.analyze(
+            prev_drives, settings.rated_wh_per_km, capacity_kwh, tariff.price_fn_from_settings(settings))
+        prev_charging = charging_analysis.analyze(prev_charges, prev_drives)
+        prev_efficiency = efficiency_analysis.analyze(prev_drives, settings.rated_wh_per_km)
+        narrative_lines = narrative_engine.build(
+            {"driving": driving, "charging": charging, "efficiency": efficiency},
+            {"driving": prev_driving, "charging": prev_charging, "efficiency": prev_efficiency},
+            settings.currency,
+        )
+
     # Battery Used %: gross energy used this window (parking/idle included,
     # matching total_energy_used_kwh) as a share of usable pack capacity — the
     # same figure that turns the window's kWh into %.
@@ -1704,5 +1741,6 @@ def summary(
         "battery_balance": battery_balance,
         "petrol_comparison": petrol_comparison,
         "week_compare": week_compare,
+        "narrative": narrative_lines,
         "recommendations": recs,
     }

@@ -403,6 +403,60 @@ def test_place_and_area_passes_through_invalid_coords():
     assert _place("") == ""
 
 
+def test_summary_narrative_gated_the_same_as_week_compare():
+    """The narrative only makes sense for a plain days-based window (a
+    natural "period before" exists); since_charge/current_drive windows
+    have no such period, so it's omitted rather than comparing against
+    something arbitrary."""
+    settings = get_settings()
+    old = settings.app_passcode
+    settings.app_passcode = ""
+    try:
+        with TestClient(app) as client:  # startup seeds demo data
+            wide = client.get("/api/summary?days=365").json()
+            assert wide["narrative"] is not None
+            assert isinstance(wide["narrative"], list) and wide["narrative"]
+            assert "km" in wide["narrative"][0]
+
+            narrow = client.get("/api/summary?days=7").json()   # < 14 days
+            assert narrow["narrative"] is None
+
+            since = client.get("/api/summary?days=365&since_charge=1").json()
+            assert since["narrative"] is None
+    finally:
+        settings.app_passcode = old
+
+
+def test_monthly_report_includes_narrative():
+    settings = get_settings()
+    old_pc, old_url = settings.app_passcode, settings.report_webhook_url
+    settings.app_passcode = ""
+    settings.report_webhook_url = "https://example.invalid/report"
+    try:
+        with TestClient(app) as client:  # startup seeds demo data
+            sent = {}
+
+            def fake_post(url, json=None, timeout=None):
+                sent["json"] = json
+                import httpx as _httpx
+                return _httpx.Response(200, request=_httpx.Request("POST", url))
+
+            import app.api.routes as routes_mod
+            orig_post = routes_mod.httpx.post
+            routes_mod.httpx.post = fake_post
+            try:
+                resp = client.get("/api/reports/monthly?days=30")
+            finally:
+                routes_mod.httpx.post = orig_post
+
+            assert resp.status_code == 200
+            payload = sent["json"]
+            assert isinstance(payload["narrative"], list) and payload["narrative"]
+            assert "📝" in payload["text"]
+    finally:
+        settings.app_passcode, settings.report_webhook_url = old_pc, old_url
+
+
 def test_summary_reports_week_compare_and_costs():
     """A wide window includes the rolling week-over-week compare (or null when
     a week is empty) plus driving/charging cost figures."""
