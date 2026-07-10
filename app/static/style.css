@@ -816,6 +816,13 @@ footer { padding: 18px 28px; color: var(--muted); font-size: 12px; border-top: 1
   font-size: 13px;
 }
 .service-form button { flex: 0 0 auto; }
+/* Labeled fields (e.g. Add Historical Charge): a persistent caption above
+   each input, unlike a placeholder which disappears once you start typing —
+   important here since "start" vs "end" time/battery % look identical once
+   filled in without one. */
+.service-form .field { display: flex; flex-direction: column; gap: 3px; flex: 1 1 140px; min-width: 0; }
+.service-form .field-label { font-size: 11px; color: var(--muted); font-weight: 600; }
+.service-form .field select, .service-form .field input { flex: none; width: 100%; }
 
 /* Multi-car compare table. */
 .compare-range-label {

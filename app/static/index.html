@@ -602,20 +602,45 @@
         For a real session Tesla Analyzer never caught — logged before the car was
         linked, or during a sync outage. Purely additive: adds one charge, leaves
         everything else untouched (unlike <strong>Load Tesla Data</strong>, which
-        replaces your whole history).
+        replaces your whole history). Both times start blank — enter when charging
+        actually started and finished, not now.
       </p>
       <form id="add-charge-form" class="service-form">
-        <input type="datetime-local" id="charge-start" required title="Start time">
-        <input type="datetime-local" id="charge-end" required title="End time">
-        <input type="number" id="charge-energy" placeholder="Energy added (kWh)" min="0.1" step="0.1" required>
-        <select id="charge-type">
-          <option value="AC" selected>AC (home/destination)</option>
-          <option value="DC">DC (Supercharger/fast)</option>
-        </select>
-        <input type="number" id="charge-start-soc" placeholder="Start SoC %" min="0" max="100" step="1">
-        <input type="number" id="charge-end-soc" placeholder="End SoC %" min="0" max="100" step="1">
-        <input type="text" id="charge-location" placeholder="Location (optional)" maxlength="120">
-        <input type="number" id="charge-cost" placeholder="Cost (optional — auto-calculated if blank)" min="0" step="0.01">
+        <label class="field">
+          <span class="field-label">Charging started</span>
+          <input type="datetime-local" id="charge-start" required>
+        </label>
+        <label class="field">
+          <span class="field-label">Charging finished</span>
+          <input type="datetime-local" id="charge-end" required>
+        </label>
+        <label class="field">
+          <span class="field-label">Energy added (kWh)</span>
+          <input type="number" id="charge-energy" min="0.1" step="0.1" required>
+        </label>
+        <label class="field">
+          <span class="field-label">Charger type</span>
+          <select id="charge-type">
+            <option value="AC" selected>AC (home/destination)</option>
+            <option value="DC">DC (Supercharger/fast)</option>
+          </select>
+        </label>
+        <label class="field">
+          <span class="field-label">Battery % when charging started</span>
+          <input type="number" id="charge-start-soc" min="0" max="100" step="1">
+        </label>
+        <label class="field">
+          <span class="field-label">Battery % when charging finished</span>
+          <input type="number" id="charge-end-soc" min="0" max="100" step="1">
+        </label>
+        <label class="field">
+          <span class="field-label">Location (optional)</span>
+          <input type="text" id="charge-location" maxlength="120">
+        </label>
+        <label class="field">
+          <span class="field-label">Cost (optional — auto-calculated if blank)</span>
+          <input type="number" id="charge-cost" min="0" step="0.01">
+        </label>
         <button type="submit" class="btn btn-accent">+ Add charge</button>
       </form>
       <span id="add-charge-status" class="status"></span>
