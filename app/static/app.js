@@ -727,25 +727,24 @@ function renderLists(d) {
       return `<li class="loc"><span class="loc-name">${l}${when}</span>` +
         `<span class="count">${kwh != null ? fmt(kwh, 1) + " kWh · " : ""}${c}×</span></li>`;
     }).join("");
-  // The "since charge" window starts right where the last charge ends, so it
-  // never contains a charging session of its own — surface that charge as a
-  // list row (same shape as a normal location entry) instead of leaving the
-  // card looking broken.
-  const lc = d.window_label === "since last charge" ? d.last_charge : null;
+  // Pinned atop the list in every window (not just "since charge") so the
+  // most recent charge is always visible at a glance, in the same row shape
+  // as a normal location entry — most useful in "since charge" itself, where
+  // the window starts right where this charge ends, so it never appears in
+  // the list below on its own.
+  const lc = d.last_charge;
   const lastChargeRow = lc ? (() => {
     const kwh = lc.energy_added_kwh != null ? `${fmt(lc.energy_added_kwh, 1)} kWh` : "";
     const soc = lc.start_soc != null && lc.end_soc != null ? `${lc.start_soc}%→${lc.end_soc}%` : "";
     const cost = lc.cost != null ? `${d.currency} ${fmt(lc.cost, 2)}` : "";
-    const when = `<span class="loc-when">ended ${tripWhen(lc.end_time)}${soc ? " · " + soc : ""}</span>`;
+    const span = `${tripWhen(lc.start_time)} → ${tripEnd(lc.start_time, lc.end_time)}`;
+    const when = `<span class="loc-when">${span}${soc ? " · " + soc : ""}</span>`;
     const count = [kwh, cost].filter(Boolean).join(" · ");
     return `<li class="loc last-charge"><span class="loc-name">${lc.location || "Last charge"}${when}</span>` +
       `<span class="count">${count}</span></li>`;
   })() : "";
-  const noChargeMsg = /charge|drive/.test(d.window_label || "")
-    ? "This window starts after your last charge — pick a wider window (e.g. 7 days) to see charging spots."
-    : "No charging sessions in this window";
   document.getElementById("topLocations").innerHTML =
-    lastChargeRow + locs || `<li class="empty">${noChargeMsg}</li>`;
+    lastChargeRow + locs || '<li class="empty">No charging sessions in this window</li>';
 }
 
 function renderBehaviour(d) {

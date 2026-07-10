@@ -336,8 +336,9 @@ def test_summary_since_charge_window():
             since_charges = since["charging"].get("total_sessions", 0) if since["charging"]["available"] else 0
             assert since_charges <= 1  # at most a charge that started after the last one ended
             # The window's own boundary charge is otherwise invisible in every
-            # list above (it ends right at "since"), so it's surfaced separately.
-            assert full["last_charge"] is None  # only meaningful for since_charge windows
+            # list above (it ends right at "since"), so it's surfaced separately —
+            # in every window, not just since_charge, so the format/context is
+            # consistent regardless of which window is picked.
             lc = since["last_charge"]
             assert lc is not None
             assert set(lc) == {
@@ -345,6 +346,7 @@ def test_summary_since_charge_window():
                 "end_soc", "cost", "charge_type", "location",
             }
             assert lc["end_time"] <= since["generated_at"]
+            assert full["last_charge"] == lc  # same last charge regardless of window
     finally:
         settings.app_passcode = old
 
