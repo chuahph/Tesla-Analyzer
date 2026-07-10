@@ -181,9 +181,19 @@ Once linked, run `python run.py collect` to log new drives/charges over time.
    ENERGY_PRICE_PER_KWH=0.30
    ```
 
-   Optional: time-of-use pricing instead of the flat rate above — driving and
-   charging cost then price each session by its own start time. Both rates
-   must be set (> 0) to enable it; leaving either at 0 keeps the flat rate.
+   Charging cost defaults to separate AC/DC rates instead of the flat price
+   above — real bills usually differ a lot between AC/home and DC fast
+   charging. Set either to 0 to fall back to the flat/ToU rate for that type.
+
+   ```env
+   ENERGY_PRICE_AC_KWH=0.99   # RM/kWh, AC / home charging
+   ENERGY_PRICE_DC_KWH=1.29   # RM/kWh, DC fast charging
+   ```
+
+   Optional: time-of-use pricing instead of the flat rate above — driving
+   cost, and charging cost for whichever charger type has no AC/DC rate set,
+   then price each session by its own start time. Both rates must be set
+   (> 0) to enable it; leaving either at 0 keeps the flat rate.
 
    ```env
    ENERGY_PRICE_PEAK_KWH=1.20      # RM/kWh during peak hours

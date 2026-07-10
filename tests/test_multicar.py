@@ -591,6 +591,14 @@ def test_sync_poll_interval_defaults_to_one_minute():
     assert Settings().sync_poll_interval_min == 1.0
 
 
+def test_ac_dc_charge_price_defaults():
+    from app.config import Settings
+
+    s = Settings()
+    assert s.energy_price_ac_kwh == 0.99
+    assert s.energy_price_dc_kwh == 1.29
+
+
 def test_online_idle_car_read_again_after_just_over_a_minute(monkeypatch):
     """With the default 1-minute interval, a car last read 70s ago (just
     past the new threshold, well short of the old 5-minute one) must be

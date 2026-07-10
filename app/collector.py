@@ -16,6 +16,7 @@ from datetime import datetime
 
 from sqlalchemy import func, select
 
+from . import tariff
 from .config import get_settings
 from .database import SessionLocal, init_db
 from .models import Charge, Drive, Vehicle
@@ -153,7 +154,7 @@ def _process_snapshot(session, vehicle, data, drive_state, charge_state):  # pra
                     energy_added_kwh=round(energy, 2),
                     charge_type="DC" if is_dc else "AC",
                     max_power_kw=charge_state["max_power"],
-                    cost=round(energy * settings.energy_price_per_kwh, 2),
+                    cost=round(energy * tariff.charge_price_at(settings, is_dc, now), 2),
                     outside_temp_c=charge_state["temp"],
                 )
             )

@@ -536,7 +536,8 @@ def test_charge_cost_uses_time_of_use_pricing_at_write_time():
     from app.models import Charge, Vehicle
 
     settings = SimpleNamespace(
-        energy_price_per_kwh=0.90, energy_price_peak_kwh=1.20,
+        energy_price_per_kwh=0.90, energy_price_ac_kwh=0.0, energy_price_dc_kwh=0.0,
+        energy_price_peak_kwh=1.20,
         energy_price_offpeak_kwh=0.45, tariff_peak_start_hour=8,
         tariff_peak_end_hour=22, tariff_weekend_offpeak=True,
         battery_capacity_kwh=0.0, battery_new_range_km=0.0, low_soc_notify_pct=0.0,
@@ -585,6 +586,77 @@ def test_charge_cost_uses_time_of_use_pricing_at_write_time():
         assert charge.cost == round(5.0 * 1.20, 2)   # peak rate, not the flat 0.90
 
 
+def test_charge_cost_uses_ac_dc_rate_at_write_time():
+    """AC/DC rates win over ToU (and the flat rate) when configured — real
+    bills differ far more by charger type than by time of day."""
+    from types import SimpleNamespace
+
+    from app.api.routes import _process_vehicle
+    from app.database import SessionLocal
+    from app.models import Charge, Vehicle
+
+    settings = SimpleNamespace(
+        energy_price_per_kwh=0.90, energy_price_ac_kwh=0.99, energy_price_dc_kwh=1.29,
+        # ToU also configured, to prove AC/DC wins over it too.
+        energy_price_peak_kwh=1.20, energy_price_offpeak_kwh=0.45,
+        tariff_peak_start_hour=8, tariff_peak_end_hour=22, tariff_weekend_offpeak=True,
+        battery_capacity_kwh=0.0, battery_new_range_km=0.0, low_soc_notify_pct=0.0,
+        drive_min_km=0.5,
+    )
+
+    def vehicle_data(vin, ts, odo_mi, soc, added_kwh, charging, fast=False):
+        return {
+            "vin": vin, "display_name": "Test",
+            "vehicle_config": {},
+            "vehicle_state": {"odometer": odo_mi, "is_user_present": True, "locked": False},
+            "drive_state": {"timestamp": ts * 1000, "shift_state": "P", "speed": 0,
+                            "latitude": None, "longitude": None},
+            "charge_state": {
+                "battery_level": soc, "battery_range": 200.0,
+                "charging_state": "Charging" if charging else "Complete",
+                "charger_power": 150.0 if fast else 7.0,
+                "charge_energy_added": added_kwh,
+                "fast_charger_present": fast,
+            },
+            "climate_state": {"outside_temp": 25.0},
+        }
+
+    with SessionLocal() as s:
+        v = Vehicle(vin="TESTVIN-ACDC", name="Test", model="Model 3")
+        s.add(v)
+        s.commit()
+
+        import calendar
+        from datetime import datetime as _dt, timedelta as _td
+
+        base_ts = calendar.timegm((_dt(2026, 7, 6, 14, 0, 0) - _td(hours=8)).timetuple())
+
+        # AC session: home charger, 5 kWh added.
+        d1 = vehicle_data("TESTVIN-ACDC", base_ts, 1000.0, 40, 0.0, True)
+        _process_vehicle(s, d1, {"vin": "TESTVIN-ACDC"}, settings)
+        s.commit()
+        d2 = vehicle_data("TESTVIN-ACDC", base_ts + 600, 1000.0, 47, 5.0, False)
+        _process_vehicle(s, d2, {"vin": "TESTVIN-ACDC"}, settings)
+        s.commit()
+
+        # DC fast-charge session: 10 kWh added, an hour later. Odometer stays
+        # put (parked between sessions) — any movement here would register as
+        # a whole-gap drive, which isn't what this test is about.
+        d3 = vehicle_data("TESTVIN-ACDC", base_ts + 3600, 1000.0, 50, 0.0, True, fast=True)
+        _process_vehicle(s, d3, {"vin": "TESTVIN-ACDC"}, settings)
+        s.commit()
+        d4 = vehicle_data("TESTVIN-ACDC", base_ts + 4200, 1000.0, 63, 10.0, False, fast=True)
+        _process_vehicle(s, d4, {"vin": "TESTVIN-ACDC"}, settings)
+        s.commit()
+
+        charges = s.query(Charge).filter(Charge.vehicle_id == v.id).order_by(Charge.start_time).all()
+        assert len(charges) == 2
+        assert charges[0].charge_type == "AC"
+        assert charges[0].cost == round(5.0 * 0.99, 2)
+        assert charges[1].charge_type == "DC"
+        assert charges[1].cost == round(10.0 * 1.29, 2)
+
+
 def test_drive_complete_fires_event_webhook_but_not_push(monkeypatch):
     """Logging a drive through _process_vehicle fires the generic event
     webhook (for home-automation consumers) without going through the push
@@ -597,7 +669,8 @@ def test_drive_complete_fires_event_webhook_but_not_push(monkeypatch):
     from app.models import Vehicle
 
     settings = SimpleNamespace(
-        energy_price_per_kwh=0.90, energy_price_peak_kwh=0.0,
+        energy_price_per_kwh=0.90, energy_price_ac_kwh=0.0, energy_price_dc_kwh=0.0,
+        energy_price_peak_kwh=0.0,
         energy_price_offpeak_kwh=0.0, tariff_peak_start_hour=8,
         tariff_peak_end_hour=22, tariff_weekend_offpeak=True,
         battery_capacity_kwh=0.0, battery_new_range_km=0.0, low_soc_notify_pct=0.0,
@@ -847,8 +920,22 @@ def test_manual_charge_logs_a_historical_session_additively():
                 c = s.get(Charge, charge_id)
                 assert c.energy_added_kwh == 30.0
                 assert c.duration_min == 420.0
-                assert c.cost > 0   # auto-computed from the configured tariff
+                # Auto-computed from the configured AC rate (charge_type: "AC" above).
+                assert c.cost == round(30.0 * settings.energy_price_ac_kwh, 2)
                 s.delete(c)   # tidy up so this doesn't skew later tests' totals
+                s.commit()
+
+            # A DC session auto-costs at the DC rate instead.
+            resp_dc = client.post("/api/charges/manual", json={
+                "start_time": "2025-01-05T12:00:00", "end_time": "2025-01-05T12:30:00",
+                "energy_added_kwh": 20.0, "charge_type": "DC",
+                "start_soc": 20, "end_soc": 60, "location": "Supercharger",
+            })
+            assert resp_dc.status_code == 200
+            with SessionLocal() as s:
+                c_dc = s.get(Charge, resp_dc.json()["id"])
+                assert c_dc.cost == round(20.0 * settings.energy_price_dc_kwh, 2)
+                s.delete(c_dc)
                 s.commit()
 
             # Validation.

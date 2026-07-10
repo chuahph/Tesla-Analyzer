@@ -572,6 +572,28 @@ def test_fast_charge_flag_makes_dc():
     assert c[0]["max_power_kw"] == 150
 
 
+def test_charge_cost_uses_dc_rate_for_fast_charge_ac_rate_otherwise():
+    """price_per_kwh_dc, when given, prices a DC session instead of the plain
+    price_per_kwh AC/flat rate — same energy, different charger type."""
+    ac_prev = snap(T0, 10_000.0, 40, charging=True, kw=7, fast=False)
+    ac_cur = snap(T0 + 3600, 10_000.0, 60)
+    _, ac_charges, _, _ = process_snapshot(
+        ac_prev, ac_cur, None, None, 60.0, 0.99, price_per_kwh_dc=1.29)
+    assert ac_charges[0]["charge_type"] == "AC"
+    assert ac_charges[0]["cost"] == round(ac_charges[0]["energy_added_kwh"] * 0.99, 2)
+
+    dc_prev = snap(T0, 20_000.0, 40, charging=True, kw=150, fast=True)
+    dc_cur = snap(T0 + 1500, 20_000.0, 75)
+    _, dc_charges, _, _ = process_snapshot(
+        dc_prev, dc_cur, None, None, 60.0, 0.99, price_per_kwh_dc=1.29)
+    assert dc_charges[0]["charge_type"] == "DC"
+    assert dc_charges[0]["cost"] == round(dc_charges[0]["energy_added_kwh"] * 1.29, 2)
+
+    # None (the default) means both charger types share price_per_kwh.
+    _, dc_default, _, _ = process_snapshot(dc_prev, dc_cur, None, None, 60.0, 0.99)
+    assert dc_default[0]["cost"] == round(dc_default[0]["energy_added_kwh"] * 0.99, 2)
+
+
 def test_driving_wh_per_km_removes_idle_load():
     from app.sync import driving_wh_per_km
 

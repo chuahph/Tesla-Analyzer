@@ -657,7 +657,6 @@ def _process_vehicle(
 
     from .. import sync as sync_mod
 
-    tariff_price = tariff.price_fn_from_settings(settings)
     vin = data.get("vin") or v_summary.get("vin") or "LINKED-UNKNOWN"
     vehicle = session.query(Vehicle).filter(Vehicle.vin == vin).first()
     if vehicle is None:
@@ -779,9 +778,11 @@ def _process_vehicle(
             old = vehicle.battery_capacity_kwh or 75.0
             vehicle.battery_capacity_kwh = round(0.8 * old + 0.2 * cap, 1)
         c["location"] = _place(c.get("location", ""), session)
-        # Re-price at the session's own start time under time-of-use pricing
-        # (falls back to the flat rate when TOU isn't configured).
-        c["cost"] = round(c["energy_added_kwh"] * tariff_price(c["start_time"]), 2)
+        # Re-price at the session's own start time and actual charger type —
+        # AC/DC rates take priority when configured, falling back to the
+        # flat/ToU rate for whichever type has none set.
+        rate = tariff.charge_price_at(settings, c["charge_type"] == "DC", c["start_time"])
+        c["cost"] = round(c["energy_added_kwh"] * rate, 2)
         session.add(Charge(vehicle_id=vehicle.id, **c))
         notifications.notify(
             session, "Charging complete",
@@ -842,7 +843,6 @@ def sync_now(wake: bool = Query(False), session: Session = Depends(get_session))
     import json as _json
 
     settings = get_settings()
-    tariff_price = tariff.price_fn_from_settings(settings)
     token = state.active_token(session)
     if not token:
         raise HTTPException(400, "No linked Tesla account — link your account first.")
@@ -993,7 +993,8 @@ def sync_now(wake: bool = Query(False), session: Session = Depends(get_session))
                             old_cap = vehicle_row.battery_capacity_kwh or 75.0
                             vehicle_row.battery_capacity_kwh = round(0.8 * old_cap + 0.2 * cap, 1)
                         c["location"] = _place(c.get("location", ""), session)
-                        c["cost"] = round(c["energy_added_kwh"] * tariff_price(c["start_time"]), 2)
+                        rate = tariff.charge_price_at(settings, c["charge_type"] == "DC", c["start_time"])
+                        c["cost"] = round(c["energy_added_kwh"] * rate, 2)
                         session.add(Charge(vehicle_id=vehicle_row.id, **c))
                         session.commit()
                         total["charges"] += 1
@@ -1289,7 +1290,8 @@ def add_manual_charge(payload: dict = Body(...), session: Session = Depends(get_
     location = str(payload.get("location") or "")[:120]
 
     if cost is None:
-        cost = round(energy_added_kwh * tariff.price_fn_from_settings(settings)(start_time), 2)
+        rate = tariff.charge_price_at(settings, charge_type == "DC", start_time)
+        cost = round(energy_added_kwh * rate, 2)
 
     vehicle = _first_vehicle(session)
     charge = Charge(

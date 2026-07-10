@@ -47,3 +47,35 @@ def test_price_fn_from_settings():
     fn = price_fn_from_settings(settings)
     assert fn(datetime(2026, 7, 6, 14, 0)) == 1.20    # Monday peak
     assert fn(datetime(2026, 7, 4, 14, 0)) == 0.45     # Saturday
+
+
+def test_charge_price_at_prefers_ac_dc_rate_over_flat_and_tou():
+    from types import SimpleNamespace
+
+    from app.tariff import charge_price_at
+
+    settings = SimpleNamespace(
+        energy_price_per_kwh=0.90, energy_price_ac_kwh=0.99, energy_price_dc_kwh=1.29,
+        # ToU configured too, to prove AC/DC wins over it, not just over flat.
+        energy_price_peak_kwh=1.20, energy_price_offpeak_kwh=0.45,
+        tariff_peak_start_hour=8, tariff_peak_end_hour=22, tariff_weekend_offpeak=True,
+    )
+    monday_2pm = datetime(2026, 7, 6, 14, 0)
+    assert charge_price_at(settings, dc=False, dt=monday_2pm) == 0.99
+    assert charge_price_at(settings, dc=True, dt=monday_2pm) == 1.29
+
+
+def test_charge_price_at_falls_back_to_flat_tou_when_ac_dc_unset():
+    from types import SimpleNamespace
+
+    from app.tariff import charge_price_at
+
+    settings = SimpleNamespace(
+        energy_price_per_kwh=0.90, energy_price_ac_kwh=0.0, energy_price_dc_kwh=0.0,
+        energy_price_peak_kwh=1.20, energy_price_offpeak_kwh=0.45,
+        tariff_peak_start_hour=8, tariff_peak_end_hour=22, tariff_weekend_offpeak=True,
+    )
+    monday_2pm = datetime(2026, 7, 6, 14, 0)     # peak
+    monday_11pm = datetime(2026, 7, 6, 23, 0)    # off-peak
+    assert charge_price_at(settings, dc=False, dt=monday_2pm) == 1.20
+    assert charge_price_at(settings, dc=True, dt=monday_11pm) == 0.45

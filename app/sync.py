@@ -472,7 +472,7 @@ def live_trip(
 
 
 def _charge_from(start: dict, cur: dict, capacity_kwh: float, price_per_kwh: float,
-                 drive_min_km: float = DRIVE_MIN_KM):
+                 drive_min_km: float = DRIVE_MIN_KM, price_per_kwh_dc: float | None = None):
     dt_min = max((cur["ts"] - start["ts"]) / 60.0, 0.0)
     # Prefer Tesla's own measured energy for the session (charge_energy_added,
     # which accumulates during charging). Fall back to the range/SoC estimate
@@ -510,6 +510,10 @@ def _charge_from(start: dict, cur: dict, capacity_kwh: float, price_per_kwh: flo
     # Locations card still groups sessions meaningfully instead of being blank.
     location = _coords(start) or _coords(cur) or (
         "DC fast charger" if dc else "AC / home charger")
+    # DC-specific rate wins when the caller supplied one — see
+    # energy_price_dc_kwh in config.py; otherwise both charger types share
+    # the single price_per_kwh the caller passed in.
+    rate = price_per_kwh_dc if (dc and price_per_kwh_dc is not None) else price_per_kwh
     return {
         "start_time": _dt(start["ts"]),
         "end_time": _dt(cur["ts"]),
@@ -520,7 +524,7 @@ def _charge_from(start: dict, cur: dict, capacity_kwh: float, price_per_kwh: flo
         "charge_type": "DC" if dc else "AC",
         "max_power_kw": max(start.get("max_kw", 0.0), cur.get("charger_kw", 0.0)),
         "location": location,
-        "cost": round(energy * price_per_kwh, 2),
+        "cost": round(energy * rate, 2),
         "outside_temp_c": cur["out_temp"],
         # Transient (not a DB column): whether energy came from Tesla's meter,
         # so usable capacity can be calibrated only from real measurements.
@@ -529,7 +533,8 @@ def _charge_from(start: dict, cur: dict, capacity_kwh: float, price_per_kwh: flo
 
 
 def close_charge_on_sleep(open_charge: dict, last_snapshot: dict, capacity_kwh: float,
-                          price_per_kwh: float, drive_min_km: float = DRIVE_MIN_KM):
+                          price_per_kwh: float, drive_min_km: float = DRIVE_MIN_KM,
+                          price_per_kwh_dc: float | None = None):
     """Close a charge session the moment the car is confirmed asleep/gone
     unreachable, symmetric to ``close_trip_on_sleep``.
 
@@ -539,7 +544,8 @@ def close_charge_on_sleep(open_charge: dict, last_snapshot: dict, capacity_kwh: 
     from the last real reading rather than leaving it open indefinitely
     waiting for a reconnect that might be hours away.
     """
-    return _charge_from(open_charge, last_snapshot, capacity_kwh, price_per_kwh, drive_min_km)
+    return _charge_from(open_charge, last_snapshot, capacity_kwh, price_per_kwh, drive_min_km,
+                        price_per_kwh_dc)
 
 
 # AC (home/destination) charging routes mains power through the car's onboard
@@ -610,7 +616,7 @@ def _gap_meter_total(prev: dict, cur: dict) -> float | None:
 
 
 def _split_gap_events(prev: dict, cur: dict, capacity_kwh: float, price_per_kwh: float,
-                      drive_min_km: float = DRIVE_MIN_KM):
+                      drive_min_km: float = DRIVE_MIN_KM, price_per_kwh_dc: float | None = None):
     """Reconstruct a charge immediately followed by a short drive, when both
     happened inside one unpolled gap (the car charged, then set off before
     the next poll caught it — e.g. a nap-time top-up followed by a school run).
@@ -663,7 +669,7 @@ def _split_gap_events(prev: dict, cur: dict, capacity_kwh: float, price_per_kwh:
         {"ts": split_ts, "soc": split_soc, "energy_added_kwh": meter_total,
          "charger_kw": 0.0, "fast": bool(prev.get("fast") or cur.get("fast")),
          "out_temp": cur["out_temp"]},
-        capacity_kwh, price_per_kwh, drive_min_km,
+        capacity_kwh, price_per_kwh, drive_min_km, price_per_kwh_dc,
     )
     drive = _drive_from(
         {"ts": split_ts, "odo_km": prev["odo_km"], "soc": split_soc,
@@ -681,6 +687,7 @@ def process_snapshot(
     capacity_kwh: float,
     price_per_kwh: float,
     drive_min_km: float = DRIVE_MIN_KM,
+    price_per_kwh_dc: float | None = None,
 ) -> tuple[list[dict], list[dict], dict | None, dict | None]:
     """Advance the session state machine by one snapshot.
 
@@ -690,6 +697,10 @@ def process_snapshot(
     a real trade-off, not a bug fix: lower it to catch genuinely short moves
     (a charger-to-parking-spot shuffle) at the cost of more exposure to
     logging non-trips as tiny phantom drives.
+
+    ``price_per_kwh_dc``: DC fast-charging rate, when it differs from
+    ``price_per_kwh`` (the AC/default rate) — see energy_price_dc_kwh in
+    config.py. None means both charger types share ``price_per_kwh``.
 
     Returns (drives, charges, open_trip, open_charge) — the sessions completed
     at this snapshot plus the carried-over open sessions.
@@ -708,7 +719,7 @@ def process_snapshot(
         and not is_driving(cur) and not cur.get("charging")
     ):
         split_charge, split_drive = _split_gap_events(
-            prev, cur, capacity_kwh, price_per_kwh, drive_min_km)
+            prev, cur, capacity_kwh, price_per_kwh, drive_min_km, price_per_kwh_dc)
 
     # --- Trips: open on power-on/in-gear, close when the car stops ---------
     if open_trip:
@@ -813,7 +824,8 @@ def process_snapshot(
             "fast": bool(open_charge.get("fast") or cur.get("fast")),
         }
         if not cur.get("charging"):
-            c = _charge_from(open_charge, cur, capacity_kwh, price_per_kwh, drive_min_km)
+            c = _charge_from(open_charge, cur, capacity_kwh, price_per_kwh, drive_min_km,
+                             price_per_kwh_dc)
             if c:
                 charges.append(c)
             open_charge = None
@@ -874,6 +886,7 @@ def process_snapshot(
             capacity_kwh,
             price_per_kwh,
             drive_min_km,
+            price_per_kwh_dc,
         )
         if c:
             charges.append(c)

@@ -42,3 +42,21 @@ def price_fn_from_settings(settings):
         settings.tariff_peak_start_hour, settings.tariff_peak_end_hour,
         settings.tariff_weekend_offpeak,
     )
+
+
+def charge_price_at(settings, dc: bool, dt: datetime) -> float:
+    """The RM/kWh rate for a completed charging session, by charger type.
+
+    energy_price_ac_kwh / energy_price_dc_kwh take priority when set (> 0)
+    — see their config.py docstring. Falls back to the flat/ToU rate at
+    ``dt`` (via price_at) when the relevant type's own rate is 0.
+    """
+    rate = settings.energy_price_dc_kwh if dc else settings.energy_price_ac_kwh
+    if rate > 0:
+        return rate
+    return price_at(
+        dt, settings.energy_price_per_kwh,
+        settings.energy_price_peak_kwh, settings.energy_price_offpeak_kwh,
+        settings.tariff_peak_start_hour, settings.tariff_peak_end_hour,
+        settings.tariff_weekend_offpeak,
+    )

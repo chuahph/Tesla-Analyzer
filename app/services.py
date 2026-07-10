@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from sqlalchemy import delete
 
-from . import state
+from . import state, tariff
 from .config import get_settings
 from .models import BatteryReading, Charge, Drive, ServiceRecord, Vehicle
 
@@ -93,7 +93,8 @@ def replace_with_import(
     for c in charges:
         c = dict(c)
         if not c.get("cost") and c.get("energy_added_kwh"):
-            c["cost"] = round(c["energy_added_kwh"] * settings.energy_price_per_kwh, 2)
+            rate = tariff.charge_price_at(settings, c.get("charge_type") == "DC", c["start_time"])
+            c["cost"] = round(c["energy_added_kwh"] * rate, 2)
         session.add(Charge(vehicle_id=vehicle.id, **c))
 
     session.commit()
