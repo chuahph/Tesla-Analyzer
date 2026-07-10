@@ -757,8 +757,9 @@ function renderLists(d) {
       const rate = !c.is_free && c.rate_per_kwh != null ? ` (${fmt(c.rate_per_kwh, 2)}/kWh)` : "";
       const editBtn = !STATIC_MODE && c.id != null
         ? ` <button class="edit-rate-btn" data-charge-id="${c.id}" ` +
-          `data-kwh="${c.energy_added_kwh}" data-rate="${c.rate_per_kwh ?? ""}" ` +
-          `title="Edit this session's rate">✎</button>`
+          `data-loc="${loc.replace(/"/g, "&quot;")}" data-kwh="${c.energy_added_kwh}" ` +
+          `data-rate="${c.rate_per_kwh ?? ""}" data-is-free="${c.is_free}" ` +
+          `title="Fix this session's cost">✎</button>`
         : "";
       return `<li class="charge"><span class="charge-main"><span class="charge-loc">${loc}</span>` +
         `<span class="charge-when">${when}</span></span>` +
@@ -769,33 +770,63 @@ function renderLists(d) {
   }
 }
 
-// "Edit rate" (✎) on a Recent Charges row: fix a session's cost by
-// supplying its actual RM/kWh rate — for one priced differently from the
-// configured AC/DC default (a promo rate, a pricier one-off public
-// charger, ...). 0 doubles as marking the session free.
+// "Fix cost" (✎) on a Recent Charges row: one toggle button covers both
+// ways a session's cost can be wrong — mark it free (FOC, e.g. a Tesla
+// Destination Charger) or supply its actual RM/kWh rate (a promo rate, a
+// pricier one-off public charger, ...). Ticking Free disables the rate
+// field, same interaction as the Add Historical Charge form's own toggle.
 function wireEditRateButtons(root) {
   root.querySelectorAll(".edit-rate-btn[data-charge-id]").forEach((btn) => {
-    btn.addEventListener("click", async (e) => {
+    btn.addEventListener("click", (e) => {
       e.stopPropagation();
-      const current = btn.dataset.rate || "0";
-      const input = window.prompt("Actual rate for this session (per kWh):", current);
-      if (input == null || input.trim() === "") return;
-      const rate = parseFloat(input);
+      const form = document.getElementById("edit-charge-form");
+      form.dataset.chargeId = btn.dataset.chargeId;
+      const isFree = btn.dataset.isFree === "true";
+      const freeCb = document.getElementById("edit-charge-free");
+      const rateInput = document.getElementById("edit-charge-rate");
+      freeCb.checked = isFree;
+      rateInput.value = isFree ? "" : (btn.dataset.rate || "");
+      rateInput.disabled = isFree;
+      document.getElementById("edit-charge-summary").textContent =
+        `${btn.dataset.loc} — ${btn.dataset.kwh} kWh`;
+      setStatus(document.getElementById("edit-charge-status"), "", "");
+      openModal("edit-charge-modal");
+    });
+  });
+}
+
+function setupEditChargeModal() {
+  const form = document.getElementById("edit-charge-form");
+  if (!form) return;
+  const freeCb = document.getElementById("edit-charge-free");
+  const rateInput = document.getElementById("edit-charge-rate");
+  freeCb.addEventListener("change", (e) => {
+    rateInput.disabled = e.target.checked;
+    if (e.target.checked) rateInput.value = "";
+  });
+  form.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const statusEl = document.getElementById("edit-charge-status");
+    const isFree = freeCb.checked;
+    let rate = 0;
+    if (!isFree) {
+      rate = parseFloat(rateInput.value);
       if (!Number.isFinite(rate) || rate < 0) {
-        window.alert("Enter a rate of 0 or more.");
+        setStatus(statusEl, "Enter a rate of 0 or more, or tick Free.", "err");
         return;
       }
-      try {
-        const resp = await fetch("/api/charges/edit-rate", {
-          method: "POST", headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ id: +btn.dataset.chargeId, price_per_kwh: rate }),
-        });
-        if (!resp.ok) throw new Error((await resp.json()).detail || "Failed");
-        load();   // refresh KPIs/lists so the corrected cost shows immediately
-      } catch (err) {
-        window.alert(err.message);
-      }
-    });
+    }
+    try {
+      const resp = await fetch("/api/charges/edit-rate", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ id: +form.dataset.chargeId, price_per_kwh: rate }),
+      });
+      if (!resp.ok) throw new Error((await resp.json()).detail || "Failed");
+      closeModal("edit-charge-modal");
+      load();   // refresh KPIs/lists so the corrected cost shows immediately
+    } catch (err) {
+      setStatus(statusEl, err.message, "err");
+    }
   });
 }
 
@@ -1987,6 +2018,7 @@ function setupAddChargeButton() {
   });
 }
 if (!STATIC_MODE) setupAddChargeButton();
+if (!STATIC_MODE) setupEditChargeModal();
 
 // Wire the static chart "!" explainers once (dynamic panels wire themselves).
 wireInfoButtons(document);
