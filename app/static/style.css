@@ -739,3 +739,14 @@ footer { padding: 18px 28px; color: var(--muted); font-size: 12px; border-top: 1
   }
   .print-report td:first-child { color: #555; width: 38%; }
 }
+
+/* Data-quality / distance-flag badges on a trip row (see trip-score for the
+   sizing precedent — these sit right next to it in trip-head). */
+.dq-badge {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 17px; height: 17px; border-radius: 50%;
+  font-size: 10.5px; font-weight: 800; flex: 0 0 auto; cursor: help;
+}
+.dq-badge.dq-estimated { color: var(--amber); background: rgba(245,158,11,.14); }
+.dq-badge.dq-incomplete { color: #ff6b70; background: rgba(232,33,39,.14); }
+.dq-badge.dq-warn { color: var(--amber); background: rgba(245,158,11,.14); }

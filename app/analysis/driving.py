@@ -6,7 +6,7 @@ from typing import Any
 
 from .. import sync as sync_mod
 from ..models import Drive
-from . import has_valid_energy, linregress, mean, percentile, safe_div
+from . import has_valid_energy, haversine_km, linregress, mean, percentile, safe_div
 
 
 def _speed_bucket(speed: float) -> str:
@@ -124,6 +124,41 @@ def _trip_conditions(d: Drive) -> str:
     if d.outside_temp_c >= 33:
         parts.append(f"hot {round(d.outside_temp_c)}°C")
     return " · ".join(parts)
+
+
+def _data_quality(d: Drive) -> str:
+    """How trustworthy this trip's efficiency figures are, so the dashboard
+    can show which trips are real measurements vs a fallback estimate:
+      - "measured": valid energy AND idle live-tracked while the trip was
+        open — driving_wh_per_km reflects an actual observed stop, not a
+        guess.
+      - "estimated": valid energy but idle wasn't live-tracked (a trip
+        logged before that existed, or reconstructed across an unpolled
+        gap) — driving_wh_per_km falls back to the avg/max-speed heuristic.
+      - "incomplete": no valid energy (a range-reading gap contaminated the
+        trip) — Wh/km and cost are unavailable for it.
+    """
+    if not has_valid_energy(d):
+        return "incomplete"
+    return "measured" if getattr(d, "idle_tracked", False) else "estimated"
+
+
+def _distance_flag(d: Drive) -> str | None:
+    """Flags a trip whose logged odometer distance is implausibly short
+    against the straight-line distance between its own stored endpoints — a
+    real driven distance can never be shorter than a straight line between
+    the same two points, so this catches an odometer/GPS data glitch that
+    the energy math alone wouldn't reveal. None when there's nothing to
+    compare (older trips with no stored coords) or the numbers are sane.
+    """
+    start = getattr(d, "start_coords", "") or ""
+    end = getattr(d, "end_coords", "") or ""
+    straight = haversine_km(start, end)
+    if straight is None or straight < 0.3:   # too short to be meaningful either way
+        return None
+    if d.distance_km < straight * 0.9:
+        return "distance_short"
+    return None
 
 
 def _insights(drives: list[Drive]) -> list[str]:
@@ -365,6 +400,14 @@ def analyze(drives: list[Drive], rated_wh_per_km: float = 150.0,
                     if has_valid_energy(d) and price_at(d.start_time) else None
                 ),
                 "conditions": _trip_conditions(d),
+                # "measured" (real tracked idle) / "estimated" (heuristic
+                # fallback) / "incomplete" (no valid energy) — how much to
+                # trust this trip's efficiency figures.
+                "data_quality": _data_quality(d),
+                # Set only when the odometer distance is implausibly short
+                # against the trip's own stored endpoints — an odometer/GPS
+                # glitch, independent of the energy math.
+                "distance_flag": _distance_flag(d),
                 "route": f"{d.start_location} → {d.end_location}"
                 if d.start_location and d.end_location else "",
                 # Live directions link (Google Maps start -> end) when the raw

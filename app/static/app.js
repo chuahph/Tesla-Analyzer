@@ -537,6 +537,18 @@ function renderLists(d) {
       const mapLink = t.map_url
         ? ` <a class="trip-map" href="${t.map_url}" target="_blank" rel="noopener" title="Open route in Google Maps">🗺</a>`
         : "";
+      // Data-quality badge: silent when the trip's figures are a real
+      // measurement (the expected default); a small marker only when they're
+      // a fallback estimate or genuinely unavailable, so a glance at the list
+      // shows which trips to trust at face value.
+      const dq = t.data_quality === "estimated"
+        ? `<span class="dq-badge dq-estimated" title="Idle wasn't live-tracked for this trip — Wh/km uses a speed-based estimate, not a measured stop">≈</span>`
+        : t.data_quality === "incomplete"
+        ? `<span class="dq-badge dq-incomplete" title="No valid energy reading for this trip (a range-reading gap) — efficiency figures are unavailable">✕</span>`
+        : "";
+      const distFlag = t.distance_flag
+        ? `<span class="dq-badge dq-warn" title="Logged distance is shorter than the straight-line distance between this trip's own start/end points — likely an odometer or GPS glitch">⚠</span>`
+        : "";
       // In select mode, a checkbox precedes each trip (self-hosted only).
       const check = tripSelectMode && t.id != null
         ? `<input type="checkbox" class="trip-check" value="${t.id}" aria-label="Select trip" />` : "";
@@ -547,7 +559,7 @@ function renderLists(d) {
           `<span id="${condId}" class="info-pop hidden">${tripConditionWhy(t)}</span>`
         : "";
       return `<li class="trip${tripSelectMode ? " selectable" : ""}">` +
-        `<span class="trip-head">${check}${score}<span class="trip-route">${when}${t.route ? "<br>" + t.route : ""}${mapLink}</span></span>` +
+        `<span class="trip-head">${check}${score}${dq}${distFlag}<span class="trip-route">${when}${t.route ? "<br>" + t.route : ""}${mapLink}</span></span>` +
         `<span class="trip-meta">${t.distance_km} km · ${t.duration_min} min${speed}${kwh}${whkm}${soc}${cost}</span>${cond}</li>`;
     })
     .join("");

@@ -18,6 +18,19 @@ def test_mean_and_percentile():
     assert percentile([10], 0.95) == 10
 
 
+def test_haversine_km():
+    from app.analysis import haversine_km
+
+    # 0.1 deg latitude ~= 11.1 km at any longitude.
+    d = haversine_km("5.30, 100.30", "5.40, 100.30")
+    assert 10.9 <= d <= 11.3
+    # Same point -> zero.
+    assert haversine_km("5.30, 100.30", "5.30, 100.30") == 0.0
+    # Malformed / missing input -> None, not a crash.
+    assert haversine_km("", "5.30, 100.30") is None
+    assert haversine_km("not-coords", "5.30, 100.30") is None
+
+
 def test_linregress_recovers_slope():
     xs = list(range(10))
     ys = [3 * x + 5 for x in xs]
@@ -327,6 +340,61 @@ def test_charging_cost_split_and_per_100km(seeded):
     assert round(r["ac_cost"] + r["dc_cost"], 2) == r["total_cost"]
     km = sum(d.distance_km for d in drives)
     assert r["cost_per_100km"] == round(r["total_cost"] / km * 100.0, 2)
+
+
+def test_recent_trips_report_data_quality():
+    """measured (real tracked idle) / estimated (heuristic fallback) /
+    incomplete (no valid energy) reflects how much to trust each trip."""
+    from datetime import datetime
+
+    from app.analysis import driving as driving_analysis
+    from app.models import Drive
+
+    def trip(**overrides):
+        base = dict(
+            start_time=datetime(2026, 7, 9, 8, 0), end_time=datetime(2026, 7, 9, 8, 20),
+            distance_km=10.0, duration_min=20.0, avg_speed_kmh=30.0, max_speed_kmh=60.0,
+            start_soc=60, end_soc=58, energy_used_kwh=1.5, outside_temp_c=28.0,
+        )
+        base.update(overrides)
+        return Drive(**base)
+
+    measured = trip(idle_min=0.0, idle_tracked=True)
+    estimated = trip(idle_min=0.0, idle_tracked=False)
+    incomplete = trip(energy_used_kwh=0.0)   # no valid energy -> wh_per_km 0
+
+    assert driving_analysis.analyze([measured], 150.0, 75.0)["recent_trips"][0]["data_quality"] == "measured"
+    assert driving_analysis.analyze([estimated], 150.0, 75.0)["recent_trips"][0]["data_quality"] == "estimated"
+    assert driving_analysis.analyze([incomplete], 150.0, 75.0)["recent_trips"][0]["data_quality"] == "incomplete"
+
+
+def test_distance_flag_catches_implausibly_short_odometer_distance():
+    """A trip whose logged distance is shorter than the straight-line
+    distance between its own stored endpoints is flagged — physically that
+    driven distance can never be shorter than a straight line. Trips with no
+    stored coords, or with a sane distance, are left unflagged."""
+    from datetime import datetime
+
+    from app.analysis import driving as driving_analysis
+    from app.models import Drive
+
+    def trip(distance_km, start_coords, end_coords):
+        return Drive(
+            start_time=datetime(2026, 7, 9, 8, 0), end_time=datetime(2026, 7, 9, 8, 20),
+            distance_km=distance_km, duration_min=20.0, avg_speed_kmh=30.0, max_speed_kmh=60.0,
+            start_soc=60, end_soc=58, energy_used_kwh=1.5, outside_temp_c=28.0,
+            start_coords=start_coords, end_coords=end_coords,
+        )
+
+    # ~11 km straight-line between these two points (0.1 deg lat ~= 11.1 km).
+    flagged = trip(2.0, "5.30, 100.30", "5.40, 100.30")   # 2 km logged, impossible
+    sane = trip(15.0, "5.30, 100.30", "5.40, 100.30")     # 15 km logged, plausible
+    no_coords = trip(2.0, "", "")
+
+    r = driving_analysis.analyze([flagged], 150.0, 75.0)["recent_trips"][0]
+    assert r["distance_flag"] == "distance_short"
+    assert driving_analysis.analyze([sane], 150.0, 75.0)["recent_trips"][0]["distance_flag"] is None
+    assert driving_analysis.analyze([no_coords], 150.0, 75.0)["recent_trips"][0]["distance_flag"] is None
 
 
 def test_top_routes_group_by_area_but_show_specific_label():

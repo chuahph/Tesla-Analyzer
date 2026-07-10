@@ -1,6 +1,7 @@
 """Analytics engine: driving, charging, efficiency and recommendations."""
 from __future__ import annotations
 
+import math
 from collections.abc import Sequence
 
 # A real drive can't average below this over its whole distance; a lower figure
@@ -49,3 +50,28 @@ def percentile(values: Sequence[float], pct: float) -> float:
     lo = int(k)
     hi = min(lo + 1, len(ordered) - 1)
     return ordered[lo] + (ordered[hi] - ordered[lo]) * (k - lo)
+
+
+_EARTH_RADIUS_KM = 6371.0
+
+
+def haversine_km(coords_a: str, coords_b: str) -> float | None:
+    """Straight-line distance (km) between two 'lat, lon' strings.
+
+    A real driven distance can never be shorter than this — the one Tesla-
+    independent sanity check available without a separate trip-meter API
+    field: if the logged odometer delta comes in under the straight-line
+    distance between the same two points, something (not necessarily the
+    energy math) is off with that trip's data. Returns None for missing/
+    malformed input so callers can skip the check rather than guess.
+    """
+    try:
+        lat1, lon1 = (float(p.strip()) for p in coords_a.split(",", 1))
+        lat2, lon2 = (float(p.strip()) for p in coords_b.split(",", 1))
+    except (ValueError, AttributeError):
+        return None
+    phi1, phi2 = math.radians(lat1), math.radians(lat2)
+    dphi = math.radians(lat2 - lat1)
+    dlambda = math.radians(lon2 - lon1)
+    a = math.sin(dphi / 2) ** 2 + math.cos(phi1) * math.cos(phi2) * math.sin(dlambda / 2) ** 2
+    return 2 * _EARTH_RADIUS_KM * math.asin(min(1.0, math.sqrt(a)))
