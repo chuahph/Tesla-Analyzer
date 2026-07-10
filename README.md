@@ -275,6 +275,31 @@ uploads, so those need a small relay in between rather than the URL directly.
 
 ---
 
+## Scheduled reports
+
+`GET /api/reports/monthly` POSTs a driving/charging/efficiency summary — as
+JSON — to a webhook, on whatever schedule you point a cron job at it.
+
+1. Set `REPORT_WEBHOOK_URL` in Render's environment variables.
+2. Add a **third** cron job pointed at:
+   ```
+   https://<your-app>.onrender.com/api/reports/monthly?key=<SYNC_KEY>
+   ```
+   monthly (or whatever cadence you'd like a report at — the endpoint itself
+   doesn't track a period, it just summarises the last `?days=N` days,
+   default 30). Reuses the same `SYNC_KEY` as the sync and backup cron jobs.
+3. Without `REPORT_WEBHOOK_URL` set, the endpoint returns a 400 explaining
+   that — it never silently no-ops.
+
+The JSON body includes a top-level `"text"` field — a plain-English summary
+line — which **Slack and Discord incoming webhooks read directly**, so
+pointing either straight at this endpoint's URL works with no relay needed
+(unlike the raw-ZIP backup above). The same payload also carries the full
+structured figures (`driving`, `charging`, `efficiency`) for anything that
+wants to parse it instead.
+
+---
+
 ## Push notifications
 
 Get an alert on your phone/desktop the moment a charge finishes or the

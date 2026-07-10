@@ -1247,6 +1247,79 @@ def backup_now(session: Session = Depends(get_session)):
     }
 
 
+def _monthly_report_payload(session: Session, vehicle: Vehicle, settings, days: int) -> dict:
+    """Driving/charging/efficiency summary for the last ``days`` days, plus a
+    plain-text rendering — Slack and Discord incoming webhooks both read a
+    top-level "text" field directly, so the same payload works untouched
+    there while still carrying the structured figures for anything else."""
+    capacity_kwh, _ = _usable_capacity(session, vehicle, settings)
+    drives, charges = _window(session, vehicle.id, days)
+    price_fn = tariff.price_fn_from_settings(settings)
+    driving = driving_analysis.analyze(drives, settings.rated_wh_per_km, capacity_kwh, price_fn)
+    charging = charging_analysis.analyze(charges, drives)
+    efficiency = efficiency_analysis.analyze(drives, settings.rated_wh_per_km)
+    cur = settings.currency
+
+    lines = [f"📊 {vehicle.name} — last {days} days"]
+    if driving.get("available"):
+        lines.append(
+            f"🚗 {driving['total_distance_km']} km over {driving['total_drives']} drives "
+            f"({driving['total_duration_h']} h)"
+        )
+        if driving.get("total_cost") is not None:
+            lines.append(f"💵 {cur} {driving['total_cost']} in driving energy cost")
+    else:
+        lines.append("🚗 No drives logged in this period.")
+    if efficiency.get("available") and efficiency.get("avg_efficiency_wh_per_km"):
+        vs = efficiency["vs_rated_pct"]
+        lines.append(
+            f"📈 {efficiency['avg_efficiency_wh_per_km']} Wh/km "
+            f"({'+' if vs >= 0 else ''}{vs}% vs rated)"
+        )
+    if charging.get("available"):
+        lines.append(
+            f"⚡ {charging['total_energy_kwh']} kWh charged across "
+            f"{charging['total_sessions']} sessions — {cur} {charging['total_cost']}"
+        )
+    else:
+        lines.append("⚡ No charging sessions logged in this period.")
+
+    return {
+        "text": "\n".join(lines),
+        "vehicle": vehicle.name,
+        "period_days": days,
+        "driving": driving,
+        "charging": charging,
+        "efficiency": efficiency,
+    }
+
+
+@router.get("/reports/monthly")
+def monthly_report(days: int = Query(30, ge=1, le=365), session: Session = Depends(get_session)):
+    """POST a driving/charging/efficiency summary to the configured report
+    webhook — cron-callable the same way /api/sync and /api/backup are (the
+    sync_key query param passes the passcode gate). No internal scheduling:
+    call this on whatever schedule you want the report at (monthly is the
+    intended use — see README) from the same external cron that already
+    hits /api/sync; ``days`` controls how far back each report looks.
+    """
+    settings = get_settings()
+    url = settings.report_webhook_url.strip()
+    if not url:
+        raise HTTPException(400, "No REPORT_WEBHOOK_URL configured.")
+
+    vehicle = _first_vehicle(session)
+    payload = _monthly_report_payload(session, vehicle, settings, days)
+
+    try:
+        resp = httpx.post(url, json=payload, timeout=15.0)
+        resp.raise_for_status()
+    except httpx.HTTPError as exc:
+        raise HTTPException(502, f"Report webhook delivery failed: {exc}") from exc
+
+    return {"sent": True, "webhook_status": resp.status_code, "period_days": days}
+
+
 # --- Web push notifications -------------------------------------------------
 
 

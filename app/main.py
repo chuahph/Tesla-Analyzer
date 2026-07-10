@@ -82,13 +82,14 @@ async def _passcode_gate(request: Request, call_next):
     path = request.url.path
     if not passcode or path in _OPEN_PATHS or _is_authed(request, passcode):
         return await call_next(request)
-    # External cron services trigger /api/sync (hands-off background logging)
-    # and /api/backup (scheduled webhook backups) with the secret key instead
-    # of the passcode cookie.
+    # External cron services trigger /api/sync (hands-off background logging),
+    # /api/backup (scheduled webhook backups) and /api/reports/monthly
+    # (scheduled webhook reports) with the secret key instead of the
+    # passcode cookie.
     sync_key = settings.sync_key.strip()
     if (
         sync_key
-        and path in ("/api/sync", "/api/backup")
+        and path in ("/api/sync", "/api/backup", "/api/reports/monthly")
         and hmac.compare_digest(request.query_params.get("key", ""), sync_key)
     ):
         return await call_next(request)

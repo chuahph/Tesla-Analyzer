@@ -42,6 +42,13 @@ class Settings(BaseSettings):
     # Point it at your own upload endpoint, a cloud-storage presigned PUT
     # URL, or a relay that forwards to email/Slack/Discord.
     backup_webhook_url: str = ""
+    # Optional URL that GET /api/reports/monthly (also cron-callable via
+    # sync_key) POSTs a driving/charging/efficiency summary JSON to (includes
+    # a "text" field a Slack/Discord incoming webhook reads directly). Empty
+    # = the endpoint is disabled. No internal scheduling — same philosophy as
+    # backup_webhook_url: call it on whatever cadence you want the report at
+    # (monthly is the intended use, but the endpoint itself is period-agnostic).
+    report_webhook_url: str = ""
 
     # Web push notifications (charge complete, low battery, ...). Generate a
     # keypair once with `python -m app.push_keys` and set both here — empty

@@ -149,6 +149,102 @@ def test_backup_surfaces_webhook_delivery_failure():
         settings.app_passcode, settings.backup_webhook_url = old_pc, old_url
 
 
+def test_monthly_report_requires_webhook_url_and_posts_summary():
+    settings = get_settings()
+    old_pc, old_url = settings.app_passcode, settings.report_webhook_url
+    settings.app_passcode = ""
+    try:
+        with TestClient(app) as client:  # startup seeds demo data
+            # No webhook configured -> a clear 400, not a silent no-op.
+            settings.report_webhook_url = ""
+            resp = client.get("/api/reports/monthly")
+            assert resp.status_code == 400
+            assert "REPORT_WEBHOOK_URL" in resp.json()["detail"]
+
+            # Configured -> POSTs a JSON summary to it.
+            settings.report_webhook_url = "https://example.invalid/report"
+            sent = {}
+
+            def fake_post(url, json=None, timeout=None):
+                sent["url"], sent["json"] = url, json
+                import httpx as _httpx
+                return _httpx.Response(200, request=_httpx.Request("POST", url))
+
+            import app.api.routes as routes_mod
+            orig_post = routes_mod.httpx.post
+            routes_mod.httpx.post = fake_post
+            try:
+                resp = client.get("/api/reports/monthly?days=30")
+            finally:
+                routes_mod.httpx.post = orig_post
+
+            assert resp.status_code == 200
+            body = resp.json()
+            assert body["sent"] is True and body["period_days"] == 30
+            assert sent["url"] == "https://example.invalid/report"
+            payload = sent["json"]
+            assert payload["period_days"] == 30
+            assert "text" in payload and isinstance(payload["text"], str)
+            assert "km" in payload["text"]  # demo data has drives in the last 30 days
+            assert payload["driving"]["available"] is True
+            assert payload["charging"]["available"] in (True, False)
+    finally:
+        settings.app_passcode, settings.report_webhook_url = old_pc, old_url
+
+
+def test_monthly_report_surfaces_webhook_delivery_failure():
+    settings = get_settings()
+    old_pc, old_url = settings.app_passcode, settings.report_webhook_url
+    settings.app_passcode = ""
+    settings.report_webhook_url = "https://example.invalid/report"
+    try:
+        with TestClient(app) as client:  # startup seeds demo data
+            def failing_post(url, json=None, timeout=None):
+                import httpx as _httpx
+                raise _httpx.ConnectError("connection refused", request=_httpx.Request("POST", url))
+
+            import app.api.routes as routes_mod
+            orig_post = routes_mod.httpx.post
+            routes_mod.httpx.post = failing_post
+            try:
+                resp = client.get("/api/reports/monthly")
+            finally:
+                routes_mod.httpx.post = orig_post
+
+            assert resp.status_code == 502
+            assert "webhook" in resp.json()["detail"].lower()
+    finally:
+        settings.app_passcode, settings.report_webhook_url = old_pc, old_url
+
+
+def test_monthly_report_cron_callable_via_sync_key():
+    """Same passcode-bypass mechanism as /api/sync and /api/backup."""
+    settings = get_settings()
+    old_pc, old_key, old_url = settings.app_passcode, settings.sync_key, settings.report_webhook_url
+    settings.app_passcode = "secret123"
+    settings.sync_key = "crontoken"
+    settings.report_webhook_url = "https://example.invalid/report"
+    try:
+        with TestClient(app) as client:
+            # No key -> blocked by the passcode gate.
+            assert client.get("/api/reports/monthly").status_code == 401
+
+            def fake_post(url, json=None, timeout=None):
+                import httpx as _httpx
+                return _httpx.Response(200, request=_httpx.Request("POST", url))
+
+            import app.api.routes as routes_mod
+            orig_post = routes_mod.httpx.post
+            routes_mod.httpx.post = fake_post
+            try:
+                resp = client.get("/api/reports/monthly?key=crontoken")
+            finally:
+                routes_mod.httpx.post = orig_post
+            assert resp.status_code == 200
+    finally:
+        settings.app_passcode, settings.sync_key, settings.report_webhook_url = old_pc, old_key, old_url
+
+
 def test_push_endpoints_404_when_not_configured():
     settings = get_settings()
     old_pc = settings.app_passcode
