@@ -1633,6 +1633,14 @@ def summary(
         new_range_km=spec_km,
     )
 
+    tou = None
+    if settings.energy_price_peak_kwh > 0 and settings.energy_price_offpeak_kwh > 0:
+        tou = {
+            "peak_price": settings.energy_price_peak_kwh,
+            "offpeak_price": settings.energy_price_offpeak_kwh,
+            "peak_start_hour": settings.tariff_peak_start_hour,
+            "peak_end_hour": settings.tariff_peak_end_hour,
+        }
     recs = recommendations_engine.build(
         driving,
         charging,
@@ -1640,6 +1648,7 @@ def summary(
         battery,
         energy_price=settings.energy_price_per_kwh,
         currency=settings.currency,
+        tou=tou,
     )
 
     vehicle_out = VehicleOut.model_validate(vehicle).model_dump()

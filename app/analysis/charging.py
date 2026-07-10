@@ -41,10 +41,14 @@ def analyze(charges: list[Charge], drives: list[Drive] | None = None) -> dict[st
     end_soc_targets = Counter(int(round(c.end_soc / 5.0) * 5) for c in charges)
     full_charges = sum(1 for c in charges if c.end_soc >= 99)
 
-    # Charging start hour distribution (off-peak overnight is cheapest).
+    # Charging start hour distribution (off-peak overnight is cheapest), by
+    # session count and by energy — the smart charging advisor needs the
+    # latter to size a real currency saving, not just "many sessions".
     by_hour: dict[int, int] = defaultdict(int)
+    energy_by_hour: dict[int, float] = defaultdict(float)
     for c in charges:
         by_hour[c.start_time.hour] += 1
+        energy_by_hour[c.start_time.hour] += c.energy_added_kwh
 
     # Locations. Charges logged without GPS (or before location capture existed)
     # have no place name — infer it from the trip that ended nearby, else group
@@ -115,5 +119,6 @@ def analyze(charges: list[Charge], drives: list[Drive] | None = None) -> dict[st
         "avg_end_soc": round(mean([c.end_soc for c in charges if c.end_soc > 0]), 0),
         "end_soc_targets": dict(sorted(end_soc_targets.items())),
         "charges_by_hour": {str(h): by_hour.get(h, 0) for h in range(24)},
+        "energy_by_hour": {str(h): round(energy_by_hour.get(h, 0.0), 2) for h in range(24)},
         "top_locations": top_locations,
     }

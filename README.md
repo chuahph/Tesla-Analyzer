@@ -61,8 +61,13 @@ python scripts/build_site.py --out site   # → ./site (open site/index.html)
 Turns the analysis into actionable advice with estimated savings, e.g.:
 - "37% of charges go to 100%" → set the daily limit to 80–90%.
 - "High speed is costing significant range" → with the Wh/km penalty per km/h.
-- "A lot of charging happens during peak hours" → shift to off-peak.
 - "Cold weather is hurting efficiency" → pre-condition while plugged in.
+- **Smart charging advisor** (advisory only) — with a time-of-use tariff
+  configured, sizes a real currency figure from the account's own peak-hour
+  charging energy (e.g. "146.6 kWh charged at peak → RM 109.97/window could
+  be saved by scheduling charging after 22:00"), rather than a generic hint.
+  Purely a suggestion in the recommendation feed — it never sets a schedule
+  or sends any command to the car.
 
 **Dashboard**
 A dark, responsive single-page dashboard (Chart.js) with KPI cards, six charts

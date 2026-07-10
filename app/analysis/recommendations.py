@@ -27,7 +27,13 @@ def build(
     *,
     energy_price: float,
     currency: str,
+    tou: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
+    """``tou``, when a real time-of-use tariff is configured: {peak_price,
+    offpeak_price, peak_start_hour, peak_end_hour} — sizes the smart
+    charging advisor's saving from the account's own peak-hour energy
+    instead of a generic heuristic. None (the default) keeps the old
+    session-count-based hint for accounts on a flat rate."""
     recs: list[dict[str, Any]] = []
 
     # --- Battery degradation --------------------------------------------------
@@ -192,22 +198,55 @@ def build(
                 )
             )
 
-        # Off-peak shifting.
-        by_hour = charging["charges_by_hour"]
-        peak_charges = sum(v for h, v in by_hour.items() if 7 <= int(h) <= 21)
-        if peak_charges > charging["total_sessions"] * 0.4:
-            recs.append(
-                _rec(
-                    "Cost",
-                    "medium",
-                    "A lot of charging happens during peak hours",
-                    "Many sessions start between 07:00 and 21:00. If your utility has a "
-                    "time-of-use tariff, scheduling charging to start after midnight (the "
-                    "car supports a scheduled departure/charge time) can cut the per-kWh "
-                    "price substantially.",
-                    "10–40% off the electricity portion of your charging bill",
-                )
+        # Smart charging advisor (advisory only — suggests a schedule, never
+        # sets one): with a real time-of-use tariff configured, size the
+        # actual currency saved by shifting the window's peak-hour energy to
+        # off-peak, from the account's own energy-by-hour history. Falls
+        # back to a generic session-count heuristic without TOU pricing,
+        # since there's no real per-kWh rate delta to size a figure from.
+        peak_start = tou.get("peak_start_hour") if tou else None
+        peak_end = tou.get("peak_end_hour") if tou else None
+        if tou and tou.get("peak_price") and tou.get("offpeak_price") and peak_start is not None:
+            energy_by_hour = charging.get("energy_by_hour") or {}
+            # Same peak-window test as tariff.price_at, so this matches
+            # exactly what the account was actually charged for each hour.
+            peak_kwh = sum(
+                v for h, v in energy_by_hour.items() if peak_start <= int(h) < peak_end
             )
+            rate_delta = tou["peak_price"] - tou["offpeak_price"]
+            savings = round(peak_kwh * rate_delta, 2)
+            if peak_kwh > 0 and savings > 0:
+                recs.append(
+                    _rec(
+                        "Cost",
+                        "high" if savings >= 20 else "medium",
+                        f"Smart charging: shift {peak_kwh:.1f} kWh off peak hours",
+                        f"{peak_kwh:.1f} kWh was charged between {peak_start:02d}:00–"
+                        f"{peak_end:02d}:00 at the peak rate ({currency} "
+                        f"{tou['peak_price']:.2f}/kWh) instead of the off-peak rate "
+                        f"({currency} {tou['offpeak_price']:.2f}/kWh). Scheduling charging "
+                        f"to start after {peak_end:02d}:00 (the car's own scheduled-charge "
+                        "setting, in the Tesla app — this dashboard doesn't drive the car) "
+                        "would have avoided this at no change to how much you drive.",
+                        f"{currency} {savings:.2f} over this window",
+                    )
+                )
+        else:
+            by_hour = charging["charges_by_hour"]
+            peak_charges = sum(v for h, v in by_hour.items() if 7 <= int(h) <= 21)
+            if peak_charges > charging["total_sessions"] * 0.4:
+                recs.append(
+                    _rec(
+                        "Cost",
+                        "medium",
+                        "A lot of charging happens during peak hours",
+                        "Many sessions start between 07:00 and 21:00. If your utility has a "
+                        "time-of-use tariff, scheduling charging to start after midnight (the "
+                        "car supports a scheduled departure/charge time) can cut the per-kWh "
+                        "price substantially.",
+                        "10–40% off the electricity portion of your charging bill",
+                    )
+                )
 
     # --- Usage patterns ------------------------------------------------------
     if driving.get("available"):

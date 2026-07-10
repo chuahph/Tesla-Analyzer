@@ -620,6 +620,51 @@ def test_recommendations_built(seeded):
     assert vals == sorted(vals)
 
 
+def test_smart_charging_advisor_sizes_saving_from_peak_hour_energy():
+    """With a real TOU tariff configured, the advisor must size its saving
+    from the account's own peak-hour energy — not a generic heuristic —
+    and must never touch anything beyond producing recommendation text
+    (advisory only, no vehicle command)."""
+    charging = {
+        "available": True,
+        "full_charge_share_pct": 0.0,
+        "dc_energy_share_pct": 0.0,
+        "total_sessions": 4,
+        "charges_by_hour": {},
+        # 10 kWh at 14:00 (peak, 08-22) + 5 kWh at 02:00 (off-peak).
+        "energy_by_hour": {**{str(h): 0.0 for h in range(24)}, "14": 10.0, "2": 5.0},
+    }
+    tou = {"peak_price": 1.20, "offpeak_price": 0.45,
+           "peak_start_hour": 8, "peak_end_hour": 22}
+    recs = recommendations_engine.build(
+        {"available": False}, charging, {"available": False},
+        energy_price=0.90, currency="RM", tou=tou,
+    )
+    advisor = next(r for r in recs if r["title"].startswith("Smart charging"))
+    assert "10.0 kWh" in advisor["title"]
+    # 10 kWh * (1.20 - 0.45) = RM 7.50.
+    assert "7.50" in advisor["estimated_saving"]
+    # Purely a recommendation dict — no side effects, no vehicle-facing keys.
+    assert set(advisor) == {"category", "priority", "title", "detail", "estimated_saving"}
+
+    # No peak-hour energy at all -> no advisor recommendation fires.
+    charging_no_peak = {**charging, "energy_by_hour": {str(h): 0.0 for h in range(24)}}
+    charging_no_peak["energy_by_hour"]["2"] = 5.0
+    recs2 = recommendations_engine.build(
+        {"available": False}, charging_no_peak, {"available": False},
+        energy_price=0.90, currency="RM", tou=tou,
+    )
+    assert not any(r["title"].startswith("Smart charging") for r in recs2)
+
+    # Without a configured TOU tariff, falls back to the old generic hint
+    # instead (never both at once).
+    recs3 = recommendations_engine.build(
+        {"available": False}, charging, {"available": False},
+        energy_price=0.90, currency="RM", tou=None,
+    )
+    assert not any(r["title"].startswith("Smart charging") for r in recs3)
+
+
 def test_recommendations_empty_data():
     recs = recommendations_engine.build(
         {"available": False}, {"available": False}, {"available": False},
