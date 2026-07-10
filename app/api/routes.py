@@ -1242,6 +1242,59 @@ def list_charges(
     return charges[-limit:]
 
 
+@router.post("/charges/manual")
+def add_manual_charge(payload: dict = Body(...), session: Session = Depends(get_session)):
+    """Log a charging session by hand — for a session the sync loop never
+    saw (missed before the account was linked, or dropped by a bug that's
+    since been fixed) and has no live snapshot data left to reconstruct
+    from. Purely additive: inserts one Charge row for the active vehicle
+    and touches nothing else, unlike /api/import (which replaces the
+    entire dataset).
+    """
+    settings = get_settings()
+    try:
+        start_time = datetime.fromisoformat(payload["start_time"])
+        end_time = datetime.fromisoformat(payload["end_time"])
+    except (KeyError, ValueError):
+        raise HTTPException(400, "Missing or invalid 'start_time'/'end_time' (expected ISO format).")
+    if end_time <= start_time:
+        raise HTTPException(400, "'end_time' must be after 'start_time'.")
+    try:
+        energy_added_kwh = float(payload["energy_added_kwh"])
+    except (KeyError, TypeError, ValueError):
+        raise HTTPException(400, "Missing or invalid 'energy_added_kwh'.")
+    if energy_added_kwh <= 0:
+        raise HTTPException(400, "'energy_added_kwh' must be greater than 0.")
+
+    charge_type = str(payload.get("charge_type") or "AC").upper()
+    if charge_type not in ("AC", "DC"):
+        raise HTTPException(400, "'charge_type' must be 'AC' or 'DC'.")
+    try:
+        start_soc = float(payload.get("start_soc") or 0.0)
+        end_soc = float(payload.get("end_soc") or 0.0)
+        max_power_kw = float(payload.get("max_power_kw") or 0.0)
+        cost = payload.get("cost")
+        cost = float(cost) if cost not in (None, "") else None
+    except (TypeError, ValueError):
+        raise HTTPException(400, "Invalid numeric field.")
+    location = str(payload.get("location") or "")[:120]
+
+    if cost is None:
+        cost = round(energy_added_kwh * tariff.price_fn_from_settings(settings)(start_time), 2)
+
+    vehicle = _first_vehicle(session)
+    charge = Charge(
+        vehicle_id=vehicle.id, start_time=start_time, end_time=end_time,
+        duration_min=round((end_time - start_time).total_seconds() / 60.0, 1),
+        start_soc=start_soc, end_soc=end_soc, energy_added_kwh=round(energy_added_kwh, 2),
+        charge_type=charge_type, max_power_kw=max_power_kw, location=location,
+        cost=cost, outside_temp_c=payload.get("outside_temp_c") or 20.0,
+    )
+    session.add(charge)
+    session.commit()
+    return {"id": charge.id}
+
+
 @router.get("/export")
 def export_data(
     days: int = Query(730, ge=1, le=3650), session: Session = Depends(get_session)

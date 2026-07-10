@@ -543,6 +543,7 @@
       <button id="btn-notify" class="btn hidden">🔔 Notifications</button>
       <button id="btn-places" class="btn hidden">📍 Places</button>
       <button id="btn-service" class="btn hidden">🔧 Service &amp; Tyres</button>
+      <button id="btn-add-charge" class="btn hidden">🔌 Add Historical Charge</button>
     </section>
   </main>
 
@@ -587,6 +588,37 @@
       </form>
       <span id="service-status" class="status"></span>
       <ul id="service-list" class="places-list"></ul>
+    </div>
+  </div>
+
+  <!-- Modal: manually log a charging session the sync loop never caught
+       (e.g. before the car was linked, or dropped by a since-fixed bug) —
+       additive only, doesn't touch anything else, unlike Load Tesla Data. -->
+  <div id="add-charge-modal" class="modal hidden">
+    <div class="modal-card">
+      <button class="modal-close" data-close>×</button>
+      <h2>🔌 Add historical charge</h2>
+      <p class="modal-sub">
+        For a real session Tesla Analyzer never caught — logged before the car was
+        linked, or during a sync outage. Purely additive: adds one charge, leaves
+        everything else untouched (unlike <strong>Load Tesla Data</strong>, which
+        replaces your whole history).
+      </p>
+      <form id="add-charge-form" class="service-form">
+        <input type="datetime-local" id="charge-start" required title="Start time">
+        <input type="datetime-local" id="charge-end" required title="End time">
+        <input type="number" id="charge-energy" placeholder="Energy added (kWh)" min="0.1" step="0.1" required>
+        <select id="charge-type">
+          <option value="AC" selected>AC (home/destination)</option>
+          <option value="DC">DC (Supercharger/fast)</option>
+        </select>
+        <input type="number" id="charge-start-soc" placeholder="Start SoC %" min="0" max="100" step="1">
+        <input type="number" id="charge-end-soc" placeholder="End SoC %" min="0" max="100" step="1">
+        <input type="text" id="charge-location" placeholder="Location (optional)" maxlength="120">
+        <input type="number" id="charge-cost" placeholder="Cost (optional — auto-calculated if blank)" min="0" step="0.01">
+        <button type="submit" class="btn btn-accent">+ Add charge</button>
+      </form>
+      <span id="add-charge-status" class="status"></span>
     </div>
   </div>
 

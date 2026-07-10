@@ -802,6 +802,73 @@ def test_places_crud_and_geofenced_labeling():
         settings.app_passcode = old
 
 
+def test_manual_charge_logs_a_historical_session_additively():
+    """A manually-logged charge is inserted for the active vehicle without
+    touching any other data — the safe alternative to /api/import (which
+    wipes and replaces everything) for backfilling one missed session."""
+    settings = get_settings()
+    old = settings.app_passcode
+    settings.app_passcode = ""
+    try:
+        with TestClient(app) as client:  # startup seeds demo data
+            before = client.get("/api/summary?days=730").json()
+            before_drives = before["driving"]["total_drives"]
+            before_sessions = before["charging"]["total_sessions"]
+
+            resp = client.post("/api/charges/manual", json={
+                "start_time": "2025-01-01T22:00:00", "end_time": "2025-01-02T05:00:00",
+                "energy_added_kwh": 30.0, "charge_type": "AC",
+                "start_soc": 40, "end_soc": 90, "location": "Home",
+            })
+            assert resp.status_code == 200
+            charge_id = resp.json()["id"]
+
+            after = client.get("/api/summary?days=730").json()
+            assert after["driving"]["total_drives"] == before_drives   # untouched
+            assert after["charging"]["total_sessions"] == before_sessions + 1
+
+            from app.database import SessionLocal
+            from app.models import Charge
+            with SessionLocal() as s:
+                c = s.get(Charge, charge_id)
+                assert c.energy_added_kwh == 30.0
+                assert c.duration_min == 420.0
+                assert c.cost > 0   # auto-computed from the configured tariff
+                s.delete(c)   # tidy up so this doesn't skew later tests' totals
+                s.commit()
+
+            # Validation.
+            assert client.post("/api/charges/manual", json={
+                "end_time": "2025-01-02T05:00:00", "energy_added_kwh": 10,
+            }).status_code == 400   # missing start_time
+            assert client.post("/api/charges/manual", json={
+                "start_time": "2025-01-02T05:00:00", "end_time": "2025-01-01T22:00:00",
+                "energy_added_kwh": 10,
+            }).status_code == 400   # end before start
+            assert client.post("/api/charges/manual", json={
+                "start_time": "2025-01-01T22:00:00", "end_time": "2025-01-02T05:00:00",
+                "energy_added_kwh": 0,
+            }).status_code == 400   # zero energy
+            assert client.post("/api/charges/manual", json={
+                "start_time": "2025-01-01T22:00:00", "end_time": "2025-01-02T05:00:00",
+                "energy_added_kwh": 10, "charge_type": "GAS",
+            }).status_code == 400   # invalid charge_type
+
+            # An explicit cost overrides the tariff-computed one.
+            resp2 = client.post("/api/charges/manual", json={
+                "start_time": "2025-02-01T22:00:00", "end_time": "2025-02-02T05:00:00",
+                "energy_added_kwh": 10.0, "cost": 4.5,
+            })
+            assert resp2.status_code == 200
+            with SessionLocal() as s:
+                c2 = s.get(Charge, resp2.json()["id"])
+                assert c2.cost == 4.5
+                s.delete(c2)
+                s.commit()
+    finally:
+        settings.app_passcode = old
+
+
 def test_service_crud_and_due_status():
     """Logging a service record (a) persists and lists back, (b) feeds the
     due/overdue projection, and (c) can be deleted."""

@@ -429,6 +429,19 @@ tracking); logging it once starts the countdown. Purely what you enter here
 
 ---
 
+## Adding a missed historical charge
+
+The sync loop only ever sees what it polls live — a charging session from
+before the car was linked, or one dropped by a bug that's since been fixed,
+has no snapshot data left for it to reconstruct. Tap **🔌 Add Historical
+Charge** to log one by hand: start/end time, energy added, AC/DC, SoC, cost
+(auto-calculated from your configured tariff if left blank). Purely
+additive — it inserts one charge and leaves everything else untouched,
+unlike **📁 Load Tesla Data**, which replaces your *entire* history and
+would wipe a live-linked account's synced data. Self-hosted only.
+
+---
+
 ## Install on iPhone / iPad (PWA) — no computer needed
 
 Tesla Analyzer is an installable **Progressive Web App** — it adds to your home

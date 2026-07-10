@@ -1875,6 +1875,48 @@ function setupServiceButton() {
 }
 if (!STATIC_MODE) setupServiceButton();
 
+// Manually log a charge the sync loop never caught (before the car was
+// linked, or dropped by a since-fixed bug) — additive only, same
+// self-hosted-only gating as the other data-entry buttons.
+function setupAddChargeButton() {
+  const btn = document.getElementById("btn-add-charge");
+  if (!btn) return;
+  btn.classList.remove("hidden");
+  btn.addEventListener("click", () => openModal("add-charge-modal"));
+
+  const form = document.getElementById("add-charge-form");
+  const statusEl = document.getElementById("add-charge-status");
+  form.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const start = document.getElementById("charge-start").value;
+    const end = document.getElementById("charge-end").value;
+    const energy = document.getElementById("charge-energy").value;
+    if (!start || !end || !energy) return;
+    const payload = {
+      start_time: start, end_time: end, energy_added_kwh: +energy,
+      charge_type: document.getElementById("charge-type").value,
+      start_soc: +document.getElementById("charge-start-soc").value || 0,
+      end_soc: +document.getElementById("charge-end-soc").value || 0,
+      location: document.getElementById("charge-location").value || "",
+    };
+    const costVal = document.getElementById("charge-cost").value;
+    if (costVal) payload.cost = +costVal;
+    try {
+      const resp = await fetch("/api/charges/manual", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      if (!resp.ok) throw new Error((await resp.json()).detail || "Failed");
+      setStatus(statusEl, "Added.", "ok");
+      form.reset();
+      load();   // refresh KPIs/lists so the new session shows immediately
+    } catch (err) {
+      setStatus(statusEl, err.message, "err");
+    }
+  });
+}
+if (!STATIC_MODE) setupAddChargeButton();
+
 // Wire the static chart "!" explainers once (dynamic panels wire themselves).
 wireInfoButtons(document);
 
