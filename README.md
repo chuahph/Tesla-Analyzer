@@ -47,6 +47,11 @@ python scripts/build_site.py --out site   # → ./site (open site/index.html)
 - **Charging** — total energy & cost, AC vs DC split, average cost per kWh,
   charge-target (end-SoC) distribution, share of 100% charges, charging by
   hour and location.
+- **Battery health vs fleet** — once an odometer reading exists, the health
+  card compares this pack's own degradation against a typical Tesla pack at
+  the same mileage (a rough yardstick from widely-cited aggregate studies,
+  not per-VIN precision), so "6% degradation" reads as *ahead of* or
+  *behind* what's normal at that distance rather than in isolation.
 
 **Recommendations engine**
 Turns the analysis into actionable advice with estimated savings, e.g.:

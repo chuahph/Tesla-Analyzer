@@ -1483,7 +1483,7 @@ def summary(
         vehicle.model, vehicle.trim, year=vin_info.get("year")
     )
     battery = battery_analysis.analyze(
-        [{"soc": r.soc, "range_km": r.range_km, "ts": r.ts} for r in readings],
+        [{"soc": r.soc, "range_km": r.range_km, "ts": r.ts, "odo_km": r.odo_km} for r in readings],
         new_range_km=spec_km,
     )
 

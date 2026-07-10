@@ -2,9 +2,12 @@
 from app.analysis.battery import analyze, new_range_for
 
 
-def mk(soc, full_range_km):
+def mk(soc, full_range_km, odo_km=None):
     """A reading of a pack whose true full range is ``full_range_km``."""
-    return {"soc": soc, "range_km": full_range_km * soc / 100.0}
+    r = {"soc": soc, "range_km": full_range_km * soc / 100.0}
+    if odo_km is not None:
+        r["odo_km"] = odo_km
+    return r
 
 
 def test_insufficient_readings():
@@ -220,6 +223,42 @@ def test_usable_capacity_falls_back_without_degradation_history():
         # A measured EMA that has moved off the default is trusted instead.
         v.battery_capacity_kwh = 72.4
         assert _usable_capacity(s, v, settings) == (72.4, "measured")
+
+
+def test_fleet_degradation_curve_interpolates_and_extrapolates():
+    from app.analysis.battery import fleet_degradation_pct
+
+    assert fleet_degradation_pct(0) == 0.0
+    assert fleet_degradation_pct(-500) == 0.0            # clamped, not negative
+    assert fleet_degradation_pct(25_000) == 2.0           # exact table point
+    # Halfway between the 50k (3.5%) and 100k (5.5%) points.
+    assert abs(fleet_degradation_pct(75_000) - 4.5) < 1e-9
+    # Past the last table point (400k, 11%): extrapolated using the last
+    # segment's slope, not flatlined.
+    beyond = fleet_degradation_pct(500_000)
+    assert beyond > 11.0
+
+
+def test_vs_fleet_benchmark_present_only_with_odometer_data():
+    # No odo_km on any reading -> nothing to anchor the comparison to.
+    no_odo = analyze([mk(50 + (i % 40), 500) for i in range(30)])
+    assert no_odo["vs_fleet_pct"] is None
+    assert no_odo["current_odo_km"] is None
+    assert no_odo["fleet_degradation_pct"] is None
+
+    # A pack degraded ~10% at 25,000 km (fleet typical: 2%) reads clearly
+    # worse than typical, with a positive vs_fleet_pct (percentage points
+    # worse than the fleet curve at the same mileage).
+    old = [mk(60, 500, odo_km=20_000 + i * 100) for i in range(15)]
+    new = [mk(60, 450, odo_km=24_000 + i * 10) for i in range(15)]
+    worse = analyze(old + new)
+    assert worse["current_odo_km"] == 24_140.0
+    assert abs(worse["fleet_degradation_pct"] - 1.9) < 0.2   # fleet curve near 25k km
+    assert worse["vs_fleet_pct"] > 5                # ~10% actual vs ~2% typical
+
+    # A healthy pack at the same mileage reads at/below the fleet curve.
+    healthy = analyze([mk(50 + (i % 40), 500, odo_km=24_000 + i * 10) for i in range(30)])
+    assert healthy["vs_fleet_pct"] <= 0
 
 
 def test_new_range_uses_vin_year_generation():

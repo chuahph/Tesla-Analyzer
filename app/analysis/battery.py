@@ -97,6 +97,45 @@ def _variant_lookup(table, model: str, trim: str, year: int | None):
     return None
 
 
+# Approximate fleet-average degradation vs. odometer (km), from widely-cited
+# aggregate studies of real-world Tesla packs (e.g. Tesloop's high-mileage
+# fleet, Recurrent Auto's aggregated telemetry across tens of thousands of
+# vehicles). This is deliberately rough — a "faster/slower than a typical
+# pack" yardstick, not per-VIN precision — and normalised on distance
+# travelled rather than calendar age, since usage (fast charging habits,
+# climate, annual mileage) varies far more than age does across the fleet.
+# Piecewise-linear; each point is (odometer_km, typical degradation_pct).
+FLEET_DEGRADATION_KM_PCT: list[tuple[float, float]] = [
+    (0.0, 0.0),
+    (25_000.0, 2.0),
+    (50_000.0, 3.5),
+    (100_000.0, 5.5),
+    (160_000.0, 7.0),
+    (250_000.0, 9.0),
+    (400_000.0, 11.0),
+]
+
+
+def fleet_degradation_pct(odo_km: float) -> float:
+    """Typical fleet degradation (%) at this odometer, interpolated from
+    FLEET_DEGRADATION_KM_PCT. Clamped at 0 below the first point; extrapolated
+    past the last point using its final segment's slope (packs keep degrading,
+    just more slowly, well past 400,000 km — flatlining there would understate
+    it for the highest-mileage cars)."""
+    pts = FLEET_DEGRADATION_KM_PCT
+    if odo_km <= pts[0][0]:
+        return pts[0][1]
+    if odo_km >= pts[-1][0]:
+        (x0, y0), (x1, y1) = pts[-2], pts[-1]
+        slope = (y1 - y0) / (x1 - x0)
+        return y1 + slope * (odo_km - x1)
+    for (x0, y0), (x1, y1) in zip(pts, pts[1:]):
+        if x0 <= odo_km <= x1:
+            frac = (odo_km - x0) / (x1 - x0)
+            return y0 + frac * (y1 - y0)
+    return pts[-1][1]  # unreachable given the bounds above
+
+
 def new_range_for(model: str, trim: str, year: int | None = None) -> float | None:
     """Factory new range for this exact variant, if we recognise the badge.
 
@@ -192,6 +231,17 @@ def analyze(
 
     socs = [r["soc"] for r, _ in projections]
     recent_socs = [r["soc"] for r, _ in recent]
+
+    # Fleet benchmark: how this car's own degradation compares to a typical
+    # pack at the same odometer. Needs at least one reading with an odometer
+    # value (rows logged before that column existed have none) — falls back
+    # to unavailable rather than comparing against odo_km=0, which would
+    # always read as "much worse than a brand-new car".
+    odo_values = [r.get("odo_km") for r, _ in projections if r.get("odo_km")]
+    current_odo_km = max(odo_values) if odo_values else None
+    fleet_pct = fleet_degradation_pct(current_odo_km) if current_odo_km else None
+    vs_fleet_pct = round(degradation - fleet_pct, 1) if fleet_pct is not None else None
+
     return {
         "available": True,
         "n_readings": len(projections),
@@ -210,4 +260,9 @@ def analyze(
         "new_range_km": round(new_range_km, 0) if new_range_km else None,
         "min_soc_seen": round(min(socs), 0),
         "avg_soc": round(mean(socs), 0),
+        # Fleet comparison (see fleet_degradation_pct): None when there's no
+        # odometer reading to anchor it to.
+        "current_odo_km": round(current_odo_km, 0) if current_odo_km else None,
+        "fleet_degradation_pct": round(fleet_pct, 1) if fleet_pct is not None else None,
+        "vs_fleet_pct": vs_fleet_pct,
     }

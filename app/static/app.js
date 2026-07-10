@@ -705,6 +705,17 @@ function renderBattery(d) {
     ? `<div class="bat-line">Charging habits: avg target ${chg.avg_end_soc}% · ` +
       `${chg.full_charge_share_pct}% to 100% · DC ${chg.dc_energy_share_pct}% of energy</div>`
     : "";
+  // Fleet benchmark: how this car's degradation compares to a typical pack
+  // at the same mileage (rough aggregate-data yardstick, not per-VIN
+  // precision — see fleet_degradation_pct's docstring). Hidden until an
+  // odometer reading exists to anchor the comparison to.
+  const fleet = b.vs_fleet_pct != null
+    ? `<div class="bat-line">vs. typical pack at ${fmt(b.current_odo_km)} km ` +
+      `(~${fmt(b.fleet_degradation_pct, 1)}% degradation): ` +
+      `<strong class="${b.vs_fleet_pct <= 0 ? "tone-good" : "tone-bad"}">` +
+      `${b.vs_fleet_pct > 0 ? "+" : ""}${fmt(b.vs_fleet_pct, 1)}pp` +
+      `${b.vs_fleet_pct <= 0 ? " (better than typical)" : " (faster than typical)"}</strong></div>`
+    : "";
   const healthCls = b.health_pct >= 90 ? "" : b.health_pct >= 80 ? " warn" : " bad";
   const ref = b.reference === "factory spec"
     ? `when-new spec ${b.reference_km} km`
@@ -717,6 +728,7 @@ function renderBattery(d) {
     <div class="bat-line">Estimated full range <strong>${b.est_full_range_km} km</strong>
       vs ${ref} (${b.degradation_pct}% degradation)</div>
     <div class="bat-line">Based on ${b.n_readings} readings · avg SoC ${b.avg_soc}% · lowest seen ${b.min_soc_seen}%</div>
+    ${fleet}
     ${habits}`;
   const btn = document.getElementById("batt-info-btn");
   if (btn) btn.addEventListener("click", () =>
