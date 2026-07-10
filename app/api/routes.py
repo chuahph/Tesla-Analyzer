@@ -92,9 +92,15 @@ def _degradation_pct(session: Session, vehicle: Vehicle, settings) -> float | No
     """The car's own range-based degradation estimate (% capacity lost vs
     new) — the same figure the Battery Health card shows, computed purely
     from range-projection history, independent of any charge-derived kWh
-    figure. None while there isn't yet enough reading history."""
-    readings = session.scalars(
-        select(BatteryReading)
+    figure. None while there isn't yet enough reading history.
+
+    Runs on every sync tick (via _usable_capacity), so it selects only the
+    two columns the estimate needs rather than hydrating up to 2000 full
+    ORM rows a minute — the width of what crosses the wire to a remote
+    Postgres matters more here than in a once-per-page-load path.
+    """
+    rows = session.execute(
+        select(BatteryReading.soc, BatteryReading.range_km)
         .where(BatteryReading.vehicle_id == vehicle.id)
         .order_by(BatteryReading.ts)
         .limit(2000)
@@ -103,7 +109,7 @@ def _degradation_pct(session: Session, vehicle: Vehicle, settings) -> float | No
     spec_km = settings.battery_new_range_km or battery_analysis.new_range_for(
         vehicle.model, vehicle.trim, year=vin_info.get("year"))
     health = battery_analysis.analyze(
-        [{"soc": r.soc, "range_km": r.range_km} for r in readings], new_range_km=spec_km)
+        [{"soc": soc, "range_km": range_km} for soc, range_km in rows], new_range_km=spec_km)
     return health["degradation_pct"] if health.get("available") else None
 
 
@@ -1171,8 +1177,9 @@ def compare_vehicles(days: int = Query(30, ge=1, le=730), session: Session = Dep
         driving = driving_analysis.analyze(
             drives, settings.rated_wh_per_km, capacity_kwh, tariff.price_fn_from_settings(settings))
         charging = charging_analysis.analyze(charges, drives)
-        readings = session.scalars(
-            select(BatteryReading)
+        readings = session.execute(
+            select(BatteryReading.soc, BatteryReading.range_km,
+                   BatteryReading.ts, BatteryReading.odo_km)
             .where(BatteryReading.vehicle_id == vehicle.id)
             .order_by(BatteryReading.ts)
             .limit(2000)
@@ -1181,7 +1188,8 @@ def compare_vehicles(days: int = Query(30, ge=1, le=730), session: Session = Dep
         spec_km = settings.battery_new_range_km or battery_analysis.new_range_for(
             vehicle.model, vehicle.trim, year=vin_info.get("year"))
         battery = battery_analysis.analyze(
-            [{"soc": r.soc, "range_km": r.range_km, "ts": r.ts, "odo_km": r.odo_km} for r in readings],
+            [{"soc": soc, "range_km": rng, "ts": ts, "odo_km": odo}
+             for soc, rng, ts, odo in readings],
             new_range_km=spec_km,
         )
         rows.append({
@@ -1273,6 +1281,7 @@ def add_manual_charge(payload: dict = Body(...), session: Session = Depends(get_
         start_soc = float(payload.get("start_soc") or 0.0)
         end_soc = float(payload.get("end_soc") or 0.0)
         max_power_kw = float(payload.get("max_power_kw") or 0.0)
+        outside_temp_c = float(payload.get("outside_temp_c") or 20.0)
         cost = payload.get("cost")
         cost = float(cost) if cost not in (None, "") else None
     except (TypeError, ValueError):
@@ -1288,7 +1297,7 @@ def add_manual_charge(payload: dict = Body(...), session: Session = Depends(get_
         duration_min=round((end_time - start_time).total_seconds() / 60.0, 1),
         start_soc=start_soc, end_soc=end_soc, energy_added_kwh=round(energy_added_kwh, 2),
         charge_type=charge_type, max_power_kw=max_power_kw, location=location,
-        cost=cost, outside_temp_c=payload.get("outside_temp_c") or 20.0,
+        cost=cost, outside_temp_c=outside_temp_c,
     )
     session.add(charge)
     session.commit()
@@ -1721,8 +1730,11 @@ def summary(
         }
 
     # Battery health uses the full reading history, not the display window.
-    readings = session.scalars(
-        select(BatteryReading)
+    # Column-only select: analyze() needs four fields, not 2000 hydrated ORM
+    # rows on every dashboard load.
+    readings = session.execute(
+        select(BatteryReading.soc, BatteryReading.range_km,
+               BatteryReading.ts, BatteryReading.odo_km)
         .where(BatteryReading.vehicle_id == vehicle.id)
         .order_by(BatteryReading.ts)
         .limit(2000)
@@ -1735,7 +1747,8 @@ def summary(
         vehicle.model, vehicle.trim, year=vin_info.get("year")
     )
     battery = battery_analysis.analyze(
-        [{"soc": r.soc, "range_km": r.range_km, "ts": r.ts, "odo_km": r.odo_km} for r in readings],
+        [{"soc": soc, "range_km": rng, "ts": ts, "odo_km": odo}
+         for soc, rng, ts, odo in readings],
         new_range_km=spec_km,
     )
 

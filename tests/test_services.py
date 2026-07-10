@@ -9,7 +9,7 @@ car's leftover battery-health readings and reports a wrong degradation %.
 from sqlalchemy import select
 
 from app import services
-from app.models import BatteryReading, Charge, Drive, Vehicle
+from app.models import BatteryReading, Charge, Drive, ServiceRecord, Vehicle
 
 
 def test_wipe_clears_battery_readings_too(session):
@@ -43,6 +43,30 @@ def test_purge_demo_clears_its_battery_readings_too(session):
     assert remaining_vins == {"LRW3F7EK3RC999999"}
     remaining_readings = session.scalars(select(BatteryReading)).all()
     assert [r.vehicle_id for r in remaining_readings] == [real.id]   # demo's reading gone
+
+
+def test_wipe_and_purge_clear_service_records_too(session):
+    """Same leak class as the BatteryReading bug: a ServiceRecord left
+    behind after its vehicle is deleted attaches to whatever new car later
+    reuses the freed id — inheriting a stranger's tyre-rotation history."""
+    import datetime as _dt
+
+    demo = Vehicle(vin="DEMO-SVC", name="Demo", model="Model 3")
+    real = Vehicle(vin="LRW3F7EK3RC888888", name="Real", model="Model 3")
+    session.add_all([demo, real])
+    session.flush()
+    session.add(ServiceRecord(vehicle_id=demo.id, type="Tire Rotation",
+                              date=_dt.datetime(2026, 1, 1), odo_km=5000.0))
+    session.add(ServiceRecord(vehicle_id=real.id, type="Brake Fluid",
+                              date=_dt.datetime(2026, 1, 1), odo_km=9000.0))
+    session.commit()
+
+    services.purge_demo(session)
+    remaining = session.scalars(select(ServiceRecord)).all()
+    assert [r.type for r in remaining] == ["Brake Fluid"]   # demo's record gone, real's kept
+
+    services._wipe(session)
+    assert session.scalars(select(ServiceRecord)).all() == []
 
 
 def test_stale_vehicle_id_reuse_does_not_leak_readings_across_cars(session):

@@ -5,13 +5,18 @@ from sqlalchemy import delete
 
 from . import state
 from .config import get_settings
-from .models import BatteryReading, Charge, Drive, Vehicle
+from .models import BatteryReading, Charge, Drive, ServiceRecord, Vehicle
 
 
 def _wipe(session) -> None:
+    # Every table keyed by vehicle_id must be cleared together with Vehicle:
+    # SQLite reuses freed integer ids, so any row left behind silently
+    # attaches to whatever NEW car later lands on the same id (the exact
+    # cross-vehicle leak once shipped with BatteryReading).
     session.execute(delete(Drive))
     session.execute(delete(Charge))
     session.execute(delete(BatteryReading))
+    session.execute(delete(ServiceRecord))
     session.execute(delete(Vehicle))
     session.commit()
 
@@ -26,6 +31,7 @@ def purge_demo(session) -> None:
     session.execute(delete(Drive).where(Drive.vehicle_id.in_(demo_ids)))
     session.execute(delete(Charge).where(Charge.vehicle_id.in_(demo_ids)))
     session.execute(delete(BatteryReading).where(BatteryReading.vehicle_id.in_(demo_ids)))
+    session.execute(delete(ServiceRecord).where(ServiceRecord.vehicle_id.in_(demo_ids)))
     session.execute(delete(Vehicle).where(Vehicle.id.in_(demo_ids)))
     session.commit()
 
