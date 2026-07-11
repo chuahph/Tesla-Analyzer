@@ -325,6 +325,23 @@
         .slice(0, 5)
         .map((name) => [name, byLoc.get(name), round(locEnergy.get(name) || 0, 1),
           locLast.get(name) || null]),
+      // Mirror app/analysis/charging.py's recent_charges (the Recent Charges
+      // card reads this) — most recent first. Imported/demo rows have no DB
+      // id, so the edit-rate button stays hidden for them (id: null).
+      recent_charges: [...charges]
+        .sort((a, b) => String(b.start_time).localeCompare(String(a.start_time)))
+        .map((c) => ({
+          id: c.id ?? null,
+          start_time: c.start_time,
+          end_time: c.end_time,
+          charge_type: c.charge_type,
+          energy_added_kwh: round(c.energy_added_kwh, 2),
+          cost: c.cost != null ? round(c.cost, 2) : null,
+          rate_per_kwh: c.cost != null && c.energy_added_kwh
+            ? round(c.cost / c.energy_added_kwh, 3) : null,
+          location: placeOf(c),
+          is_free: !!c.is_free,
+        })),
     };
   }
 

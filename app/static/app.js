@@ -770,10 +770,11 @@ function renderLists(d) {
     // The window's own boundary charge (e.g. "since charge") is otherwise
     // invisible below — it ended right at the window's start, so it's
     // excluded from recent_charges by definition. Pin it atop the list
-    // instead of a separate card, skipping it when it's already the first
-    // row (a wide window already includes it naturally).
+    // instead of a separate card, skipping it when the list already has it
+    // anywhere (recent_charges sorts by start time, last_charge by end
+    // time, so "already included" isn't guaranteed to mean "first row").
     const lc = d.last_charge;
-    const pinned = lc && recentCharges[0]?.id !== lc.id ? [lc] : [];
+    const pinned = lc && !recentCharges.some((c) => c.id === lc.id) ? [lc] : [];
     const rows = [...pinned, ...recentCharges].map((c) => chargeRowHtml(c, d.currency)).join("");
     chargesEl.innerHTML = rows || '<li class="empty">No charging sessions in this window</li>';
     wireEditRateButtons(chargesEl);
