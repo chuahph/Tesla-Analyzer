@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 from collections import Counter, defaultdict
+from datetime import datetime
+from types import SimpleNamespace
 from typing import Any
 
 from .. import sync as sync_mod
@@ -18,6 +20,7 @@ VAMPIRE_MIN_GAP_HOURS = 2.0
 
 def vampire_drain(
     drives: list[Drive], charges: list[Charge] | None, capacity_kwh: float,
+    anchor: tuple[datetime, float] | None = None,
 ) -> dict[str, Any]:
     """kWh lost while parked between two consecutive drives, with no charge in
     between — standby/vampire drain (sentry mode, cabin overheat protection,
@@ -29,6 +32,16 @@ def vampire_drain(
     constant. A charge starting inside a gap invalidates it as a pure-drain
     measurement (the charge itself moved SoC upward), so that gap is skipped
     entirely rather than netted against the charge.
+
+    ``anchor``, if given, is ``(end_time, end_soc)`` for a boundary *before*
+    the first drive — typically the last charge that ended before the
+    window (e.g. for a "since charge" window, that charge's own end). Without
+    it, the gap before the very first drive in ``drives`` is invisible to
+    this function (there's nothing earlier in the list to measure it
+    against) — for a "since charge" window that's usually the single longest
+    qualifying gap of all (the overnight stretch right after charging, before
+    the day's first drive), so omitting the anchor there would silently drop
+    most of the real parked time.
 
     No extrapolated "%/day" rate is reported: real standby drain is mostly
     near-zero deep-sleep punctuated by short high-drain bursts (sentry
@@ -45,14 +58,16 @@ def vampire_drain(
     window-wide total.
     """
     ordered = sorted(drives, key=lambda d: d.start_time)
-    if len(ordered) < 2 or not capacity_kwh:
+    boundary = SimpleNamespace(end_time=anchor[0], end_soc=anchor[1]) if anchor else None
+    chain = ([boundary] if boundary else []) + ordered
+    if len(chain) < 2 or not capacity_kwh:
         return {"kwh": 0.0, "hours": 0.0, "gaps": 0, "gap_list": []}
     charge_starts = sorted(c.start_time for c in (charges or []))
     total_kwh = 0.0
     total_hours = 0.0
     gap_list: list[dict[str, Any]] = []
     ci = 0
-    for a, b in zip(ordered, ordered[1:]):
+    for a, b in zip(chain, chain[1:]):
         gap_start, gap_end = a.end_time, b.start_time
         gap_hours = (gap_end - gap_start).total_seconds() / 3600.0
         if gap_hours < VAMPIRE_MIN_GAP_HOURS:
@@ -278,13 +293,17 @@ def _insights(drives: list[Drive]) -> list[str]:
 
 def analyze(drives: list[Drive], rated_wh_per_km: float = 150.0,
             capacity_kwh: float = 75.0, energy_price: float = 0.0,
-            charges: list[Charge] | None = None) -> dict[str, Any]:
+            charges: list[Charge] | None = None,
+            vampire_anchor: tuple[datetime, float] | None = None) -> dict[str, Any]:
     """``energy_price`` is either a flat RM/kWh float, or a
     ``datetime -> RM/kWh`` callable (time-of-use pricing — see app.tariff) for
     per-trip rates by when each drive happened. ``charges`` (optional) is this
     same window's charges, used only to exclude a parked gap that actually had
     a charge in it from the vampire-drain figuring below — leave it out and
-    every gap between drives is assumed charge-free."""
+    every gap between drives is assumed charge-free. ``vampire_anchor``
+    (optional) is ``(end_time, end_soc)`` for a boundary before this window's
+    first drive (e.g. a "since charge" window's own last charge) — see
+    vampire_drain()'s docstring for why this matters."""
     if not drives:
         return {"available": False}
     price_at = energy_price if callable(energy_price) else (lambda _dt: energy_price)
@@ -310,7 +329,7 @@ def analyze(drives: list[Drive], rated_wh_per_km: float = 150.0,
     # vampire_drain(). Not part of any drive's own energy_used_kwh, so it's
     # otherwise invisible; added back in below so "kWh used" is the real
     # total drawn from the pack, not just what happened while actually moving.
-    vampire = vampire_drain(ordered, charges, capacity_kwh)
+    vampire = vampire_drain(ordered, charges, capacity_kwh, anchor=vampire_anchor)
     vampire_kwh = vampire["kwh"]
     # Trip drain, measured PER DRIVE at its best-available precision: each
     # drive's own fractional energy_used_kwh (from its range delta — sub-1%

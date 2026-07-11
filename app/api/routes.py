@@ -1779,7 +1779,8 @@ def summary(
             select(Drive).where(Drive.vehicle_id == vehicle.id, Drive.start_time >= last_charge.end_time)
             .order_by(Drive.start_time)
         ).all()
-        vampire_since = driving_analysis.vampire_drain(drives_since, [], capacity_kwh)
+        vampire_since = driving_analysis.vampire_drain(
+            drives_since, [], capacity_kwh, anchor=(last_charge.end_time, last_charge.end_soc))
         used_since_last_charge_kwh = (
             sum(d.energy_used_kwh for d in drives_since) + vampire_since["kwh"]
         )
@@ -1813,9 +1814,17 @@ def summary(
             window_label = "since last charge"
     drives, charges = _window(session, vehicle.id, days, since=since)
 
+    # Anchor the vampire-drain gap search at this charge's own end when the
+    # window starts there — otherwise the parked stretch before the window's
+    # first drive (often the single longest charge-free gap of all) is
+    # invisible to vampire_drain() (see its docstring).
+    vampire_anchor = (
+        (last_charge.end_time, last_charge.end_soc)
+        if since_charge and last_charge is not None else None
+    )
     driving = driving_analysis.analyze(
         drives, settings.rated_wh_per_km, capacity_kwh, tariff.price_fn_from_settings(settings),
-        charges=charges)
+        charges=charges, vampire_anchor=vampire_anchor)
     charging = charging_analysis.analyze(charges, drives)
     efficiency = efficiency_analysis.analyze(drives, settings.rated_wh_per_km)
 

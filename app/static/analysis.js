@@ -157,9 +157,14 @@
   // between — mirror app/analysis/driving.py vampire_drain(). Returns the
   // aggregate plus a per-gap gapList so recent_trips can annotate "parked Xh
   // before this trip" per trip, not just report one window-wide total.
-  function vampireDrain(drives, charges, capacity) {
+  // anchor, if given, is {end_time, end_soc} for a boundary before the first
+  // drive (e.g. a "since charge" window's own last charge) — see the Python
+  // docstring for why this matters (otherwise the gap before the very first
+  // drive, often the longest one, is invisible).
+  function vampireDrain(drives, charges, capacity, anchor) {
     const ordered = [...drives].sort((a, b) => new Date(a.start_time) - new Date(b.start_time));
-    if (ordered.length < 2 || !capacity) {
+    const chain = anchor ? [anchor, ...ordered] : ordered;
+    if (chain.length < 2 || !capacity) {
       return { kwh: 0.0, hours: 0.0, gaps: 0, gapList: [] };
     }
     const chargeStarts = (charges || [])
@@ -167,8 +172,8 @@
       .sort((a, b) => a - b);
     let totalKwh = 0.0, totalHours = 0.0, ci = 0;
     const gapList = [];
-    for (let i = 0; i < ordered.length - 1; i++) {
-      const a = ordered[i], b = ordered[i + 1];
+    for (let i = 0; i < chain.length - 1; i++) {
+      const a = chain[i], b = chain[i + 1];
       const gapStart = new Date(a.end_time).getTime();
       const gapEnd = new Date(b.start_time).getTime();
       const gapHours = (gapEnd - gapStart) / 3600000.0;
@@ -192,7 +197,7 @@
   }
 
   // --- driving (mirror app/analysis/driving.py) ---
-  function analyzeDriving(drives, rated, capacity, charges) {
+  function analyzeDriving(drives, rated, capacity, charges, vampireAnchor) {
     rated = rated || RATED_WH_PER_KM;
     capacity = capacity || 75.0;
     if (!drives.length) return { available: false };
@@ -227,7 +232,7 @@
     // drives — see vampireDrain(). Not part of any drive's own
     // energy_used_kwh, so it's otherwise invisible; added back in below so
     // "kWh used" is the real total drawn from the pack.
-    const vampire = vampireDrain(ordered, charges, capacity);
+    const vampire = vampireDrain(ordered, charges, capacity, vampireAnchor);
     let vampireKwh = vampire.kwh;
     // Trip drain measured PER DRIVE at its best-available precision: each
     // drive's own fractional energy_used_kwh (range-delta, sub-1% precise) OR
@@ -685,31 +690,27 @@
     const charges = (dataset.charges || []).filter((c) => new Date(c.start_time).getTime() >= since);
 
     const capacity = (dataset.vehicle && dataset.vehicle.battery_capacity_kwh) || 75.0;
-    const driving = analyzeDriving(drives, rated, capacity, charges);
-    const charging = analyzeCharging(charges, drives);
-    const efficiency = analyzeEfficiency(drives, rated);
-    const v = dataset.vehicle || {};
-    const battery = analyzeBattery(
-      dataset.battery_readings || [],
-      newRangeFor(v.model, v.trim, vinYear(v.vin)));
-    const recommendations = buildRecommendations(driving, charging, efficiency, price, currency, battery);
 
     // Most recent charge across the WHOLE dataset, not window-scoped —
     // mirrors app/api/routes.py's summary(): pins atop Recent Charges (the
     // window's own boundary charge is otherwise invisible there).
-    // used_since_kwh is likewise unscoped by window.
+    // used_since_kwh is likewise unscoped by window. Computed before
+    // analyzeDriving() below so its vampire-drain anchor (the parked gap
+    // before the window's first drive) can be threaded through.
     const allCharges = dataset.charges || [];
     const allDrives = dataset.drives || [];
     let lastCharge = null;
+    let lc = null;
     if (allCharges.length) {
-      const lc = [...allCharges].sort((a, b) =>
+      lc = [...allCharges].sort((a, b) =>
         new Date(b.end_time || b.start_time) - new Date(a.end_time || a.start_time))[0];
       const lcEndMs = new Date(lc.end_time || lc.start_time).getTime();
       const drivesSince = allDrives.filter((d) => new Date(d.start_time).getTime() >= lcEndMs);
       // Includes vampire drain in any parked gap since (see vampireDrain())
       // — no charges list needed, since by definition nothing has charged
       // since lc (it's the most recent one on record).
-      const vampireSince = vampireDrain(drivesSince, [], capacity);
+      const vampireSince = vampireDrain(
+        drivesSince, [], capacity, { end_time: lc.end_time, end_soc: lc.end_soc });
       const usedSince = drivesSince.reduce((sum, d) => sum + (d.energy_used_kwh || 0), 0) + vampireSince.kwh;
       lastCharge = {
         id: lc.id ?? null,
@@ -732,6 +733,21 @@
         battery_kwh_at_end: round((lc.end_soc || 0) / 100.0 * capacity, 2),
       };
     }
+
+    // Anchor the vampire-drain gap search at this charge's own end when the
+    // window starts there — otherwise the parked stretch before the
+    // window's first drive (often the single longest charge-free gap of
+    // all) is invisible to vampireDrain() (see its docstring).
+    const vampireAnchor = windowLabel === "since last charge" && lc
+      ? { end_time: lc.end_time, end_soc: lc.end_soc } : undefined;
+    const driving = analyzeDriving(drives, rated, capacity, charges, vampireAnchor);
+    const charging = analyzeCharging(charges, drives);
+    const efficiency = analyzeEfficiency(drives, rated);
+    const v = dataset.vehicle || {};
+    const battery = analyzeBattery(
+      dataset.battery_readings || [],
+      newRangeFor(v.model, v.trim, vinYear(v.vin)));
+    const recommendations = buildRecommendations(driving, charging, efficiency, price, currency, battery);
 
     // Battery Used: % of the full (degradation-adjusted) pack, same basis as
     // every other %-of-battery figure (soc_used_pct) so they're all directly

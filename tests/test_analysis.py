@@ -281,6 +281,40 @@ def test_vampire_drain_function_thresholds_and_excludes_charged_gaps():
     assert r3 == {"kwh": 0.0, "hours": 0.0, "gaps": 0, "gap_list": []}
 
 
+def test_vampire_drain_anchor_measures_gap_before_first_drive():
+    """Without an anchor, the gap before drives[0] is invisible (nothing
+    earlier in the list to pair it with) — exactly the real scenario a user
+    reported: last charge ended Fri 20:14, first drive since was Sat
+    10:30-11:09, a charge-free ~14h16m overnight gap that a "since charge"
+    window should count as vampire drain but silently didn't. Passing
+    anchor=(charge_end_time, charge_end_soc) fixes it by giving that gap a
+    "before" boundary to measure against, same as any other gap."""
+    from datetime import datetime
+
+    from app.analysis.driving import vampire_drain
+    from app.models import Drive
+
+    first_drive = [Drive(
+        id=1, start_time=datetime(2026, 7, 4, 10, 30), end_time=datetime(2026, 7, 4, 11, 9),
+        distance_km=20.0, duration_min=39.0, avg_speed_kmh=30, max_speed_kmh=60,
+        start_soc=78, end_soc=74, energy_used_kwh=3.0, outside_temp_c=28.0,
+    )]
+
+    # No anchor: a single drive with nothing before it in the list — no gap
+    # to measure at all, even though it was clearly preceded by ~14h parked.
+    r_no_anchor = vampire_drain(first_drive, [], 75.0)
+    assert r_no_anchor == {"kwh": 0.0, "hours": 0.0, "gaps": 0, "gap_list": []}
+
+    # With the last charge's end as an anchor, that same ~14h16m gap (charge
+    # ended Fri 20:14, drive started Sat 10:30) is now measured.
+    charge_end = datetime(2026, 7, 3, 20, 14)
+    r_anchored = vampire_drain(first_drive, [], 75.0, anchor=(charge_end, 80.0))
+    assert r_anchored["gaps"] == 1
+    assert r_anchored["hours"] == round((first_drive[0].start_time - charge_end).total_seconds() / 3600.0, 1)
+    assert r_anchored["kwh"] == round(2 / 100.0 * 75.0, 2)  # 80% -> 78% = 2 points lost
+    assert r_anchored["gap_list"][0]["before_drive_id"] == 1
+
+
 def test_recent_trips_vampire_before_annotation():
     """Each of the (up to 5) most recent trips carries the qualifying parked
     gap that preceded it, if any — None for the very first drive in the
