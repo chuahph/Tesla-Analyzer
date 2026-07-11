@@ -1770,12 +1770,11 @@ def summary(
     )
     if last_charge is not None:
         # kWh used since this charge ended — independent of whatever window
-        # is currently selected, so "Net Battery" (the pack's level at that
-        # charge's end minus this) reads the same regardless of which window
-        # the user has picked, same as last_charge_summary itself. Includes
-        # vampire drain in any parked gap since (see vampire_drain()) — no
-        # charges list needed for that call, since by definition nothing has
-        # charged since last_charge (it's the most recent one on record).
+        # is currently selected, matching the rest of last_charge_summary.
+        # Includes vampire drain in any parked gap since (see
+        # vampire_drain()) — no charges list needed for that call, since by
+        # definition nothing has charged since last_charge (it's the most
+        # recent one on record).
         drives_since = session.scalars(
             select(Drive).where(Drive.vehicle_id == vehicle.id, Drive.start_time >= last_charge.end_time)
             .order_by(Drive.start_time)
@@ -1805,8 +1804,8 @@ def summary(
             # × usable capacity) — the real "fuel in the tank" figure, unlike
             # energy_added_kwh which is just what this one session topped up
             # and says nothing about what was already there if it didn't
-            # start from empty. Net Battery and the since-charge Battery Used
-            # % both anchor to this instead.
+            # start from empty. The since-charge Battery Used % anchors to
+            # this instead.
             "battery_kwh_at_end": round((last_charge.end_soc or 0.0) / 100.0 * capacity_kwh, 2),
         }
         if since_charge:

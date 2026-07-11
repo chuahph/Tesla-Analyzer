@@ -695,8 +695,8 @@
 
     // Most recent charge across the WHOLE dataset, not window-scoped —
     // mirrors app/api/routes.py's summary(): pins atop Recent Charges (the
-    // window's own boundary charge is otherwise invisible there) and backs
-    // the Net Battery KPI. used_since_kwh is likewise unscoped by window.
+    // window's own boundary charge is otherwise invisible there).
+    // used_since_kwh is likewise unscoped by window.
     const allCharges = dataset.charges || [];
     const allDrives = dataset.drives || [];
     let lastCharge = null;
@@ -725,10 +725,9 @@
         is_free: !!lc.is_free,
         used_since_kwh: round(usedSince, 2),
         // What was actually in the pack when this charge finished (end SoC
-        // × usable capacity) — Net Battery and the since-charge Battery
-        // Used % both anchor to this rather than energy_added_kwh, which
-        // says nothing about what was already there if the charge didn't
-        // start from empty.
+        // × usable capacity) — the since-charge Battery Used % anchors to
+        // this rather than energy_added_kwh, which says nothing about what
+        // was already there if the charge didn't start from empty.
         battery_kwh_at_end: round((lc.end_soc || 0) / 100.0 * capacity, 2),
       };
     }

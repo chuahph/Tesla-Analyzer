@@ -354,8 +354,8 @@ def test_summary_since_charge_window():
 
 
 def test_last_charge_used_since_kwh_sums_drives_after_it_independent_of_window():
-    """used_since_kwh (what Net Battery is based on) is the kWh driven after
-    the last charge ended — computed fresh regardless of which window/days
+    """used_since_kwh (in last_charge_summary) is the kWh used after the
+    last charge ended — computed fresh regardless of which window/days
     param the request happens to carry, same as last_charge itself."""
     settings = get_settings()
     old = settings.app_passcode
