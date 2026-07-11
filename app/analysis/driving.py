@@ -5,8 +5,75 @@ from collections import Counter, defaultdict
 from typing import Any
 
 from .. import sync as sync_mod
-from ..models import Drive
+from ..models import Charge, Drive
 from . import has_valid_energy, haversine_km, linregress, mean, percentile, safe_div
+
+# Minimum parked gap (hours) between two consecutive drives worth counting as
+# vampire drain. SoC is an integer percent, so a shorter gap's real loss is
+# usually well under one whole point and would just be rounding noise, not a
+# genuine reading — a multi-hour-plus gap is long enough for a real drop to
+# register.
+VAMPIRE_MIN_GAP_HOURS = 2.0
+
+
+def vampire_drain(
+    drives: list[Drive], charges: list[Charge] | None, capacity_kwh: float,
+) -> dict[str, Any]:
+    """kWh lost while parked between two consecutive drives, with no charge in
+    between — standby/vampire drain (sentry mode, cabin overheat protection,
+    preconditioning, plain self-discharge). Not part of any single Drive's own
+    energy_used_kwh, since it happens in the *gap* between trips, not during
+    one — this is the only place it gets measured.
+
+    Only gaps at least VAMPIRE_MIN_GAP_HOURS long are counted — see that
+    constant. A charge starting inside a gap invalidates it as a pure-drain
+    measurement (the charge itself moved SoC upward), so that gap is skipped
+    entirely rather than netted against the charge.
+
+    Returns the aggregate (kwh/hours/gaps/avg_pct_per_day) plus a per-gap
+    ``gap_list`` — {before_drive_id, hours, kwh, pct} for the drive that
+    followed each qualifying gap — so a caller (e.g. the recent-trips list)
+    can annotate "parked Xh, lost Y% before this trip" per trip, not just
+    report one window-wide total.
+    """
+    ordered = sorted(drives, key=lambda d: d.start_time)
+    if len(ordered) < 2 or not capacity_kwh:
+        return {"kwh": 0.0, "hours": 0.0, "gaps": 0, "avg_pct_per_day": None, "gap_list": []}
+    charge_starts = sorted(c.start_time for c in (charges or []))
+    total_kwh = 0.0
+    total_hours = 0.0
+    gap_list: list[dict[str, Any]] = []
+    ci = 0
+    for a, b in zip(ordered, ordered[1:]):
+        gap_start, gap_end = a.end_time, b.start_time
+        gap_hours = (gap_end - gap_start).total_seconds() / 3600.0
+        if gap_hours < VAMPIRE_MIN_GAP_HOURS:
+            continue
+        while ci < len(charge_starts) and charge_starts[ci] < gap_start:
+            ci += 1
+        if ci < len(charge_starts) and charge_starts[ci] < gap_end:
+            continue  # a charge happened in this gap — not a pure-drain measurement
+        drop_pct = max(a.end_soc - b.start_soc, 0.0)
+        if drop_pct <= 0:
+            continue
+        kwh = drop_pct / 100.0 * capacity_kwh
+        total_kwh += kwh
+        total_hours += gap_hours
+        gap_list.append({
+            "before_drive_id": getattr(b, "id", None),
+            "hours": round(gap_hours, 1),
+            "kwh": round(kwh, 2),
+            "pct": round(drop_pct, 1),
+        })
+    avg_pct_per_day = (
+        round((total_kwh / capacity_kwh * 100.0) / (total_hours / 24.0), 2)
+        if total_hours > 0 else None
+    )
+    return {
+        "kwh": round(total_kwh, 2), "hours": round(total_hours, 1),
+        "gaps": len(gap_list), "avg_pct_per_day": avg_pct_per_day,
+        "gap_list": gap_list,
+    }
 
 
 def _speed_bucket(speed: float) -> str:
@@ -207,10 +274,14 @@ def _insights(drives: list[Drive]) -> list[str]:
 
 
 def analyze(drives: list[Drive], rated_wh_per_km: float = 150.0,
-            capacity_kwh: float = 75.0, energy_price: float = 0.0) -> dict[str, Any]:
+            capacity_kwh: float = 75.0, energy_price: float = 0.0,
+            charges: list[Charge] | None = None) -> dict[str, Any]:
     """``energy_price`` is either a flat RM/kWh float, or a
     ``datetime -> RM/kWh`` callable (time-of-use pricing — see app.tariff) for
-    per-trip rates by when each drive happened."""
+    per-trip rates by when each drive happened. ``charges`` (optional) is this
+    same window's charges, used only to exclude a parked gap that actually had
+    a charge in it from the vampire-drain figuring below — leave it out and
+    every gap between drives is assumed charge-free."""
     if not drives:
         return {"available": False}
     price_at = energy_price if callable(energy_price) else (lambda _dt: energy_price)
@@ -230,25 +301,58 @@ def analyze(drives: list[Drive], rated_wh_per_km: float = 150.0,
     total_distance = sum(distances)
     total_duration_h = sum(durations) / 60.0
     total_energy = sum(d.energy_used_kwh for d in drives)
-    # Real-world range yardstick: km per 1% of battery used. Three sources, in
-    # order of robustness — take the largest so short trips still yield a value:
-    #   • net drop from the first drive's start SoC to the last drive's end SoC
-    #     (best for a "since charge" window: no charging in between, so the
-    #     cumulative battery use shows even when each trip is sub-1%);
-    #   • measured energy ÷ pack capacity (fractional, from the range delta);
-    #   • the sum of per-trip integer SoC deltas.
     ordered = sorted(drives, key=lambda x: x.start_time)
-    soc_net = max(ordered[0].start_soc - ordered[-1].end_soc, 0.0) if ordered else 0.0
+    # Standby/vampire drain in the parked gaps *between* this window's drives
+    # (sentry mode, preconditioning, plain self-discharge) — see
+    # vampire_drain(). Not part of any drive's own energy_used_kwh, so it's
+    # otherwise invisible; added back in below so "kWh used" is the real
+    # total drawn from the pack, not just what happened while actually moving.
+    vampire = vampire_drain(ordered, charges, capacity_kwh)
+    vampire_kwh = vampire["kwh"]
+    # Floor for the *trip* portion only: raw per-trip integer SoC deltas,
+    # which only ever adds signal a trip's own (possibly gap-ridden) energy
+    # reading missed — several sub-1% trips can each round to a 1-point drop
+    # while measuring ~0 kWh, understating total_energy the same way a single
+    # data-gap trip would. Applied before vampire is added on top (not to the
+    # combined total), so the floor can never leak into — or be masked by —
+    # the separately-measured between-drive figure.
     soc_from_int = sum(max(d.start_soc - d.end_soc, 0.0) for d in drives)
-    soc_from_energy = (total_energy / capacity_kwh * 100.0) if capacity_kwh else 0.0
-    soc_used = max(soc_net, soc_from_int, soc_from_energy)
+    floor_kwh = (soc_from_int / 100.0 * capacity_kwh) if capacity_kwh else 0.0
+    # Unrounded throughout — km_per_soc and soc_used are sensitive to error
+    # introduced by rounding an intermediate sum, so only the values actually
+    # returned below get rounded, at the very end.
+    trip_energy_used_raw = max(total_energy, floor_kwh) if capacity_kwh else total_energy
+    # Gross battery energy drawn over the window — the real drain from the
+    # pack, so it *includes* parking, climate-while-stopped and overnight
+    # vampire loss, not just the driving energy summed per trip. (Per-trip
+    # Wh/km and the Avg Efficiency figure stay driving-only; this is the "kWh
+    # used" headline that should reflect everything the battery actually
+    # lost.) Always exactly trip_energy_used_kwh + vampire_drain.kwh — no
+    # separate max()/heuristic at this level, so the two never drift apart.
+    total_energy_used_raw = trip_energy_used_raw + vampire_kwh
+    soc_used = (total_energy_used_raw / capacity_kwh * 100.0) if capacity_kwh else 0.0
+    # Real-world range yardstick: km per 1% of battery used, from the same
+    # total (trip + vampire) — moving further per % is a real efficiency
+    # signal, but so is *not* leaving it parked draining for no distance, so
+    # this isn't purely a driving-efficiency number and shouldn't be read as
+    # one in isolation.
     km_per_soc = round(total_distance / soc_used, 1) if soc_used >= 0.2 and total_distance else None
-    # Gross battery energy drawn over the window — the real drain from the pack,
-    # so it *includes* parking, climate-while-stopped and overnight vampire loss,
-    # not just the driving energy summed per trip. (Per-trip Wh/km and the Avg
-    # Efficiency figure stay driving-only; this is the "kWh used" headline that
-    # should reflect everything the battery actually lost.)
-    total_energy_used = round(soc_used / 100.0 * capacity_kwh, 1) if capacity_kwh else round(total_energy, 1)
+    # Round the total once, then derive the displayed vampire/trip split from
+    # that ROUNDED total by subtraction — rounding total, vampire and trip
+    # independently (e.g. 7.5, 5.25->5.2 or 5.3, 2.25->2.2) can be off by a
+    # few cents at 1-decimal precision even though the raw figures agree
+    # exactly; deriving one from the other guarantees they still sum exactly
+    # at the precision actually shown on screen.
+    total_energy_used = round(total_energy_used_raw, 1)
+    vampire_kwh = round(vampire_kwh, 1)
+    trip_energy_used = round(total_energy_used - vampire_kwh, 1)
+    # None-id drives (unpersisted, e.g. a static-mode import) all collide on
+    # the same key — excluded, since there's no way to attribute the gap to
+    # one of them specifically, and a wrong attribution is worse than a
+    # missing annotation.
+    vampire_by_drive_id = {
+        g["before_drive_id"]: g for g in vampire["gap_list"] if g["before_drive_id"] is not None
+    }
 
     # Distribution of distance driven across speed regimes.
     by_speed: dict[str, float] = defaultdict(float)
@@ -335,6 +439,16 @@ def analyze(drives: list[Drive], rated_wh_per_km: float = 150.0,
         # Gross drain including parking/idle/overnight (see above) — the KPI's
         # "kWh used" headline. total_energy_kwh stays the driving-only sum.
         "total_energy_used_kwh": total_energy_used,
+        # The same total split into what was actually driven vs. lost while
+        # parked between drives — trip_energy_used_kwh + vampire_drain.kwh
+        # always sums back to total_energy_used_kwh exactly (see analyze()).
+        "trip_energy_used_kwh": trip_energy_used,
+        "vampire_drain": {
+            "kwh": vampire_kwh,
+            "hours": vampire["hours"],
+            "gaps": vampire["gaps"],
+            "avg_pct_per_day": vampire["avg_pct_per_day"],
+        },
         "avg_trip_distance_km": round(mean(distances), 1),
         "avg_trip_duration_min": round(mean(durations), 1),
         "avg_speed_kmh": round(mean(speeds), 1),
@@ -460,6 +574,11 @@ def analyze(drives: list[Drive], rated_wh_per_km: float = 150.0,
                     if has_valid_energy(d) and capacity_kwh
                     else round(max(d.start_soc - d.end_soc, 0.0), 1)
                 ),
+                # The parked gap immediately before this trip, if it was long
+                # enough and charge-free to count as vampire drain (see
+                # vampire_drain()) — None when this is the first drive in the
+                # window, the gap was too short, or a charge happened in it.
+                "vampire_before": vampire_by_drive_id.get(getattr(d, "id", None)),
             }
             for d in sorted(drives, key=lambda x: x.start_time, reverse=True)[:5]
         ],

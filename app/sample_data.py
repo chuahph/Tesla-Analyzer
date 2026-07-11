@@ -75,7 +75,15 @@ def generate(session: Session, days: int = 120, seed: int = 42) -> Vehicle:
         is_weekday = day.weekday() < 5
 
         # --- Drives -------------------------------------------------------
+        # Each drive's own timing/route/speed is drawn here, in whatever
+        # order rng.choice happens to pick — but SoC only ever moves forward
+        # through *wall-clock* time, so it's chained below in a second pass
+        # sorted by t0, not this draw order. (Keeping the draws themselves in
+        # this original order/count means the seeded dataset's overall shape
+        # — distances, speeds, locations — is unchanged; only which drive
+        # gets soc-chained first now matches when it actually happened.)
         n_drives = rng.choice([2, 2, 3] if is_weekday else [1, 2, 2])
+        pending = []
         for _ in range(n_drives):
             hour = rng.choice([7, 8, 12, 17, 18, 19]) + rng.randint(0, 1)
             t0 = day.replace(hour=min(hour, 22), minute=rng.randint(0, 59), second=0, microsecond=0)
@@ -94,7 +102,12 @@ def generate(session: Session, days: int = 120, seed: int = 42) -> Vehicle:
             duration = (distance / max(avg_speed, 1)) * 60.0
             wh_km = _efficiency_wh_per_km(avg_speed, temp, rated)
             energy = wh_km * distance / 1000.0
+            out_temp = round(temp + rng.uniform(-2, 2), 1)
+            pending.append((t0, distance, duration, avg_speed, max_speed, energy, out_temp, origin, dest))
 
+        for t0, distance, duration, avg_speed, max_speed, energy, out_temp, origin, dest in sorted(
+            pending, key=lambda p: p[0]
+        ):
             end_soc = soc - (energy / capacity) * 100.0
             if end_soc < 12:
                 # Too low to drive — skip and let a charge happen first.
@@ -117,7 +130,7 @@ def generate(session: Session, days: int = 120, seed: int = 42) -> Vehicle:
                     energy_used_kwh=round(energy, 2),
                     avg_speed_kmh=round(avg_speed, 1),
                     max_speed_kmh=round(max_speed, 1),
-                    outside_temp_c=round(temp + rng.uniform(-2, 2), 1),
+                    outside_temp_c=out_temp,
                     start_location=origin,
                     end_location=dest,
                 )

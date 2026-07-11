@@ -415,15 +415,34 @@ function renderKpis(d) {
     // from a charge that only topped up partway) when the window began.
     // Any other window can span several charge/discharge cycles with no
     // single "starting battery" to divide by, so it's just the raw kWh.
+    // Split trip-vs-parked so the headline doesn't read as "all driving" —
+    // bal.trip_kwh + bal.vampire_kwh always sums to bal.used_kwh exactly
+    // (see driving_analysis.analyze()).
+    const split = bal && bal.vampire_kwh > 0
+      ? ` (${fmt(bal.trip_kwh, 1)} trip + ${fmt(bal.vampire_kwh, 1)} idle)` : "";
     if (bal && bal.used_kwh != null) {
       if (bal.used_pct != null) {
         cards.push(kpiCard("Battery Used", fmt(bal.used_pct, 1) + "%",
-          `${fmt(bal.used_kwh, 1)} kWh of ${fmt(lc ? lc.battery_kwh_at_end : bal.full_charge_kwh, 1)} kWh available since last charge`,
+          `${fmt(bal.used_kwh, 1)} kWh${split} of ${fmt(lc ? lc.battery_kwh_at_end : bal.full_charge_kwh, 1)} kWh available since last charge`,
           "amber"));
       } else {
         cards.push(kpiCard("Battery Used", `${fmt(bal.used_kwh, 1)} kWh`,
-          "% not shown — window may span more than one charge", "amber"));
+          `${split ? split.trim() + " · " : ""}% not shown — window may span more than one charge`, "amber"));
       }
+    }
+    // Vampire Drain: standby loss in parked gaps between drives (sentry
+    // mode, preconditioning, plain self-discharge) — see
+    // driving_analysis.vampire_drain(). A rate (%/day), not just the raw
+    // kWh, since "2% lost" means very different things over 3 hours vs 3
+    // days — the rate is what's actually comparable across windows. Hidden
+    // entirely when nothing qualified (e.g. a driver who's out every day
+    // never leaves a long enough gap to measure).
+    if (bal && bal.vampire_gaps > 0) {
+      const rate = bal.vampire_avg_pct_per_day != null
+        ? `≈${fmt(bal.vampire_avg_pct_per_day, 2)}%/day avg · ` : "";
+      cards.push(kpiCard("Vampire Drain", `${fmt(bal.vampire_kwh, 1)} kWh`,
+        `${rate}${bal.vampire_gaps} parked gap${bal.vampire_gaps === 1 ? "" : "s"} · ${fmt(bal.vampire_hours, 0)} h parked`,
+        "amber"));
     }
     // Net Battery: what's actually left in the pack from your last charge —
     // what it held when that charge finished (end SoC × capacity, not just
@@ -742,7 +761,16 @@ function renderLists(d) {
         ? `<button class="trip-tag trip-tag-${t.tag || "none"}" data-trip-id="${t.id}" data-tag="${t.tag || ""}" title="Tap to set work/personal">` +
           `${t.tag === "work" ? "💼 Work" : t.tag === "personal" ? "🏠 Personal" : "+ tag"}</button>`
         : "";
-      return `<li class="trip${tripSelectMode ? " selectable" : ""}">` +
+      // Parked gap right before this trip, if it was long enough and
+      // charge-free to count as vampire/standby drain (see
+      // driving_analysis.vampire_drain()) — its own slim row rather than
+      // crowding the trip's own meta line, since it happened *before* the
+      // trip, not during it.
+      const vb = t.vampire_before;
+      const vampireNote = vb
+        ? `<li class="vampire-note">🔋 Parked ${fmt(vb.hours, 0)} h · lost ${fmt(vb.pct, 1)}% (${fmt(vb.kwh, 1)} kWh) standby</li>`
+        : "";
+      return `${vampireNote}<li class="trip${tripSelectMode ? " selectable" : ""}">` +
         `<span class="trip-head">${check}${score}${dq}${distFlag}<span class="trip-route">${when}${t.route ? "<br>" + routeHtml : ""}${mapLink}</span></span>` +
         `<span class="trip-meta">${t.distance_km} km · ${t.duration_min} min${speed}${kwh}${whkm}${soc}${cost}${tagChip}</span>${cond}</li>`;
     })

@@ -192,6 +192,115 @@ def test_total_energy_used_includes_parking_drain():
     assert r["total_energy_used_kwh"] == 7.5
     # Efficiency (per-trip model) untouched by the parking drain.
     assert r["avg_efficiency_wh_per_km"] == round(0.8 * 1000.0 / 6.0, 1)
+    # trip_energy_used_kwh + vampire_drain.kwh always sums back to the total
+    # exactly — this window's whole 7% between-drive gap (79% -> 72%) is
+    # vampire; the within-drive 1%+2% (worth 2.25 kWh at 75 kWh pack, more
+    # than the drives' own under-measured 0.8 kWh) floors the trip side.
+    assert r["vampire_drain"]["kwh"] == 5.2   # round(5.25, 1) -> 5.2 (banker's rounding)
+    assert r["trip_energy_used_kwh"] == 2.3   # derived as total - vampire, not independently rounded
+    assert round(r["trip_energy_used_kwh"] + r["vampire_drain"]["kwh"], 1) == r["total_energy_used_kwh"]
+    assert r["vampire_drain"]["gaps"] == 1
+    assert r["vampire_drain"]["hours"] == 11.8   # 8:10 -> 20:00
+
+
+def test_vampire_drain_function_thresholds_and_excludes_charged_gaps():
+    """vampire_drain() in isolation: a short gap is noise (below the 2h
+    threshold) and doesn't count; a gap with a charge inside it isn't a pure
+    drain measurement and is skipped entirely, not netted against the charge."""
+    from datetime import datetime
+
+    from app.analysis.driving import VAMPIRE_MIN_GAP_HOURS, vampire_drain
+    from app.models import Charge, Drive
+
+    def d(start, end, ssoc, esoc):
+        return Drive(id=None, start_time=start, end_time=end, distance_km=3.0,
+                     duration_min=10.0, avg_speed_kmh=30, max_speed_kmh=45,
+                     start_soc=ssoc, end_soc=esoc, energy_used_kwh=0.0, outside_temp_c=28.0)
+
+    assert VAMPIRE_MIN_GAP_HOURS == 2.0
+
+    # A gap just under the threshold: real SoC drop, but too short to trust
+    # as signal rather than integer-rounding noise.
+    short = [
+        d(datetime(2026, 7, 4, 8, 0), datetime(2026, 7, 4, 8, 10), 80, 80),
+        d(datetime(2026, 7, 4, 9, 50), datetime(2026, 7, 4, 10, 0), 79, 79),
+    ]
+    r = vampire_drain(short, [], 75.0)
+    assert r == {"kwh": 0.0, "hours": 0.0, "gaps": 0, "avg_pct_per_day": None, "gap_list": []}
+
+    # Same gap, now long enough (3h) — counts.
+    long_gap = [
+        d(datetime(2026, 7, 4, 8, 0), datetime(2026, 7, 4, 8, 10), 80, 80),
+        d(datetime(2026, 7, 4, 11, 10), datetime(2026, 7, 4, 11, 20), 79, 79),
+    ]
+    r2 = vampire_drain(long_gap, [], 75.0)
+    assert r2["gaps"] == 1
+    assert r2["kwh"] == round(1 / 100.0 * 75.0, 2)
+    assert r2["hours"] == 3.0
+
+    # A charge starting inside that same gap invalidates it as a pure-drain
+    # measurement — excluded outright, not netted against the charge.
+    mid_gap_charge = Charge(
+        start_time=datetime(2026, 7, 4, 9, 0), end_time=datetime(2026, 7, 4, 9, 30),
+        duration_min=30.0, start_soc=79, end_soc=85, energy_added_kwh=4.5,
+        charge_type="AC", max_power_kw=7.0, cost=4.5,
+    )
+    r3 = vampire_drain(long_gap, [mid_gap_charge], 75.0)
+    assert r3 == {"kwh": 0.0, "hours": 0.0, "gaps": 0, "avg_pct_per_day": None, "gap_list": []}
+
+
+def test_vampire_drain_avg_pct_per_day_rate():
+    """The rate (not the raw amount) is what's comparable across windows —
+    the same 1% loss over 3h vs. 3 days should read as very different rates."""
+    from datetime import datetime
+
+    from app.analysis.driving import vampire_drain
+    from app.models import Drive
+
+    def d(start, end, ssoc, esoc):
+        return Drive(start_time=start, end_time=end, distance_km=3.0, duration_min=10.0,
+                     avg_speed_kmh=30, max_speed_kmh=45, start_soc=ssoc, end_soc=esoc,
+                     energy_used_kwh=0.0, outside_temp_c=28.0)
+
+    drives = [
+        d(datetime(2026, 7, 1, 8, 0), datetime(2026, 7, 1, 8, 10), 90, 90),
+        # Exactly 3 days later, 3% lost — 1%/day.
+        d(datetime(2026, 7, 4, 8, 0), datetime(2026, 7, 4, 8, 10), 87, 87),
+    ]
+    r = vampire_drain(drives, [], 75.0)
+    assert r["avg_pct_per_day"] == 1.0
+
+
+def test_recent_trips_vampire_before_annotation():
+    """Each of the (up to 5) most recent trips carries the qualifying parked
+    gap that preceded it, if any — None for the very first drive in the
+    window (nothing before it to measure) and for a trip that followed
+    quickly (no qualifying gap)."""
+    from datetime import datetime
+
+    from app.analysis.driving import analyze
+    from app.models import Drive
+
+    def d(start, end, ssoc, esoc):
+        return Drive(id=hash((start, end)) % 100000 + 1, start_time=start, end_time=end,
+                     distance_km=3.0, duration_min=10.0, avg_speed_kmh=30, max_speed_kmh=45,
+                     start_soc=ssoc, end_soc=esoc, energy_used_kwh=0.3, outside_temp_c=28.0)
+
+    drives = [
+        d(datetime(2026, 7, 4, 8, 0), datetime(2026, 7, 4, 8, 10), 80, 79),
+        # 5h parked gap, 2% lost — qualifies.
+        d(datetime(2026, 7, 4, 13, 10), datetime(2026, 7, 4, 13, 20), 77, 76),
+        # Only 20 min later — no qualifying gap.
+        d(datetime(2026, 7, 4, 13, 40), datetime(2026, 7, 4, 13, 50), 75, 74),
+    ]
+    r = analyze(drives, 150.0, 75.0)
+    trips = {t["id"]: t for t in r["recent_trips"]}
+    assert trips[drives[0].id]["vampire_before"] is None
+    vb = trips[drives[1].id]["vampire_before"]
+    assert vb is not None
+    assert vb["hours"] == 5.0
+    assert vb["pct"] == 2.0
+    assert trips[drives[2].id]["vampire_before"] is None
 
 
 def test_zero_energy_drive_does_not_dilute_efficiency():

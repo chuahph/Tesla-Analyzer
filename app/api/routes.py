@@ -1200,7 +1200,8 @@ def compare_vehicles(days: int = Query(30, ge=1, le=730), session: Session = Dep
         capacity_kwh, _ = _usable_capacity(session, vehicle, settings)
         drives, charges = _window(session, vehicle.id, days)
         driving = driving_analysis.analyze(
-            drives, settings.rated_wh_per_km, capacity_kwh, tariff.price_fn_from_settings(settings))
+            drives, settings.rated_wh_per_km, capacity_kwh, tariff.price_fn_from_settings(settings),
+            charges=charges)
         charging = charging_analysis.analyze(charges, drives)
         readings = session.execute(
             select(BatteryReading.soc, BatteryReading.range_km,
@@ -1578,7 +1579,7 @@ def _monthly_report_payload(session: Session, vehicle: Vehicle, settings, days: 
     capacity_kwh, _ = _usable_capacity(session, vehicle, settings)
     drives, charges = _window(session, vehicle.id, days)
     price_fn = tariff.price_fn_from_settings(settings)
-    driving = driving_analysis.analyze(drives, settings.rated_wh_per_km, capacity_kwh, price_fn)
+    driving = driving_analysis.analyze(drives, settings.rated_wh_per_km, capacity_kwh, price_fn, charges=charges)
     charging = charging_analysis.analyze(charges, drives)
     efficiency = efficiency_analysis.analyze(drives, settings.rated_wh_per_km)
     cur = settings.currency
@@ -1614,7 +1615,8 @@ def _monthly_report_payload(session: Session, vehicle: Vehicle, settings, days: 
     since = now - timedelta(days=days)
     prev_since = since - timedelta(days=days)
     prev_drives, prev_charges = _window(session, vehicle.id, days, since=prev_since, until=since)
-    prev_driving = driving_analysis.analyze(prev_drives, settings.rated_wh_per_km, capacity_kwh, price_fn)
+    prev_driving = driving_analysis.analyze(
+        prev_drives, settings.rated_wh_per_km, capacity_kwh, price_fn, charges=prev_charges)
     prev_charging = charging_analysis.analyze(prev_charges, prev_drives)
     prev_efficiency = efficiency_analysis.analyze(prev_drives, settings.rated_wh_per_km)
     narrative_lines = narrative_engine.build(
@@ -1767,14 +1769,21 @@ def summary(
         .order_by(Charge.end_time.desc())
     )
     if last_charge is not None:
-        # kWh driven since this charge ended — independent of whatever window
-        # is currently selected, so "Net Battery" (last charge's kWh added
-        # minus this) reads the same regardless of which window the user has
-        # picked, same as last_charge_summary itself.
-        used_since_last_charge_kwh = session.scalar(
-            select(func.sum(Drive.energy_used_kwh))
-            .where(Drive.vehicle_id == vehicle.id, Drive.start_time >= last_charge.end_time)
-        ) or 0.0
+        # kWh used since this charge ended — independent of whatever window
+        # is currently selected, so "Net Battery" (the pack's level at that
+        # charge's end minus this) reads the same regardless of which window
+        # the user has picked, same as last_charge_summary itself. Includes
+        # vampire drain in any parked gap since (see vampire_drain()) — no
+        # charges list needed for that call, since by definition nothing has
+        # charged since last_charge (it's the most recent one on record).
+        drives_since = session.scalars(
+            select(Drive).where(Drive.vehicle_id == vehicle.id, Drive.start_time >= last_charge.end_time)
+            .order_by(Drive.start_time)
+        ).all()
+        vampire_since = driving_analysis.vampire_drain(drives_since, [], capacity_kwh)
+        used_since_last_charge_kwh = (
+            sum(d.energy_used_kwh for d in drives_since) + vampire_since["kwh"]
+        )
         last_charge_summary = {
             "id": last_charge.id,
             "start_time": last_charge.start_time.isoformat(timespec="minutes"),
@@ -1806,7 +1815,8 @@ def summary(
     drives, charges = _window(session, vehicle.id, days, since=since)
 
     driving = driving_analysis.analyze(
-        drives, settings.rated_wh_per_km, capacity_kwh, tariff.price_fn_from_settings(settings))
+        drives, settings.rated_wh_per_km, capacity_kwh, tariff.price_fn_from_settings(settings),
+        charges=charges)
     charging = charging_analysis.analyze(charges, drives)
     efficiency = efficiency_analysis.analyze(drives, settings.rated_wh_per_km)
 
@@ -1841,7 +1851,8 @@ def summary(
         prev_since = cur_since - timedelta(days=days)
         prev_drives, prev_charges = _window(session, vehicle.id, days, since=prev_since, until=cur_since)
         prev_driving = driving_analysis.analyze(
-            prev_drives, settings.rated_wh_per_km, capacity_kwh, tariff.price_fn_from_settings(settings))
+            prev_drives, settings.rated_wh_per_km, capacity_kwh, tariff.price_fn_from_settings(settings),
+            charges=prev_charges)
         prev_charging = charging_analysis.analyze(prev_charges, prev_drives)
         prev_efficiency = efficiency_analysis.analyze(prev_drives, settings.rated_wh_per_km)
         narrative_lines = narrative_engine.build(
@@ -1873,12 +1884,23 @@ def summary(
         .order_by(BatteryReading.ts.desc())
         .limit(1)
     )
+    # Same window's used_kwh split into trip vs. vampire (standby drain
+    # between drives — see driving_analysis.vampire_drain()); the two always
+    # sum to used_kwh exactly, since that's how total_energy_used_kwh itself
+    # is built. avg_pct_per_day is a rate (not a raw amount) so a long
+    # window's cumulative loss reads as something comparable across windows.
+    vd = (driving.get("vampire_drain") or {}) if driving.get("available") else {}
     battery_balance = {
         "full_charge_kwh": full_charge_kwh,
         "charged_kwh": round(charged_kwh, 1),
         "used_kwh": round(used_kwh, 1),
         "used_pct": used_pct,
         "current_soc_pct": round(current_soc, 1) if current_soc is not None else None,
+        "trip_kwh": round(driving.get("trip_energy_used_kwh") or 0.0, 1) if driving.get("available") else 0.0,
+        "vampire_kwh": vd.get("kwh", 0.0),
+        "vampire_hours": vd.get("hours", 0.0),
+        "vampire_gaps": vd.get("gaps", 0),
+        "vampire_avg_pct_per_day": vd.get("avg_pct_per_day"),
     }
 
     # Petrol comparator (TCO): what an equivalent petrol car would have cost

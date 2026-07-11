@@ -435,11 +435,15 @@ def test_summary_reports_battery_balance():
             bal = body["battery_balance"]
             assert set(bal) == {
                 "full_charge_kwh", "charged_kwh", "used_kwh", "used_pct", "current_soc_pct",
+                "trip_kwh", "vampire_kwh", "vampire_hours", "vampire_gaps",
+                "vampire_avg_pct_per_day",
             }
             assert bal["charged_kwh"] >= 0
             assert bal["used_kwh"] >= 0
             assert bal["full_charge_kwh"] > 0
             assert bal["used_pct"] is None
+            # trip_kwh + vampire_kwh always sums back to used_kwh exactly.
+            assert round(bal["trip_kwh"] + bal["vampire_kwh"], 1) == round(bal["used_kwh"], 1)
             if bal["current_soc_pct"] is not None:
                 assert 0 <= bal["current_soc_pct"] <= 100
 

@@ -149,8 +149,52 @@
     return s >= 85 ? "A" : s >= 70 ? "B" : s >= 55 ? "C" : s >= 40 ? "D" : "E";
   }
 
+  // Minimum parked gap (hours) between two consecutive drives worth counting
+  // as vampire drain — mirror app/analysis/driving.py VAMPIRE_MIN_GAP_HOURS.
+  const VAMPIRE_MIN_GAP_HOURS = 2.0;
+
+  // kWh lost while parked between two consecutive drives, with no charge in
+  // between — mirror app/analysis/driving.py vampire_drain(). Returns the
+  // aggregate plus a per-gap gapList so recent_trips can annotate "parked Xh
+  // before this trip" per trip, not just report one window-wide total.
+  function vampireDrain(drives, charges, capacity) {
+    const ordered = [...drives].sort((a, b) => new Date(a.start_time) - new Date(b.start_time));
+    if (ordered.length < 2 || !capacity) {
+      return { kwh: 0.0, hours: 0.0, gaps: 0, avg_pct_per_day: null, gapList: [] };
+    }
+    const chargeStarts = (charges || [])
+      .map((c) => new Date(c.start_time).getTime())
+      .sort((a, b) => a - b);
+    let totalKwh = 0.0, totalHours = 0.0, ci = 0;
+    const gapList = [];
+    for (let i = 0; i < ordered.length - 1; i++) {
+      const a = ordered[i], b = ordered[i + 1];
+      const gapStart = new Date(a.end_time).getTime();
+      const gapEnd = new Date(b.start_time).getTime();
+      const gapHours = (gapEnd - gapStart) / 3600000.0;
+      if (gapHours < VAMPIRE_MIN_GAP_HOURS) continue;
+      while (ci < chargeStarts.length && chargeStarts[ci] < gapStart) ci++;
+      if (ci < chargeStarts.length && chargeStarts[ci] < gapEnd) continue;
+      const dropPct = Math.max((a.end_soc || 0) - (b.start_soc || 0), 0.0);
+      if (dropPct <= 0) continue;
+      const kwh = (dropPct / 100.0) * capacity;
+      totalKwh += kwh;
+      totalHours += gapHours;
+      gapList.push({
+        before_drive_id: b.id ?? null,
+        hours: round(gapHours, 1), kwh: round(kwh, 2), pct: round(dropPct, 1),
+      });
+    }
+    const avgPctPerDay = totalHours > 0
+      ? round((totalKwh / capacity * 100.0) / (totalHours / 24.0), 2) : null;
+    return {
+      kwh: round(totalKwh, 2), hours: round(totalHours, 1),
+      gaps: gapList.length, avg_pct_per_day: avgPctPerDay, gapList,
+    };
+  }
+
   // --- driving (mirror app/analysis/driving.py) ---
-  function analyzeDriving(drives, rated, capacity) {
+  function analyzeDriving(drives, rated, capacity, charges) {
     rated = rated || RATED_WH_PER_KM;
     capacity = capacity || 75.0;
     if (!drives.length) return { available: false };
@@ -180,18 +224,34 @@
     const [slope] = linregress(effDrives.map((d) => d.avg_speed_kmh), effs);
     const totKm = dist.reduce((a, b) => a + b, 0);
     const totKwh = drives.reduce((a, d) => a + d.energy_used_kwh, 0);
-    // Real-world range yardstick: km per 1% of battery. Take the largest of
-    // three sources so short trips still yield a value (see driving.py):
-    // net first→last SoC drop, energy-derived %, and summed per-trip deltas.
     const ordered = [...drives].sort((a, b) => new Date(a.start_time) - new Date(b.start_time));
-    const socNet = ordered.length ? Math.max((ordered[0].start_soc || 0) - (ordered[ordered.length - 1].end_soc || 0), 0) : 0;
+    // Standby/vampire drain in the parked gaps *between* this window's
+    // drives — see vampireDrain(). Not part of any drive's own
+    // energy_used_kwh, so it's otherwise invisible; added back in below so
+    // "kWh used" is the real total drawn from the pack.
+    const vampire = vampireDrain(ordered, charges, capacity);
+    let vampireKwh = vampire.kwh;
+    // Floor for the *trip* portion only: raw per-trip integer SoC deltas,
+    // which only ever adds signal a trip's own (possibly gap-ridden) energy
+    // reading missed. Applied before vampire is added on top — see
+    // app/analysis/driving.py analyze() for the full rationale.
     const socFromInt = drives.reduce((a, d) => a + Math.max((d.start_soc || 0) - (d.end_soc || 0), 0), 0);
-    const socFromEnergy = capacity ? (totKwh / capacity * 100.0) : 0;
-    const socUsed = Math.max(socNet, socFromInt, socFromEnergy);
+    const floorKwh = capacity ? (socFromInt / 100.0 * capacity) : 0;
+    const tripEnergyUsedRaw = capacity ? Math.max(totKwh, floorKwh) : totKwh;
+    const totalEnergyUsedRaw = tripEnergyUsedRaw + vampireKwh;
+    const socUsed = capacity ? (totalEnergyUsedRaw / capacity * 100.0) : 0;
+    // Real-world range yardstick: km per 1% of battery used, from the same
+    // total (trip + vampire).
     const kmPerSoc = (socUsed >= 0.2 && totKm) ? round(totKm / socUsed, 1) : null;
-    // Gross battery drain over the window (includes parking/idle/overnight) —
-    // the "kWh used" headline. Driving-only sum stays as total_energy_kwh.
-    const totalEnergyUsed = capacity ? round(socUsed / 100.0 * capacity, 1) : round(totKwh, 1);
+    // Round the total once, then derive the displayed vampire/trip split by
+    // subtraction from that rounded total — see driving.py analyze() for why
+    // rounding all three independently can leave them off by a rounding
+    // unit even though the raw figures agree exactly.
+    const totalEnergyUsed = round(totalEnergyUsedRaw, 1);
+    vampireKwh = round(vampireKwh, 1);
+    const tripEnergyUsed = round(totalEnergyUsed - vampireKwh, 1);
+    const vampireByDriveId = new Map(
+      vampire.gapList.filter((g) => g.before_drive_id != null).map((g) => [g.before_drive_id, g]));
 
     const distBand = {}; [...bySpeed.keys()].sort().forEach((k) => distBand[k] = round(bySpeed.get(k), 1));
     const tbh = {}; for (let h = 0; h < 24; h++) tbh[String(h)] = byHour.get(h) || 0;
@@ -209,11 +269,18 @@
       total_duration_h: round(dur.reduce((a, b) => a + b, 0) / 60.0, 1),
       total_energy_kwh: round(drives.reduce((a, d) => a + d.energy_used_kwh, 0), 1),
       total_energy_used_kwh: totalEnergyUsed,
+      // trip_energy_used_kwh + vampire_drain.kwh always sums back to
+      // total_energy_used_kwh exactly (see the rounding note above).
+      trip_energy_used_kwh: tripEnergyUsed,
+      vampire_drain: {
+        kwh: vampireKwh, hours: vampire.hours,
+        gaps: vampire.gaps, avg_pct_per_day: vampire.avg_pct_per_day,
+      },
       avg_trip_distance_km: round(mean(dist), 1),
       avg_trip_duration_min: round(mean(dur), 1),
       avg_speed_kmh: round(mean(spd), 1),
       km_per_soc_pct: kmPerSoc,
-      soc_used_pct: round(socFromInt, 1),
+      soc_used_pct: round(socUsed, 1),
       p95_speed_kmh: round(percentile(drives.map((d) => d.max_speed_kmh), 0.95), 1),
       max_speed_kmh: round(Math.max(0, ...drives.map((d) => d.max_speed_kmh || 0)), 1),
       longest_trip_km: round(Math.max(...dist), 1),
@@ -245,6 +312,10 @@
           conditions: tripConditions(d),
           route: d.start_location && d.end_location
             ? `${d.start_location} → ${d.end_location}` : "",
+          // The parked gap immediately before this trip, if it was long
+          // enough and charge-free to count as vampire drain — None when
+          // this is the first drive in the window or no gap qualified.
+          vampire_before: vampireByDriveId.get(d.id) ?? null,
         })),
     };
   }
@@ -613,7 +684,7 @@
     const charges = (dataset.charges || []).filter((c) => new Date(c.start_time).getTime() >= since);
 
     const capacity = (dataset.vehicle && dataset.vehicle.battery_capacity_kwh) || 75.0;
-    const driving = analyzeDriving(drives, rated, capacity);
+    const driving = analyzeDriving(drives, rated, capacity, charges);
     const charging = analyzeCharging(charges, drives);
     const efficiency = analyzeEfficiency(drives, rated);
     const v = dataset.vehicle || {};
@@ -633,9 +704,12 @@
       const lc = [...allCharges].sort((a, b) =>
         new Date(b.end_time || b.start_time) - new Date(a.end_time || a.start_time))[0];
       const lcEndMs = new Date(lc.end_time || lc.start_time).getTime();
-      const usedSince = allDrives
-        .filter((d) => new Date(d.start_time).getTime() >= lcEndMs)
-        .reduce((sum, d) => sum + (d.energy_used_kwh || 0), 0);
+      const drivesSince = allDrives.filter((d) => new Date(d.start_time).getTime() >= lcEndMs);
+      // Includes vampire drain in any parked gap since (see vampireDrain())
+      // — no charges list needed, since by definition nothing has charged
+      // since lc (it's the most recent one on record).
+      const vampireSince = vampireDrain(drivesSince, [], capacity);
+      const usedSince = drivesSince.reduce((sum, d) => sum + (d.energy_used_kwh || 0), 0) + vampireSince.kwh;
       lastCharge = {
         id: lc.id ?? null,
         start_time: lc.start_time,
@@ -669,11 +743,17 @@
     if (windowLabel === "since last charge" && lastCharge && lastCharge.battery_kwh_at_end > 0) {
       usedPct = round(usedKwh / lastCharge.battery_kwh_at_end * 100, 1);
     }
+    const vd = driving.available ? (driving.vampire_drain || {}) : {};
     const batteryBalance = {
       full_charge_kwh: round(capacity, 1),
       charged_kwh: round(charging.total_energy_kwh || 0, 1),
       used_kwh: round(usedKwh, 1),
       used_pct: usedPct,
+      trip_kwh: driving.available ? round(driving.trip_energy_used_kwh || 0, 1) : 0,
+      vampire_kwh: vd.kwh || 0.0,
+      vampire_hours: vd.hours || 0.0,
+      vampire_gaps: vd.gaps || 0,
+      vampire_avg_pct_per_day: vd.avg_pct_per_day ?? null,
     };
 
     return {
