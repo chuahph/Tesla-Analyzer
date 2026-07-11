@@ -782,9 +782,10 @@ def _process_vehicle(
         # Re-price at the session's own start time and actual charger type —
         # auto-matched Home/Office location (or the saved default source)
         # takes priority; Public falls back to flat/ToU pricing.
-        rate = pricing_prefs.rate_for_charge(
+        source, rate = pricing_prefs.resolve_source_and_rate(
             session, settings, raw_coords, c["charge_type"] == "DC", c["start_time"])
         c["cost"] = round(c["energy_added_kwh"] * rate, 2)
+        c["price_source"] = source
         session.add(Charge(vehicle_id=vehicle.id, **c))
         notifications.notify(
             session, "Charging complete",
@@ -996,9 +997,10 @@ def sync_now(wake: bool = Query(False), session: Session = Depends(get_session))
                             vehicle_row.battery_capacity_kwh = round(0.8 * old_cap + 0.2 * cap, 1)
                         raw_coords = c.get("location", "")
                         c["location"] = _place(raw_coords, session)
-                        rate = pricing_prefs.rate_for_charge(
+                        source, rate = pricing_prefs.resolve_source_and_rate(
                             session, settings, raw_coords, c["charge_type"] == "DC", c["start_time"])
                         c["cost"] = round(c["energy_added_kwh"] * rate, 2)
+                        c["price_source"] = source
                         session.add(Charge(vehicle_id=vehicle_row.id, **c))
                         session.commit()
                         total["charges"] += 1
@@ -1297,10 +1299,15 @@ def add_manual_charge(payload: dict = Body(...), session: Session = Depends(get_
     # manual flag rather than something auto-detected.
     is_free = bool(payload.get("is_free"))
 
+    # A source is only recorded when the rate was auto-resolved — a free
+    # session or one given an explicit cost isn't tied to any of the three
+    # presets, so the dashboard falls back to guessing from location text.
+    price_source = ""
     if is_free:
         cost = 0.0
     elif cost is None:
-        rate = pricing_prefs.rate_for_charge(session, settings, location, charge_type == "DC", start_time)
+        price_source, rate = pricing_prefs.resolve_source_and_rate(
+            session, settings, location, charge_type == "DC", start_time)
         cost = round(energy_added_kwh * rate, 2)
 
     vehicle = _first_vehicle(session)
@@ -1309,7 +1316,7 @@ def add_manual_charge(payload: dict = Body(...), session: Session = Depends(get_
         duration_min=round((end_time - start_time).total_seconds() / 60.0, 1),
         start_soc=start_soc, end_soc=end_soc, energy_added_kwh=round(energy_added_kwh, 2),
         charge_type=charge_type, max_power_kw=max_power_kw, location=location,
-        cost=cost, outside_temp_c=outside_temp_c, is_free=is_free,
+        cost=cost, outside_temp_c=outside_temp_c, is_free=is_free, price_source=price_source,
     )
     session.add(charge)
     session.commit()
@@ -1322,6 +1329,11 @@ def edit_charge_rate(payload: dict = Body(...), session: Session = Depends(get_s
     supply — for a session priced at something other than the configured
     AC/DC default (a promo rate, a pricier one-off public charger, ...).
     0 doubles as marking the session free.
+
+    An optional 'source' (from the dashboard's 🌐/🏠/🏢 quick-rate buttons)
+    is persisted so the row's selected-icon indicator can show it later —
+    without this, a typed custom rate clears any source the charge had, since
+    it no longer matches one of the three presets.
     """
     charge_id = payload.get("id")
     if not isinstance(charge_id, int):
@@ -1332,14 +1344,21 @@ def edit_charge_rate(payload: dict = Body(...), session: Session = Depends(get_s
         raise HTTPException(400, "Missing or invalid 'price_per_kwh'.")
     if rate < 0:
         raise HTTPException(400, "'price_per_kwh' must be >= 0.")
+    source = payload.get("source") or ""
+    if source and source not in pricing_prefs.SOURCES:
+        raise HTTPException(400, "'source' must be 'public', 'home', or 'office'.")
 
     charge = session.get(Charge, charge_id)
     if charge is None:
         raise HTTPException(404, "Charge not found.")
     charge.cost = round(charge.energy_added_kwh * rate, 2)
     charge.is_free = rate == 0
+    charge.price_source = source
     session.commit()
-    return {"id": charge.id, "cost": charge.cost, "is_free": charge.is_free}
+    return {
+        "id": charge.id, "cost": charge.cost, "is_free": charge.is_free,
+        "source": charge.price_source or None,
+    }
 
 
 @router.get("/pricing-prefs")
@@ -1752,6 +1771,7 @@ def summary(
             ),
             "is_free": bool(last_charge.is_free),
             "used_since_kwh": round(used_since_last_charge_kwh, 2),
+            "source": last_charge.price_source or None,
         }
         if since_charge:
             since = last_charge.end_time

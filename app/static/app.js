@@ -859,16 +859,19 @@ function quickRate(source, chargeType) {
   return rates[`${source}_${chargeType === "DC" ? "dc" : "ac"}`];
 }
 
-// Which of Public/Home/Office this session happened at — a read-only
-// indicator so the row's three source buttons double as a "this was a
-// Home/Office/Public session" selector, not just a set of suggestions.
-// Keyed off location text rather than comparing the session's stored rate
-// to today's configured rates: a charge priced under last month's rate (or
-// a rate that's since been edited) would never match the *current* numbers
-// and would look permanently unselected even though it's obviously a home
-// or office session — location doesn't drift the way a saved rate does.
+// Which of Public/Home/Office this session is currently priced against — a
+// read-only indicator so the row's three source buttons double as a "this
+// is a Home/Office/Public session" selector, not just a set of suggestions.
+// Prefers the backend's persisted c.source (set when the charge was first
+// priced, and updated whenever a 🌐/🏠/🏢 button is used to fix one) so
+// picking a different source and saving moves the highlight there right
+// away. Falls back to guessing from location text only for a charge that
+// predates that column or was given a fully custom rate — location doesn't
+// drift the way a saved rate does, so that's still better than comparing
+// against today's configured numbers.
 function matchedSource(c) {
   if (c.is_free) return null;
+  if (c.source) return c.source;
   const loc = (c.location || "").toLowerCase();
   if (loc.includes("office")) return "office";
   if (loc.includes("home")) return "home";
@@ -906,7 +909,7 @@ function chargeRowHtml(c, currency) {
       const r = quickRate(source, c.charge_type);
       buttons += ` <button class="quick-rate-btn${sel(source)}" data-charge-id="${c.id}" ` +
         `data-loc="${escLoc}" data-kwh="${c.energy_added_kwh}" data-quick-rate="${r}" ` +
-        `title="${label} rate (${fmt(r, 2)}/kWh) — edit in Rates">${icon}</button>`;
+        `data-source="${source}" title="${label} rate (${fmt(r, 2)}/kWh) — edit in Rates">${icon}</button>`;
     }
   }
   return `<li class="charge"><span class="charge-main"><span class="charge-loc">${loc}</span>` +
@@ -914,9 +917,15 @@ function chargeRowHtml(c, currency) {
     `<span class="charge-figs">${kwh} · ${cost}${rate}${buttons}</span></li>`;
 }
 
-function openEditChargeModal(chargeId, loc, kwh, rate, isFree) {
+function openEditChargeModal(chargeId, loc, kwh, rate, isFree, source) {
   const form = document.getElementById("edit-charge-form");
   form.dataset.chargeId = chargeId;
+  // Which source (public/home/office) this edit should be attributed to —
+  // "" for the plain ✎ button (a fully custom rate isn't any of the three,
+  // so it clears whatever source the charge had), or whichever of 🌐/🏠/🏢
+  // was clicked, so the row's selected-icon indicator follows the pick as
+  // soon as this is saved instead of only reacting to location text.
+  form.dataset.source = source || "";
   const freeCb = document.getElementById("edit-charge-free");
   const rateInput = document.getElementById("edit-charge-rate");
   freeCb.checked = isFree;
@@ -932,21 +941,21 @@ function openEditChargeModal(chargeId, loc, kwh, rate, isFree) {
 // Destination Charger) or supply its actual RM/kWh rate (a promo rate, a
 // pricier one-off public charger, ...). Ticking Free disables the rate
 // field, same interaction as the Add Historical Charge form's own toggle.
-// Home (🏠) / Office (🏢) open the same modal pre-filled with a suggested
-// rate instead of the session's current one — still editable before saving.
+// 🌐/🏠/🏢 open the same modal pre-filled with a suggested rate instead of
+// the session's current one — still editable before saving.
 function wireEditRateButtons(root) {
   root.querySelectorAll(".edit-rate-btn[data-charge-id]").forEach((btn) => {
     btn.addEventListener("click", (e) => {
       e.stopPropagation();
       openEditChargeModal(btn.dataset.chargeId, btn.dataset.loc, btn.dataset.kwh,
-        btn.dataset.rate || "", btn.dataset.isFree === "true");
+        btn.dataset.rate || "", btn.dataset.isFree === "true", "");
     });
   });
   root.querySelectorAll(".quick-rate-btn[data-charge-id]").forEach((btn) => {
     btn.addEventListener("click", (e) => {
       e.stopPropagation();
       openEditChargeModal(btn.dataset.chargeId, btn.dataset.loc, btn.dataset.kwh,
-        btn.dataset.quickRate, false);
+        btn.dataset.quickRate, false, btn.dataset.source);
     });
   });
 }
@@ -975,7 +984,9 @@ function setupEditChargeModal() {
     try {
       const resp = await fetch("/api/charges/edit-rate", {
         method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ id: +form.dataset.chargeId, price_per_kwh: rate }),
+        body: JSON.stringify({
+          id: +form.dataset.chargeId, price_per_kwh: rate, source: form.dataset.source || "",
+        }),
       });
       if (!resp.ok) throw new Error((await resp.json()).detail || "Failed");
       closeModal("edit-charge-modal");

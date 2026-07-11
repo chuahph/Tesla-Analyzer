@@ -140,6 +140,15 @@ class Charge(Base):
     # telemetry field reliably distinguishes these from a paid AC charger, so
     # this is set by hand rather than auto-detected. Forces cost to 0.
     is_free: Mapped[bool] = mapped_column(Boolean, default=False)
+    # Which of Public/Home/Office this session was actually priced against —
+    # set when a charge is first priced, and again whenever the dashboard's
+    # 🌐/🏠/🏢 quick-rate buttons are used to fix one after the fact. Blank
+    # for a fully custom rate (doesn't match any of the three) or a charge
+    # logged before this column existed — the dashboard falls back to
+    # guessing from location text in that case, since a *saved* source
+    # keeps meaning "this was a home charge" even after rates change later,
+    # unlike comparing the stored cost to today's configured rates.
+    price_source: Mapped[str] = mapped_column(String(10), default="")
 
     vehicle: Mapped["Vehicle"] = relationship(back_populates="charges")
 

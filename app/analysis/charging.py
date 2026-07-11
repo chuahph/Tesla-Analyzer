@@ -116,6 +116,11 @@ def analyze(charges: list[Charge], drives: list[Drive] | None = None) -> dict[st
             ),
             "location": _place(c),
             "is_free": bool(getattr(c, "is_free", False)),
+            # Which of Public/Home/Office this was actually priced against,
+            # persisted at charge-price time — None for a custom rate or a
+            # session logged before this existed (the frontend falls back
+            # to guessing from location text in that case).
+            "source": getattr(c, "price_source", "") or None,
         }
         for c in sorted(charges, key=lambda c: c.start_time, reverse=True)
     ]

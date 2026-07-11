@@ -143,6 +143,7 @@ def _process_snapshot(session, vehicle, data, drive_state, charge_state):  # pra
         settings = get_settings()
         is_dc = charge_state["fast"]
         if energy > 0.1:
+            source, rate = pricing_prefs.resolve_source_and_rate(session, settings, "", is_dc, now)
             session.add(
                 Charge(
                     vehicle_id=vehicle.id,
@@ -154,8 +155,9 @@ def _process_snapshot(session, vehicle, data, drive_state, charge_state):  # pra
                     energy_added_kwh=round(energy, 2),
                     charge_type="DC" if is_dc else "AC",
                     max_power_kw=charge_state["max_power"],
-                    cost=round(energy * pricing_prefs.rate_for_charge(session, settings, "", is_dc, now), 2),
+                    cost=round(energy * rate, 2),
                     outside_temp_c=charge_state["temp"],
+                    price_source=source,
                 )
             )
             session.commit()

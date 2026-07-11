@@ -344,7 +344,7 @@ def test_summary_since_charge_window():
             assert set(lc) == {
                 "id", "start_time", "end_time", "energy_added_kwh", "start_soc",
                 "end_soc", "cost", "charge_type", "location", "rate_per_kwh", "is_free",
-                "used_since_kwh",
+                "used_since_kwh", "source",
             }
             assert lc["used_since_kwh"] >= 0
             assert lc["end_time"] <= since["generated_at"]
@@ -1078,11 +1078,27 @@ def test_edit_charge_rate_recalculates_cost():
                 "id": charge_id, "price_per_kwh": 0.5,
             })
             assert edit.status_code == 200
-            assert edit.json() == {"id": charge_id, "cost": 5.0, "is_free": False}
+            assert edit.json() == {"id": charge_id, "cost": 5.0, "is_free": False, "source": None}
             with SessionLocal() as s:
                 c = s.get(Charge, charge_id)
                 assert c.cost == 5.0
                 assert c.is_free is False
+
+            # The dashboard's 🏠 quick-rate button passes a source, which
+            # persists so the selected-icon indicator survives rate changes.
+            edit_home = client.post("/api/charges/edit-rate", json={
+                "id": charge_id, "price_per_kwh": 0.44, "source": "home",
+            })
+            assert edit_home.status_code == 200
+            assert edit_home.json()["source"] == "home"
+            with SessionLocal() as s:
+                c = s.get(Charge, charge_id)
+                assert c.price_source == "home"
+
+            # An invalid source is rejected outright.
+            assert client.post("/api/charges/edit-rate", json={
+                "id": charge_id, "price_per_kwh": 0.5, "source": "garage",
+            }).status_code == 400
 
             # 0 doubles as marking it free.
             edit_free = client.post("/api/charges/edit-rate", json={

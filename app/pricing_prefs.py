@@ -124,21 +124,27 @@ def match_source(location_or_coords: str, session: Session) -> str | None:
     return None
 
 
-def rate_for_charge(
+def resolve_source_and_rate(
     session: Session, settings, location_or_coords: str, dc: bool, dt: datetime,
-) -> float:
-    """The RM/kWh rate for a newly-priced charge — auto-matched Home/Office
+) -> tuple[str, float]:
+    """(source, rate) for a newly-priced charge — auto-matched Home/Office
     location wins, else the saved default source. Public still falls back to
     flat/ToU pricing (tariff.price_at) when its own rate is 0, exactly as
-    tariff.charge_price_at already does for the non-preference-aware path."""
+    tariff.charge_price_at already does for the non-preference-aware path.
+
+    Callers should persist the returned source on the Charge row
+    (price_source) rather than re-deriving "was this home/office/public"
+    later by comparing the stored cost to whatever rates happen to be
+    configured *then* — rates change over time, so that comparison quietly
+    stops matching for anything already logged."""
     rates = get_rates(session, settings)
     source = match_source(location_or_coords, session) or get_default_source(session)
     if source != "public":
-        return rates[f"{source}_{'dc' if dc else 'ac'}"]
+        return source, rates[f"{source}_{'dc' if dc else 'ac'}"]
     override = rates["public_dc"] if dc else rates["public_ac"]
     if override > 0:
-        return override
-    return tariff.price_at(
+        return "public", override
+    return "public", tariff.price_at(
         dt, settings.energy_price_per_kwh,
         settings.energy_price_peak_kwh, settings.energy_price_offpeak_kwh,
         settings.tariff_peak_start_hour, settings.tariff_peak_end_hour,

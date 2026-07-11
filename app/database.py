@@ -76,6 +76,7 @@ def init_db() -> None:
     _ensure_column("drives", "end_coords", "VARCHAR(40)", "''")
     _ensure_column("drives", "tag", "VARCHAR(20)", "''")
     _ensure_column("charges", "is_free", "BOOLEAN", "FALSE")
+    _ensure_column("charges", "price_source", "VARCHAR(10)", "''")
 
 
 def get_session() -> Iterator[Session]:
