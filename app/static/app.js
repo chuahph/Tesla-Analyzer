@@ -803,6 +803,7 @@ let pricingPrefs = null;
 const PRICING_PREFS_FALLBACK = {
   rates: { public_ac: 1.0, public_dc: 1.5, home_ac: 0.44, home_dc: 0.44, office_ac: 0.57, office_dc: 0.57 },
   default_source: "public",
+  updated_at: null,
 };
 
 const DEFAULT_SOURCE_ICONS = { public: "🌐", home: "🏠", office: "🏢" };
@@ -1074,10 +1075,23 @@ function setupRatesModal() {
   }
   starBtns.forEach((s) => s.addEventListener("click", () => setDefaultSource(s.dataset.source)));
 
+  // No live TNB/public-charger rate feed exists to auto-refresh from (see
+  // the link below the rates form), so this is a manual-review reminder
+  // instead: when the numbers were last saved, standing in for a freshness
+  // check the app can't actually perform on its own.
+  function renderUpdatedNote(prefs) {
+    const note = document.getElementById("rates-updated-note");
+    if (!note) return;
+    note.textContent = prefs.updated_at
+      ? `Rates last updated: ${prefs.updated_at}`
+      : "Rates have never been saved — showing built-in defaults.";
+  }
+
   function populate() {
     const prefs = pricingPrefs || PRICING_PREFS_FALLBACK;
     for (const key in fields) fields[key].value = prefs.rates[key] ?? "";
     setDefaultSource(prefs.default_source || "public");
+    renderUpdatedNote(prefs);
   }
 
   btn.addEventListener("click", async () => {
@@ -1106,6 +1120,7 @@ function setupRatesModal() {
       if (!resp.ok) throw new Error((await resp.json()).detail || "Failed");
       pricingPrefs = await resp.json();
       renderDefaultSourceBtn();
+      renderUpdatedNote(pricingPrefs);
       setStatus(statusEl, "Saved.", "ok");
       load();   // refresh Recent Charges so 🌐/🏠/🏢 suggestions reflect the new rates
     } catch (err) {

@@ -696,8 +696,19 @@
         Set your real AC/DC rates for Public, Home and Office charging. A new
         charge within ~2km of a Place you've named "Home" or "Office" prices
         itself automatically; anything else uses whichever source's ★ is lit
-        below. Not retroactive — use ✎ or 🌐/🏠/🏢 on a Recent Charges row to
+        below. Not retroactive — use 🌐/🏠/🏢/🏷️ on a Recent Charges row to
         fix a session already logged.
+      </p>
+      <!-- Neither TNB nor any Malaysian public charging network exposes a
+           live rates API (TNB publishes only a PDF tariff schedule; each
+           charging operator sets its own price with no shared feed) — these
+           numbers are entered by hand, so a freshness reminder plus a link
+           to check the official source stands in for an auto-refresh. -->
+      <p class="modal-sub" id="rates-updated-note"></p>
+      <p class="modal-sub">
+        No live rate feed exists for either — check
+        <a href="https://www.mytnb.com.my/tariff" target="_blank" rel="noopener">TNB's official tariff page</a>
+        periodically (and your own charging receipts for public rates) and update the numbers above by hand.
       </p>
       <form id="rates-form" class="service-form">
         <input type="hidden" id="rate-default-source" value="public">

@@ -1370,6 +1370,7 @@ def get_pricing_prefs(session: Session = Depends(get_session)):
         "rates": pricing_prefs.get_rates(session, settings),
         "default_source": pricing_prefs.get_default_source(session),
         "match_radius_km": pricing_prefs.HOME_OFFICE_MATCH_RADIUS_KM,
+        "updated_at": pricing_prefs.get_updated_at(session),
     }
 
 
@@ -1402,6 +1403,7 @@ def save_pricing_prefs(payload: dict = Body(...), session: Session = Depends(get
     return {
         "rates": pricing_prefs.get_rates(session, settings),
         "default_source": pricing_prefs.get_default_source(session),
+        "updated_at": pricing_prefs.get_updated_at(session),
     }
 
 

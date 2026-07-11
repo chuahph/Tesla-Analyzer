@@ -80,12 +80,20 @@ def get_default_source(session: Session) -> str:
     return state.get(session, state.DEFAULT_PRICE_SOURCE_KEY, "public") or "public"
 
 
+def get_updated_at(session: Session) -> str | None:
+    """When the Rates page was last saved (ISO date) — no live TNB/public
+    charger rate feed exists to auto-refresh from, so the Rates page shows
+    this as a manual-review reminder instead."""
+    return state.get(session, state.PRICE_UPDATED_AT_KEY, "") or None
+
+
 def save(session: Session, rates: dict[str, float], default_source: str) -> None:
     for key, setting_key in _RATE_KEYS.items():
         if key in rates and rates[key] is not None:
             state.put(session, setting_key, str(rates[key]))
     if default_source in SOURCES:
         state.put(session, state.DEFAULT_PRICE_SOURCE_KEY, default_source)
+    state.put(session, state.PRICE_UPDATED_AT_KEY, datetime.utcnow().date().isoformat())
 
 
 def _is_coords(text: str) -> bool:

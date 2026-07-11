@@ -1134,6 +1134,49 @@ def test_edit_charge_rate_recalculates_cost():
         settings.app_passcode = old
 
 
+def test_pricing_prefs_updated_at_tracks_last_save():
+    """No live TNB/public-charger rate feed exists to auto-refresh from, so
+    the Rates page shows when the numbers were last saved instead — None
+    until the first save, then today's date, persisting across a fresh
+    GET."""
+    settings = get_settings()
+    old = settings.app_passcode
+    settings.app_passcode = ""
+    from app import state
+    from app.database import SessionLocal
+
+    keys = (
+        state.PRICE_PUBLIC_AC_KEY, state.PRICE_PUBLIC_DC_KEY,
+        state.PRICE_HOME_AC_KEY, state.PRICE_HOME_DC_KEY,
+        state.PRICE_OFFICE_AC_KEY, state.PRICE_OFFICE_DC_KEY,
+        state.DEFAULT_PRICE_SOURCE_KEY, state.PRICE_UPDATED_AT_KEY,
+    )
+    try:
+        with SessionLocal() as s:
+            state.delete(s, *keys)
+        with TestClient(app) as client:  # startup seeds demo data
+            before = client.get("/api/pricing-prefs").json()
+            assert before["updated_at"] is None
+
+            resp = client.post("/api/pricing-prefs", json={
+                "rates": {
+                    "public_ac": 1.0, "public_dc": 1.5,
+                    "home_ac": 0.44, "home_dc": 0.44,
+                    "office_ac": 0.57, "office_dc": 0.57,
+                },
+                "default_source": "public",
+            })
+            assert resp.status_code == 200
+            from datetime import date
+            today = date.today().isoformat()
+            assert resp.json()["updated_at"] == today
+            assert client.get("/api/pricing-prefs").json()["updated_at"] == today
+    finally:
+        settings.app_passcode = old
+        with SessionLocal() as s:
+            state.delete(s, *keys)
+
+
 def test_service_crud_and_due_status():
     """Logging a service record (a) persists and lists back, (b) feeds the
     due/overdue projection, and (c) can be deleted."""
