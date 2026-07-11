@@ -1774,6 +1774,13 @@ def summary(
             "is_free": bool(last_charge.is_free),
             "used_since_kwh": round(used_since_last_charge_kwh, 2),
             "source": last_charge.price_source or None,
+            # What was actually IN the pack when this charge finished (end SoC
+            # × usable capacity) — the real "fuel in the tank" figure, unlike
+            # energy_added_kwh which is just what this one session topped up
+            # and says nothing about what was already there if it didn't
+            # start from empty. Net Battery and the since-charge Battery Used
+            # % both anchor to this instead.
+            "battery_kwh_at_end": round((last_charge.end_soc or 0.0) / 100.0 * capacity_kwh, 2),
         }
         if since_charge:
             since = last_charge.end_time
@@ -1825,12 +1832,21 @@ def summary(
             settings.currency,
         )
 
-    # Battery Used %: gross energy used this window (parking/idle included,
-    # matching total_energy_used_kwh) as a share of usable pack capacity — the
-    # same figure that turns the window's kWh into %.
+    # Battery Used: how much of what was actually available got used. For the
+    # since-charge window this is well-defined — the pack held exactly
+    # last_charge_summary["battery_kwh_at_end"] the moment the window began,
+    # so % = used ÷ that (not ÷ the full pack — a charge that topped up to
+    # 60% left far less than a full pack to draw from, and dividing by 100%
+    # capacity understates how much of what you actually had is gone). Any
+    # other window (7/30/90 days, ...) has no single "starting battery"
+    # figure — it can span several charge/discharge cycles — so only the
+    # accumulated kWh is shown there, no %.
     full_charge_kwh = capacity_kwh
     charged_kwh = charging.get("total_energy_kwh") or 0.0
     used_kwh = (driving.get("total_energy_used_kwh") or 0.0) if driving.get("available") else 0.0
+    used_pct = None
+    if since_charge and last_charge_summary and last_charge_summary["battery_kwh_at_end"] > 0:
+        used_pct = round(used_kwh / last_charge_summary["battery_kwh_at_end"] * 100.0, 1)
     # Battery Balance: how much charge is actually left in the pack right now
     # (the latest logged SoC reading) — the "fuel gauge", not a derived delta.
     current_soc = session.scalar(
@@ -1843,7 +1859,7 @@ def summary(
         "full_charge_kwh": full_charge_kwh,
         "charged_kwh": round(charged_kwh, 1),
         "used_kwh": round(used_kwh, 1),
-        "used_pct": round(used_kwh / full_charge_kwh * 100.0, 1) if full_charge_kwh else None,
+        "used_pct": used_pct,
         "current_soc_pct": round(current_soc, 1) if current_soc is not None else None,
     }
 

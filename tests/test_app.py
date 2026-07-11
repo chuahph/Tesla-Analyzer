@@ -344,7 +344,7 @@ def test_summary_since_charge_window():
             assert set(lc) == {
                 "id", "start_time", "end_time", "energy_added_kwh", "start_soc",
                 "end_soc", "cost", "charge_type", "location", "rate_per_kwh", "is_free",
-                "used_since_kwh", "source",
+                "used_since_kwh", "source", "battery_kwh_at_end",
             }
             assert lc["used_since_kwh"] >= 0
             assert lc["end_time"] <= since["generated_at"]
@@ -420,9 +420,12 @@ def test_last_charge_used_since_kwh_sums_drives_after_it_independent_of_window()
 
 
 def test_summary_reports_battery_balance():
-    """battery_balance reports the window's kWh used as a % of the pack
-    capacity implied by the last 100% charge, plus the current SoC as the
-    "left in the pack" figure."""
+    """battery_balance always reports the window's raw kWh used; % is only
+    included for the since-charge window (a plain days-based window can span
+    several charge/discharge cycles, with no single "starting battery" to
+    divide by) and is computed against what was actually in the pack when
+    the last charge ended (end SoC × capacity), not the full pack — a charge
+    that only topped up partway shouldn't understate the drain."""
     settings = get_settings()
     old = settings.app_passcode
     settings.app_passcode = ""
@@ -436,10 +439,17 @@ def test_summary_reports_battery_balance():
             assert bal["charged_kwh"] >= 0
             assert bal["used_kwh"] >= 0
             assert bal["full_charge_kwh"] > 0
-            if bal["used_pct"] is not None:
-                assert round(bal["used_pct"], 1) == round(bal["used_kwh"] / bal["full_charge_kwh"] * 100.0, 1)
+            assert bal["used_pct"] is None
             if bal["current_soc_pct"] is not None:
                 assert 0 <= bal["current_soc_pct"] <= 100
+
+            since_body = client.get("/api/summary?since_charge=true").json()
+            since_bal = since_body["battery_balance"]
+            lc = since_body["last_charge"]
+            if lc and lc["battery_kwh_at_end"] > 0:
+                assert since_bal["used_pct"] is not None
+                assert round(since_bal["used_pct"], 1) == round(
+                    since_bal["used_kwh"] / lc["battery_kwh_at_end"] * 100.0, 1)
     finally:
         settings.app_passcode = old
 

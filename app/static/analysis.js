@@ -648,8 +648,31 @@
           ? round(lc.cost / lc.energy_added_kwh, 3) : null,
         is_free: !!lc.is_free,
         used_since_kwh: round(usedSince, 2),
+        // What was actually in the pack when this charge finished (end SoC
+        // × usable capacity) — Net Battery and the since-charge Battery
+        // Used % both anchor to this rather than energy_added_kwh, which
+        // says nothing about what was already there if the charge didn't
+        // start from empty.
+        battery_kwh_at_end: round((lc.end_soc || 0) / 100.0 * capacity, 2),
       };
     }
+
+    // Battery Used: % only makes sense for the since-charge window, where
+    // the pack held exactly lastCharge.battery_kwh_at_end when the window
+    // began — mirrors app/api/routes.py's summary(). Any other window can
+    // span several charge/discharge cycles with no single "starting
+    // battery" to divide by, so only the raw kWh is reported.
+    const usedKwh = driving.available ? (driving.total_energy_used_kwh || 0) : 0;
+    let usedPct = null;
+    if (windowLabel === "since last charge" && lastCharge && lastCharge.battery_kwh_at_end > 0) {
+      usedPct = round(usedKwh / lastCharge.battery_kwh_at_end * 100, 1);
+    }
+    const batteryBalance = {
+      full_charge_kwh: round(capacity, 1),
+      charged_kwh: round(charging.total_energy_kwh || 0, 1),
+      used_kwh: round(usedKwh, 1),
+      used_pct: usedPct,
+    };
 
     return {
       vehicle: dataset.vehicle || { name: "Tesla", model: "", trim: "" },
@@ -658,6 +681,7 @@
       generated_at: new Date().toISOString().slice(0, 19),
       currency,
       last_charge: lastCharge,
+      battery_balance: batteryBalance,
       driving, charging, efficiency, battery, recommendations,
     };
   }

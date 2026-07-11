@@ -408,30 +408,37 @@ function renderKpis(d) {
     cards.push(drv.km_per_soc_pct
       ? kpiCard("km / 1% Battery", fmt(drv.km_per_soc_pct, 1) + " km", socSub, "teal")
       : kpiCard("km / 1% Battery", "—", "waiting on range data from a synced drive", "teal"));
-    // Headline % of the pack consumed this window: kWh used ÷ the capacity
-    // implied by the last 100% charge (matches how the car itself converts
-    // kWh to %, not a generic/default pack size).
-    if (bal && bal.used_pct != null) {
-      // A wide window uses the pack many times over — "1,422%" is technically
-      // true but reads as a glitch. Past 100%, say it in full charges instead.
-      cards.push(bal.used_pct <= 100
-        ? kpiCard("Battery Used", fmt(bal.used_pct, 1) + "%",
-            `${fmt(bal.used_kwh, 1)} kWh of ${fmt(bal.full_charge_kwh, 1)} kWh full charge`, "amber")
-        : kpiCard("Battery Used", `${fmt(bal.used_pct / 100, 1)}× pack`,
-            `${fmt(bal.used_kwh, 1)} kWh ≈ ${fmt(bal.used_pct / 100, 1)} full charges`, "amber"));
-    }
-    // Net Battery: what's left of your last charge — its kWh added, minus
-    // what's been driven since it ended. Independent of the window/battery
-    // Used above (which is the whole window's drain, can span many charges);
-    // this is always anchored to just the most recent one. Floors at 0 once
-    // depleted — you're then running on whatever came before that charge,
-    // not a deficit, so a negative number here wouldn't mean anything.
     const lc = d.last_charge;
-    if (lc && lc.energy_added_kwh != null) {
+    // Battery Used: % is only meaningful for the "since charge" window,
+    // where the pack held exactly lc.battery_kwh_at_end (last charge's end
+    // SoC × capacity — NOT the full pack, which would understate the drain
+    // from a charge that only topped up partway) when the window began.
+    // Any other window can span several charge/discharge cycles with no
+    // single "starting battery" to divide by, so it's just the raw kWh.
+    if (bal && bal.used_kwh != null) {
+      if (bal.used_pct != null) {
+        cards.push(kpiCard("Battery Used", fmt(bal.used_pct, 1) + "%",
+          `${fmt(bal.used_kwh, 1)} kWh of ${fmt(lc ? lc.battery_kwh_at_end : bal.full_charge_kwh, 1)} kWh available since last charge`,
+          "amber"));
+      } else {
+        cards.push(kpiCard("Battery Used", `${fmt(bal.used_kwh, 1)} kWh`,
+          "% not shown — window may span more than one charge", "amber"));
+      }
+    }
+    // Net Battery: what's actually left in the pack from your last charge —
+    // what it held when that charge finished (end SoC × capacity, not just
+    // the kWh that one session added — it may not have started from empty)
+    // minus what's been driven since. Independent of the window/Battery
+    // Used above (which is the whole window's drain, can span many
+    // charges); this is always anchored to just the most recent one. Floors
+    // at 0 once depleted — you're then running on whatever came before that
+    // charge, not a deficit, so a negative number here wouldn't mean
+    // anything.
+    if (lc && lc.battery_kwh_at_end != null) {
       const usedSince = lc.used_since_kwh || 0;
-      const net = Math.max(lc.energy_added_kwh - usedSince, 0);
+      const net = Math.max(lc.battery_kwh_at_end - usedSince, 0);
       cards.push(kpiCard("Net Battery", `${fmt(net, 1)} kWh`,
-        `${fmt(lc.energy_added_kwh, 1)} kWh last charge − ${fmt(usedSince, 1)} kWh used since`,
+        `${fmt(lc.battery_kwh_at_end, 1)} kWh in pack after last charge − ${fmt(usedSince, 1)} kWh used since`,
         net > 0 ? "green" : "amber"));
     }
     // TCO: what this window's distance would have cost in an equivalent
