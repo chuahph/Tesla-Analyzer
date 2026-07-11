@@ -342,8 +342,8 @@ def test_summary_since_charge_window():
             lc = since["last_charge"]
             assert lc is not None
             assert set(lc) == {
-                "start_time", "end_time", "energy_added_kwh", "start_soc",
-                "end_soc", "cost", "charge_type", "location",
+                "id", "start_time", "end_time", "energy_added_kwh", "start_soc",
+                "end_soc", "cost", "charge_type", "location", "rate_per_kwh", "is_free",
             }
             assert lc["end_time"] <= since["generated_at"]
             assert full["last_charge"] == lc  # same last charge regardless of window

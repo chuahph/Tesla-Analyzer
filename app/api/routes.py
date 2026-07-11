@@ -1665,12 +1665,15 @@ def summary(
                 since = last_start
                 window_label = "last drive"
     # Fetched unconditionally (not just for since_charge) so the dashboard can
-    # always pin a "last charge" row atop the Charging Locations list — the
+    # always pin a "last charge" row atop the Recent Charges list — the
     # charge itself is otherwise invisible in the since-charge view (it ended
     # right at the window's start, so it's excluded from every list below by
     # definition), which reads as "my charge went missing" rather than "this
     # window starts after it"; showing it in every window keeps the format
     # (and the at-a-glance context) consistent regardless of which is picked.
+    # Same field shape as charging_analysis.recent_charges' rows (id/rate_per_kwh/
+    # is_free included) so the frontend can render and dedupe both with one
+    # template instead of two.
     last_charge_summary = None
     last_charge = session.scalar(
         select(Charge).where(Charge.vehicle_id == vehicle.id)
@@ -1678,6 +1681,7 @@ def summary(
     )
     if last_charge is not None:
         last_charge_summary = {
+            "id": last_charge.id,
             "start_time": last_charge.start_time.isoformat(timespec="minutes"),
             "end_time": last_charge.end_time.isoformat(timespec="minutes"),
             "energy_added_kwh": last_charge.energy_added_kwh,
@@ -1686,6 +1690,11 @@ def summary(
             "cost": last_charge.cost,
             "charge_type": last_charge.charge_type,
             "location": last_charge.location,
+            "rate_per_kwh": (
+                round(last_charge.cost / last_charge.energy_added_kwh, 3)
+                if last_charge.energy_added_kwh else None
+            ),
+            "is_free": bool(last_charge.is_free),
         }
         if since_charge:
             since = last_charge.end_time

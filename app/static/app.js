@@ -764,53 +764,40 @@ function renderLists(d) {
   document.getElementById("topRoutes").innerHTML =
     routes || '<li class="empty">No repeated routes yet</li>';
 
-  const locs = (d.charging.top_locations || [])
-    .map(([l, c, kwh, last]) => {
-      const when = last ? `<span class="loc-when">last ${tripWhen(last)}</span>` : "";
-      return `<li class="loc"><span class="loc-name">${l}${when}</span>` +
-        `<span class="count">${kwh != null ? fmt(kwh, 1) + " kWh · " : ""}${c}×</span></li>`;
-    }).join("");
-  // Pinned atop the list in every window (not just "since charge") so the
-  // most recent charge is always visible at a glance, in the same row shape
-  // as a normal location entry — most useful in "since charge" itself, where
-  // the window starts right where this charge ends, so it never appears in
-  // the list below on its own.
-  const lc = d.last_charge;
-  const lastChargeRow = lc ? (() => {
-    const kwh = lc.energy_added_kwh != null ? `${fmt(lc.energy_added_kwh, 1)} kWh` : "";
-    const soc = lc.start_soc != null && lc.end_soc != null ? `${lc.start_soc}%→${lc.end_soc}%` : "";
-    const cost = lc.cost != null ? `${d.currency} ${fmt(lc.cost, 2)}` : "";
-    const span = `${tripWhen(lc.start_time)} → ${tripEnd(lc.start_time, lc.end_time)}`;
-    const when = `<span class="loc-when">${span}${soc ? " · " + soc : ""}</span>`;
-    const count = [kwh, cost].filter(Boolean).join(" · ");
-    return `<li class="loc last-charge"><span class="loc-name">${lc.location || "Last charge"}${when}</span>` +
-      `<span class="count">${count}</span></li>`;
-  })() : "";
-  document.getElementById("topLocations").innerHTML =
-    lastChargeRow + locs || '<li class="empty">No charging sessions in this window</li>';
-
   const chargesEl = document.getElementById("recentCharges");
   if (chargesEl) {
     const recentCharges = d.charging.recent_charges || [];
-    const rows = recentCharges.map((c) => {
-      const when = `${tripWhen(c.start_time)} → ${tripEnd(c.start_time, c.end_time)}`;
-      const loc = c.location ? `${c.location} · ${c.charge_type}` : c.charge_type;
-      const kwh = `${fmt(c.energy_added_kwh, 1)} kWh`;
-      const cost = c.is_free ? "Free" : `${d.currency} ${fmt(c.cost, 2)}`;
-      const rate = !c.is_free && c.rate_per_kwh != null ? ` (${fmt(c.rate_per_kwh, 2)}/kWh)` : "";
-      const editBtn = !STATIC_MODE && c.id != null
-        ? ` <button class="edit-rate-btn" data-charge-id="${c.id}" ` +
-          `data-loc="${loc.replace(/"/g, "&quot;")}" data-kwh="${c.energy_added_kwh}" ` +
-          `data-rate="${c.rate_per_kwh ?? ""}" data-is-free="${c.is_free}" ` +
-          `title="Fix this session's cost">✎</button>`
-        : "";
-      return `<li class="charge"><span class="charge-main"><span class="charge-loc">${loc}</span>` +
-        `<span class="charge-when">${when}</span></span>` +
-        `<span class="charge-figs">${kwh} · ${cost}${rate}${editBtn}</span></li>`;
-    }).join("");
+    // The window's own boundary charge (e.g. "since charge") is otherwise
+    // invisible below — it ended right at the window's start, so it's
+    // excluded from recent_charges by definition. Pin it atop the list
+    // instead of a separate card, skipping it when it's already the first
+    // row (a wide window already includes it naturally).
+    const lc = d.last_charge;
+    const pinned = lc && recentCharges[0]?.id !== lc.id ? [lc] : [];
+    const rows = [...pinned, ...recentCharges].map((c) => chargeRowHtml(c, d.currency)).join("");
     chargesEl.innerHTML = rows || '<li class="empty">No charging sessions in this window</li>';
     wireEditRateButtons(chargesEl);
   }
+}
+
+// One Recent Charges row — shared by the pinned "last charge" entry and
+// every session in charging.recent_charges, so both look and behave
+// identically (same edit-rate button) instead of two different formats.
+function chargeRowHtml(c, currency) {
+  const when = `${tripWhen(c.start_time)} → ${tripEnd(c.start_time, c.end_time)}`;
+  const loc = c.location ? `${c.location} · ${c.charge_type}` : c.charge_type;
+  const kwh = `${fmt(c.energy_added_kwh, 1)} kWh`;
+  const cost = c.is_free ? "Free" : `${currency} ${fmt(c.cost, 2)}`;
+  const rate = !c.is_free && c.rate_per_kwh != null ? ` (${fmt(c.rate_per_kwh, 2)}/kWh)` : "";
+  const editBtn = !STATIC_MODE && c.id != null
+    ? ` <button class="edit-rate-btn" data-charge-id="${c.id}" ` +
+      `data-loc="${loc.replace(/"/g, "&quot;")}" data-kwh="${c.energy_added_kwh}" ` +
+      `data-rate="${c.rate_per_kwh ?? ""}" data-is-free="${c.is_free}" ` +
+      `title="Fix this session's cost">✎</button>`
+    : "";
+  return `<li class="charge"><span class="charge-main"><span class="charge-loc">${loc}</span>` +
+    `<span class="charge-when">${when}</span></span>` +
+    `<span class="charge-figs">${kwh} · ${cost}${rate}${editBtn}</span></li>`;
 }
 
 // "Fix cost" (✎) on a Recent Charges row: one toggle button covers both
