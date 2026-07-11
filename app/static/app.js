@@ -918,7 +918,8 @@ function chargeRowHtml(c, currency) {
       const sel = active === source ? " selected" : "";
       buttons += ` <button class="quick-rate-btn${sel}" data-charge-id="${c.id}" ` +
         `data-loc="${escLoc}" data-kwh="${c.energy_added_kwh}" data-quick-rate="${r}" ` +
-        `data-source="${source}" data-is-free="${c.is_free}" title="${title}">${icon}</button>`;
+        `data-source="${source}" data-is-free="${c.is_free}" data-start-time="${c.start_time}" ` +
+        `title="${title}">${icon}</button>`;
     }
   }
   return `<li class="charge"><span class="charge-main"><span class="charge-loc">${loc}</span>` +
@@ -926,20 +927,46 @@ function chargeRowHtml(c, currency) {
     `<span class="charge-figs">${kwh} · ${cost}${rate}${buttons}</span></li>`;
 }
 
-function openEditChargeModal(chargeId, loc, kwh, rate, isFree, source) {
+// TNB residential Time-of-Use, all-in per-kWh (energy + network + capacity
+// charges; excludes the flat monthly retail charge and ICPT surcharge,
+// which aren't assignable to one session) — weekday 2pm-10pm is peak,
+// everything else (incl. all of Sat/Sun/public holidays) is off-peak.
+// Parses the year/month/day/hour directly out of the naive "local time"
+// string instead of `new Date(startTimeIso)`, since the timestamp has no
+// timezone offset — letting the browser interpret it in *its own* zone
+// would shift which hour (and sometimes which day) counts as peak whenever
+// the phone checking this isn't in Malaysia's timezone.
+const TNB_TOU_PEAK_RATE = 0.46;
+const TNB_TOU_OFFPEAK_RATE = 0.42;
+function tnbTouRate(startTimeIso) {
+  const m = String(startTimeIso).match(/(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2})/);
+  if (!m) return null;
+  const [, y, mo, d, h] = m;
+  const day = new Date(+y, +mo - 1, +d).getDay();   // 0=Sun..6=Sat
+  const isWeekday = day >= 1 && day <= 5;
+  const isPeak = isWeekday && +h >= 14 && +h < 22;
+  return isPeak ? TNB_TOU_PEAK_RATE : TNB_TOU_OFFPEAK_RATE;
+}
+
+function openEditChargeModal(chargeId, loc, kwh, rate, isFree, source, startTime) {
   const form = document.getElementById("edit-charge-form");
   form.dataset.chargeId = chargeId;
   // Which source (public/home/office/other) this edit is attributed to, so
   // the row's selected-icon indicator follows the pick as soon as this is
   // saved, instead of only reacting to location text.
   form.dataset.source = source;
+  form.dataset.startTime = startTime || "";
   const [icon, label] = SOURCE_META[source] || SOURCE_META.other;
   document.getElementById("edit-charge-title").textContent = `${icon} Fix charging cost — ${label}`;
   const freeCb = document.getElementById("edit-charge-free");
   const rateInput = document.getElementById("edit-charge-rate");
+  const touRow = document.getElementById("edit-charge-tou-row");
+  const touCb = document.getElementById("edit-charge-tou");
   freeCb.checked = isFree;
   rateInput.value = isFree ? "" : (rate ?? "");
   rateInput.disabled = isFree;
+  touCb.checked = false;
+  touRow.classList.toggle("hidden", source !== "home");
   document.getElementById("edit-charge-summary").textContent = `${loc} — ${kwh} kWh`;
   setStatus(document.getElementById("edit-charge-status"), "", "");
   openModal("edit-charge-modal");
@@ -958,7 +985,8 @@ function wireEditRateButtons(root) {
       e.stopPropagation();
       const isOther = btn.dataset.source === "other";
       openEditChargeModal(btn.dataset.chargeId, btn.dataset.loc, btn.dataset.kwh,
-        btn.dataset.quickRate, isOther && btn.dataset.isFree === "true", btn.dataset.source);
+        btn.dataset.quickRate, isOther && btn.dataset.isFree === "true", btn.dataset.source,
+        btn.dataset.startTime);
     });
   });
 }
@@ -968,9 +996,25 @@ function setupEditChargeModal() {
   if (!form) return;
   const freeCb = document.getElementById("edit-charge-free");
   const rateInput = document.getElementById("edit-charge-rate");
+  const touCb = document.getElementById("edit-charge-tou");
   freeCb.addEventListener("change", (e) => {
     rateInput.disabled = e.target.checked;
-    if (e.target.checked) rateInput.value = "";
+    if (e.target.checked) {
+      rateInput.value = "";
+      touCb.checked = false;   // free and a computed rate are mutually exclusive
+    }
+  });
+  // Fills the rate box from TNB's Time-of-Use tariff at this charge's own
+  // start time — a suggestion like the 🌐/🏠/🏢 quick-rate buttons, not a
+  // lock: the field stays editable, and unticking just leaves the number
+  // as-is rather than reverting it.
+  touCb.addEventListener("change", (e) => {
+    if (!e.target.checked) return;
+    const touRate = tnbTouRate(form.dataset.startTime);
+    if (touRate == null) return;
+    freeCb.checked = false;
+    rateInput.disabled = false;
+    rateInput.value = touRate.toFixed(2);
   });
   form.addEventListener("submit", async (e) => {
     e.preventDefault();

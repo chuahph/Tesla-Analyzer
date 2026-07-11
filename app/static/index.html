@@ -666,6 +666,13 @@
           <input type="checkbox" id="edit-charge-free">
           <span class="field-label">Free (FOC) — sets cost to 0</span>
         </label>
+        <!-- Home only: fill the rate box from TNB's residential Time-of-Use
+             tariff at this session's own start time, instead of the flat
+             Home rate — weekday 2pm–10pm is peak, everything else off-peak. -->
+        <label class="field field-checkbox hidden" id="edit-charge-tou-row">
+          <input type="checkbox" id="edit-charge-tou">
+          <span class="field-label">Use TNB Time-of-Use rate (based on when charging started)</span>
+        </label>
         <label class="field">
           <span class="field-label">Actual rate (per kWh)</span>
           <input type="number" id="edit-charge-rate" min="0" step="0.01">
