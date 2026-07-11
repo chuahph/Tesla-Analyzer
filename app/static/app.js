@@ -817,6 +817,19 @@ function quickRate(source, chargeType) {
   return rates[`${source}_${chargeType === "DC" ? "dc" : "ac"}`];
 }
 
+// Which of Public/Home/Office this session's actual rate currently matches
+// (within a cent, to absorb rounding) — a read-only indicator so the row's
+// three source buttons double as a "you're currently priced as X" selector,
+// not just a set of suggestions. null for a free session or a custom rate
+// that doesn't match any of the three (e.g. a promo).
+function matchedSource(c) {
+  if (c.is_free || c.rate_per_kwh == null) return null;
+  for (const source of ["public", "home", "office"]) {
+    if (Math.abs(quickRate(source, c.charge_type) - c.rate_per_kwh) < 0.005) return source;
+  }
+  return null;
+}
+
 // One Recent Charges row — shared by the pinned "last charge" entry and
 // every session in charging.recent_charges, so both look and behave
 // identically (same edit-rate button) instead of two different formats.
@@ -834,15 +847,22 @@ function chargeRowHtml(c, currency) {
       `data-rate="${c.rate_per_kwh ?? ""}" data-is-free="${c.is_free}" ` +
       `title="Fix this session's cost">✎</button>`;
     // A home/office DC charger is unusual but real (an EVSE, a workplace fast
-    // charger), so these apply to both types, not just AC.
-    const homeRate = quickRate("home", c.charge_type);
-    const officeRate = quickRate("office", c.charge_type);
-    buttons += ` <button class="quick-rate-btn" data-charge-id="${c.id}" ` +
-      `data-loc="${escLoc}" data-kwh="${c.energy_added_kwh}" data-quick-rate="${homeRate}" ` +
-      `title="Charged at home? Suggest your Home rate (${fmt(homeRate, 2)}/kWh) — edit in Rates">🏠</button>`;
-    buttons += ` <button class="quick-rate-btn" data-charge-id="${c.id}" ` +
-      `data-loc="${escLoc}" data-kwh="${c.energy_added_kwh}" data-quick-rate="${officeRate}" ` +
-      `title="Charged at the office? Suggest your Office rate (${fmt(officeRate, 2)}/kWh) — edit in Rates">🏢</button>`;
+    // charger), so these apply to both types, not just AC. Whichever one
+    // matches the session's current rate is highlighted — click any of the
+    // three to switch it.
+    const active = matchedSource(c);
+    const sel = (src) => (active === src ? " selected" : "");
+    const sources = [
+      ["public", "🌐", "Public"],
+      ["home", "🏠", "Home"],
+      ["office", "🏢", "Office"],
+    ];
+    for (const [source, icon, label] of sources) {
+      const r = quickRate(source, c.charge_type);
+      buttons += ` <button class="quick-rate-btn${sel(source)}" data-charge-id="${c.id}" ` +
+        `data-loc="${escLoc}" data-kwh="${c.energy_added_kwh}" data-quick-rate="${r}" ` +
+        `title="${label} rate (${fmt(r, 2)}/kWh) — edit in Rates">${icon}</button>`;
+    }
   }
   return `<li class="charge"><span class="charge-main"><span class="charge-loc">${loc}</span>` +
     `<span class="charge-when">${when}</span></span>` +
@@ -937,13 +957,24 @@ function setupRatesModal() {
     office_ac: document.getElementById("rate-office-ac"),
     office_dc: document.getElementById("rate-office-dc"),
   };
-  const sourceSelect = document.getElementById("rate-default-source");
+  const sourceInput = document.getElementById("rate-default-source");
+  const starBtns = form.querySelectorAll(".default-star-btn");
   const statusEl = document.getElementById("rates-status");
+
+  function setDefaultSource(source) {
+    sourceInput.value = source;
+    starBtns.forEach((s) => {
+      const active = s.dataset.source === source;
+      s.classList.toggle("selected", active);
+      s.textContent = active ? "★" : "☆";
+    });
+  }
+  starBtns.forEach((s) => s.addEventListener("click", () => setDefaultSource(s.dataset.source)));
 
   function populate() {
     const prefs = pricingPrefs || PRICING_PREFS_FALLBACK;
     for (const key in fields) fields[key].value = prefs.rates[key] ?? "";
-    sourceSelect.value = prefs.default_source || "public";
+    setDefaultSource(prefs.default_source || "public");
   }
 
   btn.addEventListener("click", async () => {
@@ -967,7 +998,7 @@ function setupRatesModal() {
     try {
       const resp = await fetch("/api/pricing-prefs", {
         method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ rates, default_source: sourceSelect.value }),
+        body: JSON.stringify({ rates, default_source: sourceInput.value }),
       });
       if (!resp.ok) throw new Error((await resp.json()).detail || "Failed");
       pricingPrefs = await resp.json();

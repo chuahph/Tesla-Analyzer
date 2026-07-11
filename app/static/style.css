@@ -441,9 +441,32 @@ canvas { max-height: 260px; }
 .charge-figs { color: var(--muted); font-size: 12.5px; font-variant-numeric: tabular-nums; }
 .edit-rate-btn, .quick-rate-btn {
   border: none; background: none; cursor: pointer; font-size: 11px;
-  opacity: .55; padding: 0 2px; vertical-align: middle;
+  opacity: .55; padding: 0 2px; vertical-align: middle; border-radius: 4px;
 }
 .edit-rate-btn:hover, .quick-rate-btn:hover { opacity: 1; }
+/* The source (Public/Home/Office) this session's current rate matches —
+   a passive indicator, not a toggle: click any button to switch it. */
+.quick-rate-btn.selected {
+  opacity: 1; background: rgba(232,33,39,.15); box-shadow: 0 0 0 1px var(--accent);
+}
+
+/* Rates modal: one visually distinct block per source (Public/Home/Office),
+   each with its own ★ toggle to pick the default instead of a separate
+   dropdown disconnected from the rates it governs. */
+.rate-group {
+  flex-basis: 100%; background: var(--panel-2); border: 1px solid var(--border);
+  border-radius: 10px; padding: 10px 12px; margin-bottom: 4px;
+  display: flex; flex-wrap: wrap; gap: 6px;
+}
+.rate-group-title {
+  flex-basis: 100%; display: flex; align-items: center; justify-content: space-between;
+  font-weight: 600; font-size: 13px; margin-bottom: 4px;
+}
+.default-star-btn {
+  border: none; background: none; cursor: pointer; font-size: 18px;
+  line-height: 1; color: var(--muted); padding: 0 2px;
+}
+.default-star-btn.selected { color: var(--accent); }
 
 #recommendations { display: flex; flex-direction: column; gap: 12px; }
 .rec {
