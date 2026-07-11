@@ -464,7 +464,7 @@ function renderKpis(d) {
           : kpiCard(`Vampire Drain${battpackBtn}`, `${fmt(bal.vampire_kwh, 1)} kWh`, gapInfo, "amber"));
       } else {
         cards.push(kpiCard(`Vampire Drain${battpackBtn}`, vampirePct != null ? "0.0%" : "0 kWh",
-          "no qualifying parked gap (2h+, charge-free) in this window", "amber"));
+          "no qualifying parked gap (1h+, charge-free) in this window", "amber"));
       }
     }
     if (bal) {

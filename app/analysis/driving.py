@@ -11,11 +11,10 @@ from ..models import Charge, Drive
 from . import has_valid_energy, haversine_km, linregress, mean, percentile, safe_div
 
 # Minimum parked gap (hours) between two consecutive drives worth counting as
-# vampire drain. SoC is an integer percent, so a shorter gap's real loss is
-# usually well under one whole point and would just be rounding noise, not a
-# genuine reading — a multi-hour-plus gap is long enough for a real drop to
-# register.
-VAMPIRE_MIN_GAP_HOURS = 2.0
+# vampire drain — long enough to read as "parked/idle," not a quick errand
+# stop or red-light-adjacent pause that's really still part of the day's
+# driving.
+VAMPIRE_MIN_GAP_HOURS = 1.0
 
 
 def vampire_drain(

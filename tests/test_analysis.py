@@ -230,15 +230,16 @@ def test_total_battery_used_measures_each_trip_at_its_best_precision():
     r = analyze([tA, tB], 150.0, 75.0)
     assert r["total_energy_kwh"] == 5.0                     # driving-only sum unchanged
     assert r["total_energy_used_kwh"] == round(5.0 + 3.75, 1)   # 8.8
-    assert r["vampire_drain"]["kwh"] == 0.0                 # the 10:00 gap is < 2h from 8:10
+    assert r["vampire_drain"]["kwh"] == 0.0                 # the 10:00 gap qualifies (1h50m) but SoC didn't move (79 -> 79)
     # Invariant: trip + vampire always reconstructs the headline total.
     assert round(r["trip_energy_used_kwh"] + r["vampire_drain"]["kwh"], 1) == r["total_energy_used_kwh"]
 
 
 def test_vampire_drain_function_thresholds_and_excludes_charged_gaps():
-    """vampire_drain() in isolation: a short gap is noise (below the 2h
-    threshold) and doesn't count; a gap with a charge inside it isn't a pure
-    drain measurement and is skipped entirely, not netted against the charge."""
+    """vampire_drain() in isolation: a short gap (below the threshold) is
+    treated as a normal daytime stop, not idle/standby, and doesn't count;
+    a gap with a charge inside it isn't a pure drain measurement and is
+    skipped entirely, not netted against the charge."""
     from datetime import datetime
 
     from app.analysis.driving import VAMPIRE_MIN_GAP_HOURS, vampire_drain
@@ -249,13 +250,13 @@ def test_vampire_drain_function_thresholds_and_excludes_charged_gaps():
                      duration_min=10.0, avg_speed_kmh=30, max_speed_kmh=45,
                      start_soc=ssoc, end_soc=esoc, energy_used_kwh=0.0, outside_temp_c=28.0)
 
-    assert VAMPIRE_MIN_GAP_HOURS == 2.0
+    assert VAMPIRE_MIN_GAP_HOURS == 1.0
 
-    # A gap just under the threshold: real SoC drop, but too short to trust
-    # as signal rather than integer-rounding noise.
+    # A gap just under the threshold: real SoC drop, but short enough to
+    # read as a normal errand stop rather than genuine parked/idle time.
     short = [
         d(datetime(2026, 7, 4, 8, 0), datetime(2026, 7, 4, 8, 10), 80, 80),
-        d(datetime(2026, 7, 4, 9, 50), datetime(2026, 7, 4, 10, 0), 79, 79),
+        d(datetime(2026, 7, 4, 8, 55), datetime(2026, 7, 4, 9, 5), 79, 79),
     ]
     r = vampire_drain(short, [], 75.0)
     assert r == {"kwh": 0.0, "hours": 0.0, "gaps": 0, "gap_list": []}

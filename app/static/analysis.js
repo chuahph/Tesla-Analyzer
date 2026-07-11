@@ -151,7 +151,7 @@
 
   // Minimum parked gap (hours) between two consecutive drives worth counting
   // as vampire drain — mirror app/analysis/driving.py VAMPIRE_MIN_GAP_HOURS.
-  const VAMPIRE_MIN_GAP_HOURS = 2.0;
+  const VAMPIRE_MIN_GAP_HOURS = 1.0;
 
   // kWh lost while parked between two consecutive drives, with no charge in
   // between — mirror app/analysis/driving.py vampire_drain(). Returns the
