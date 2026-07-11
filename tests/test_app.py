@@ -1095,6 +1095,14 @@ def test_edit_charge_rate_recalculates_cost():
                 c = s.get(Charge, charge_id)
                 assert c.price_source == "home"
 
+            # "other" (the dashboard's 🏷️ Others button — a fully custom
+            # rate, not one of the three configured presets) is also valid.
+            edit_other = client.post("/api/charges/edit-rate", json={
+                "id": charge_id, "price_per_kwh": 0.62, "source": "other",
+            })
+            assert edit_other.status_code == 200
+            assert edit_other.json()["source"] == "other"
+
             # An invalid source is rejected outright.
             assert client.post("/api/charges/edit-rate", json={
                 "id": charge_id, "price_per_kwh": 0.5, "source": "garage",

@@ -1330,10 +1330,10 @@ def edit_charge_rate(payload: dict = Body(...), session: Session = Depends(get_s
     AC/DC default (a promo rate, a pricier one-off public charger, ...).
     0 doubles as marking the session free.
 
-    An optional 'source' (from the dashboard's 🌐/🏠/🏢 quick-rate buttons)
-    is persisted so the row's selected-icon indicator can show it later —
-    without this, a typed custom rate clears any source the charge had, since
-    it no longer matches one of the three presets.
+    An optional 'source' (from the dashboard's 🌐/🏠/🏢/🏷️ quick-rate
+    buttons — Public/Home/Office/Others) is persisted so the row's
+    selected-icon indicator can show it later, and keeps showing it even
+    after rates change, unlike re-deriving it from the numbers each time.
     """
     charge_id = payload.get("id")
     if not isinstance(charge_id, int):
@@ -1345,8 +1345,8 @@ def edit_charge_rate(payload: dict = Body(...), session: Session = Depends(get_s
     if rate < 0:
         raise HTTPException(400, "'price_per_kwh' must be >= 0.")
     source = payload.get("source") or ""
-    if source and source not in pricing_prefs.SOURCES:
-        raise HTTPException(400, "'source' must be 'public', 'home', or 'office'.")
+    if source and source not in pricing_prefs.EDIT_SOURCES:
+        raise HTTPException(400, "'source' must be 'public', 'home', 'office', or 'other'.")
 
     charge = session.get(Charge, charge_id)
     if charge is None:

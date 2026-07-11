@@ -49,6 +49,13 @@ _RATE_KEYS = {
 
 SOURCES = ("public", "home", "office")
 
+# Valid values for a *logged charge's* price_source — SOURCES plus "other"
+# for a fully custom rate (a promo, a one-off price) that isn't one of the
+# three configured presets. "other" is never a valid default/auto-match
+# source (there's no configured rate to auto-price a charge at), so it's
+# kept out of SOURCES and only accepted where a charge is being tagged.
+EDIT_SOURCES = SOURCES + ("other",)
+
 
 def get_rates(session: Session, settings) -> dict[str, float]:
     """All six rates: a DB-saved value if the user has ever saved the Rates

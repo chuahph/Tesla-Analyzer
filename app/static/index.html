@@ -652,12 +652,14 @@
 
   <!-- Modal: fix one already-logged charge's cost — either mark it free
        (e.g. a Tesla Destination Charger) or supply its actual RM/kWh rate
-       (a promo rate, a pricier one-off public charger, ...). One toggle
-       button on each Recent Charges row opens this for both cases. -->
+       (a promo rate, a pricier one-off public charger, ...). Any of the
+       🌐/🏠/🏢/🏷️ buttons on a Recent Charges row opens this; the title
+       is rewritten to say which one so it's always clear what you're
+       editing (Public/Home/Office/Others). -->
   <div id="edit-charge-modal" class="modal hidden">
     <div class="modal-card">
       <button class="modal-close" data-close>×</button>
-      <h2>✎ Fix charging cost</h2>
+      <h2 id="edit-charge-title">Fix charging cost</h2>
       <p class="modal-sub" id="edit-charge-summary"></p>
       <form id="edit-charge-form" class="service-form">
         <label class="field field-checkbox">

@@ -859,16 +859,28 @@ function quickRate(source, chargeType) {
   return rates[`${source}_${chargeType === "DC" ? "dc" : "ac"}`];
 }
 
-// Which of Public/Home/Office this session is currently priced against — a
-// read-only indicator so the row's three source buttons double as a "this
-// is a Home/Office/Public session" selector, not just a set of suggestions.
-// Prefers the backend's persisted c.source (set when the charge was first
-// priced, and updated whenever a 🌐/🏠/🏢 button is used to fix one) so
-// picking a different source and saving moves the highlight there right
-// away. Falls back to guessing from location text only for a charge that
-// predates that column or was given a fully custom rate — location doesn't
-// drift the way a saved rate does, so that's still better than comparing
-// against today's configured numbers.
+// Icon + label for each of the four things a charge can be priced as. The
+// three presets (Public/Home/Office) come with a configured rate; "Others"
+// covers everything else — a promo, a one-off price, or just marking the
+// session Free — and replaces what used to be a separate ✎ button, folded
+// into the same row of icons instead of sitting apart from them.
+const SOURCE_META = {
+  public: ["🌐", "Public"],
+  home: ["🏠", "Home"],
+  office: ["🏢", "Office"],
+  other: ["🏷️", "Others"],
+};
+
+// Which of Public/Home/Office/Others this session is currently priced
+// against — a read-only indicator so the row's four source buttons double
+// as a "this is a Home/Office/Public/Others session" selector, not just a
+// set of suggestions. Prefers the backend's persisted c.source (set when
+// the charge was first priced, and updated whenever one of the four
+// buttons is used to fix one) so picking a different source and saving
+// moves the highlight there right away. Falls back to guessing from
+// location text only for a charge that predates that column — location
+// doesn't drift the way a saved rate does, so that's still better than
+// comparing against today's configured numbers.
 function matchedSource(c) {
   if (c.is_free) return null;
   if (c.source) return c.source;
@@ -880,7 +892,7 @@ function matchedSource(c) {
 
 // One Recent Charges row — shared by the pinned "last charge" entry and
 // every session in charging.recent_charges, so both look and behave
-// identically (same edit-rate button) instead of two different formats.
+// identically (same buttons) instead of two different formats.
 function chargeRowHtml(c, currency) {
   const when = `${tripWhen(c.start_time)} → ${tripEnd(c.start_time, c.end_time)}`;
   const loc = c.location ? `${c.location} · ${c.charge_type}` : c.charge_type;
@@ -890,26 +902,23 @@ function chargeRowHtml(c, currency) {
   let buttons = "";
   if (!STATIC_MODE && c.id != null) {
     const escLoc = loc.replace(/"/g, "&quot;");
-    buttons += ` <button class="edit-rate-btn" data-charge-id="${c.id}" ` +
-      `data-loc="${escLoc}" data-kwh="${c.energy_added_kwh}" ` +
-      `data-rate="${c.rate_per_kwh ?? ""}" data-is-free="${c.is_free}" ` +
-      `title="Fix this session's cost">✎</button>`;
     // A home/office DC charger is unusual but real (an EVSE, a workplace fast
     // charger), so these apply to both types, not just AC. Whichever one
-    // matches the session's current rate is highlighted — click any of the
-    // three to switch it.
+    // matches the session's current price is highlighted in bold color;
+    // click any of the four to switch it (Others opens with the session's
+    // own current rate and Free state, for a fully custom fix).
     const active = matchedSource(c);
-    const sel = (src) => (active === src ? " selected" : "");
-    const sources = [
-      ["public", "🌐", "Public"],
-      ["home", "🏠", "Home"],
-      ["office", "🏢", "Office"],
-    ];
-    for (const [source, icon, label] of sources) {
-      const r = quickRate(source, c.charge_type);
-      buttons += ` <button class="quick-rate-btn${sel(source)}" data-charge-id="${c.id}" ` +
+    for (const source of ["public", "home", "office", "other"]) {
+      const [icon, label] = SOURCE_META[source];
+      const isOther = source === "other";
+      const r = isOther ? (c.rate_per_kwh ?? "") : quickRate(source, c.charge_type);
+      const title = isOther
+        ? "Custom rate, or mark this session Free"
+        : `${label} rate (${fmt(r, 2)}/kWh) — edit in Rates`;
+      const sel = active === source ? " selected" : "";
+      buttons += ` <button class="quick-rate-btn${sel}" data-charge-id="${c.id}" ` +
         `data-loc="${escLoc}" data-kwh="${c.energy_added_kwh}" data-quick-rate="${r}" ` +
-        `data-source="${source}" title="${label} rate (${fmt(r, 2)}/kWh) — edit in Rates">${icon}</button>`;
+        `data-source="${source}" data-is-free="${c.is_free}" title="${title}">${icon}</button>`;
     }
   }
   return `<li class="charge"><span class="charge-main"><span class="charge-loc">${loc}</span>` +
@@ -920,12 +929,12 @@ function chargeRowHtml(c, currency) {
 function openEditChargeModal(chargeId, loc, kwh, rate, isFree, source) {
   const form = document.getElementById("edit-charge-form");
   form.dataset.chargeId = chargeId;
-  // Which source (public/home/office) this edit should be attributed to —
-  // "" for the plain ✎ button (a fully custom rate isn't any of the three,
-  // so it clears whatever source the charge had), or whichever of 🌐/🏠/🏢
-  // was clicked, so the row's selected-icon indicator follows the pick as
-  // soon as this is saved instead of only reacting to location text.
-  form.dataset.source = source || "";
+  // Which source (public/home/office/other) this edit is attributed to, so
+  // the row's selected-icon indicator follows the pick as soon as this is
+  // saved, instead of only reacting to location text.
+  form.dataset.source = source;
+  const [icon, label] = SOURCE_META[source] || SOURCE_META.other;
+  document.getElementById("edit-charge-title").textContent = `${icon} Fix charging cost — ${label}`;
   const freeCb = document.getElementById("edit-charge-free");
   const rateInput = document.getElementById("edit-charge-rate");
   freeCb.checked = isFree;
@@ -936,26 +945,20 @@ function openEditChargeModal(chargeId, loc, kwh, rate, isFree, source) {
   openModal("edit-charge-modal");
 }
 
-// "Fix cost" (✎) on a Recent Charges row: one toggle button covers both
-// ways a session's cost can be wrong — mark it free (FOC, e.g. a Tesla
-// Destination Charger) or supply its actual RM/kWh rate (a promo rate, a
-// pricier one-off public charger, ...). Ticking Free disables the rate
+// One toggle button per source (🌐/🏠/🏢/🏷️) on a Recent Charges row opens
+// the same "Fix charging cost" modal, covering both ways a session's cost
+// can be wrong: mark it free (FOC, e.g. a Tesla Destination Charger) or
+// supply its actual RM/kWh rate. Public/Home/Office pre-fill their
+// configured rate; Others (🏷️) pre-fills the session's own current rate
+// and Free state, for a fully custom fix. Ticking Free disables the rate
 // field, same interaction as the Add Historical Charge form's own toggle.
-// 🌐/🏠/🏢 open the same modal pre-filled with a suggested rate instead of
-// the session's current one — still editable before saving.
 function wireEditRateButtons(root) {
-  root.querySelectorAll(".edit-rate-btn[data-charge-id]").forEach((btn) => {
-    btn.addEventListener("click", (e) => {
-      e.stopPropagation();
-      openEditChargeModal(btn.dataset.chargeId, btn.dataset.loc, btn.dataset.kwh,
-        btn.dataset.rate || "", btn.dataset.isFree === "true", "");
-    });
-  });
   root.querySelectorAll(".quick-rate-btn[data-charge-id]").forEach((btn) => {
     btn.addEventListener("click", (e) => {
       e.stopPropagation();
+      const isOther = btn.dataset.source === "other";
       openEditChargeModal(btn.dataset.chargeId, btn.dataset.loc, btn.dataset.kwh,
-        btn.dataset.quickRate, false, btn.dataset.source);
+        btn.dataset.quickRate, isOther && btn.dataset.isFree === "true", btn.dataset.source);
     });
   });
 }
