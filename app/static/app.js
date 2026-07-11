@@ -859,17 +859,20 @@ function quickRate(source, chargeType) {
   return rates[`${source}_${chargeType === "DC" ? "dc" : "ac"}`];
 }
 
-// Which of Public/Home/Office this session's actual rate currently matches
-// (within a cent, to absorb rounding) — a read-only indicator so the row's
-// three source buttons double as a "you're currently priced as X" selector,
-// not just a set of suggestions. null for a free session or a custom rate
-// that doesn't match any of the three (e.g. a promo).
+// Which of Public/Home/Office this session happened at — a read-only
+// indicator so the row's three source buttons double as a "this was a
+// Home/Office/Public session" selector, not just a set of suggestions.
+// Keyed off location text rather than comparing the session's stored rate
+// to today's configured rates: a charge priced under last month's rate (or
+// a rate that's since been edited) would never match the *current* numbers
+// and would look permanently unselected even though it's obviously a home
+// or office session — location doesn't drift the way a saved rate does.
 function matchedSource(c) {
-  if (c.is_free || c.rate_per_kwh == null) return null;
-  for (const source of ["public", "home", "office"]) {
-    if (Math.abs(quickRate(source, c.charge_type) - c.rate_per_kwh) < 0.005) return source;
-  }
-  return null;
+  if (c.is_free) return null;
+  const loc = (c.location || "").toLowerCase();
+  if (loc.includes("office")) return "office";
+  if (loc.includes("home")) return "home";
+  return "public";
 }
 
 // One Recent Charges row — shared by the pinned "last charge" entry and
