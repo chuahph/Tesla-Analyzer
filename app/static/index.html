@@ -448,6 +448,10 @@
       <!-- Trips / routes / charging spots sit right after battery health,
            before the charts; recommendations move to the very bottom. -->
       <div class="card">
+        <h2>🔁 Top Routes</h2>
+        <ul id="topRoutes" class="plain-list"></ul>
+      </div>
+      <div class="card">
         <h2>🧭 Recent Trips</h2>
         <!-- Work/personal totals for the window; hidden until something's tagged. -->
         <div id="tag-summary" class="tag-summary" style="display:none"></div>
@@ -459,10 +463,6 @@
           <button id="delete-selected" class="btn btn-danger btn-mini hidden">Delete selected</button>
           <button id="cancel-select" class="btn btn-mini hidden">Cancel</button>
         </div>
-      </div>
-      <div class="card">
-        <h2>🔁 Top Routes</h2>
-        <ul id="topRoutes" class="plain-list"></ul>
       </div>
       <div class="card">
         <h2>📍 Recent Charges</h2>
