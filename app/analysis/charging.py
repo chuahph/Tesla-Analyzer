@@ -106,6 +106,8 @@ def analyze(charges: list[Charge], drives: list[Drive] | None = None) -> dict[st
             "start_time": c.start_time.isoformat(timespec="minutes"),
             "end_time": c.end_time.isoformat(timespec="minutes"),
             "charge_type": c.charge_type,
+            "start_soc": c.start_soc,
+            "end_soc": c.end_soc,
             "energy_added_kwh": round(c.energy_added_kwh, 2),
             "cost": round(c.cost, 2),
             # The rate actually applied to this session — editable per-session

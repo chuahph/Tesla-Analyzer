@@ -912,6 +912,8 @@ function chargeRowHtml(c, currency) {
   const when = `${tripWhen(c.start_time)} → ${tripEnd(c.start_time, c.end_time)}`;
   const loc = c.location ? `${c.location} · ${c.charge_type}` : c.charge_type;
   const kwh = `${fmt(c.energy_added_kwh, 1)} kWh`;
+  const soc = c.start_soc != null && c.end_soc != null
+    ? ` · ${fmt(c.start_soc)}% → ${fmt(c.end_soc)}%` : "";
   const cost = c.is_free ? "Free" : `${currency} ${fmt(c.cost, 2)}`;
   const rate = !c.is_free && c.rate_per_kwh != null ? ` (${fmt(c.rate_per_kwh, 2)}/kWh)` : "";
   // In select mode, a checkbox precedes each charge (self-hosted only) and
@@ -945,7 +947,7 @@ function chargeRowHtml(c, currency) {
   return `<li class="charge${chargeSelectMode && c.id != null ? " selectable" : ""}">` +
     `<span class="charge-main">${check}<span class="charge-loc">${loc}</span>` +
     `<span class="charge-when">${when}</span></span>` +
-    `<span class="charge-figs">${kwh} · ${cost}${rate}${buttons}</span></li>`;
+    `<span class="charge-figs">${kwh}${soc} · ${cost}${rate}${buttons}</span></li>`;
 }
 
 // TNB residential Time-of-Use, all-in per-kWh (energy + network + capacity

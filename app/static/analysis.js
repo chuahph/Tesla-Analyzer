@@ -335,6 +335,8 @@
           start_time: c.start_time,
           end_time: c.end_time,
           charge_type: c.charge_type,
+          start_soc: c.start_soc,
+          end_soc: c.end_soc,
           energy_added_kwh: round(c.energy_added_kwh, 2),
           cost: c.cost != null ? round(c.cost, 2) : null,
           rate_per_kwh: c.cost != null && c.energy_added_kwh
