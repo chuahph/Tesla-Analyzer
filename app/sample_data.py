@@ -58,7 +58,13 @@ def generate(session: Session, days: int = 120, seed: int = 42) -> Vehicle:
 
     rated = 148.0  # Wh/km nominal for this model
     capacity = vehicle.battery_capacity_kwh
-    energy_price = 0.90   # RM per kWh (home AC)
+    # Price demo charges at the app's configured AC/DC rates so the demo
+    # dashboard matches what a real synced charge would cost — instead of
+    # drifting from the config defaults (which it silently did before).
+    from .config import get_settings
+    _settings = get_settings()
+    ac_price = _settings.energy_price_ac_kwh or _settings.energy_price_per_kwh
+    dc_price = _settings.energy_price_dc_kwh or _settings.energy_price_per_kwh
 
     soc = 80.0  # start state of charge (%)
     start = datetime.now() - timedelta(days=days)
@@ -132,13 +138,13 @@ def generate(session: Session, days: int = 120, seed: int = 42) -> Vehicle:
                 power = rng.uniform(120, 250)
                 duration = energy_added / power * 60.0 * rng.uniform(1.2, 1.6)
                 location = rng.choice(SUPERCHARGERS)
-                price = 1.25   # RM per kWh (DC / Supercharger)
+                price = dc_price   # RM per kWh (DC / Supercharger)
                 t0 = day.replace(hour=rng.choice([13, 14, 15]), minute=rng.randint(0, 59))
             else:
                 power = rng.uniform(7, 11)
                 duration = energy_added / power * 60.0
                 location = "Home"
-                price = energy_price
+                price = ac_price
                 t0 = day.replace(hour=rng.choice([22, 23]), minute=rng.randint(0, 59))
 
             # Same clamp as drives above — an overnight AC charge on the
