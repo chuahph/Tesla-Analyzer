@@ -801,7 +801,7 @@ function renderLists(d) {
 // show a sane number before the first fetch resolves.
 let pricingPrefs = null;
 const PRICING_PREFS_FALLBACK = {
-  rates: { public_ac: 1.0, public_dc: 1.5, home_ac: 0.44, home_dc: 0.44, office_ac: 0.57, office_dc: 0.57 },
+  rates: { public_ac: 1.10, public_dc: 1.40, home_ac: 0.44, home_dc: 0.44, office_ac: 0.57, office_dc: 0.57 },
   default_source: "public",
   updated_at: null,
 };

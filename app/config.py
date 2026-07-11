@@ -93,12 +93,14 @@ class Settings(BaseSettings):
     # between AC and DC fast charging than time-of-day does, so these take
     # priority over the flat/ToU rate below for completed charging sessions.
     # Set either to 0 to fall back to flat/ToU pricing for that type instead.
-    # Defaults are typical Malaysian *public* charging rates (2026): public
-    # AC ≈ RM1.00/kWh (Gentari/JomCharge/ChargEV), public DC ≈ RM1.50/kWh
-    # (JomCharge ~1.40, Gentari 1.60–1.80). Set AC lower (e.g. 0.57) if you
-    # mostly charge at home on the TNB residential tariff.
-    energy_price_ac_kwh: float = 1.00
-    energy_price_dc_kwh: float = 1.50
+    # Defaults are typical Malaysian *public* charging rates: AC ≈ RM1.10/kWh
+    # (JomCharge/Gentari ~1.10, ChargEV 0.85–1.10), DC ≈ RM1.40/kWh
+    # (JomCharge/Gentari ~1.40, up to 1.80 for non-member Tesla Supercharger)
+    # — reviewed against published operator rates, no live feed exists for
+    # either. Set AC lower (e.g. 0.44) if you mostly charge at home on the
+    # TNB residential tariff — see the Rates page for that.
+    energy_price_ac_kwh: float = 1.10
+    energy_price_dc_kwh: float = 1.40
     # Optional time-of-use pricing: when both are set (> 0), driving/charging
     # cost uses the peak or off-peak rate for each timestamp instead of the
     # flat price above. 0 = disabled (flat rate everywhere).

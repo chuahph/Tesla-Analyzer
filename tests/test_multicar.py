@@ -595,8 +595,8 @@ def test_ac_dc_charge_price_defaults():
     from app.config import Settings
 
     s = Settings()
-    assert s.energy_price_ac_kwh == 1.00   # typical Malaysian public AC rate
-    assert s.energy_price_dc_kwh == 1.50   # typical Malaysian public DC rate
+    assert s.energy_price_ac_kwh == 1.10   # typical Malaysian public AC rate
+    assert s.energy_price_dc_kwh == 1.40   # typical Malaysian public DC rate
 
 
 def test_online_idle_car_read_again_after_just_over_a_minute(monkeypatch):
