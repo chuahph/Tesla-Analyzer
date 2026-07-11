@@ -180,8 +180,10 @@
       if (gapHours < VAMPIRE_MIN_GAP_HOURS) continue;
       while (ci < chargeStarts.length && chargeStarts[ci] < gapStart) ci++;
       if (ci < chargeStarts.length && chargeStarts[ci] < gapEnd) continue;
+      // A qualifying gap counts as parked time even with zero measured
+      // drop — SoC is only integer precision, so a real sub-1% loss over a
+      // few hours doesn't necessarily cross a point (mirror driving.py).
       const dropPct = Math.max((a.end_soc || 0) - (b.start_soc || 0), 0.0);
-      if (dropPct <= 0) continue;
       const kwh = (dropPct / 100.0) * capacity;
       totalKwh += kwh;
       totalHours += gapHours;

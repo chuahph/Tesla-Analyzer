@@ -281,6 +281,36 @@ def test_vampire_drain_function_thresholds_and_excludes_charged_gaps():
     assert r3 == {"kwh": 0.0, "hours": 0.0, "gaps": 0, "gap_list": []}
 
 
+def test_vampire_drain_counts_hours_even_with_zero_measured_drop():
+    """A qualifying (2h+, charge-free) gap counts toward gaps/hours even if
+    SoC happened to read unchanged — SoC is only integer precision, so a
+    real sub-1% loss over a few hours plausibly never crosses a whole point.
+    Reported by a user whose real standby drain is ~0.3-0.4%/day: over a
+    14h gap that's under half a percent, so it very likely wouldn't move
+    the integer SoC reading at all — excluding the gap outright (the old
+    behaviour) would keep silently undercounting "hours parked" for
+    exactly this kind of low-drain car."""
+    from datetime import datetime
+
+    from app.analysis.driving import vampire_drain
+    from app.models import Drive
+
+    def d(start, end, ssoc, esoc):
+        return Drive(id=None, start_time=start, end_time=end, distance_km=3.0,
+                     duration_min=10.0, avg_speed_kmh=30, max_speed_kmh=45,
+                     start_soc=ssoc, end_soc=esoc, energy_used_kwh=0.0, outside_temp_c=28.0)
+
+    zero_drop = [
+        d(datetime(2026, 7, 3, 20, 14), datetime(2026, 7, 3, 20, 14), 80, 80),
+        # 14h16m later, same SoC — no measurable drop, but still parked.
+        d(datetime(2026, 7, 4, 10, 30), datetime(2026, 7, 4, 11, 9), 80, 78),
+    ]
+    r = vampire_drain(zero_drop, [], 75.0)
+    assert r["gaps"] == 1
+    assert r["hours"] == round((14 * 60 + 16) / 60.0, 1)
+    assert r["kwh"] == 0.0  # no measured drop, so no kWh attributed — but the gap still counts
+
+
 def test_vampire_drain_anchor_measures_gap_before_first_drive():
     """Without an anchor, the gap before drives[0] is invisible (nothing
     earlier in the list to pair it with) — exactly the real scenario a user

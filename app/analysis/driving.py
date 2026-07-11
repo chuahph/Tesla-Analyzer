@@ -76,9 +76,15 @@ def vampire_drain(
             ci += 1
         if ci < len(charge_starts) and charge_starts[ci] < gap_end:
             continue  # a charge happened in this gap — not a pure-drain measurement
+        # A qualifying (long enough, charge-free) gap counts as parked time
+        # even if SoC happened to read unchanged — SoC is only integer
+        # precision, so a real sub-1% loss (very plausible over just a few
+        # hours) doesn't necessarily cross a whole point and show up here.
+        # Zero drop just means zero measured *kwh* for this gap, not that it
+        # didn't happen — excluding the gap outright would keep undercounting
+        # "hours parked" for exactly the low-drain cars this feature is
+        # supposed to reassure.
         drop_pct = max(a.end_soc - b.start_soc, 0.0)
-        if drop_pct <= 0:
-            continue
         kwh = drop_pct / 100.0 * capacity_kwh
         total_kwh += kwh
         total_hours += gap_hours
