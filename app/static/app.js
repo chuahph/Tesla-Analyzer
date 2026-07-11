@@ -805,11 +805,53 @@ const PRICING_PREFS_FALLBACK = {
   default_source: "public",
 };
 
+const DEFAULT_SOURCE_ICONS = { public: "🌐", home: "🏠", office: "🏢" };
+const DEFAULT_SOURCE_ORDER = ["public", "home", "office"];
+
+// Reflects the current default source on the quick-switch button beside the
+// Recent Charges title — called after every fetch/save of pricingPrefs so
+// it never drifts from what the Rates modal (or this same button) last set.
+function renderDefaultSourceBtn() {
+  const btn = document.getElementById("btn-default-source");
+  if (!btn) return;
+  const source = (pricingPrefs || PRICING_PREFS_FALLBACK).default_source || "public";
+  btn.textContent = DEFAULT_SOURCE_ICONS[source];
+  const label = source.charAt(0).toUpperCase() + source.slice(1);
+  btn.title = `Default source for new charges: ${label} — tap to change`;
+}
+
 async function loadPricingPrefs() {
   if (STATIC_MODE) return;
   try {
     pricingPrefs = await (await fetch("/api/pricing-prefs")).json();
   } catch (e) { /* keep whatever's cached; callers fall back below */ }
+  renderDefaultSourceBtn();
+}
+
+// Quick-switch button beside "Recent Charges": tap to cycle Public → Home →
+// Office as the default source, without opening the Rates modal — same
+// effect as its ★ toggles, just one tap away from where you'd notice a
+// mispriced session.
+function setupDefaultSourceButton() {
+  const btn = document.getElementById("btn-default-source");
+  if (!btn) return;
+  btn.classList.remove("hidden");
+  renderDefaultSourceBtn();
+  btn.addEventListener("click", async () => {
+    if (!pricingPrefs) await loadPricingPrefs();
+    const prefs = pricingPrefs || PRICING_PREFS_FALLBACK;
+    const current = prefs.default_source || "public";
+    const next = DEFAULT_SOURCE_ORDER[(DEFAULT_SOURCE_ORDER.indexOf(current) + 1) % DEFAULT_SOURCE_ORDER.length];
+    try {
+      const resp = await fetch("/api/pricing-prefs", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ rates: prefs.rates, default_source: next }),
+      });
+      if (!resp.ok) throw new Error((await resp.json()).detail || "Failed");
+      pricingPrefs = await resp.json();
+      renderDefaultSourceBtn();
+    } catch (e) { /* leave the button showing the last-known source */ }
+  });
 }
 
 function quickRate(source, chargeType) {
@@ -1002,8 +1044,9 @@ function setupRatesModal() {
       });
       if (!resp.ok) throw new Error((await resp.json()).detail || "Failed");
       pricingPrefs = await resp.json();
+      renderDefaultSourceBtn();
       setStatus(statusEl, "Saved.", "ok");
-      load();   // refresh Recent Charges so 🏠/🏢 suggestions reflect the new rates
+      load();   // refresh Recent Charges so 🌐/🏠/🏢 suggestions reflect the new rates
     } catch (err) {
       setStatus(statusEl, err.message, "err");
     }
@@ -2171,6 +2214,7 @@ function setupAddChargeButton() {
 if (!STATIC_MODE) setupAddChargeButton();
 if (!STATIC_MODE) setupEditChargeModal();
 if (!STATIC_MODE) setupRatesModal();
+if (!STATIC_MODE) setupDefaultSourceButton();
 if (!STATIC_MODE) loadPricingPrefs();
 
 // Wire the static chart "!" explainers once (dynamic panels wire themselves).
