@@ -432,20 +432,26 @@ function renderKpis(d) {
     }
     // Vampire Drain: standby loss in parked gaps between drives (sentry
     // mode, preconditioning, plain self-discharge) — see
-    // driving_analysis.vampire_drain(). A rate (%/day), not just the raw
-    // kWh, since "2% lost" means very different things over 3 hours vs 3
-    // days — the rate is what's actually comparable across windows. Always
-    // shown (like every other KPI here) rather than disappearing when
-    // nothing qualified this window — a nightly-charging driver legitimately
-    // sees "0" most windows (the overnight gap always has a charge in it,
-    // so it's excluded), which reads as "measured, found none" rather than
-    // "this feature isn't working."
+    // driving_analysis.vampire_drain(). Two % figures, both derived
+    // client-side from fields already on bal: share is "of all the battery
+    // used this window, how much was idle vs. driving" (mirrors Battery
+    // Used's "(X trip + Y idle)" split); rate is %/day, since "2% lost"
+    // means very different things over 3 hours vs 3 days and is what's
+    // actually comparable across windows. Always shown (like every other
+    // KPI here) rather than disappearing when nothing qualified this window
+    // — a nightly-charging driver legitimately sees "0" most windows (the
+    // overnight gap always has a charge in it, so it's excluded), which
+    // reads as "measured, found none" rather than "this feature isn't
+    // working."
     if (bal) {
+      const usedTotal = (bal.trip_kwh || 0) + (bal.vampire_kwh || 0);
+      const share = usedTotal > 0
+        ? `${fmt(bal.vampire_kwh / usedTotal * 100, 1)}% of battery used · ` : "";
       const rate = bal.vampire_avg_pct_per_day != null
         ? `≈${fmt(bal.vampire_avg_pct_per_day, 2)}%/day avg · ` : "";
       cards.push(bal.vampire_gaps > 0
         ? kpiCard("Vampire Drain", `${fmt(bal.vampire_kwh, 1)} kWh`,
-            `${rate}${bal.vampire_gaps} parked gap${bal.vampire_gaps === 1 ? "" : "s"} · ${fmt(bal.vampire_hours, 0)} h parked`,
+            `${share}${rate}${bal.vampire_gaps} parked gap${bal.vampire_gaps === 1 ? "" : "s"} · ${fmt(bal.vampire_hours, 0)} h parked`,
             "amber")
         : kpiCard("Vampire Drain", "0 kWh",
             "no qualifying parked gap (2h+, charge-free) in this window", "amber"));
