@@ -94,13 +94,18 @@ def generate(session: Session, days: int = 120, seed: int = 42) -> Vehicle:
                 # Too low to drive — skip and let a charge happen first.
                 break
 
+            # The final day's late-evening events can roll past midnight into
+            # what's now "today" — clamp so nothing seeded ever claims to end
+            # after the real current moment (breaks any "X <= now" check).
+            end_time = min(t0 + timedelta(minutes=duration), datetime.now())
+            duration_min = (end_time - t0).total_seconds() / 60.0
             session.add(
                 Drive(
                     vehicle_id=vehicle.id,
                     start_time=t0,
-                    end_time=t0 + timedelta(minutes=duration),
+                    end_time=end_time,
                     distance_km=round(distance, 1),
-                    duration_min=round(duration, 1),
+                    duration_min=round(duration_min, 1),
                     start_soc=round(soc, 1),
                     end_soc=round(end_soc, 1),
                     energy_used_kwh=round(energy, 2),
@@ -136,12 +141,16 @@ def generate(session: Session, days: int = 120, seed: int = 42) -> Vehicle:
                 price = energy_price
                 t0 = day.replace(hour=rng.choice([22, 23]), minute=rng.randint(0, 59))
 
+            # Same clamp as drives above — an overnight AC charge on the
+            # final day can otherwise end after the real current moment.
+            end_time = min(t0 + timedelta(minutes=duration), datetime.now())
+            duration_min = (end_time - t0).total_seconds() / 60.0
             session.add(
                 Charge(
                     vehicle_id=vehicle.id,
                     start_time=t0,
-                    end_time=t0 + timedelta(minutes=duration),
-                    duration_min=round(duration, 1),
+                    end_time=end_time,
+                    duration_min=round(duration_min, 1),
                     start_soc=round(soc, 1),
                     end_soc=float(target),
                     energy_added_kwh=round(energy_added, 2),
