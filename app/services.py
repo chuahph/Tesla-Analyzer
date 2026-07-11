@@ -59,6 +59,29 @@ def delete_drives(session, ids: list[int]) -> int:
     return n
 
 
+def clear_charges(session) -> int:
+    """Delete every recorded charging session (trips/battery data kept).
+
+    Also drops any half-open charge state so the next sync starts a fresh
+    session instead of closing one anchored in the deleted history.
+    """
+    n = session.query(Charge).count()
+    session.execute(delete(Charge))
+    session.commit()
+    state.put(session, state.OPEN_CHARGE_KEY, "")
+    return n
+
+
+def delete_charges(session, ids: list[int]) -> int:
+    """Delete only the charges whose ids are given (trips/battery kept)."""
+    if not ids:
+        return 0
+    n = session.query(Charge).filter(Charge.id.in_(ids)).count()
+    session.execute(delete(Charge).where(Charge.id.in_(ids)))
+    session.commit()
+    return n
+
+
 # Fixed quick-tag categories the UI cycles through; the column itself accepts
 # any short string, so a future free-text tag entered another way still
 # round-trips fine — this is just what the one-tap cycle offers.

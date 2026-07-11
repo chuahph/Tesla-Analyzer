@@ -372,6 +372,24 @@ def delete_drives(payload: dict = Body(...), session: Session = Depends(get_sess
     return {"deleted_drives": deleted}
 
 
+@router.post("/data/clear-charges")
+def clear_charges(session: Session = Depends(get_session)):
+    """Wipe the charging history for a clean start (trips/battery data kept).
+
+    Sits behind the passcode gate like every other endpoint.
+    """
+    deleted = services.clear_charges(session)
+    return {"deleted_charges": deleted}
+
+
+@router.post("/data/delete-charges")
+def delete_charges(payload: dict = Body(...), session: Session = Depends(get_session)):
+    """Delete only the selected charges (by id); trips/battery kept."""
+    ids = [int(i) for i in (payload.get("ids") or []) if str(i).lstrip("-").isdigit()]
+    deleted = services.delete_charges(session, ids)
+    return {"deleted_charges": deleted}
+
+
 @router.post("/data/tag-drive")
 def tag_drive(payload: dict = Body(...), session: Session = Depends(get_session)):
     """Set (or clear) a single trip's work/personal/... category."""

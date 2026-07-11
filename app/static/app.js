@@ -789,9 +789,16 @@ function renderLists(d) {
     // time, so "already included" isn't guaranteed to mean "first row").
     const lc = d.last_charge;
     const pinned = lc && !recentCharges.some((c) => c.id === lc.id) ? [lc] : [];
-    const rows = [...pinned, ...recentCharges].map((c) => chargeRowHtml(c, d.currency)).join("");
+    const allCharges = [...pinned, ...recentCharges];
+    const rows = allCharges.map((c) => chargeRowHtml(c, d.currency)).join("");
     chargesEl.innerHTML = rows || '<li class="empty">No charging sessions in this window</li>';
     wireEditRateButtons(chargesEl);
+    // Only offer the charge tools when there's a real (self-hosted) DB behind them.
+    const chargeTools = document.getElementById("charge-tools");
+    if (chargeTools) {
+      chargeTools.classList.toggle("hidden", STATIC_MODE || !allCharges.some((c) => c.id != null));
+    }
+    updateDeleteSelectedChargesLabel();
   }
 }
 
@@ -907,8 +914,13 @@ function chargeRowHtml(c, currency) {
   const kwh = `${fmt(c.energy_added_kwh, 1)} kWh`;
   const cost = c.is_free ? "Free" : `${currency} ${fmt(c.cost, 2)}`;
   const rate = !c.is_free && c.rate_per_kwh != null ? ` (${fmt(c.rate_per_kwh, 2)}/kWh)` : "";
+  // In select mode, a checkbox precedes each charge (self-hosted only) and
+  // the pricing buttons step aside — same trade as the trip list's own
+  // select mode, so a stray tap can't fire a price edit while deleting.
+  const check = chargeSelectMode && c.id != null
+    ? `<input type="checkbox" class="charge-check" value="${c.id}" aria-label="Select charge" />` : "";
   let buttons = "";
-  if (!STATIC_MODE && c.id != null) {
+  if (!STATIC_MODE && c.id != null && !chargeSelectMode) {
     const escLoc = loc.replace(/"/g, "&quot;");
     // A home/office DC charger is unusual but real (an EVSE, a workplace fast
     // charger), so these apply to both types, not just AC. Whichever one
@@ -930,7 +942,8 @@ function chargeRowHtml(c, currency) {
         `title="${title}">${icon}</button>`;
     }
   }
-  return `<li class="charge"><span class="charge-main"><span class="charge-loc">${loc}</span>` +
+  return `<li class="charge${chargeSelectMode && c.id != null ? " selectable" : ""}">` +
+    `<span class="charge-main">${check}<span class="charge-loc">${loc}</span>` +
     `<span class="charge-when">${when}</span></span>` +
     `<span class="charge-figs">${kwh} · ${cost}${rate}${buttons}</span></li>`;
 }
@@ -1568,6 +1581,82 @@ if (clearTripsBtn) {
     } finally {
       clearTripsBtn.disabled = false;
       clearTripsBtn.textContent = "🗑 Clear all";
+    }
+  });
+}
+
+// Charge tools (self-hosted only): same select/delete/clear-all pattern as
+// the trip tools above, just wired against Recent Charges instead. Trip and
+// battery-health history are always kept.
+let chargeSelectMode = false;
+
+function setChargeSelectMode(on) {
+  chargeSelectMode = on;
+  const show = (id, vis) => {
+    const el = document.getElementById(id);
+    if (el) el.classList.toggle("hidden", !vis);
+  };
+  show("select-charges", !on);
+  show("clear-charges", !on);
+  show("delete-selected-charges", on);
+  show("cancel-select-charges", on);
+  renderLists(lastData || {});
+}
+
+function updateDeleteSelectedChargesLabel() {
+  const btn = document.getElementById("delete-selected-charges");
+  if (!btn) return;
+  const n = document.querySelectorAll(".charge-check:checked").length;
+  btn.textContent = n ? `Delete selected (${n})` : "Delete selected";
+  btn.disabled = !n;
+}
+
+document.getElementById("recentCharges")?.addEventListener("change", (e) => {
+  if (e.target.classList.contains("charge-check")) updateDeleteSelectedChargesLabel();
+});
+
+document.getElementById("select-charges")?.addEventListener("click", () => setChargeSelectMode(true));
+document.getElementById("cancel-select-charges")?.addEventListener("click", () => setChargeSelectMode(false));
+
+document.getElementById("delete-selected-charges")?.addEventListener("click", async () => {
+  const ids = [...document.querySelectorAll(".charge-check:checked")].map((c) => +c.value);
+  if (!ids.length) return;
+  if (!confirm(`Delete ${ids.length} selected charging session(s)?\n\nThis cannot be undone.`)) return;
+  const btn = document.getElementById("delete-selected-charges");
+  btn.disabled = true; btn.textContent = "Deleting…";
+  try {
+    const res = await fetch("/api/data/delete-charges", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ids }),
+    });
+    const body = await res.json();
+    if (!res.ok) throw new Error(body.detail || "Could not delete charges");
+    chargeSelectMode = false;
+    setChargeSelectMode(false);
+    await load();
+  } catch (e) {
+    alert(e.message);
+    btn.disabled = false;
+  }
+});
+
+const clearChargesBtn = document.getElementById("clear-charges");
+if (clearChargesBtn) {
+  clearChargesBtn.addEventListener("click", async () => {
+    if (!confirm("Delete ALL recorded charging sessions?\n\nTrip and battery-health " +
+                 "history are kept. This cannot be undone.")) return;
+    clearChargesBtn.disabled = true;
+    clearChargesBtn.textContent = "Clearing…";
+    try {
+      const res = await fetch("/api/data/clear-charges", { method: "POST" });
+      const body = await res.json();
+      if (!res.ok) throw new Error(body.detail || "Could not clear charges");
+      await load();
+    } catch (e) {
+      alert(e.message);
+    } finally {
+      clearChargesBtn.disabled = false;
+      clearChargesBtn.textContent = "🗑 Clear all";
     }
   });
 }

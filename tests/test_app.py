@@ -871,6 +871,65 @@ def test_delete_selected_drives_by_id():
         seed_demo_if_empty()
 
 
+def test_clear_charges_keeps_drives_and_respects_gate():
+    settings = get_settings()
+    old = settings.app_passcode
+    settings.app_passcode = "secret123"
+    try:
+        with TestClient(app) as client:  # startup seeds demo data
+            # Locked without the passcode cookie.
+            assert client.post("/api/data/clear-charges").status_code == 401
+            client.post("/login", data={"passcode": "secret123"})
+            before = client.get("/api/summary?days=730").json()
+            resp = client.post("/api/data/clear-charges")
+            assert resp.status_code == 200
+            assert resp.json()["deleted_charges"] == before["charging"]["total_sessions"]
+            after = client.get("/api/summary?days=730").json()
+            assert after["charging"]["available"] is False       # charges gone
+            assert after["driving"]["total_drives"] == before["driving"]["total_drives"]
+    finally:
+        settings.app_passcode = old
+        # Re-seed the demo data so later tests see the usual dataset.
+        from app import services
+        from app.database import SessionLocal
+
+        with SessionLocal() as s:
+            services._wipe(s)
+        from app.collector import seed_demo_if_empty
+
+        seed_demo_if_empty()
+
+
+def test_delete_selected_charges_by_id():
+    from app.database import SessionLocal
+    from app.models import Charge
+
+    settings = get_settings()
+    old = settings.app_passcode
+    settings.app_passcode = ""
+    try:
+        with TestClient(app) as client:  # startup seeds demo data
+            with SessionLocal() as s:
+                ids = [c.id for c in s.query(Charge).order_by(Charge.id).limit(3).all()]
+                total = s.query(Charge).count()
+            resp = client.post("/api/data/delete-charges", json={"ids": ids})
+            assert resp.status_code == 200
+            assert resp.json()["deleted_charges"] == len(ids)
+            with SessionLocal() as s:
+                assert s.query(Charge).count() == total - len(ids)
+                assert not s.query(Charge).filter(Charge.id.in_(ids)).count()
+            # Empty / no ids deletes nothing.
+            assert client.post("/api/data/delete-charges", json={"ids": []}).json()["deleted_charges"] == 0
+    finally:
+        settings.app_passcode = old
+        from app import services
+        from app.database import SessionLocal as SL
+        with SL() as s:
+            services._wipe(s)
+        from app.collector import seed_demo_if_empty
+        seed_demo_if_empty()
+
+
 def test_tag_drive_endpoint():
     from app.database import SessionLocal
     from app.models import Drive
