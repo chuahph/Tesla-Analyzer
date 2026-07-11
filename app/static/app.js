@@ -781,6 +781,24 @@ function renderLists(d) {
   }
 }
 
+// TNB residential Time-of-Use, all-in per-kWh (energy + network + capacity
+// charges; excludes the flat monthly retail charge and ICPT surcharge,
+// which aren't assignable to one session) — weekday 2pm-10pm is peak,
+// everything else (incl. all of Sat/Sun/public holidays) is off-peak, same
+// shape as tariff.price_at() server-side. A quick-fill suggestion, not an
+// authoritative bill calculation — Home still lets you adjust before saving.
+const TNB_TOU_OFFPEAK_RATE = 0.42;   // 24.43 + 4.55 + 12.85 sen, rounded
+const TNB_TOU_PEAK_RATE = 0.46;      // 28.52 + 4.55 + 12.85 sen, rounded
+const OFFICE_CHARGE_RATE = 0.57;
+
+function tnbTouRate(startTimeIso) {
+  const d = new Date(startTimeIso);
+  const isWeekend = d.getDay() === 0 || d.getDay() === 6;
+  const hour = d.getHours();
+  const isPeak = !isWeekend && hour >= 14 && hour < 22;
+  return isPeak ? TNB_TOU_PEAK_RATE : TNB_TOU_OFFPEAK_RATE;
+}
+
 // One Recent Charges row — shared by the pinned "last charge" entry and
 // every session in charging.recent_charges, so both look and behave
 // identically (same edit-rate button) instead of two different formats.
@@ -790,15 +808,41 @@ function chargeRowHtml(c, currency) {
   const kwh = `${fmt(c.energy_added_kwh, 1)} kWh`;
   const cost = c.is_free ? "Free" : `${currency} ${fmt(c.cost, 2)}`;
   const rate = !c.is_free && c.rate_per_kwh != null ? ` (${fmt(c.rate_per_kwh, 2)}/kWh)` : "";
-  const editBtn = !STATIC_MODE && c.id != null
-    ? ` <button class="edit-rate-btn" data-charge-id="${c.id}" ` +
-      `data-loc="${loc.replace(/"/g, "&quot;")}" data-kwh="${c.energy_added_kwh}" ` +
+  let buttons = "";
+  if (!STATIC_MODE && c.id != null) {
+    const escLoc = loc.replace(/"/g, "&quot;");
+    buttons += ` <button class="edit-rate-btn" data-charge-id="${c.id}" ` +
+      `data-loc="${escLoc}" data-kwh="${c.energy_added_kwh}" ` +
       `data-rate="${c.rate_per_kwh ?? ""}" data-is-free="${c.is_free}" ` +
-      `title="Fix this session's cost">✎</button>`
-    : "";
+      `title="Fix this session's cost">✎</button>`;
+    // Home/Office quick-rate shortcuts only make sense for AC charging — DC
+    // fast charging never happens at either.
+    if (c.charge_type === "AC") {
+      const homeRate = tnbTouRate(c.start_time);
+      buttons += ` <button class="quick-rate-btn" data-charge-id="${c.id}" ` +
+        `data-loc="${escLoc}" data-kwh="${c.energy_added_kwh}" data-quick-rate="${homeRate}" ` +
+        `title="Charged at home? Suggest the TNB Time-of-Use rate for this time (${fmt(homeRate, 2)}/kWh)">🏠</button>`;
+      buttons += ` <button class="quick-rate-btn" data-charge-id="${c.id}" ` +
+        `data-loc="${escLoc}" data-kwh="${c.energy_added_kwh}" data-quick-rate="${OFFICE_CHARGE_RATE}" ` +
+        `title="Charged at the office? Suggest RM${fmt(OFFICE_CHARGE_RATE, 2)}/kWh">🏢</button>`;
+    }
+  }
   return `<li class="charge"><span class="charge-main"><span class="charge-loc">${loc}</span>` +
     `<span class="charge-when">${when}</span></span>` +
-    `<span class="charge-figs">${kwh} · ${cost}${rate}${editBtn}</span></li>`;
+    `<span class="charge-figs">${kwh} · ${cost}${rate}${buttons}</span></li>`;
+}
+
+function openEditChargeModal(chargeId, loc, kwh, rate, isFree) {
+  const form = document.getElementById("edit-charge-form");
+  form.dataset.chargeId = chargeId;
+  const freeCb = document.getElementById("edit-charge-free");
+  const rateInput = document.getElementById("edit-charge-rate");
+  freeCb.checked = isFree;
+  rateInput.value = isFree ? "" : (rate ?? "");
+  rateInput.disabled = isFree;
+  document.getElementById("edit-charge-summary").textContent = `${loc} — ${kwh} kWh`;
+  setStatus(document.getElementById("edit-charge-status"), "", "");
+  openModal("edit-charge-modal");
 }
 
 // "Fix cost" (✎) on a Recent Charges row: one toggle button covers both
@@ -806,22 +850,21 @@ function chargeRowHtml(c, currency) {
 // Destination Charger) or supply its actual RM/kWh rate (a promo rate, a
 // pricier one-off public charger, ...). Ticking Free disables the rate
 // field, same interaction as the Add Historical Charge form's own toggle.
+// Home (🏠) / Office (🏢) open the same modal pre-filled with a suggested
+// rate instead of the session's current one — still editable before saving.
 function wireEditRateButtons(root) {
   root.querySelectorAll(".edit-rate-btn[data-charge-id]").forEach((btn) => {
     btn.addEventListener("click", (e) => {
       e.stopPropagation();
-      const form = document.getElementById("edit-charge-form");
-      form.dataset.chargeId = btn.dataset.chargeId;
-      const isFree = btn.dataset.isFree === "true";
-      const freeCb = document.getElementById("edit-charge-free");
-      const rateInput = document.getElementById("edit-charge-rate");
-      freeCb.checked = isFree;
-      rateInput.value = isFree ? "" : (btn.dataset.rate || "");
-      rateInput.disabled = isFree;
-      document.getElementById("edit-charge-summary").textContent =
-        `${btn.dataset.loc} — ${btn.dataset.kwh} kWh`;
-      setStatus(document.getElementById("edit-charge-status"), "", "");
-      openModal("edit-charge-modal");
+      openEditChargeModal(btn.dataset.chargeId, btn.dataset.loc, btn.dataset.kwh,
+        btn.dataset.rate || "", btn.dataset.isFree === "true");
+    });
+  });
+  root.querySelectorAll(".quick-rate-btn[data-charge-id]").forEach((btn) => {
+    btn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      openEditChargeModal(btn.dataset.chargeId, btn.dataset.loc, btn.dataset.kwh,
+        btn.dataset.quickRate, false);
     });
   });
 }
