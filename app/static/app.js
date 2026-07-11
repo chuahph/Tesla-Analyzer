@@ -421,7 +421,7 @@ function renderKpis(d) {
       ? ` (${fmt(bal.trip_kwh, 1)} trip + ${fmt(bal.vampire_kwh, 1)} idle)` : "";
     if (bal && bal.used_kwh != null) {
       if (bal.used_pct != null) {
-        cards.push(kpiCard("Battery Used", fmt(bal.used_pct, 1) + "%",
+        cards.push(kpiCard("Battery Used", fmt(bal.used_pct, 1, true) + "%",
           `${fmt(bal.used_kwh, 1)} kWh${split} of ${fmt(bal.full_charge_kwh, 1)} kWh full pack (after degradation)`,
           "amber"));
       } else {
@@ -437,9 +437,13 @@ function renderKpis(d) {
     // same footing and add up (trip % + vampire % = Battery Used %). Only
     // shown when Battery Used's own % is (since-charge window); other
     // windows fall back to the raw kWh, matching Battery Used's own
-    // fallback. Rate is %/day, since "2% lost" means very different things
-    // over 3 hours vs 3 days and is what's actually comparable across
-    // windows. Card itself is always shown (like every other KPI here)
+    // fallback. The %/day figure is a separate thing: a projected daily
+    // PACE (this gap's drain rate extrapolated to 24h), not this gap's
+    // actual share of the pack — a short gap can have a high %/day pace
+    // while only costing a small actual % (e.g. 1.4 kWh over 7h parked is
+    // "only" 2.0% of the pack, but at that same rate a full day parked
+    // would cost ≈6.9%), so it's labelled "pace" and kept separate from the
+    // headline %. Card itself is always shown (like every other KPI here)
     // rather than disappearing when nothing qualified this window — a
     // nightly-charging driver legitimately sees "0" most windows (the
     // overnight gap always has a charge in it, so it's excluded), which
@@ -448,15 +452,17 @@ function renderKpis(d) {
     if (bal) {
       const vampirePct = bal.used_pct != null && bal.full_charge_kwh > 0
         ? bal.vampire_kwh / bal.full_charge_kwh * 100 : null;
-      const rate = bal.vampire_avg_pct_per_day != null
-        ? `≈${fmt(bal.vampire_avg_pct_per_day, 2)}%/day avg · ` : "";
+      const pace = bal.vampire_avg_pct_per_day != null
+        ? ` · ≈${fmt(bal.vampire_avg_pct_per_day, 2)}%/day pace` : "";
       if (bal.vampire_gaps > 0) {
-        const detail = `${rate}${bal.vampire_gaps} parked gap${bal.vampire_gaps === 1 ? "" : "s"} · ${fmt(bal.vampire_hours, 0)} h parked`;
+        const gapInfo = `${bal.vampire_gaps} parked gap${bal.vampire_gaps === 1 ? "" : "s"} · ${fmt(bal.vampire_hours, 0)} h parked${pace}`;
         cards.push(vampirePct != null
-          ? kpiCard("Vampire Drain", fmt(vampirePct, 1) + "%", `${fmt(bal.vampire_kwh, 1)} kWh · ${detail}`, "amber")
-          : kpiCard("Vampire Drain", `${fmt(bal.vampire_kwh, 1)} kWh`, detail, "amber"));
+          ? kpiCard("Vampire Drain", fmt(vampirePct, 1, true) + "%",
+              `${fmt(bal.vampire_kwh, 1)} kWh of ${fmt(bal.full_charge_kwh, 1)} kWh full pack (after degradation) · ${gapInfo}`,
+              "amber")
+          : kpiCard("Vampire Drain", `${fmt(bal.vampire_kwh, 1)} kWh`, gapInfo, "amber"));
       } else {
-        cards.push(kpiCard("Vampire Drain", vampirePct != null ? "0%" : "0 kWh",
+        cards.push(kpiCard("Vampire Drain", vampirePct != null ? "0.0%" : "0 kWh",
           "no qualifying parked gap (2h+, charge-free) in this window", "amber"));
       }
     }
