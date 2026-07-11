@@ -2085,8 +2085,29 @@ if (reportBtn) reportBtn.addEventListener("click", () => {
 // it next to index.html (relative scope under the project subpath).
 if ("serviceWorker" in navigator) {
   const swUrl = STATIC_MODE ? "./sw.js" : "/sw.js";
+  // Auto-reload once when a NEW service worker takes over, so a fresh deploy's
+  // updated JS/CSS is actually applied instead of the bundle already running
+  // in this tab. Without this, a new version installs and activates in the
+  // background but the *visible* page keeps its old code until the user
+  // happens to reload again by hand — which is exactly why an updated KPI can
+  // look "not deployed" long after it shipped. Only armed when a controller
+  // already exists (i.e. this is an update, not the first-ever install, where
+  // claiming control is normal and no reload is wanted), and guarded so it can
+  // fire at most one reload, never a loop.
+  if (navigator.serviceWorker.controller) {
+    let reloading = false;
+    navigator.serviceWorker.addEventListener("controllerchange", () => {
+      if (reloading) return;
+      reloading = true;
+      window.location.reload();
+    });
+  }
   window.addEventListener("load", () =>
-    navigator.serviceWorker.register(swUrl).catch(() => {})
+    // update() forces an immediate check for a new sw.js rather than waiting
+    // for the browser's own periodic poll, so updates land on the next load.
+    navigator.serviceWorker.register(swUrl)
+      .then((reg) => reg.update().catch(() => {}))
+      .catch(() => {})
   );
 }
 
