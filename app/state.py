@@ -37,6 +37,17 @@ LOW_SOC_NOTIFIED_KEY = "low_soc_notified"  # "1" once the low-SoC push has fired
 # above the threshold, so plugging in and charging re-arms it instead of
 # firing once ever.
 
+# Charging price preferences (see pricing_prefs.py) — user-editable RM/kWh
+# rates per source × charger type, saved from the dashboard's Rates page
+# without touching .env or restarting.
+PRICE_PUBLIC_AC_KEY = "price_public_ac"
+PRICE_PUBLIC_DC_KEY = "price_public_dc"
+PRICE_HOME_AC_KEY = "price_home_ac"
+PRICE_HOME_DC_KEY = "price_home_dc"
+PRICE_OFFICE_AC_KEY = "price_office_ac"
+PRICE_OFFICE_DC_KEY = "price_office_dc"
+DEFAULT_PRICE_SOURCE_KEY = "default_price_source"  # "public" | "home" | "office"
+
 
 def get(session: Session, key: str, default: str = "") -> str:
     row = session.get(Setting, key)

@@ -540,6 +540,7 @@
       <button id="btn-places" class="btn hidden">📍 Places</button>
       <button id="btn-service" class="btn hidden">🔧 Service &amp; Tyres</button>
       <button id="btn-add-charge" class="btn hidden">🔌 Add Historical Charge</button>
+      <button id="btn-rates" class="btn hidden">💰 Rates</button>
     </section>
   </main>
 
@@ -668,6 +669,61 @@
         <button type="submit" class="btn btn-accent">Save</button>
       </form>
       <span id="edit-charge-status" class="status"></span>
+    </div>
+  </div>
+
+  <!-- Modal: one place to set Public/Home/Office AC & DC rates and which
+       source new charges assume by default. A new charge auto-matches
+       Home/Office by GPS (within ~2km of a Place named "Home"/"Office"),
+       falling back to this default only when nothing matches — either way
+       the ✎/🏠/🏢 buttons on a Recent Charges row can still correct it. -->
+  <div id="rates-modal" class="modal hidden">
+    <div class="modal-card">
+      <button class="modal-close" data-close>×</button>
+      <h2>💰 Charging rates</h2>
+      <p class="modal-sub">
+        Set your real AC/DC rates for Public, Home and Office charging. A new
+        charge within ~2km of a Place you've named "Home" or "Office" prices
+        itself automatically; anything else uses your Default source below.
+        Not retroactive — use ✎ or 🏠/🏢 on a Recent Charges row to fix a
+        session already logged.
+      </p>
+      <form id="rates-form" class="service-form">
+        <label class="field">
+          <span class="field-label">Default source (used when a charge's location doesn't match Home/Office)</span>
+          <select id="rate-default-source">
+            <option value="public">Public</option>
+            <option value="home">Home</option>
+            <option value="office">Office</option>
+          </select>
+        </label>
+        <label class="field">
+          <span class="field-label">Public AC rate (per kWh)</span>
+          <input type="number" id="rate-public-ac" min="0" step="0.01">
+        </label>
+        <label class="field">
+          <span class="field-label">Public DC rate (per kWh)</span>
+          <input type="number" id="rate-public-dc" min="0" step="0.01">
+        </label>
+        <label class="field">
+          <span class="field-label">Home AC rate (per kWh)</span>
+          <input type="number" id="rate-home-ac" min="0" step="0.01">
+        </label>
+        <label class="field">
+          <span class="field-label">Home DC rate (per kWh)</span>
+          <input type="number" id="rate-home-dc" min="0" step="0.01">
+        </label>
+        <label class="field">
+          <span class="field-label">Office AC rate (per kWh)</span>
+          <input type="number" id="rate-office-ac" min="0" step="0.01">
+        </label>
+        <label class="field">
+          <span class="field-label">Office DC rate (per kWh)</span>
+          <input type="number" id="rate-office-dc" min="0" step="0.01">
+        </label>
+        <button type="submit" class="btn btn-accent">Save</button>
+      </form>
+      <span id="rates-status" class="status"></span>
     </div>
   </div>
 

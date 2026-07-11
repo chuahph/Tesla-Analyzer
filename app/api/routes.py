@@ -9,7 +9,7 @@ from fastapi.responses import RedirectResponse
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from .. import auth, notifications, services, state, tariff, vin as vin_mod
+from .. import auth, notifications, pricing_prefs, services, state, tariff, vin as vin_mod
 from ..analysis import haversine_km
 from ..analysis import narrative as narrative_engine
 from ..analysis import battery as battery_analysis
@@ -777,11 +777,13 @@ def _process_vehicle(
         if cap:
             old = vehicle.battery_capacity_kwh or 75.0
             vehicle.battery_capacity_kwh = round(0.8 * old + 0.2 * cap, 1)
-        c["location"] = _place(c.get("location", ""), session)
+        raw_coords = c.get("location", "")
+        c["location"] = _place(raw_coords, session)
         # Re-price at the session's own start time and actual charger type —
-        # AC/DC rates take priority when configured, falling back to the
-        # flat/ToU rate for whichever type has none set.
-        rate = tariff.charge_price_at(settings, c["charge_type"] == "DC", c["start_time"])
+        # auto-matched Home/Office location (or the saved default source)
+        # takes priority; Public falls back to flat/ToU pricing.
+        rate = pricing_prefs.rate_for_charge(
+            session, settings, raw_coords, c["charge_type"] == "DC", c["start_time"])
         c["cost"] = round(c["energy_added_kwh"] * rate, 2)
         session.add(Charge(vehicle_id=vehicle.id, **c))
         notifications.notify(
@@ -992,8 +994,10 @@ def sync_now(wake: bool = Query(False), session: Session = Depends(get_session))
                         if cap:
                             old_cap = vehicle_row.battery_capacity_kwh or 75.0
                             vehicle_row.battery_capacity_kwh = round(0.8 * old_cap + 0.2 * cap, 1)
-                        c["location"] = _place(c.get("location", ""), session)
-                        rate = tariff.charge_price_at(settings, c["charge_type"] == "DC", c["start_time"])
+                        raw_coords = c.get("location", "")
+                        c["location"] = _place(raw_coords, session)
+                        rate = pricing_prefs.rate_for_charge(
+                            session, settings, raw_coords, c["charge_type"] == "DC", c["start_time"])
                         c["cost"] = round(c["energy_added_kwh"] * rate, 2)
                         session.add(Charge(vehicle_id=vehicle_row.id, **c))
                         session.commit()
@@ -1296,7 +1300,7 @@ def add_manual_charge(payload: dict = Body(...), session: Session = Depends(get_
     if is_free:
         cost = 0.0
     elif cost is None:
-        rate = tariff.charge_price_at(settings, charge_type == "DC", start_time)
+        rate = pricing_prefs.rate_for_charge(session, settings, location, charge_type == "DC", start_time)
         cost = round(energy_added_kwh * rate, 2)
 
     vehicle = _first_vehicle(session)
@@ -1336,6 +1340,50 @@ def edit_charge_rate(payload: dict = Body(...), session: Session = Depends(get_s
     charge.is_free = rate == 0
     session.commit()
     return {"id": charge.id, "cost": charge.cost, "is_free": charge.is_free}
+
+
+@router.get("/pricing-prefs")
+def get_pricing_prefs(session: Session = Depends(get_session)):
+    """Current Public/Home/Office AC+DC rates and which source new charges
+    default to — the Rates page reads this to populate its form."""
+    settings = get_settings()
+    return {
+        "rates": pricing_prefs.get_rates(session, settings),
+        "default_source": pricing_prefs.get_default_source(session),
+        "match_radius_km": pricing_prefs.HOME_OFFICE_MATCH_RADIUS_KM,
+    }
+
+
+@router.post("/pricing-prefs")
+def save_pricing_prefs(payload: dict = Body(...), session: Session = Depends(get_session)):
+    """Save the Rates page. Only affects charges priced from now on — never
+    retroactive (use the ✎ edit-rate button on a session to fix one already
+    logged)."""
+    raw_rates = payload.get("rates") or {}
+    if not isinstance(raw_rates, dict):
+        raise HTTPException(400, "'rates' must be an object.")
+    rates: dict[str, float] = {}
+    for key in ("public_ac", "public_dc", "home_ac", "home_dc", "office_ac", "office_dc"):
+        if key not in raw_rates or raw_rates[key] in (None, ""):
+            continue
+        try:
+            value = float(raw_rates[key])
+        except (TypeError, ValueError):
+            raise HTTPException(400, f"'{key}' must be a number.")
+        if value < 0:
+            raise HTTPException(400, f"'{key}' must be >= 0.")
+        rates[key] = value
+
+    default_source = str(payload.get("default_source") or "public")
+    if default_source not in pricing_prefs.SOURCES:
+        raise HTTPException(400, "'default_source' must be 'public', 'home', or 'office'.")
+
+    pricing_prefs.save(session, rates, default_source)
+    settings = get_settings()
+    return {
+        "rates": pricing_prefs.get_rates(session, settings),
+        "default_source": pricing_prefs.get_default_source(session),
+    }
 
 
 @router.get("/export")

@@ -794,16 +794,27 @@ function renderLists(d) {
 // everything else (incl. all of Sat/Sun/public holidays) is off-peak, same
 // shape as tariff.price_at() server-side. A quick-fill suggestion, not an
 // authoritative bill calculation — Home still lets you adjust before saving.
-const TNB_TOU_OFFPEAK_RATE = 0.42;   // 24.43 + 4.55 + 12.85 sen, rounded
-const TNB_TOU_PEAK_RATE = 0.46;      // 28.52 + 4.55 + 12.85 sen, rounded
-const OFFICE_CHARGE_RATE = 0.57;
+// Cached /api/pricing-prefs response (Public/Home/Office x AC/DC rates +
+// default source) — fetched once by loadPricingPrefs(), read by both the
+// Recent Charges row buttons and the Rates modal. Falls back to the same
+// defaults the backend seeds a fresh install with, so the buttons still
+// show a sane number before the first fetch resolves.
+let pricingPrefs = null;
+const PRICING_PREFS_FALLBACK = {
+  rates: { public_ac: 1.0, public_dc: 1.5, home_ac: 0.44, home_dc: 0.44, office_ac: 0.57, office_dc: 0.57 },
+  default_source: "public",
+};
 
-function tnbTouRate(startTimeIso) {
-  const d = new Date(startTimeIso);
-  const isWeekend = d.getDay() === 0 || d.getDay() === 6;
-  const hour = d.getHours();
-  const isPeak = !isWeekend && hour >= 14 && hour < 22;
-  return isPeak ? TNB_TOU_PEAK_RATE : TNB_TOU_OFFPEAK_RATE;
+async function loadPricingPrefs() {
+  if (STATIC_MODE) return;
+  try {
+    pricingPrefs = await (await fetch("/api/pricing-prefs")).json();
+  } catch (e) { /* keep whatever's cached; callers fall back below */ }
+}
+
+function quickRate(source, chargeType) {
+  const rates = (pricingPrefs || PRICING_PREFS_FALLBACK).rates;
+  return rates[`${source}_${chargeType === "DC" ? "dc" : "ac"}`];
 }
 
 // One Recent Charges row — shared by the pinned "last charge" entry and
@@ -822,17 +833,16 @@ function chargeRowHtml(c, currency) {
       `data-loc="${escLoc}" data-kwh="${c.energy_added_kwh}" ` +
       `data-rate="${c.rate_per_kwh ?? ""}" data-is-free="${c.is_free}" ` +
       `title="Fix this session's cost">✎</button>`;
-    // Home/Office quick-rate shortcuts only make sense for AC charging — DC
-    // fast charging never happens at either.
-    if (c.charge_type === "AC") {
-      const homeRate = tnbTouRate(c.start_time);
-      buttons += ` <button class="quick-rate-btn" data-charge-id="${c.id}" ` +
-        `data-loc="${escLoc}" data-kwh="${c.energy_added_kwh}" data-quick-rate="${homeRate}" ` +
-        `title="Charged at home? Suggest the TNB Time-of-Use rate for this time (${fmt(homeRate, 2)}/kWh)">🏠</button>`;
-      buttons += ` <button class="quick-rate-btn" data-charge-id="${c.id}" ` +
-        `data-loc="${escLoc}" data-kwh="${c.energy_added_kwh}" data-quick-rate="${OFFICE_CHARGE_RATE}" ` +
-        `title="Charged at the office? Suggest RM${fmt(OFFICE_CHARGE_RATE, 2)}/kWh">🏢</button>`;
-    }
+    // A home/office DC charger is unusual but real (an EVSE, a workplace fast
+    // charger), so these apply to both types, not just AC.
+    const homeRate = quickRate("home", c.charge_type);
+    const officeRate = quickRate("office", c.charge_type);
+    buttons += ` <button class="quick-rate-btn" data-charge-id="${c.id}" ` +
+      `data-loc="${escLoc}" data-kwh="${c.energy_added_kwh}" data-quick-rate="${homeRate}" ` +
+      `title="Charged at home? Suggest your Home rate (${fmt(homeRate, 2)}/kWh) — edit in Rates">🏠</button>`;
+    buttons += ` <button class="quick-rate-btn" data-charge-id="${c.id}" ` +
+      `data-loc="${escLoc}" data-kwh="${c.energy_added_kwh}" data-quick-rate="${officeRate}" ` +
+      `title="Charged at the office? Suggest your Office rate (${fmt(officeRate, 2)}/kWh) — edit in Rates">🏢</button>`;
   }
   return `<li class="charge"><span class="charge-main"><span class="charge-loc">${loc}</span>` +
     `<span class="charge-when">${when}</span></span>` +
@@ -905,6 +915,64 @@ function setupEditChargeModal() {
       if (!resp.ok) throw new Error((await resp.json()).detail || "Failed");
       closeModal("edit-charge-modal");
       load();   // refresh KPIs/lists so the corrected cost shows immediately
+    } catch (err) {
+      setStatus(statusEl, err.message, "err");
+    }
+  });
+}
+
+// "Rates" page: set Public/Home/Office AC & DC rates and the default source
+// new charges fall back to when their location doesn't auto-match Home/Office.
+function setupRatesModal() {
+  const btn = document.getElementById("btn-rates");
+  const form = document.getElementById("rates-form");
+  if (!btn || !form) return;
+  btn.classList.remove("hidden");
+
+  const fields = {
+    public_ac: document.getElementById("rate-public-ac"),
+    public_dc: document.getElementById("rate-public-dc"),
+    home_ac: document.getElementById("rate-home-ac"),
+    home_dc: document.getElementById("rate-home-dc"),
+    office_ac: document.getElementById("rate-office-ac"),
+    office_dc: document.getElementById("rate-office-dc"),
+  };
+  const sourceSelect = document.getElementById("rate-default-source");
+  const statusEl = document.getElementById("rates-status");
+
+  function populate() {
+    const prefs = pricingPrefs || PRICING_PREFS_FALLBACK;
+    for (const key in fields) fields[key].value = prefs.rates[key] ?? "";
+    sourceSelect.value = prefs.default_source || "public";
+  }
+
+  btn.addEventListener("click", async () => {
+    setStatus(statusEl, "", "");
+    if (!pricingPrefs) await loadPricingPrefs();
+    populate();
+    openModal("rates-modal");
+  });
+
+  form.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const rates = {};
+    for (const key in fields) {
+      const v = parseFloat(fields[key].value);
+      if (!Number.isFinite(v) || v < 0) {
+        setStatus(statusEl, "Enter a rate of 0 or more for every field.", "err");
+        return;
+      }
+      rates[key] = v;
+    }
+    try {
+      const resp = await fetch("/api/pricing-prefs", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ rates, default_source: sourceSelect.value }),
+      });
+      if (!resp.ok) throw new Error((await resp.json()).detail || "Failed");
+      pricingPrefs = await resp.json();
+      setStatus(statusEl, "Saved.", "ok");
+      load();   // refresh Recent Charges so 🏠/🏢 suggestions reflect the new rates
     } catch (err) {
       setStatus(statusEl, err.message, "err");
     }
@@ -2071,6 +2139,8 @@ function setupAddChargeButton() {
 }
 if (!STATIC_MODE) setupAddChargeButton();
 if (!STATIC_MODE) setupEditChargeModal();
+if (!STATIC_MODE) setupRatesModal();
+if (!STATIC_MODE) loadPricingPrefs();
 
 // Wire the static chart "!" explainers once (dynamic panels wire themselves).
 wireInfoButtons(document);
