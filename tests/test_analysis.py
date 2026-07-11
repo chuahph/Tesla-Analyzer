@@ -203,6 +203,38 @@ def test_total_energy_used_includes_parking_drain():
     assert r["vampire_drain"]["hours"] == 11.8   # 8:10 -> 20:00
 
 
+def test_total_battery_used_measures_each_trip_at_its_best_precision():
+    """total_energy_used_kwh sums each trip's OWN best measurement (fractional
+    range energy, or the integer SoC drop when a range gap logged ~0 kWh) —
+    not a window-level max(sum_frac, sum_int), which drops a data-gap trip's
+    real drain whenever another trip's fractional energy is the larger sum."""
+    from datetime import datetime
+
+    from app.analysis.driving import analyze
+    from app.models import Drive
+
+    def d(hour, ssoc, esoc, kwh):
+        return Drive(start_time=datetime(2026, 7, 4, hour, 0),
+                     end_time=datetime(2026, 7, 4, hour, 10),
+                     distance_km=20.0, duration_min=10.0, avg_speed_kmh=40,
+                     max_speed_kmh=60, start_soc=ssoc, end_soc=esoc,
+                     energy_used_kwh=kwh, outside_temp_c=25.0)
+
+    # Trip A best by its measured energy (5.0 kWh > its 1% = 0.75 kWh drop);
+    # Trip B is a range-gap trip (0 kWh logged) that plainly dropped 5% =
+    # 3.75 kWh. True total drawn = 5.0 + 3.75 = 8.75 kWh. A window-level
+    # max(sum_frac=5.0, sum_int=4.5) would report only 5.0, losing trip B's
+    # whole 3.75 kWh.
+    tA = d(8, 80, 79, 5.0)
+    tB = d(10, 79, 74, 0.0)
+    r = analyze([tA, tB], 150.0, 75.0)
+    assert r["total_energy_kwh"] == 5.0                     # driving-only sum unchanged
+    assert r["total_energy_used_kwh"] == round(5.0 + 3.75, 1)   # 8.8
+    assert r["vampire_drain"]["kwh"] == 0.0                 # the 10:00 gap is < 2h from 8:10
+    # Invariant: trip + vampire always reconstructs the headline total.
+    assert round(r["trip_energy_used_kwh"] + r["vampire_drain"]["kwh"], 1) == r["total_energy_used_kwh"]
+
+
 def test_vampire_drain_function_thresholds_and_excludes_charged_gaps():
     """vampire_drain() in isolation: a short gap is noise (below the 2h
     threshold) and doesn't count; a gap with a charge inside it isn't a pure

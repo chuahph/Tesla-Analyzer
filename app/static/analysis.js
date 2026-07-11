@@ -231,13 +231,17 @@
     // "kWh used" is the real total drawn from the pack.
     const vampire = vampireDrain(ordered, charges, capacity);
     let vampireKwh = vampire.kwh;
-    // Floor for the *trip* portion only: raw per-trip integer SoC deltas,
-    // which only ever adds signal a trip's own (possibly gap-ridden) energy
-    // reading missed. Applied before vampire is added on top — see
-    // app/analysis/driving.py analyze() for the full rationale.
-    const socFromInt = drives.reduce((a, d) => a + Math.max((d.start_soc || 0) - (d.end_soc || 0), 0), 0);
-    const floorKwh = capacity ? (socFromInt / 100.0 * capacity) : 0;
-    const tripEnergyUsedRaw = capacity ? Math.max(totKwh, floorKwh) : totKwh;
+    // Trip drain measured PER DRIVE at its best-available precision: each
+    // drive's own fractional energy_used_kwh (range-delta, sub-1% precise) OR
+    // its integer SoC drop × capacity, whichever is larger — taken per drive
+    // then summed, NOT max(sum_frac, sum_int) at the window level, which
+    // silently drops a data-gap trip's real drain whenever another trip's
+    // fractional energy is the larger window sum. See app/analysis/driving.py
+    // analyze() for the full rationale.
+    const tripKwh = (d) => Math.max(
+      d.energy_used_kwh,
+      capacity ? Math.max((d.start_soc || 0) - (d.end_soc || 0), 0) / 100.0 * capacity : 0);
+    const tripEnergyUsedRaw = drives.reduce((a, d) => a + tripKwh(d), 0);
     const totalEnergyUsedRaw = tripEnergyUsedRaw + vampireKwh;
     const socUsed = capacity ? (totalEnergyUsedRaw / capacity * 100.0) : 0;
     // Real-world range yardstick: km per 1% of battery used, from the same

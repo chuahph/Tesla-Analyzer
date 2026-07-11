@@ -309,19 +309,24 @@ def analyze(drives: list[Drive], rated_wh_per_km: float = 150.0,
     # total drawn from the pack, not just what happened while actually moving.
     vampire = vampire_drain(ordered, charges, capacity_kwh)
     vampire_kwh = vampire["kwh"]
-    # Floor for the *trip* portion only: raw per-trip integer SoC deltas,
-    # which only ever adds signal a trip's own (possibly gap-ridden) energy
-    # reading missed — several sub-1% trips can each round to a 1-point drop
-    # while measuring ~0 kWh, understating total_energy the same way a single
-    # data-gap trip would. Applied before vampire is added on top (not to the
-    # combined total), so the floor can never leak into — or be masked by —
-    # the separately-measured between-drive figure.
-    soc_from_int = sum(max(d.start_soc - d.end_soc, 0.0) for d in drives)
-    floor_kwh = (soc_from_int / 100.0 * capacity_kwh) if capacity_kwh else 0.0
+    # Trip drain, measured PER DRIVE at its best-available precision: each
+    # drive's own fractional energy_used_kwh (from its range delta — sub-1%
+    # precise) OR its integer SoC drop × capacity, whichever is larger. A
+    # range-reading gap logs ~0 kWh for a trip that plainly dropped whole SoC
+    # points, so the integer drop rescues that trip; a normal trip's
+    # fractional energy exceeds its coarse integer drop, so that wins. Taking
+    # the max PER DRIVE and then summing (not max(sum_frac, sum_int) at the
+    # window level) is what keeps this accurate: a window-level max silently
+    # drops a data-gap trip's real drain whenever *another* trip's fractional
+    # energy happens to be the larger of the two window sums — the gap trip's
+    # SoC points then never surface at all.
+    def _trip_kwh(d: Drive) -> float:
+        integer_kwh = max(d.start_soc - d.end_soc, 0.0) / 100.0 * capacity_kwh if capacity_kwh else 0.0
+        return max(d.energy_used_kwh, integer_kwh)
     # Unrounded throughout — km_per_soc and soc_used are sensitive to error
     # introduced by rounding an intermediate sum, so only the values actually
     # returned below get rounded, at the very end.
-    trip_energy_used_raw = max(total_energy, floor_kwh) if capacity_kwh else total_energy
+    trip_energy_used_raw = sum(_trip_kwh(d) for d in drives)
     # Gross battery energy drawn over the window — the real drain from the
     # pack, so it *includes* parking, climate-while-stopped and overnight
     # vampire loss, not just the driving energy summed per trip. (Per-trip
