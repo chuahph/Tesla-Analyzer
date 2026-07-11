@@ -182,12 +182,13 @@ Once linked, run `python run.py collect` to log new drives/charges over time.
    ```
 
    Charging cost defaults to separate AC/DC rates instead of the flat price
-   above — real bills usually differ a lot between AC/home and DC fast
-   charging. Set either to 0 to fall back to the flat/ToU rate for that type.
+   above — real bills usually differ a lot between AC and DC fast charging.
+   The defaults are typical Malaysian public rates (2026); set either to 0
+   to fall back to the flat/ToU rate for that type.
 
    ```env
-   ENERGY_PRICE_AC_KWH=0.90   # RM/kWh, AC / home charging
-   ENERGY_PRICE_DC_KWH=1.13   # RM/kWh, DC fast charging
+   ENERGY_PRICE_AC_KWH=1.00   # RM/kWh, public AC (lower, ~0.57, if home)
+   ENERGY_PRICE_DC_KWH=1.50   # RM/kWh, public DC fast charging
    ```
 
    A genuinely free AC session (e.g. a Tesla Destination Charger) has no
