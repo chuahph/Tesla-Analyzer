@@ -736,15 +736,16 @@
       };
     }
 
-    // Battery Used: % only makes sense for the since-charge window, where
-    // the pack held exactly lastCharge.battery_kwh_at_end when the window
-    // began — mirrors app/api/routes.py's summary(). Any other window can
-    // span several charge/discharge cycles with no single "starting
-    // battery" to divide by, so only the raw kWh is reported.
+    // Battery Used: % of the full (degradation-adjusted) pack, same basis as
+    // every other %-of-battery figure (soc_used_pct) so they're all directly
+    // comparable and summable — mirrors app/api/routes.py's summary(). Still
+    // only shown for the since-charge window: any other window can span
+    // several charge/discharge cycles with cumulative use exceeding one
+    // pack, so only the raw kWh is reported there.
     const usedKwh = driving.available ? (driving.total_energy_used_kwh || 0) : 0;
     let usedPct = null;
-    if (windowLabel === "since last charge" && lastCharge && lastCharge.battery_kwh_at_end > 0) {
-      usedPct = round(usedKwh / lastCharge.battery_kwh_at_end * 100, 1);
+    if (windowLabel === "since last charge" && capacity > 0) {
+      usedPct = round(usedKwh / capacity * 100, 1);
     }
     const vd = driving.available ? (driving.vampire_drain || {}) : {};
     const batteryBalance = {

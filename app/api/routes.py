@@ -1860,21 +1860,19 @@ def summary(
             settings.currency,
         )
 
-    # Battery Used: how much of what was actually available got used. For the
-    # since-charge window this is well-defined — the pack held exactly
-    # last_charge_summary["battery_kwh_at_end"] the moment the window began,
-    # so % = used ÷ that (not ÷ the full pack — a charge that topped up to
-    # 60% left far less than a full pack to draw from, and dividing by 100%
-    # capacity understates how much of what you actually had is gone). Any
-    # other window (7/30/90 days, ...) has no single "starting battery"
-    # figure — it can span several charge/discharge cycles — so only the
-    # accumulated kWh is shown there, no %.
+    # Battery Used: % of the full (degradation-adjusted) pack, same basis as
+    # every other %-of-battery figure in the app (km/1% Battery's
+    # soc_used_pct, each trip's own soc_used_pct) so they're all directly
+    # comparable and summable. Still only shown for the since-charge window —
+    # any other window (7/30/90 days, ...) can span several charge/discharge
+    # cycles with cumulative use exceeding one pack, so only the raw kWh is
+    # shown there.
     full_charge_kwh = capacity_kwh
     charged_kwh = charging.get("total_energy_kwh") or 0.0
     used_kwh = (driving.get("total_energy_used_kwh") or 0.0) if driving.get("available") else 0.0
     used_pct = None
-    if since_charge and last_charge_summary and last_charge_summary["battery_kwh_at_end"] > 0:
-        used_pct = round(used_kwh / last_charge_summary["battery_kwh_at_end"] * 100.0, 1)
+    if since_charge and capacity_kwh > 0:
+        used_pct = round(used_kwh / capacity_kwh * 100.0, 1)
     # Battery Balance: how much charge is actually left in the pack right now
     # (the latest logged SoC reading) — the "fuel gauge", not a derived delta.
     current_soc = session.scalar(

@@ -422,10 +422,10 @@ def test_last_charge_used_since_kwh_sums_drives_after_it_independent_of_window()
 def test_summary_reports_battery_balance():
     """battery_balance always reports the window's raw kWh used; % is only
     included for the since-charge window (a plain days-based window can span
-    several charge/discharge cycles, with no single "starting battery" to
-    divide by) and is computed against what was actually in the pack when
-    the last charge ended (end SoC × capacity), not the full pack — a charge
-    that only topped up partway shouldn't understate the drain."""
+    several charge/discharge cycles, with no single well-defined "used out
+    of how much" to divide by) and is computed against the full
+    degradation-adjusted pack (full_charge_kwh) — the same basis as every
+    other %-of-battery figure in the app, so they're directly comparable."""
     settings = get_settings()
     old = settings.app_passcode
     settings.app_passcode = ""
@@ -449,11 +449,10 @@ def test_summary_reports_battery_balance():
 
             since_body = client.get("/api/summary?since_charge=true").json()
             since_bal = since_body["battery_balance"]
-            lc = since_body["last_charge"]
-            if lc and lc["battery_kwh_at_end"] > 0:
+            if since_bal["full_charge_kwh"] > 0:
                 assert since_bal["used_pct"] is not None
                 assert round(since_bal["used_pct"], 1) == round(
-                    since_bal["used_kwh"] / lc["battery_kwh_at_end"] * 100.0, 1)
+                    since_bal["used_kwh"] / since_bal["full_charge_kwh"] * 100.0, 1)
     finally:
         settings.app_passcode = old
 
