@@ -419,13 +419,18 @@ function renderKpis(d) {
     // sums to bal.used_kwh exactly (see driving_analysis.analyze()).
     const split = bal && bal.vampire_kwh > 0
       ? ` (${fmt(bal.trip_kwh, 1)} trip + ${fmt(bal.vampire_kwh, 1)} idle)` : "";
+    // "!" info popover explaining how full_charge_kwh (shared by Battery
+    // Used and Vampire Drain below) accounts for degradation — see
+    // _usable_capacity() in routes.py for the actual priority order.
+    const battpackBtn = bal
+      ? `<button class="info-btn" data-info="battpack-info" title="How is the battery pack capacity calculated?">!</button>` : "";
     if (bal && bal.used_kwh != null) {
       if (bal.used_pct != null) {
-        cards.push(kpiCard("Battery Used", fmt(bal.used_pct, 1, true) + "%",
-          `${fmt(bal.used_kwh, 1)} kWh${split} of ${fmt(bal.full_charge_kwh, 1)} kWh full pack (after degradation)`,
+        cards.push(kpiCard(`Battery Used${battpackBtn}`, fmt(bal.used_pct, 1, true) + "%",
+          `${fmt(bal.used_kwh, 1)} kWh${split} of ${fmt(bal.full_charge_kwh, 1)} kWh full pack`,
           "amber"));
       } else {
-        cards.push(kpiCard("Battery Used", `${fmt(bal.used_kwh, 1)} kWh`,
+        cards.push(kpiCard(`Battery Used${battpackBtn}`, `${fmt(bal.used_kwh, 1)} kWh`,
           `${split ? split.trim() + " · " : ""}% not shown — window may span more than one charge`, "amber"));
       }
     }
@@ -437,34 +442,40 @@ function renderKpis(d) {
     // same footing and add up (trip % + vampire % = Battery Used %). Only
     // shown when Battery Used's own % is (since-charge window); other
     // windows fall back to the raw kWh, matching Battery Used's own
-    // fallback. The %/day figure is a separate thing: a projected daily
-    // PACE (this gap's drain rate extrapolated to 24h), not this gap's
-    // actual share of the pack — a short gap can have a high %/day pace
-    // while only costing a small actual % (e.g. 1.4 kWh over 7h parked is
-    // "only" 2.0% of the pack, but at that same rate a full day parked
-    // would cost ≈6.9%), so it's labelled "pace" and kept separate from the
-    // headline %. Card itself is always shown (like every other KPI here)
-    // rather than disappearing when nothing qualified this window — a
-    // nightly-charging driver legitimately sees "0" most windows (the
-    // overnight gap always has a charge in it, so it's excluded), which
-    // reads as "measured, found none" rather than "this feature isn't
-    // working."
+    // fallback. No %/day rate — a typical gap is only a few hours, and
+    // linearly projecting that to 24h overstates a full day's real drain
+    // (most of a day is near-zero deep-sleep, punctuated by short bursts
+    // like sentry triggers or cabin cooling — a short gap is disproportionately
+    // likely to catch one of those bursts, not represent the day as a whole).
+    // Card itself is always shown (like every other KPI here) rather than
+    // disappearing when nothing qualified this window — a nightly-charging
+    // driver legitimately sees "0" most windows (the overnight gap always
+    // has a charge in it, so it's excluded), which reads as "measured,
+    // found none" rather than "this feature isn't working."
     if (bal) {
       const vampirePct = bal.used_pct != null && bal.full_charge_kwh > 0
         ? bal.vampire_kwh / bal.full_charge_kwh * 100 : null;
-      const pace = bal.vampire_avg_pct_per_day != null
-        ? ` · ≈${fmt(bal.vampire_avg_pct_per_day, 2)}%/day pace` : "";
       if (bal.vampire_gaps > 0) {
-        const gapInfo = `${bal.vampire_gaps} parked gap${bal.vampire_gaps === 1 ? "" : "s"} · ${fmt(bal.vampire_hours, 0)} h parked${pace}`;
+        const gapInfo = `${bal.vampire_gaps} parked gap${bal.vampire_gaps === 1 ? "" : "s"} · ${fmt(bal.vampire_hours, 0)} h parked`;
         cards.push(vampirePct != null
-          ? kpiCard("Vampire Drain", fmt(vampirePct, 1, true) + "%",
-              `${fmt(bal.vampire_kwh, 1)} kWh of ${fmt(bal.full_charge_kwh, 1)} kWh full pack (after degradation) · ${gapInfo}`,
+          ? kpiCard(`Vampire Drain${battpackBtn}`, fmt(vampirePct, 1, true) + "%",
+              `${fmt(bal.vampire_kwh, 1)} kWh of ${fmt(bal.full_charge_kwh, 1)} kWh full pack · ${gapInfo}`,
               "amber")
-          : kpiCard("Vampire Drain", `${fmt(bal.vampire_kwh, 1)} kWh`, gapInfo, "amber"));
+          : kpiCard(`Vampire Drain${battpackBtn}`, `${fmt(bal.vampire_kwh, 1)} kWh`, gapInfo, "amber"));
       } else {
-        cards.push(kpiCard("Vampire Drain", vampirePct != null ? "0.0%" : "0 kWh",
+        cards.push(kpiCard(`Vampire Drain${battpackBtn}`, vampirePct != null ? "0.0%" : "0 kWh",
           "no qualifying parked gap (2h+, charge-free) in this window", "amber"));
       }
+    }
+    if (bal) {
+      const v = d.vehicle || {};
+      cards.push(`<div id="battpack-info" class="info-pop hidden kpi-info">` +
+        `Full pack (<strong>${fmt(bal.full_charge_kwh, 1)} kWh</strong>) is the pack's usable ` +
+        `capacity adjusted for real-world battery degradation` +
+        `${v.capacity_source ? ` <span class="muted">(${v.capacity_source})</span>` : ""}: ` +
+        `a direct measurement from your own charging sessions when there's enough history, ` +
+        `otherwise your car's spec capacity reduced by its estimated degradation % — see the ` +
+        `Battery Health card below for that %.</div>`);
     }
     // TCO: what this window's distance would have cost in an equivalent
     // petrol car, vs. what it actually cost to charge. Hidden entirely
@@ -512,6 +523,7 @@ function renderKpis(d) {
     return;
   }
   document.getElementById("kpis").innerHTML = cards.join("");
+  wireInfoButtons(document.getElementById("kpis"));
 }
 
 function barConfig(labels, data, label, color, unit) {

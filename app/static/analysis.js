@@ -160,7 +160,7 @@
   function vampireDrain(drives, charges, capacity) {
     const ordered = [...drives].sort((a, b) => new Date(a.start_time) - new Date(b.start_time));
     if (ordered.length < 2 || !capacity) {
-      return { kwh: 0.0, hours: 0.0, gaps: 0, avg_pct_per_day: null, gapList: [] };
+      return { kwh: 0.0, hours: 0.0, gaps: 0, gapList: [] };
     }
     const chargeStarts = (charges || [])
       .map((c) => new Date(c.start_time).getTime())
@@ -185,11 +185,9 @@
         hours: round(gapHours, 1), kwh: round(kwh, 2), pct: round(dropPct, 1),
       });
     }
-    const avgPctPerDay = totalHours > 0
-      ? round((totalKwh / capacity * 100.0) / (totalHours / 24.0), 2) : null;
     return {
       kwh: round(totalKwh, 2), hours: round(totalHours, 1),
-      gaps: gapList.length, avg_pct_per_day: avgPctPerDay, gapList,
+      gaps: gapList.length, gapList,
     };
   }
 
@@ -277,8 +275,7 @@
       // total_energy_used_kwh exactly (see the rounding note above).
       trip_energy_used_kwh: tripEnergyUsed,
       vampire_drain: {
-        kwh: vampireKwh, hours: vampire.hours,
-        gaps: vampire.gaps, avg_pct_per_day: vampire.avg_pct_per_day,
+        kwh: vampireKwh, hours: vampire.hours, gaps: vampire.gaps,
       },
       avg_trip_distance_km: round(mean(dist), 1),
       avg_trip_duration_min: round(mean(dur), 1),
@@ -757,7 +754,6 @@
       vampire_kwh: vd.kwh || 0.0,
       vampire_hours: vd.hours || 0.0,
       vampire_gaps: vd.gaps || 0,
-      vampire_avg_pct_per_day: vd.avg_pct_per_day ?? null,
     };
 
     return {

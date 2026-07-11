@@ -371,11 +371,16 @@ main { padding: 24px 28px 60px; max-width: 1280px; margin: 0 auto; }
 .kpi.tone-teal   { border-left-color: var(--teal);     box-shadow: 0 1px 3px rgba(0,0,0,.3), inset 5px 0 16px -9px var(--teal); }
 .kpi.tone-red    { border-left-color: var(--accent);   box-shadow: 0 1px 3px rgba(0,0,0,.3), inset 5px 0 16px -9px var(--accent); }
 .kpi .label { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: .4px; }
+.kpi .label .info-btn {
+  width: 14px; height: 14px; font-size: 9px; margin-left: 4px;
+  vertical-align: 1px; text-transform: none;
+}
 .kpi-empty { grid-column: 1 / -1; }
 .kpi-empty .sub { margin-top: 6px; line-height: 1.5; }
 .kpi .value { font-size: 21px; font-weight: 700; margin-top: 2px; font-variant-numeric: tabular-nums; line-height: 1.1; }
 .kpi .sub { color: var(--muted); font-size: 11px; margin-top: 2px; line-height: 1.25; }
 .kpi-empty { min-height: 0; }
+.kpi-info { grid-column: 1 / -1; }
 
 .card-grid {
   display: grid;

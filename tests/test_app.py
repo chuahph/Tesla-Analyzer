@@ -436,7 +436,6 @@ def test_summary_reports_battery_balance():
             assert set(bal) == {
                 "full_charge_kwh", "charged_kwh", "used_kwh", "used_pct", "current_soc_pct",
                 "trip_kwh", "vampire_kwh", "vampire_hours", "vampire_gaps",
-                "vampire_avg_pct_per_day",
             }
             assert bal["charged_kwh"] >= 0
             assert bal["used_kwh"] >= 0

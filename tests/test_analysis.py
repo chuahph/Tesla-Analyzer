@@ -258,7 +258,7 @@ def test_vampire_drain_function_thresholds_and_excludes_charged_gaps():
         d(datetime(2026, 7, 4, 9, 50), datetime(2026, 7, 4, 10, 0), 79, 79),
     ]
     r = vampire_drain(short, [], 75.0)
-    assert r == {"kwh": 0.0, "hours": 0.0, "gaps": 0, "avg_pct_per_day": None, "gap_list": []}
+    assert r == {"kwh": 0.0, "hours": 0.0, "gaps": 0, "gap_list": []}
 
     # Same gap, now long enough (3h) — counts.
     long_gap = [
@@ -278,29 +278,7 @@ def test_vampire_drain_function_thresholds_and_excludes_charged_gaps():
         charge_type="AC", max_power_kw=7.0, cost=4.5,
     )
     r3 = vampire_drain(long_gap, [mid_gap_charge], 75.0)
-    assert r3 == {"kwh": 0.0, "hours": 0.0, "gaps": 0, "avg_pct_per_day": None, "gap_list": []}
-
-
-def test_vampire_drain_avg_pct_per_day_rate():
-    """The rate (not the raw amount) is what's comparable across windows —
-    the same 1% loss over 3h vs. 3 days should read as very different rates."""
-    from datetime import datetime
-
-    from app.analysis.driving import vampire_drain
-    from app.models import Drive
-
-    def d(start, end, ssoc, esoc):
-        return Drive(start_time=start, end_time=end, distance_km=3.0, duration_min=10.0,
-                     avg_speed_kmh=30, max_speed_kmh=45, start_soc=ssoc, end_soc=esoc,
-                     energy_used_kwh=0.0, outside_temp_c=28.0)
-
-    drives = [
-        d(datetime(2026, 7, 1, 8, 0), datetime(2026, 7, 1, 8, 10), 90, 90),
-        # Exactly 3 days later, 3% lost — 1%/day.
-        d(datetime(2026, 7, 4, 8, 0), datetime(2026, 7, 4, 8, 10), 87, 87),
-    ]
-    r = vampire_drain(drives, [], 75.0)
-    assert r["avg_pct_per_day"] == 1.0
+    assert r3 == {"kwh": 0.0, "hours": 0.0, "gaps": 0, "gap_list": []}
 
 
 def test_recent_trips_vampire_before_annotation():

@@ -30,15 +30,23 @@ def vampire_drain(
     measurement (the charge itself moved SoC upward), so that gap is skipped
     entirely rather than netted against the charge.
 
-    Returns the aggregate (kwh/hours/gaps/avg_pct_per_day) plus a per-gap
-    ``gap_list`` — {before_drive_id, hours, kwh, pct} for the drive that
-    followed each qualifying gap — so a caller (e.g. the recent-trips list)
-    can annotate "parked Xh, lost Y% before this trip" per trip, not just
-    report one window-wide total.
+    No extrapolated "%/day" rate is reported: real standby drain is mostly
+    near-zero deep-sleep punctuated by short high-drain bursts (sentry
+    trigger, cabin overheat protection cooling), so a typical few-hour gap
+    is disproportionately likely to catch one of those bursts and linearly
+    projecting its rate to a full day systematically overstates what a full
+    day parked would actually cost — there's no way to tell from a single
+    short gap whether it's representative.
+
+    Returns the aggregate (kwh/hours/gaps) plus a per-gap ``gap_list`` —
+    {before_drive_id, hours, kwh, pct} for the drive that followed each
+    qualifying gap — so a caller (e.g. the recent-trips list) can annotate
+    "parked Xh, lost Y% before this trip" per trip, not just report one
+    window-wide total.
     """
     ordered = sorted(drives, key=lambda d: d.start_time)
     if len(ordered) < 2 or not capacity_kwh:
-        return {"kwh": 0.0, "hours": 0.0, "gaps": 0, "avg_pct_per_day": None, "gap_list": []}
+        return {"kwh": 0.0, "hours": 0.0, "gaps": 0, "gap_list": []}
     charge_starts = sorted(c.start_time for c in (charges or []))
     total_kwh = 0.0
     total_hours = 0.0
@@ -65,14 +73,9 @@ def vampire_drain(
             "kwh": round(kwh, 2),
             "pct": round(drop_pct, 1),
         })
-    avg_pct_per_day = (
-        round((total_kwh / capacity_kwh * 100.0) / (total_hours / 24.0), 2)
-        if total_hours > 0 else None
-    )
     return {
         "kwh": round(total_kwh, 2), "hours": round(total_hours, 1),
-        "gaps": len(gap_list), "avg_pct_per_day": avg_pct_per_day,
-        "gap_list": gap_list,
+        "gaps": len(gap_list), "gap_list": gap_list,
     }
 
 
@@ -452,7 +455,6 @@ def analyze(drives: list[Drive], rated_wh_per_km: float = 150.0,
             "kwh": vampire_kwh,
             "hours": vampire["hours"],
             "gaps": vampire["gaps"],
-            "avg_pct_per_day": vampire["avg_pct_per_day"],
         },
         "avg_trip_distance_km": round(mean(distances), 1),
         "avg_trip_duration_min": round(mean(durations), 1),

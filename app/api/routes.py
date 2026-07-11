@@ -1884,8 +1884,8 @@ def summary(
     # Same window's used_kwh split into trip vs. vampire (standby drain
     # between drives — see driving_analysis.vampire_drain()); the two always
     # sum to used_kwh exactly, since that's how total_energy_used_kwh itself
-    # is built. avg_pct_per_day is a rate (not a raw amount) so a long
-    # window's cumulative loss reads as something comparable across windows.
+    # is built. No extrapolated %/day rate — see vampire_drain()'s docstring
+    # for why projecting a short gap's rate to a full day is misleading.
     vd = (driving.get("vampire_drain") or {}) if driving.get("available") else {}
     battery_balance = {
         "full_charge_kwh": full_charge_kwh,
@@ -1897,7 +1897,6 @@ def summary(
         "vampire_kwh": vd.get("kwh", 0.0),
         "vampire_hours": vd.get("hours", 0.0),
         "vampire_gaps": vd.get("gaps", 0),
-        "vampire_avg_pct_per_day": vd.get("avg_pct_per_day"),
     }
 
     # Petrol comparator (TCO): what an equivalent petrol car would have cost
