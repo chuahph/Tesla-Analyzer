@@ -620,12 +620,44 @@
       newRangeFor(v.model, v.trim, vinYear(v.vin)));
     const recommendations = buildRecommendations(driving, charging, efficiency, price, currency, battery);
 
+    // Most recent charge across the WHOLE dataset, not window-scoped —
+    // mirrors app/api/routes.py's summary(): pins atop Recent Charges (the
+    // window's own boundary charge is otherwise invisible there) and backs
+    // the Net Battery KPI. used_since_kwh is likewise unscoped by window.
+    const allCharges = dataset.charges || [];
+    const allDrives = dataset.drives || [];
+    let lastCharge = null;
+    if (allCharges.length) {
+      const lc = [...allCharges].sort((a, b) =>
+        new Date(b.end_time || b.start_time) - new Date(a.end_time || a.start_time))[0];
+      const lcEndMs = new Date(lc.end_time || lc.start_time).getTime();
+      const usedSince = allDrives
+        .filter((d) => new Date(d.start_time).getTime() >= lcEndMs)
+        .reduce((sum, d) => sum + (d.energy_used_kwh || 0), 0);
+      lastCharge = {
+        id: lc.id ?? null,
+        start_time: lc.start_time,
+        end_time: lc.end_time,
+        energy_added_kwh: round(lc.energy_added_kwh, 2),
+        start_soc: lc.start_soc,
+        end_soc: lc.end_soc,
+        cost: lc.cost != null ? round(lc.cost, 2) : null,
+        charge_type: lc.charge_type,
+        location: lc.location || "",
+        rate_per_kwh: lc.cost != null && lc.energy_added_kwh
+          ? round(lc.cost / lc.energy_added_kwh, 3) : null,
+        is_free: !!lc.is_free,
+        used_since_kwh: round(usedSince, 2),
+      };
+    }
+
     return {
       vehicle: dataset.vehicle || { name: "Tesla", model: "", trim: "" },
       window_days: days,
       window_label: windowLabel,
       generated_at: new Date().toISOString().slice(0, 19),
       currency,
+      last_charge: lastCharge,
       driving, charging, efficiency, battery, recommendations,
     };
   }

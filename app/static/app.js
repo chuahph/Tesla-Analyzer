@@ -419,13 +419,20 @@ function renderKpis(d) {
             `${fmt(bal.used_kwh, 1)} kWh of ${fmt(bal.full_charge_kwh, 1)} kWh full charge`, "amber")
         : kpiCard("Battery Used", `${fmt(bal.used_pct / 100, 1)}× pack`,
             `${fmt(bal.used_kwh, 1)} kWh ≈ ${fmt(bal.used_pct / 100, 1)} full charges`, "amber"));
-      // Net Battery: charged minus used this window — Battery Used only shows
-      // the drain side, this is the "am I keeping up with it" complement,
-      // straight from the same battery_balance figures.
-      const net = bal.charged_kwh - bal.used_kwh;
-      cards.push(kpiCard("Net Battery", `${net >= 0 ? "+" : ""}${fmt(net, 1)} kWh`,
-        `charged ${fmt(bal.charged_kwh, 1)} kWh · used ${fmt(bal.used_kwh, 1)} kWh`,
-        net >= 0 ? "green" : "red"));
+    }
+    // Net Battery: what's left of your last charge — its kWh added, minus
+    // what's been driven since it ended. Independent of the window/battery
+    // Used above (which is the whole window's drain, can span many charges);
+    // this is always anchored to just the most recent one. Floors at 0 once
+    // depleted — you're then running on whatever came before that charge,
+    // not a deficit, so a negative number here wouldn't mean anything.
+    const lc = d.last_charge;
+    if (lc && lc.energy_added_kwh != null) {
+      const usedSince = lc.used_since_kwh || 0;
+      const net = Math.max(lc.energy_added_kwh - usedSince, 0);
+      cards.push(kpiCard("Net Battery", `${fmt(net, 1)} kWh`,
+        `${fmt(lc.energy_added_kwh, 1)} kWh last charge − ${fmt(usedSince, 1)} kWh used since`,
+        net > 0 ? "green" : "amber"));
     }
     // TCO: what this window's distance would have cost in an equivalent
     // petrol car, vs. what it actually cost to charge. Hidden entirely

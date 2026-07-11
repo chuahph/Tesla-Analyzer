@@ -344,9 +344,77 @@ def test_summary_since_charge_window():
             assert set(lc) == {
                 "id", "start_time", "end_time", "energy_added_kwh", "start_soc",
                 "end_soc", "cost", "charge_type", "location", "rate_per_kwh", "is_free",
+                "used_since_kwh",
             }
+            assert lc["used_since_kwh"] >= 0
             assert lc["end_time"] <= since["generated_at"]
             assert full["last_charge"] == lc  # same last charge regardless of window
+    finally:
+        settings.app_passcode = old
+
+
+def test_last_charge_used_since_kwh_sums_drives_after_it_independent_of_window():
+    """used_since_kwh (what Net Battery is based on) is the kWh driven after
+    the last charge ended — computed fresh regardless of which window/days
+    param the request happens to carry, same as last_charge itself."""
+    settings = get_settings()
+    old = settings.app_passcode
+    settings.app_passcode = ""
+    try:
+        with TestClient(app) as client:  # startup seeds demo data
+            from app.database import SessionLocal
+            from app.models import Charge, Drive, Vehicle
+
+            with SessionLocal() as s:
+                v = Vehicle(vin="TESTVIN-NETBATT", name="Test", model="Model 3")
+                s.add(v)
+                s.commit()
+                charge = Charge(
+                    vehicle_id=v.id,
+                    start_time=datetime(2025, 6, 1, 22, 0), end_time=datetime(2025, 6, 2, 2, 0),
+                    duration_min=240, start_soc=40, end_soc=90, energy_added_kwh=30.0,
+                    charge_type="AC", max_power_kw=7, location="Home", cost=27.0,
+                )
+                s.add(charge)
+                s.commit()
+                # Two drives after the charge, one before it (must be excluded).
+                s.add(Drive(
+                    vehicle_id=v.id,
+                    start_time=datetime(2025, 6, 1, 10, 0), end_time=datetime(2025, 6, 1, 10, 30),
+                    distance_km=10, duration_min=30, start_soc=50, end_soc=48,
+                    energy_used_kwh=99.0, avg_speed_kmh=20, max_speed_kmh=40, outside_temp_c=28,
+                ))
+                s.add(Drive(
+                    vehicle_id=v.id,
+                    start_time=datetime(2025, 6, 3, 8, 0), end_time=datetime(2025, 6, 3, 8, 30),
+                    distance_km=15, duration_min=30, start_soc=90, end_soc=85,
+                    energy_used_kwh=5.5, avg_speed_kmh=30, max_speed_kmh=50, outside_temp_c=28,
+                ))
+                s.add(Drive(
+                    vehicle_id=v.id,
+                    start_time=datetime(2025, 6, 4, 8, 0), end_time=datetime(2025, 6, 4, 8, 30),
+                    distance_km=12, duration_min=30, start_soc=85, end_soc=81,
+                    energy_used_kwh=4.5, avg_speed_kmh=30, max_speed_kmh=50, outside_temp_c=28,
+                ))
+                s.commit()
+
+            client.post("/api/active-vehicle", json={"vin": "TESTVIN-NETBATT"})
+            try:
+                body_wide = client.get("/api/summary?days=365").json()
+                body_narrow = client.get("/api/summary?days=1").json()
+                assert body_wide["last_charge"]["used_since_kwh"] == 10.0    # 5.5 + 4.5, not 99
+                assert body_narrow["last_charge"]["used_since_kwh"] == 10.0  # same regardless of window
+            finally:
+                # This vehicle and its rows persist in the shared test DB —
+                # restore the active pointer and delete them so later tests
+                # (e.g. clear-drives, which isn't vehicle-scoped) aren't
+                # thrown off by an extra car's data left behind.
+                client.post("/api/active-vehicle", json={"vin": "DEMO0SAMPLE0000001"})
+                with SessionLocal() as s:
+                    s.query(Drive).filter(Drive.vehicle_id == v.id).delete()
+                    s.query(Charge).filter(Charge.vehicle_id == v.id).delete()
+                    s.query(Vehicle).filter(Vehicle.id == v.id).delete()
+                    s.commit()
     finally:
         settings.app_passcode = old
 

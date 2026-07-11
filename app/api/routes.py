@@ -1680,6 +1680,14 @@ def summary(
         .order_by(Charge.end_time.desc())
     )
     if last_charge is not None:
+        # kWh driven since this charge ended — independent of whatever window
+        # is currently selected, so "Net Battery" (last charge's kWh added
+        # minus this) reads the same regardless of which window the user has
+        # picked, same as last_charge_summary itself.
+        used_since_last_charge_kwh = session.scalar(
+            select(func.sum(Drive.energy_used_kwh))
+            .where(Drive.vehicle_id == vehicle.id, Drive.start_time >= last_charge.end_time)
+        ) or 0.0
         last_charge_summary = {
             "id": last_charge.id,
             "start_time": last_charge.start_time.isoformat(timespec="minutes"),
@@ -1695,6 +1703,7 @@ def summary(
                 if last_charge.energy_added_kwh else None
             ),
             "is_free": bool(last_charge.is_free),
+            "used_since_kwh": round(used_since_last_charge_kwh, 2),
         }
         if since_charge:
             since = last_charge.end_time
