@@ -492,7 +492,14 @@ function renderKpis(d) {
         `a direct measurement from your own charging sessions when there's enough history, ` +
         `otherwise your car's spec capacity reduced by its estimated degradation % — see the ` +
         `Battery Health card below for that %.`;
-      cards.push(`<div id="battpack-info" class="info-pop hidden kpi-info">${packNote}</div>`);
+      cards.push(`<div id="battpack-info" class="info-pop hidden kpi-info">${packNote}<br><br>` +
+        `"trip" here won't always exactly match the sum of the kWh shown per trip in Recent Trips ` +
+        `below. Each trip's own listed kWh is its <strong>measured</strong> figure (from its range ` +
+        `reading); "trip" in this breakdown is <strong>the true total minus idle</strong> — if any ` +
+        `trip's actual whole-percent battery drop came in higher than its range-based reading ` +
+        `suggested (range estimates can under-read real usage), that gap shows up here without ` +
+        `changing the number shown on that trip itself. trip + idle still always sums to the ` +
+        `total exactly.</div>`);
       cards.push(`<div id="vampire-info" class="info-pop hidden kpi-info">${packNote}<br><br>` +
         `Any gap between two drives with <strong>no charge</strong> in it (a charge moves SoC ` +
         `upward, so it can't be isolated as pure drain) counts toward the kWh/% shown here, no ` +
