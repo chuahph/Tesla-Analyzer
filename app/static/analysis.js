@@ -153,19 +153,30 @@
   // as vampire drain — mirror app/analysis/driving.py VAMPIRE_MIN_GAP_HOURS.
   const VAMPIRE_MIN_GAP_HOURS = 1.0;
 
+  // "YYYY-MM-DDTHH:MM" in local time, matching Python's isoformat(timespec=
+  // "minutes") — used for vampire gap start/end so tripWhen()'s regex-based
+  // parser (which just reads the digits, not timezone-aware) renders them
+  // exactly like every other timestamp already in the dataset.
+  function isoMinutes(ms) {
+    const d = new Date(ms);
+    const p = (n) => String(n).padStart(2, "0");
+    return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}T${p(d.getHours())}:${p(d.getMinutes())}`;
+  }
+
   // kWh lost while parked between two consecutive drives, with no charge in
   // between — mirror app/analysis/driving.py vampire_drain(). Returns the
   // aggregate plus a per-gap gapList so recent_trips can annotate "parked Xh
   // before this trip" per trip, not just report one window-wide total.
-  // anchor, if given, is {end_time, end_soc} for a boundary before the first
-  // drive (e.g. a "since charge" window's own last charge) — see the Python
-  // docstring for why this matters (otherwise the gap before the very first
-  // drive, often the longest one, is invisible).
+  // ``longest`` is the single longest qualifying gap ({hours, start, end},
+  // or null). anchor, if given, is {end_time, end_soc} for a boundary
+  // before the first drive (e.g. a "since charge" window's own last charge)
+  // — see the Python docstring for why this matters (otherwise the gap
+  // before the very first drive, often the longest one, is invisible).
   function vampireDrain(drives, charges, capacity, anchor) {
     const ordered = [...drives].sort((a, b) => new Date(a.start_time) - new Date(b.start_time));
     const chain = anchor ? [anchor, ...ordered] : ordered;
     if (chain.length < 2 || !capacity) {
-      return { kwh: 0.0, hours: 0.0, gaps: 0, gapList: [] };
+      return { kwh: 0.0, hours: 0.0, gaps: 0, gapList: [], longest: null };
     }
     const chargeStarts = (charges || [])
       .map((c) => new Date(c.start_time).getTime())
@@ -190,11 +201,16 @@
       gapList.push({
         before_drive_id: b.id ?? null,
         hours: round(gapHours, 1), kwh: round(kwh, 2), pct: round(dropPct, 1),
+        start: isoMinutes(gapStart), end: isoMinutes(gapEnd),
       });
     }
+    const longest = gapList.length
+      ? gapList.reduce((best, g) => (g.hours > best.hours ? g : best))
+      : null;
     return {
       kwh: round(totalKwh, 2), hours: round(totalHours, 1),
       gaps: gapList.length, gapList,
+      longest: longest ? { hours: longest.hours, start: longest.start, end: longest.end } : null,
     };
   }
 
@@ -282,7 +298,7 @@
       // total_energy_used_kwh exactly (see the rounding note above).
       trip_energy_used_kwh: tripEnergyUsed,
       vampire_drain: {
-        kwh: vampireKwh, hours: vampire.hours, gaps: vampire.gaps,
+        kwh: vampireKwh, hours: vampire.hours, gaps: vampire.gaps, longest: vampire.longest,
       },
       avg_trip_distance_km: round(mean(dist), 1),
       avg_trip_duration_min: round(mean(dur), 1),
@@ -384,6 +400,7 @@
       available: true,
       total_sessions: charges.length,
       total_energy_kwh: round(totalEnergy, 1),
+      total_duration_h: round(charges.reduce((a, c) => a + (c.duration_min || 0), 0) / 60.0, 1),
       total_cost: round(totalCost, 2),
       avg_cost_per_kwh: round(safeDiv(totalCost, totalEnergy), 3),
       ac_sessions: ac.length,
@@ -763,6 +780,7 @@
       usedPct = round(usedKwh / capacity * 100, 1);
     }
     const vd = driving.available ? (driving.vampire_drain || {}) : {};
+    const vdLongest = vd.longest || null;
     const batteryBalance = {
       full_charge_kwh: round(capacity, 1),
       charged_kwh: round(charging.total_energy_kwh || 0, 1),
@@ -772,6 +790,27 @@
       vampire_kwh: vd.kwh || 0.0,
       vampire_hours: vd.hours || 0.0,
       vampire_gaps: vd.gaps || 0,
+      vampire_longest_hours: vdLongest ? vdLongest.hours : null,
+      vampire_longest_start: vdLongest ? vdLongest.start : null,
+      vampire_longest_end: vdLongest ? vdLongest.end : null,
+    };
+
+    // Time Breakdown: how the window's own elapsed wall-clock time split
+    // between driving, idle (vampire) and charging — mirrors
+    // app/api/routes.py's summary(). since is always a concrete timestamp
+    // here (unlike the Python side, where a plain N-day window leaves it
+    // null and _window() fills it in) — see the branch above.
+    const windowHours = (Date.now() - since) / 3600000.0;
+    const drivingHours = driving.available ? (driving.total_duration_h || 0) : 0;
+    const chargingHours = charging.available ? (charging.total_duration_h || 0) : 0;
+    const idleHours = vd.hours || 0;
+    const otherHours = Math.max(windowHours - drivingHours - chargingHours - idleHours, 0);
+    const timeBreakdown = {
+      window_hours: round(windowHours, 1),
+      driving_hours: round(drivingHours, 1),
+      idle_hours: round(idleHours, 1),
+      charging_hours: round(chargingHours, 1),
+      other_hours: round(otherHours, 1),
     };
 
     return {
@@ -782,6 +821,7 @@
       currency,
       last_charge: lastCharge,
       battery_balance: batteryBalance,
+      time_breakdown: timeBreakdown,
       driving, charging, efficiency, battery, recommendations,
     };
   }

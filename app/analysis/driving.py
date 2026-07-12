@@ -51,16 +51,18 @@ def vampire_drain(
     short gap whether it's representative.
 
     Returns the aggregate (kwh/hours/gaps) plus a per-gap ``gap_list`` —
-    {before_drive_id, hours, kwh, pct} for the drive that followed each
-    qualifying gap — so a caller (e.g. the recent-trips list) can annotate
-    "parked Xh, lost Y% before this trip" per trip, not just report one
-    window-wide total.
+    {before_drive_id, hours, kwh, pct, start, end} for the drive that
+    followed each qualifying gap — so a caller (e.g. the recent-trips list)
+    can annotate "parked Xh, lost Y% before this trip" per trip, not just
+    report one window-wide total. ``longest`` is the single longest
+    qualifying gap ({hours, start, end}, or None) — useful on its own (e.g.
+    "longest idle stretch this window") separately from the aggregate.
     """
     ordered = sorted(drives, key=lambda d: d.start_time)
     boundary = SimpleNamespace(end_time=anchor[0], end_soc=anchor[1]) if anchor else None
     chain = ([boundary] if boundary else []) + ordered
     if len(chain) < 2 or not capacity_kwh:
-        return {"kwh": 0.0, "hours": 0.0, "gaps": 0, "gap_list": []}
+        return {"kwh": 0.0, "hours": 0.0, "gaps": 0, "gap_list": [], "longest": None}
     charge_starts = sorted(c.start_time for c in (charges or []))
     total_kwh = 0.0
     total_hours = 0.0
@@ -92,10 +94,15 @@ def vampire_drain(
             "hours": round(gap_hours, 1),
             "kwh": round(kwh, 2),
             "pct": round(drop_pct, 1),
+            "start": gap_start.isoformat(timespec="minutes"),
+            "end": gap_end.isoformat(timespec="minutes"),
         })
+    longest = max(gap_list, key=lambda g: g["hours"]) if gap_list else None
     return {
         "kwh": round(total_kwh, 2), "hours": round(total_hours, 1),
         "gaps": len(gap_list), "gap_list": gap_list,
+        "longest": {"hours": longest["hours"], "start": longest["start"], "end": longest["end"]}
+        if longest else None,
     }
 
 
@@ -479,6 +486,7 @@ def analyze(drives: list[Drive], rated_wh_per_km: float = 150.0,
             "kwh": vampire_kwh,
             "hours": vampire["hours"],
             "gaps": vampire["gaps"],
+            "longest": vampire["longest"],
         },
         "avg_trip_distance_km": round(mean(distances), 1),
         "avg_trip_duration_min": round(mean(durations), 1),

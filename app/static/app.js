@@ -490,6 +490,30 @@ function renderKpis(d) {
         `so a real small loss over a few hours doesn't always cross a full point; that just means ` +
         `0 kWh is attributed to it, not that nothing happened.</div>`);
     }
+    // Time Breakdown: how the window's own elapsed wall-clock time split
+    // between driving, idle/parked (Vampire Drain's own hours), and
+    // charging — ties those hours to the rest of the window instead of
+    // leaving Vampire Drain's figure floating on its own. Headlines idle %
+    // since that's the figure most worth a second look.
+    const tb = d.time_breakdown;
+    if (tb && tb.window_hours > 0) {
+      const idlePct = tb.idle_hours / tb.window_hours * 100;
+      cards.push(kpiCard("Time Breakdown", fmt(idlePct, 0) + "% idle",
+        `${fmt(tb.driving_hours, 0)}h driving · ${fmt(tb.idle_hours, 0)}h idle · ` +
+        `${fmt(tb.charging_hours, 0)}h charging of ${fmt(tb.window_hours, 0)}h`,
+        "violet"));
+    }
+    // Longest Idle: the single biggest qualifying parked gap this window,
+    // separate from Vampire Drain's aggregate — "that's when I was away for
+    // the weekend" vs. day-to-day standby. Always shown alongside Vampire
+    // Drain rather than only appearing once there's a gap to report.
+    if (bal) {
+      const longestH = bal.vampire_longest_hours;
+      cards.push(longestH != null
+        ? kpiCard("Longest Idle", fmt(longestH, 0) + " h",
+            `${fmt(longestH / 24, 1)} days · ended ${tripWhen(bal.vampire_longest_end)}`, "violet")
+        : kpiCard("Longest Idle", "—", "no qualifying parked gap yet", "violet"));
+    }
     // TCO: what this window's distance would have cost in an equivalent
     // petrol car, vs. what it actually cost to charge. Hidden entirely
     // unless both petrol inputs are configured (see PETROL_PRICE_PER_LITER /

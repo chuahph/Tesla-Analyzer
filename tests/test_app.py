@@ -436,6 +436,7 @@ def test_summary_reports_battery_balance():
             assert set(bal) == {
                 "full_charge_kwh", "charged_kwh", "used_kwh", "used_pct", "current_soc_pct",
                 "trip_kwh", "vampire_kwh", "vampire_hours", "vampire_gaps",
+                "vampire_longest_hours", "vampire_longest_start", "vampire_longest_end",
             }
             assert bal["charged_kwh"] >= 0
             assert bal["used_kwh"] >= 0
@@ -445,6 +446,14 @@ def test_summary_reports_battery_balance():
             assert round(bal["trip_kwh"] + bal["vampire_kwh"], 1) == round(bal["used_kwh"], 1)
             if bal["current_soc_pct"] is not None:
                 assert 0 <= bal["current_soc_pct"] <= 100
+            # The single longest gap is present iff there was at least one.
+            if bal["vampire_gaps"] > 0:
+                assert bal["vampire_longest_hours"] is not None
+                assert bal["vampire_longest_hours"] <= bal["vampire_hours"]
+                assert bal["vampire_longest_start"] is not None
+                assert bal["vampire_longest_end"] is not None
+            else:
+                assert bal["vampire_longest_hours"] is None
 
             since_body = client.get("/api/summary?since_charge=true").json()
             since_bal = since_body["battery_balance"]
@@ -452,6 +461,30 @@ def test_summary_reports_battery_balance():
                 assert since_bal["used_pct"] is not None
                 assert round(since_bal["used_pct"], 1) == round(
                     since_bal["used_kwh"] / since_bal["full_charge_kwh"] * 100.0, 1)
+    finally:
+        settings.app_passcode = old
+
+
+def test_summary_reports_time_breakdown():
+    """time_breakdown splits the window's own elapsed wall-clock time into
+    driving / idle (vampire) / charging / other — the four always sum back
+    to window_hours exactly (other_hours is defined as the remainder)."""
+    settings = get_settings()
+    old = settings.app_passcode
+    settings.app_passcode = ""
+    try:
+        with TestClient(app) as client:  # startup seeds demo data
+            body = client.get("/api/summary?days=30").json()
+            tb = body["time_breakdown"]
+            assert set(tb) == {
+                "window_hours", "driving_hours", "idle_hours", "charging_hours", "other_hours",
+            }
+            assert tb["window_hours"] == 30 * 24.0
+            for k in ("driving_hours", "idle_hours", "charging_hours", "other_hours"):
+                assert tb[k] >= 0
+            assert round(
+                tb["driving_hours"] + tb["idle_hours"] + tb["charging_hours"] + tb["other_hours"], 1
+            ) == round(tb["window_hours"], 1)
     finally:
         settings.app_passcode = old
 

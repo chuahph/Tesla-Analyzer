@@ -259,7 +259,7 @@ def test_vampire_drain_function_thresholds_and_excludes_charged_gaps():
         d(datetime(2026, 7, 4, 8, 55), datetime(2026, 7, 4, 9, 5), 79, 79),
     ]
     r = vampire_drain(short, [], 75.0)
-    assert r == {"kwh": 0.0, "hours": 0.0, "gaps": 0, "gap_list": []}
+    assert r == {"kwh": 0.0, "hours": 0.0, "gaps": 0, "gap_list": [], "longest": None}
 
     # Same gap, now long enough (3h) — counts.
     long_gap = [
@@ -270,6 +270,9 @@ def test_vampire_drain_function_thresholds_and_excludes_charged_gaps():
     assert r2["gaps"] == 1
     assert r2["kwh"] == round(1 / 100.0 * 75.0, 2)
     assert r2["hours"] == 3.0
+    assert r2["gap_list"][0]["start"] == "2026-07-04T08:10"
+    assert r2["gap_list"][0]["end"] == "2026-07-04T11:10"
+    assert r2["longest"] == {"hours": 3.0, "start": "2026-07-04T08:10", "end": "2026-07-04T11:10"}
 
     # A charge starting inside that same gap invalidates it as a pure-drain
     # measurement — excluded outright, not netted against the charge.
@@ -279,7 +282,37 @@ def test_vampire_drain_function_thresholds_and_excludes_charged_gaps():
         charge_type="AC", max_power_kw=7.0, cost=4.5,
     )
     r3 = vampire_drain(long_gap, [mid_gap_charge], 75.0)
-    assert r3 == {"kwh": 0.0, "hours": 0.0, "gaps": 0, "gap_list": []}
+    assert r3 == {"kwh": 0.0, "hours": 0.0, "gaps": 0, "gap_list": [], "longest": None}
+
+
+def test_vampire_drain_longest_picks_the_biggest_gap_not_the_last():
+    """``longest`` is the single biggest qualifying gap regardless of its
+    position in the list — a real "I was away" stretch should stand out
+    from ordinary daily gaps even when it isn't the most recent one."""
+    from datetime import datetime
+
+    from app.analysis.driving import vampire_drain
+    from app.models import Drive
+
+    def d(start, end, ssoc, esoc):
+        return Drive(id=None, start_time=start, end_time=end, distance_km=3.0,
+                     duration_min=10.0, avg_speed_kmh=30, max_speed_kmh=45,
+                     start_soc=ssoc, end_soc=esoc, energy_used_kwh=0.0, outside_temp_c=28.0)
+
+    drives = [
+        d(datetime(2026, 7, 1, 8, 0), datetime(2026, 7, 1, 8, 10), 90, 89),
+        # 3h gap.
+        d(datetime(2026, 7, 1, 11, 10), datetime(2026, 7, 1, 11, 20), 88, 87),
+        # 3-day gap in the middle — the real "away" stretch.
+        d(datetime(2026, 7, 4, 11, 20), datetime(2026, 7, 4, 11, 30), 80, 79),
+        # 2h gap after it.
+        d(datetime(2026, 7, 4, 13, 30), datetime(2026, 7, 4, 13, 40), 78, 77),
+    ]
+    r = vampire_drain(drives, [], 75.0)
+    assert r["gaps"] == 3
+    assert r["longest"]["hours"] == 72.0
+    assert r["longest"]["start"] == "2026-07-01T11:20"
+    assert r["longest"]["end"] == "2026-07-04T11:20"
 
 
 def test_vampire_drain_counts_hours_even_with_zero_measured_drop():
@@ -334,7 +367,7 @@ def test_vampire_drain_anchor_measures_gap_before_first_drive():
     # No anchor: a single drive with nothing before it in the list — no gap
     # to measure at all, even though it was clearly preceded by ~14h parked.
     r_no_anchor = vampire_drain(first_drive, [], 75.0)
-    assert r_no_anchor == {"kwh": 0.0, "hours": 0.0, "gaps": 0, "gap_list": []}
+    assert r_no_anchor == {"kwh": 0.0, "hours": 0.0, "gaps": 0, "gap_list": [], "longest": None}
 
     # With the last charge's end as an anchor, that same ~14h16m gap (charge
     # ended Fri 20:14, drive started Sat 10:30) is now measured.
