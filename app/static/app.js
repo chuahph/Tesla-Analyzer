@@ -493,9 +493,7 @@ function renderKpis(d) {
     // Estimated Range: how far the CURRENT battery balance (not this
     // window's — the latest known SoC) goes before hitting 50%, 20%, and
     // 0%, at this window's own measured efficiency when there's enough
-    // driving to measure one, else the car's rated spec. A stale-SoC note
-    // covers the gap between the last logged reading and "right now" (the
-    // car may have driven or charged since).
+    // driving to measure one, else the car's rated spec.
     if (bal && bal.current_soc_pct != null && bal.full_charge_kwh > 0) {
       const measured = eff && eff.available && eff.avg_efficiency_wh_per_km;
       const whPerKm = measured || (eff && eff.rated_wh_per_km) || 150;
@@ -504,9 +502,10 @@ function renderKpis(d) {
       const thresholds = [];
       if (soc > 50) thresholds.push(`${fmt(kmAt(50), 0)} km to 50%`);
       if (soc > 20) thresholds.push(`${fmt(kmAt(20), 0)} km to 20%`);
+      thresholds.push(`${fmt(kmAt(0), 0)} km to 0%`);
       thresholds.push(`at ${fmt(whPerKm, 0)} Wh/km${measured ? " this window" : " rated"}`);
       cards.push(kpiCard("Estimated Range", fmt(kmAt(0), 0) + " km",
-        `${fmt(soc, 0)}% now · ${thresholds.join(" · ")}`, "violet"));
+        thresholds.join(" · "), "violet"));
     }
     // Longest Idle: the single biggest qualifying parked gap this window,
     // separate from Vampire Drain's aggregate — "that's when I was away for
