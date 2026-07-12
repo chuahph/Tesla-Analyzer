@@ -22,6 +22,10 @@ from typing import Any
 MILES_TO_KM = 1.60934
 DRIVE_MIN_KM = 0.1   # ignore odometer jitter below this
 CHARGE_MIN_PCT = 0.5  # ignore SoC jitter below this
+# Independent absolute-kWh floor alongside CHARGE_MIN_PCT — see _charge_from()
+# for why the %-gain gate alone isn't enough (a BMS SoC recalibration blip,
+# e.g. right after a vehicle software reset, can clear it with ~0 real energy).
+CHARGE_MIN_KWH = 0.2
 # A trip ends when the car stops moving — not only when it powers down. If the
 # driver stays aboard (A/C running) the car may sit parked for a long time, and
 # that idle time must not be counted as drive time/energy. PARK_END_MIN is how
@@ -516,6 +520,15 @@ def _charge_from(start: dict, cur: dict, capacity_kwh: float, price_per_kwh: flo
         return None
 
     energy = measured if energy_measured else _energy_kwh(cur, start, capacity_kwh)
+    # A second, independent floor on the *absolute* kWh, not just the SoC%
+    # gain above: SoC is itself a BMS estimate, not a direct measurement, and
+    # can nudge by a whole integer point on its own after a vehicle software
+    # reset/reboot with no real energy added — on a small-ish pack that one
+    # point alone can clear CHARGE_MIN_PCT. A session this size adds nothing
+    # informative and, worse, becomes the "since last charge" anchor — reject
+    # it outright rather than log a session that rounds to "0 kWh".
+    if energy < CHARGE_MIN_KWH:
+        return None
     dc = bool(start.get("fast") or cur.get("fast"))
     # Where the car was charging: GPS coords (named later in the API layer).
     # Without location access, fall back to the charger type so the Charging

@@ -59,6 +59,33 @@ def test_snapshot_parses_sentry_and_climate_as_none_when_unreported():
     assert reported["climate_on"] is True
 
 
+def test_charge_from_rejects_soc_recalibration_blip_with_negligible_real_energy():
+    """A BMS SoC recalibration (Tesla's SoC is an estimate, not a direct
+    measurement — it can nudge by a whole integer point right after a
+    vehicle software reset, with ~0 real energy added) alone clears
+    CHARGE_MIN_PCT on a raw-SoC-delta session, but the session's own
+    measured kWh (Tesla's persistent charge_energy_added meter) stays
+    negligible — the independent CHARGE_MIN_KWH floor rejects it, so a
+    reboot-adjacent blip can't masquerade as a real (and "since last
+    charge"-anchoring) charge session."""
+    from app.sync import _charge_from
+
+    start = {"ts": T0, "soc": 58, "energy_added_kwh": 0.0, "odo_km": 10_000.0}
+    # 1 minute later, parked the whole time: raw SoC reads one point higher
+    # (recalibration, not real charging) while Tesla's own session meter
+    # shows only a negligible real draw (a charge-port test pulse).
+    cur = {"ts": T0 + 60, "soc": 59, "energy_added_kwh": 0.03,
+           "odo_km": 10_000.0, "out_temp": 28.0}
+    assert _charge_from(start, cur, 75.0, 0.90) is None
+
+    # Same shape, but a real session (meter proves several real kWh) must
+    # still be accepted — the new floor only catches negligible sessions.
+    real_cur = {**cur, "energy_added_kwh": 5.0}
+    real = _charge_from(start, real_cur, 75.0, 0.90)
+    assert real is not None
+    assert real["energy_added_kwh"] == 5.0
+
+
 def test_trip_opens_spans_snapshots_and_closes_on_park():
     """One drive across four snapshots = exactly one logged entry."""
     s1 = snap(T0, 10_000.0, 80)                               # parked at home
