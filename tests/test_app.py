@@ -681,6 +681,55 @@ def test_summary_reports_week_compare_and_costs():
         settings.app_passcode = old
 
 
+def test_trip_cost_uses_last_charge_rate_not_configured_tariff():
+    """Driving/trip cost is priced at what was actually paid for the most
+    recent charge (cost ÷ energy_added_kwh) — what's really powering every
+    subsequent trip — not the app's configured flat/ToU tariff."""
+    settings = get_settings()
+    old = settings.app_passcode
+    settings.app_passcode = ""
+    try:
+        with TestClient(app) as client:  # startup seeds demo data
+            from app.database import SessionLocal
+            from app.models import Charge, Drive, Vehicle
+
+            with SessionLocal() as s:
+                v = Vehicle(vin="TESTVIN-LASTRATE", name="Test", model="Model 3")
+                s.add(v)
+                s.commit()
+                # RM 2.00/kWh — deliberately far from the app's configured
+                # flat tariff (0.90 by default) so the two are easy to tell apart.
+                s.add(Charge(
+                    vehicle_id=v.id,
+                    start_time=datetime(2026, 7, 1, 22, 0), end_time=datetime(2026, 7, 2, 0, 0),
+                    duration_min=120, start_soc=40, end_soc=90, energy_added_kwh=20.0,
+                    charge_type="AC", max_power_kw=7, location="Home", cost=40.0,
+                ))
+                s.add(Drive(
+                    vehicle_id=v.id,
+                    start_time=datetime(2026, 7, 2, 8, 0), end_time=datetime(2026, 7, 2, 8, 30),
+                    distance_km=20, duration_min=30, start_soc=90, end_soc=85,
+                    energy_used_kwh=4.0, avg_speed_kmh=40, max_speed_kmh=60, outside_temp_c=28,
+                ))
+                s.commit()
+
+            client.post("/api/active-vehicle", json={"vin": "TESTVIN-LASTRATE"})
+            try:
+                body = client.get("/api/summary?days=365").json()
+                trip = body["driving"]["recent_trips"][0]
+                assert trip["cost"] == round(4.0 * 2.00, 2)  # 8.00, at the charge's own rate
+                assert body["driving"]["total_cost"] == round(4.0 * 2.00, 2)
+            finally:
+                client.post("/api/active-vehicle", json={"vin": "DEMO0SAMPLE0000001"})
+                with SessionLocal() as s:
+                    s.query(Drive).filter(Drive.vehicle_id == v.id).delete()
+                    s.query(Charge).filter(Charge.vehicle_id == v.id).delete()
+                    s.query(Vehicle).filter(Vehicle.id == v.id).delete()
+                    s.commit()
+    finally:
+        settings.app_passcode = old
+
+
 def test_petrol_comparison_hidden_unless_configured_then_reflects_settings():
     settings = get_settings()
     old_pc = settings.app_passcode

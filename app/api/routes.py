@@ -160,6 +160,23 @@ def _window(
     return list(drives), list(charges)
 
 
+def _last_charge_price_fn(session: Session, vehicle_id: int, settings):
+    """A flat ``datetime -> RM/kWh`` price function using the vehicle's most
+    recent charge's own actual rate (cost ÷ energy_added_kwh) — what was
+    really paid for the electricity now in the pack, which is what's
+    actually powering every trip until the next charge, rather than a
+    configured tariff assumption. Falls back to that tariff (flat/ToU) only
+    when there's no charge on record yet to price from."""
+    last_charge = session.scalar(
+        select(Charge).where(Charge.vehicle_id == vehicle_id)
+        .order_by(Charge.end_time.desc())
+    )
+    if last_charge and last_charge.energy_added_kwh:
+        rate = last_charge.cost / last_charge.energy_added_kwh
+        return lambda _dt: rate
+    return tariff.price_fn_from_settings(settings)
+
+
 def _idle_inducer(session: Session, vehicle_id: int, start_iso: str, end_iso: str) -> str | None:
     """What was likely running when the car parked into this idle gap, from
     BatteryReading rows logged before it fell asleep — the only part of the
@@ -1249,8 +1266,8 @@ def compare_vehicles(days: int = Query(30, ge=1, le=730), session: Session = Dep
         capacity_kwh, _ = _usable_capacity(session, vehicle, settings)
         drives, charges = _window(session, vehicle.id, days)
         driving = driving_analysis.analyze(
-            drives, settings.rated_wh_per_km, capacity_kwh, tariff.price_fn_from_settings(settings),
-            charges=charges)
+            drives, settings.rated_wh_per_km, capacity_kwh,
+            _last_charge_price_fn(session, vehicle.id, settings), charges=charges)
         charging = charging_analysis.analyze(charges, drives)
         readings = session.execute(
             select(BatteryReading.soc, BatteryReading.range_km,
@@ -1627,7 +1644,7 @@ def _monthly_report_payload(session: Session, vehicle: Vehicle, settings, days: 
     there while still carrying the structured figures for anything else."""
     capacity_kwh, _ = _usable_capacity(session, vehicle, settings)
     drives, charges = _window(session, vehicle.id, days)
-    price_fn = tariff.price_fn_from_settings(settings)
+    price_fn = _last_charge_price_fn(session, vehicle.id, settings)
     driving = driving_analysis.analyze(drives, settings.rated_wh_per_km, capacity_kwh, price_fn, charges=charges)
     charging = charging_analysis.analyze(charges, drives)
     efficiency = efficiency_analysis.analyze(drives, settings.rated_wh_per_km)
@@ -1871,8 +1888,15 @@ def summary(
         (last_charge.end_time, last_charge.end_soc)
         if since_charge and last_charge is not None else None
     )
+    # Price driving energy at what was actually paid for the electricity
+    # now in the pack (last_charge is already fetched above), not a
+    # configured tariff assumption — see _last_charge_price_fn().
+    price_fn = tariff.price_fn_from_settings(settings)
+    if last_charge is not None and last_charge.energy_added_kwh:
+        rate = last_charge.cost / last_charge.energy_added_kwh
+        price_fn = lambda _dt, _rate=rate: _rate  # noqa: E731
     driving = driving_analysis.analyze(
-        drives, settings.rated_wh_per_km, capacity_kwh, tariff.price_fn_from_settings(settings),
+        drives, settings.rated_wh_per_km, capacity_kwh, price_fn,
         charges=charges, vampire_anchor=vampire_anchor)
     charging = charging_analysis.analyze(charges, drives)
     efficiency = efficiency_analysis.analyze(drives, settings.rated_wh_per_km)
@@ -1908,7 +1932,7 @@ def summary(
         prev_since = cur_since - timedelta(days=days)
         prev_drives, prev_charges = _window(session, vehicle.id, days, since=prev_since, until=cur_since)
         prev_driving = driving_analysis.analyze(
-            prev_drives, settings.rated_wh_per_km, capacity_kwh, tariff.price_fn_from_settings(settings),
+            prev_drives, settings.rated_wh_per_km, capacity_kwh, price_fn,
             charges=prev_charges)
         prev_charging = charging_analysis.analyze(prev_charges, prev_drives)
         prev_efficiency = efficiency_analysis.analyze(prev_drives, settings.rated_wh_per_km)
