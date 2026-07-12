@@ -769,19 +769,6 @@
       newRangeFor(v.model, v.trim, vinYear(v.vin)));
     const recommendations = buildRecommendations(driving, charging, efficiency, price, currency, battery);
 
-    // Battery Used: % of the full (degradation-adjusted) pack, same basis as
-    // every other %-of-battery figure (soc_used_pct) so they're all directly
-    // comparable and summable — mirrors app/api/routes.py's summary(). Still
-    // only shown for the since-charge window: any other window can span
-    // several charge/discharge cycles with cumulative use exceeding one
-    // pack, so only the raw kWh is reported there.
-    const usedKwh = driving.available ? (driving.total_energy_used_kwh || 0) : 0;
-    let usedPct = null;
-    if (windowLabel === "since last charge" && capacity > 0) {
-      usedPct = round(usedKwh / capacity * 100, 1);
-    }
-    const vd = driving.available ? (driving.vampire_drain || {}) : {};
-    const vdLongest = vd.longest || null;
     // "Current" SoC proxy — static mode has no live telemetry/periodic
     // readings stream (unlike the server, which reads the latest
     // BatteryReading), so approximate it as the end_soc of whichever of the
@@ -798,14 +785,49 @@
     } else if (lc) {
       currentSoc = lc.end_soc;
     }
+    // Battery Used: % of the full (degradation-adjusted) pack, same basis as
+    // every other %-of-battery figure (soc_used_pct) so they're all directly
+    // comparable and summable — mirrors app/api/routes.py's summary(). Still
+    // only shown for the since-charge window: any other window can span
+    // several charge/discharge cycles with cumulative use exceeding one
+    // pack, so only the raw kWh is reported there.
+    // For "since charge" specifically we have real ground truth for the
+    // total drop — the charge's own end SoC minus the current-SoC proxy
+    // above — so anchor to that instead of the bottom-up per-trip estimate
+    // (driving.total_energy_used_kwh, built from each trip's own
+    // max(measured kWh, integer SoC drop) — see driving.py's _trip_kwh()).
+    // Always taking the larger per trip is a one-directional bias that,
+    // summed across several trips, drifts the total past what the pack's
+    // own SoC already reports directly (see routes.py's summary() for the
+    // matching server-side fix).
+    const windowIsSinceCharge = windowLabel === "since last charge";
+    const groundTruthUsedKwh = (
+      windowIsSinceCharge && lc && currentSoc != null && capacity > 0 && driving.available
+    ) ? Math.max((lc.end_soc - currentSoc) / 100.0 * capacity, 0.0) : null;
+    const usedKwh = groundTruthUsedKwh != null
+      ? groundTruthUsedKwh
+      : (driving.available ? (driving.total_energy_used_kwh || 0) : 0);
+    let usedPct = null;
+    if (windowIsSinceCharge && capacity > 0) {
+      usedPct = round(usedKwh / capacity * 100, 1);
+    }
+    const vd = driving.available ? (driving.vampire_drain || {}) : {};
+    const vdLongest = vd.longest || null;
+    const vampireKwh = vd.kwh || 0.0;
+    // Same "round the total once, derive the split by subtraction"
+    // principle analyze() uses, just anchored to the more accurate total
+    // when we have one (mirrors routes.py's summary()).
+    const tripKwh = groundTruthUsedKwh != null
+      ? Math.max(round(round(usedKwh, 1) - vampireKwh, 1), 0.0)
+      : (driving.available ? round(driving.trip_energy_used_kwh || 0, 1) : 0);
     const batteryBalance = {
       full_charge_kwh: round(capacity, 1),
       charged_kwh: round(charging.total_energy_kwh || 0, 1),
       used_kwh: round(usedKwh, 1),
       used_pct: usedPct,
       current_soc_pct: currentSoc != null ? round(currentSoc, 1) : null,
-      trip_kwh: driving.available ? round(driving.trip_energy_used_kwh || 0, 1) : 0,
-      vampire_kwh: vd.kwh || 0.0,
+      trip_kwh: tripKwh,
+      vampire_kwh: vampireKwh,
       vampire_hours: vd.hours || 0.0,
       vampire_gaps: vd.gaps || 0,
       vampire_longest_hours: vdLongest ? vdLongest.hours : null,

@@ -467,6 +467,81 @@ def test_summary_reports_battery_balance():
         settings.app_passcode = old
 
 
+def test_since_charge_battery_used_anchors_to_actual_soc_not_bottom_up_estimate():
+    """Reported live: "Balance 89% batt and used 11.7%, total exceed 100%".
+    The since-charge window's used_kwh/used_pct must equal the real drop
+    (last charge's end SoC minus the latest reading), not the bottom-up sum
+    of each trip's own max(measured kWh, integer SoC drop) — that per-trip
+    "take the larger" rule exists to rescue one trip with a range-reading
+    gap from being undercounted, but always taking the larger is a
+    one-directional bias that drifts the summed total past what the pack's
+    own SoC already reports directly. Here every trip's measured kWh is
+    deliberately made smaller than its own integer SoC drop, so the
+    bottom-up total (were it still used) would overshoot the true 5%/3.5kWh
+    drop implied by 100% -> 95%."""
+    settings = get_settings()
+    old_pc, old_cap = settings.app_passcode, settings.battery_capacity_kwh
+    settings.app_passcode = ""
+    settings.battery_capacity_kwh = 70.0
+    try:
+        with TestClient(app) as client:  # startup seeds demo data
+            from app.database import SessionLocal
+            from app.models import BatteryReading, Charge, Drive, Vehicle
+
+            with SessionLocal() as s:
+                v = Vehicle(vin="TESTVIN-SOCTRUTH", name="Test", model="Model 3")
+                s.add(v)
+                s.commit()
+                s.add(Charge(
+                    vehicle_id=v.id,
+                    start_time=datetime(2026, 7, 1, 7, 30), end_time=datetime(2026, 7, 1, 8, 0),
+                    duration_min=30, start_soc=80, end_soc=100, energy_added_kwh=14.0,
+                    charge_type="AC", max_power_kw=7, location="Home", cost=12.6,
+                ))
+                # Three back-to-back trips, boundaries touching (no measurable
+                # idle drop between/before any of them, so vampire_kwh == 0)
+                # and each trip's measured energy well under its own 2-point
+                # SoC drop, forcing _trip_kwh()'s max() to pick the integer
+                # estimate every time: bottom-up total = 3 * 1.4 = 4.2 kWh.
+                for i, (start, end, ssoc, esoc) in enumerate([
+                    (datetime(2026, 7, 1, 8, 10), datetime(2026, 7, 1, 8, 20), 100, 98),
+                    (datetime(2026, 7, 1, 8, 30), datetime(2026, 7, 1, 8, 40), 98, 96),
+                    (datetime(2026, 7, 1, 8, 50), datetime(2026, 7, 1, 9, 0), 96, 94),
+                ]):
+                    s.add(Drive(
+                        vehicle_id=v.id, start_time=start, end_time=end,
+                        distance_km=5, duration_min=10, start_soc=ssoc, end_soc=esoc,
+                        energy_used_kwh=0.5, avg_speed_kmh=30, max_speed_kmh=50, outside_temp_c=28,
+                    ))
+                # The real, ground-truth current SoC: 100% -> 95% = 5% = 3.5
+                # kWh of a 70 kWh pack — less than the 4.2 kWh bottom-up sum.
+                s.add(BatteryReading(
+                    vehicle_id=v.id, ts=datetime(2026, 7, 1, 9, 10),
+                    soc=95, range_km=350.0, odo_km=1000.0,
+                ))
+                s.commit()
+
+            client.post("/api/active-vehicle", json={"vin": "TESTVIN-SOCTRUTH"})
+            try:
+                bal = client.get("/api/summary?since_charge=true").json()["battery_balance"]
+                assert bal["current_soc_pct"] == 95.0
+                assert bal["used_kwh"] == 3.5  # ground truth, not the 4.2 bottom-up sum
+                assert bal["used_pct"] == 5.0
+                assert round(bal["trip_kwh"] + bal["vampire_kwh"], 1) == round(bal["used_kwh"], 1)
+                assert round(100.0 - bal["current_soc_pct"], 1) == bal["used_pct"]
+            finally:
+                client.post("/api/active-vehicle", json={"vin": "DEMO0SAMPLE0000001"})
+                with SessionLocal() as s:
+                    s.query(Drive).filter(Drive.vehicle_id == v.id).delete()
+                    s.query(Charge).filter(Charge.vehicle_id == v.id).delete()
+                    s.query(BatteryReading).filter(BatteryReading.vehicle_id == v.id).delete()
+                    s.query(Vehicle).filter(Vehicle.id == v.id).delete()
+                    s.commit()
+    finally:
+        settings.app_passcode = old_pc
+        settings.battery_capacity_kwh = old_cap
+
+
 def test_idle_inducer_detects_sentry_and_climate_but_never_a_negative():
     """_idle_inducer() only ever reports a POSITIVE detection from
     BatteryReading rows actually logged inside the gap — a reading showing

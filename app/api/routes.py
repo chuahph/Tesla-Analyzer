@@ -1942,6 +1942,14 @@ def summary(
             settings.currency,
         )
 
+    # Battery Balance: how much charge is actually left in the pack right now
+    # (the latest logged SoC reading) — the "fuel gauge", not a derived delta.
+    current_soc = session.scalar(
+        select(BatteryReading.soc)
+        .where(BatteryReading.vehicle_id == vehicle.id)
+        .order_by(BatteryReading.ts.desc())
+        .limit(1)
+    )
     # Battery Used: % of the full (degradation-adjusted) pack, same basis as
     # every other %-of-battery figure in the app (km/1% Battery's
     # soc_used_pct, each trip's own soc_used_pct) so they're all directly
@@ -1951,24 +1959,44 @@ def summary(
     # shown there.
     full_charge_kwh = capacity_kwh
     charged_kwh = charging.get("total_energy_kwh") or 0.0
-    used_kwh = (driving.get("total_energy_used_kwh") or 0.0) if driving.get("available") else 0.0
+    # For "since charge" specifically we have real ground truth for the total
+    # drop — the charge's own end SoC minus the latest reading — so anchor to
+    # that instead of driving_analysis.analyze()'s bottom-up per-trip
+    # estimate. Each trip there takes max(measured kWh, integer SoC drop) to
+    # rescue a trip with a range-reading gap from being undercounted (see
+    # driving.py's _trip_kwh()) — but always taking the larger is a
+    # one-directional bias that, summed across several trips, visibly drifts
+    # the total past what the pack's own SoC already reports directly (e.g.
+    # "89% left, 11.7% used" not summing to 100%). Only applied when there's
+    # at least one drive in the window (driving.available) — vampire_kwh
+    # below needs a real vampire_drain() result to split against, and with
+    # zero drives there isn't one.
+    ground_truth_used_kwh = (
+        max((last_charge.end_soc - current_soc) / 100.0 * capacity_kwh, 0.0)
+        if (since_charge and last_charge is not None and current_soc is not None
+            and capacity_kwh > 0 and driving.get("available"))
+        else None
+    )
+    used_kwh = (
+        ground_truth_used_kwh if ground_truth_used_kwh is not None
+        else ((driving.get("total_energy_used_kwh") or 0.0) if driving.get("available") else 0.0)
+    )
     used_pct = None
     if since_charge and capacity_kwh > 0:
         used_pct = round(used_kwh / capacity_kwh * 100.0, 1)
-    # Battery Balance: how much charge is actually left in the pack right now
-    # (the latest logged SoC reading) — the "fuel gauge", not a derived delta.
-    current_soc = session.scalar(
-        select(BatteryReading.soc)
-        .where(BatteryReading.vehicle_id == vehicle.id)
-        .order_by(BatteryReading.ts.desc())
-        .limit(1)
-    )
     # Same window's used_kwh split into trip vs. vampire (standby drain
     # between drives — see driving_analysis.vampire_drain()); the two always
-    # sum to used_kwh exactly, since that's how total_energy_used_kwh itself
-    # is built. No extrapolated %/day rate — see vampire_drain()'s docstring
-    # for why projecting a short gap's rate to a full day is misleading.
+    # sum to used_kwh exactly. When used_kwh is the ground-truth SoC delta
+    # above (not analyze()'s own bottom-up total), trip is re-derived by
+    # subtraction from THAT total instead of taken directly from analyze() —
+    # same "round the total once, derive the split by subtraction" principle
+    # analyze() itself uses, just anchored to the more accurate total.
     vd = (driving.get("vampire_drain") or {}) if driving.get("available") else {}
+    vampire_kwh = vd.get("kwh", 0.0)
+    trip_kwh = (
+        max(round(round(used_kwh, 1) - vampire_kwh, 1), 0.0) if ground_truth_used_kwh is not None
+        else (round(driving.get("trip_energy_used_kwh") or 0.0, 1) if driving.get("available") else 0.0)
+    )
     vd_longest = vd.get("longest")
     longest_inducer = (
         _idle_inducer(session, vehicle.id, vd_longest["start"], vd_longest["end"])
@@ -1980,8 +2008,8 @@ def summary(
         "used_kwh": round(used_kwh, 1),
         "used_pct": used_pct,
         "current_soc_pct": round(current_soc, 1) if current_soc is not None else None,
-        "trip_kwh": round(driving.get("trip_energy_used_kwh") or 0.0, 1) if driving.get("available") else 0.0,
-        "vampire_kwh": vd.get("kwh", 0.0),
+        "trip_kwh": trip_kwh,
+        "vampire_kwh": vampire_kwh,
         "vampire_hours": vd.get("hours", 0.0),
         "vampire_gaps": vd.get("gaps", 0),
         # The single longest qualifying parked gap this window, separate from
