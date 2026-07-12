@@ -160,6 +160,35 @@ def _window(
     return list(drives), list(charges)
 
 
+def _idle_inducer(session: Session, vehicle_id: int, start_iso: str, end_iso: str) -> str | None:
+    """What was likely running when the car parked into this idle gap, from
+    BatteryReading rows logged before it fell asleep — the only part of the
+    gap the app ever has visibility into (see BatteryReading.sentry_mode's
+    docstring: sync deliberately stops polling once the car sleeps, so it
+    can't know what a Sentry/climate toggle did hours into the gap).
+
+    Only ever a positive detection ("Sentry Mode was on"): a reading
+    showing it off, or no reading at all for this gap, says nothing
+    reliable about the rest of the (unobserved) gap, so it's never reported
+    as a confirmed negative."""
+    rows = session.scalars(
+        select(BatteryReading).where(
+            BatteryReading.vehicle_id == vehicle_id,
+            BatteryReading.ts >= datetime.fromisoformat(start_iso),
+            BatteryReading.ts <= datetime.fromisoformat(end_iso),
+        )
+    ).all()
+    sentry = any(r.sentry_mode for r in rows)
+    climate = any(r.climate_on for r in rows)
+    if sentry and climate:
+        return "Sentry Mode & climate were on"
+    if sentry:
+        return "Sentry Mode was on"
+    if climate:
+        return "Climate was on"
+    return None
+
+
 def _live_eta(session: Session, snap: dict, live: dict, capacity_kwh: float) -> dict | None:
     """Distance/time/projected-SoC to the nearest named place the car isn't
     already at, estimated from the live drive's own current position and pace.
@@ -816,13 +845,24 @@ def _process_vehicle(
             .where(BatteryReading.vehicle_id == vehicle.id)
             .order_by(BatteryReading.ts.desc())
         ).first()
-        if last_reading is None or abs(last_reading.soc - snap["soc"]) >= 1.0:
+        sentry_now = snap.get("sentry_mode")
+        climate_now = snap.get("climate_on")
+        # Also write a row on a Sentry/climate change even with SoC
+        # unmoved — the whole point is catching the state right as the car
+        # parks (before it sleeps and this polling stops seeing it), and SoC
+        # usually hasn't dropped a full point yet by then.
+        state_changed = last_reading is not None and (
+            last_reading.sentry_mode != sentry_now or last_reading.climate_on != climate_now
+        )
+        if last_reading is None or abs(last_reading.soc - snap["soc"]) >= 1.0 or state_changed:
             session.add(BatteryReading(
                 vehicle_id=vehicle.id,
                 ts=datetime.fromtimestamp(snap["ts"], sync_mod.MYT).replace(tzinfo=None),
                 soc=snap["soc"],
                 range_km=round(snap["range_km"], 1),
                 odo_km=round(snap["odo_km"], 1),
+                sentry_mode=sentry_now,
+                climate_on=climate_now,
             ))
         # Low-battery alert: fires once per low episode (a state.py flag,
         # cleared once SoC recovers past the threshold + a small hysteresis
@@ -1897,6 +1937,10 @@ def summary(
     # for why projecting a short gap's rate to a full day is misleading.
     vd = (driving.get("vampire_drain") or {}) if driving.get("available") else {}
     vd_longest = vd.get("longest")
+    longest_inducer = (
+        _idle_inducer(session, vehicle.id, vd_longest["start"], vd_longest["end"])
+        if vd_longest else None
+    )
     battery_balance = {
         "full_charge_kwh": full_charge_kwh,
         "charged_kwh": round(charged_kwh, 1),
@@ -1913,6 +1957,11 @@ def summary(
         "vampire_longest_hours": vd_longest["hours"] if vd_longest else None,
         "vampire_longest_start": vd_longest["start"] if vd_longest else None,
         "vampire_longest_end": vd_longest["end"] if vd_longest else None,
+        # What was likely running when the car parked into that gap, from
+        # BatteryReading rows logged before it slept — see _idle_inducer().
+        # None whenever there's nothing to positively report (no reading in
+        # range, or Sentry/climate both off in every reading seen).
+        "vampire_longest_inducer": longest_inducer,
     }
 
     # Petrol comparator (TCO): what an equivalent petrol car would have cost

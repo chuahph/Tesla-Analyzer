@@ -33,6 +33,30 @@ def test_snapshot_parses_vehicle_data_ms_timestamp_and_miles():
     assert s["soc"] == 72 and s["out_temp"] == 31.5
 
 
+def test_snapshot_parses_sentry_and_climate_as_none_when_unreported():
+    """sentry_mode/climate_on are None (not False) when Tesla's payload omits
+    the field entirely — an older car/software or a permission gap — so a
+    caller can tell "unknown" apart from a confirmed off. Present and true
+    when Tesla does report them."""
+    unreported = snapshot_from_vehicle_data({
+        "drive_state": {"timestamp": 1_760_000_000, "shift_state": "P"},
+        "charge_state": {"battery_level": 72},
+        "climate_state": {},
+        "vehicle_state": {},
+    })
+    assert unreported["sentry_mode"] is None
+    assert unreported["climate_on"] is None
+
+    reported = snapshot_from_vehicle_data({
+        "drive_state": {"timestamp": 1_760_000_000, "shift_state": "P"},
+        "charge_state": {"battery_level": 72},
+        "climate_state": {"is_climate_on": True},
+        "vehicle_state": {"sentry_mode": True},
+    })
+    assert reported["sentry_mode"] is True
+    assert reported["climate_on"] is True
+
+
 def test_trip_opens_spans_snapshots_and_closes_on_park():
     """One drive across four snapshots = exactly one logged entry."""
     s1 = snap(T0, 10_000.0, 80)                               # parked at home

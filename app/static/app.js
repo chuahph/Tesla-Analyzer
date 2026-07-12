@@ -512,11 +512,17 @@ function renderKpis(d) {
     // separate from Vampire Drain's aggregate — "that's when I was away for
     // the weekend" vs. day-to-day standby. Always shown alongside Vampire
     // Drain rather than only appearing once there's a gap to report.
+    // vampire_longest_inducer (server-mode only — see _idle_inducer() in
+    // routes.py) is a POSITIVE detection ("Sentry Mode was on") from
+    // BatteryReading rows logged right before the car fell asleep, the only
+    // part of the gap there's any visibility into — absent whenever there's
+    // nothing to confirm, not a claim that nothing was running.
     if (bal) {
       const longestH = bal.vampire_longest_hours;
+      const inducer = bal.vampire_longest_inducer ? ` · ${bal.vampire_longest_inducer}` : "";
       cards.push(longestH != null
         ? kpiCard("Longest Idle", fmt(longestH, 0) + " h",
-            `${fmt(longestH / 24, 1)} days · ended ${tripWhen(bal.vampire_longest_end)}`, "violet")
+            `${fmt(longestH / 24, 1)} days · ended ${tripWhen(bal.vampire_longest_end)}${inducer}`, "violet")
         : kpiCard("Longest Idle", "—", "no qualifying parked gap yet", "violet"));
     }
     // TCO: what this window's distance would have cost in an equivalent

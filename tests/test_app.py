@@ -437,6 +437,7 @@ def test_summary_reports_battery_balance():
                 "full_charge_kwh", "charged_kwh", "used_kwh", "used_pct", "current_soc_pct",
                 "trip_kwh", "vampire_kwh", "vampire_hours", "vampire_gaps",
                 "vampire_longest_hours", "vampire_longest_start", "vampire_longest_end",
+                "vampire_longest_inducer",
             }
             assert bal["charged_kwh"] >= 0
             assert bal["used_kwh"] >= 0
@@ -454,6 +455,7 @@ def test_summary_reports_battery_balance():
                 assert bal["vampire_longest_end"] is not None
             else:
                 assert bal["vampire_longest_hours"] is None
+                assert bal["vampire_longest_inducer"] is None
 
             since_body = client.get("/api/summary?since_charge=true").json()
             since_bal = since_body["battery_balance"]
@@ -463,6 +465,55 @@ def test_summary_reports_battery_balance():
                     since_bal["used_kwh"] / since_bal["full_charge_kwh"] * 100.0, 1)
     finally:
         settings.app_passcode = old
+
+
+def test_idle_inducer_detects_sentry_and_climate_but_never_a_negative():
+    """_idle_inducer() only ever reports a POSITIVE detection from
+    BatteryReading rows actually logged inside the gap — a reading showing
+    both off, or no reading at all, must never be reported as a confirmed
+    "nothing was running" (sync stops polling once the car sleeps, so most
+    of a real gap is unobserved)."""
+    from app.api.routes import _idle_inducer
+    from app.database import SessionLocal
+    from app.models import BatteryReading, Vehicle
+
+    with SessionLocal() as s:
+        v = Vehicle(vin="TESTVIN-INDUCER", name="Test", model="Model 3")
+        s.add(v)
+        s.commit()
+        gap_start, gap_end = "2026-07-01T08:00", "2026-07-01T20:00"
+
+        # No readings at all in range -> no claim either way.
+        assert _idle_inducer(s, v.id, gap_start, gap_end) is None
+
+        # A reading with both off, still inside the gap -> no claim (can't
+        # rule out a later toggle the app never saw).
+        s.add(BatteryReading(vehicle_id=v.id, ts=datetime(2026, 7, 1, 8, 5),
+                              soc=80, range_km=300, sentry_mode=False, climate_on=False))
+        s.commit()
+        assert _idle_inducer(s, v.id, gap_start, gap_end) is None
+
+        # A reading outside the gap showing Sentry on doesn't count.
+        s.add(BatteryReading(vehicle_id=v.id, ts=datetime(2026, 7, 1, 21, 0),
+                              soc=79, range_km=298, sentry_mode=True, climate_on=False))
+        s.commit()
+        assert _idle_inducer(s, v.id, gap_start, gap_end) is None
+
+        # Sentry on, inside the gap -> positive detection.
+        s.add(BatteryReading(vehicle_id=v.id, ts=datetime(2026, 7, 1, 8, 10),
+                              soc=80, range_km=300, sentry_mode=True, climate_on=False))
+        s.commit()
+        assert _idle_inducer(s, v.id, gap_start, gap_end) == "Sentry Mode was on"
+
+        # Climate also seen on inside the gap -> both mentioned.
+        s.add(BatteryReading(vehicle_id=v.id, ts=datetime(2026, 7, 1, 9, 0),
+                              soc=79, range_km=299, sentry_mode=False, climate_on=True))
+        s.commit()
+        assert _idle_inducer(s, v.id, gap_start, gap_end) == "Sentry Mode & climate were on"
+
+        s.query(BatteryReading).filter(BatteryReading.vehicle_id == v.id).delete()
+        s.query(Vehicle).filter(Vehicle.id == v.id).delete()
+        s.commit()
 
 
 def test_place_label_prefers_specific_feature_over_broad_district():

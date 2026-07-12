@@ -809,6 +809,9 @@
       vampire_longest_hours: vdLongest ? vdLongest.hours : null,
       vampire_longest_start: vdLongest ? vdLongest.start : null,
       vampire_longest_end: vdLongest ? vdLongest.end : null,
+      // Server-mode only (see _idle_inducer() in routes.py) — static mode
+      // has no live Sentry/climate telemetry stream to draw from.
+      vampire_longest_inducer: null,
     };
 
     return {

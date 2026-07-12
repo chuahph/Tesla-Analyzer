@@ -151,6 +151,13 @@ def snapshot_from_vehicle_data(data: dict[str, Any]) -> dict[str, Any]:
         "locked": bool(vs.get("locked")),
         "lat": ds.get("latitude"),
         "lon": ds.get("longitude"),
+        # Parked-drain context, not used for the drive/charge state machine —
+        # only persisted onto BatteryReading (see /api/sync) so a later
+        # vampire-drain gap can look up what was running right before the car
+        # slept. None (not False) when Tesla didn't report the field at all,
+        # kept distinct from a confirmed off.
+        "sentry_mode": vs.get("sentry_mode") if "sentry_mode" in vs else None,
+        "climate_on": cl.get("is_climate_on") if "is_climate_on" in cl else None,
     }
 
 

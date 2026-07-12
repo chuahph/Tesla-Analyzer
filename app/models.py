@@ -112,6 +112,12 @@ class BatteryReading(Base):
     soc: Mapped[float] = mapped_column(Float)
     range_km: Mapped[float] = mapped_column(Float)
     odo_km: Mapped[float] = mapped_column(Float, default=0.0)
+    # Nullable, not defaulted to False: None means "Tesla didn't report this
+    # field on this poll" (older cars/software, or a permission gap),
+    # meaningfully different from a confirmed off — see vampire_drain's
+    # "likely inducer" lookup in routes.py.
+    sentry_mode: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    climate_on: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
 
 
 class Charge(Base):
