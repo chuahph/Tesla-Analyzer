@@ -416,8 +416,12 @@ function renderKpis(d) {
     // charge/discharge cycles with cumulative use exceeding one pack, so
     // it's just the raw kWh there. Split trip-vs-parked so the headline
     // doesn't read as "all driving" — bal.trip_kwh + bal.vampire_kwh always
-    // sums to bal.used_kwh exactly (see driving_analysis.analyze()).
-    const split = bal && bal.vampire_kwh > 0
+    // sums to bal.used_kwh exactly (see driving_analysis.analyze()). Shown
+    // even when idle is exactly 0 — that's real information too (every
+    // charge-free gap this window genuinely measured no SoC movement), not
+    // just "nothing to report", so hiding it would look like the two
+    // numbers don't add up when they actually do.
+    const split = bal
       ? ` (${fmt(bal.trip_kwh, 1)} trip + ${fmt(bal.vampire_kwh, 1)} idle)` : "";
     // "!" info popover explaining how full_charge_kwh (shared by Battery
     // Used and Vampire Drain below) accounts for degradation — see
