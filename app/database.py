@@ -81,6 +81,7 @@ def init_db() -> None:
     # it) must stay distinguishable from a confirmed off.
     _ensure_column("battery_readings", "sentry_mode", "BOOLEAN", "NULL")
     _ensure_column("battery_readings", "climate_on", "BOOLEAN", "NULL")
+    _ensure_column("battery_readings", "cabin_overheat_protection", "VARCHAR(10)", "NULL")
 
 
 def get_session() -> Iterator[Session]:

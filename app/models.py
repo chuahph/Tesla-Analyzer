@@ -118,6 +118,9 @@ class BatteryReading(Base):
     # "likely inducer" lookup in routes.py.
     sentry_mode: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     climate_on: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    # Tri-state string ("Off"/"On"/"FanOnly"), not a bool — Tesla's own shape
+    # for this field. None when unreported, same rule as the two above.
+    cabin_overheat_protection: Mapped[str | None] = mapped_column(String(10), nullable=True)
 
 
 class Charge(Base):

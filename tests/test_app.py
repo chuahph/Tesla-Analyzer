@@ -516,6 +516,51 @@ def test_idle_inducer_detects_sentry_and_climate_but_never_a_negative():
         s.commit()
 
 
+def test_idle_inducer_prefers_cabin_overheat_protection_over_generic_climate():
+    """Cabin overheat protection is a specific reason climate_on went true —
+    when a reading shows it On (or FanOnly, which still counts as active),
+    the label names that specifically instead of also/separately claiming
+    generic "climate was on" for the same underlying HVAC activity."""
+    from app.api.routes import _idle_inducer
+    from app.database import SessionLocal
+    from app.models import BatteryReading, Vehicle
+
+    with SessionLocal() as s:
+        v = Vehicle(vin="TESTVIN-COP", name="Test", model="Model 3")
+        s.add(v)
+        s.commit()
+        gap_start, gap_end = "2026-07-01T08:00", "2026-07-01T20:00"
+
+        s.add(BatteryReading(vehicle_id=v.id, ts=datetime(2026, 7, 1, 12, 0),
+                              soc=80, range_km=300, climate_on=True,
+                              cabin_overheat_protection="On"))
+        s.commit()
+        assert _idle_inducer(s, v.id, gap_start, gap_end) == "cabin overheat protection was on"
+
+        # FanOnly still counts as active.
+        s.query(BatteryReading).filter(BatteryReading.vehicle_id == v.id).delete()
+        s.add(BatteryReading(vehicle_id=v.id, ts=datetime(2026, 7, 1, 12, 0),
+                              soc=80, range_km=300, climate_on=True,
+                              cabin_overheat_protection="FanOnly"))
+        s.commit()
+        assert _idle_inducer(s, v.id, gap_start, gap_end) == "cabin overheat protection was on"
+
+        # Off is not active, but climate_on is still true from something
+        # else -> falls back to the generic label.
+        s.query(BatteryReading).filter(BatteryReading.vehicle_id == v.id).delete()
+        s.add(BatteryReading(vehicle_id=v.id, ts=datetime(2026, 7, 1, 12, 0),
+                              soc=80, range_km=300, climate_on=True,
+                              cabin_overheat_protection="Off"))
+        s.commit()
+        assert _idle_inducer(s, v.id, gap_start, gap_end) == "climate was on"
+
+        s.query(BatteryReading).filter(BatteryReading.vehicle_id == v.id).delete()
+        s.query(Vehicle).filter(Vehicle.id == v.id).delete()
+        s.commit()
+        s.query(Vehicle).filter(Vehicle.id == v.id).delete()
+        s.commit()
+
+
 def test_place_label_prefers_specific_feature_over_broad_district():
     """The label should name the actual spot (POI/street) rather than the
     broader neighbourhood the old zoom-16 logic settled on, and area should

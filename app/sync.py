@@ -158,6 +158,11 @@ def snapshot_from_vehicle_data(data: dict[str, Any]) -> dict[str, Any]:
         # kept distinct from a confirmed off.
         "sentry_mode": vs.get("sentry_mode") if "sentry_mode" in vs else None,
         "climate_on": cl.get("is_climate_on") if "is_climate_on" in cl else None,
+        # Tesla reports this as a tri-state string ("Off"/"On"/"FanOnly"), not
+        # a bool — "FanOnly" still counts as active for drain purposes (it's
+        # still running the cabin fan, just not full AC).
+        "cabin_overheat_protection": cl.get("cabin_overheat_protection")
+        if "cabin_overheat_protection" in cl else None,
     }
 
 

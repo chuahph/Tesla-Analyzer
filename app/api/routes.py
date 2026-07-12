@@ -179,14 +179,20 @@ def _idle_inducer(session: Session, vehicle_id: int, start_iso: str, end_iso: st
         )
     ).all()
     sentry = any(r.sentry_mode for r in rows)
-    climate = any(r.climate_on for r in rows)
-    if sentry and climate:
-        return "Sentry Mode & climate were on"
-    if sentry:
-        return "Sentry Mode was on"
-    if climate:
-        return "Climate was on"
-    return None
+    # Cabin overheat protection is a specific (and, in a hot climate, more
+    # likely) reason the cabin fan/AC was running than generic climate use —
+    # "FanOnly" still counts as active, just not full AC. When it's on, skip
+    # the generic climate_on check entirely rather than reporting both, since
+    # COP running is exactly what sets climate_on true in the first place.
+    cop = any((r.cabin_overheat_protection or "") in ("On", "FanOnly") for r in rows)
+    climate = not cop and any(r.climate_on for r in rows)
+    reasons = [r for r, hit in (
+        ("Sentry Mode", sentry), ("cabin overheat protection", cop), ("climate", climate),
+    ) if hit]
+    if not reasons:
+        return None
+    verb = "was" if len(reasons) == 1 else "were"
+    return f"{' & '.join(reasons)} {verb} on"
 
 
 def _live_eta(session: Session, snap: dict, live: dict, capacity_kwh: float) -> dict | None:
@@ -847,12 +853,14 @@ def _process_vehicle(
         ).first()
         sentry_now = snap.get("sentry_mode")
         climate_now = snap.get("climate_on")
-        # Also write a row on a Sentry/climate change even with SoC
+        cop_now = snap.get("cabin_overheat_protection")
+        # Also write a row on a Sentry/climate/COP change even with SoC
         # unmoved — the whole point is catching the state right as the car
         # parks (before it sleeps and this polling stops seeing it), and SoC
         # usually hasn't dropped a full point yet by then.
         state_changed = last_reading is not None and (
             last_reading.sentry_mode != sentry_now or last_reading.climate_on != climate_now
+            or last_reading.cabin_overheat_protection != cop_now
         )
         if last_reading is None or abs(last_reading.soc - snap["soc"]) >= 1.0 or state_changed:
             session.add(BatteryReading(
@@ -863,6 +871,7 @@ def _process_vehicle(
                 odo_km=round(snap["odo_km"], 1),
                 sentry_mode=sentry_now,
                 climate_on=climate_now,
+                cabin_overheat_protection=cop_now,
             ))
         # Low-battery alert: fires once per low episode (a state.py flag,
         # cleared once SoC recovers past the threshold + a small hysteresis
