@@ -86,6 +86,38 @@ def test_charge_from_rejects_soc_recalibration_blip_with_negligible_real_energy(
     assert real["energy_added_kwh"] == 5.0
 
 
+def test_charging_flag_ignored_mid_drive_regen_soc_uptick():
+    """Charging can never coincide with the car actively driving. A stray
+    charging=True reading mid-trip — the reported real-world cause: a
+    regen-braking SoC uptick (Tesla's SoC readout isn't perfectly
+    monotonic while driving) briefly misread as "started charging", which
+    logged a phantom AC session at neither trip endpoint with SoC going
+    the wrong way — must not open/log a charge, and the trip must stay
+    one uninterrupted entry rather than being corrupted by the glitch."""
+    s1 = snap(T0, 10_000.0, 96, shift="D", speed=40)          # driving
+    # Momentary glitch: still driving, but charging flips true and SoC
+    # ticks up 1 point (regen) — a physically impossible combination.
+    s2 = snap(T0 + 60, 10_010.0, 97, shift="D", speed=35, charging=True)
+    s3 = snap(T0 + 600, 10_020.0, 94, shift="D", speed=60)    # driving resumes normally
+    s4 = snap(T0 + 900, 10_030.0, 92)                         # parked, trip ends
+
+    _, _, trip, charge = step(None, s1)
+    assert trip is not None and charge is None
+
+    d, c, trip, charge = step(s1, s2, trip, charge)
+    assert d == [] and c == []       # no phantom charge logged
+    assert charge is None            # never opened despite charging=True
+    assert trip is not None          # trip stays open, uninterrupted
+
+    d, c, trip, charge = step(s2, s3, trip, charge)
+    assert d == [] and c == [] and charge is None
+
+    d, c, trip, charge = step(s3, s4, trip, charge)
+    assert trip is None and len(d) == 1   # one continuous trip, not split
+    assert d[0]["distance_km"] == 30.0    # 10000 -> 10030, uncorrupted by the glitch
+    assert c == []
+
+
 def test_trip_opens_spans_snapshots_and_closes_on_park():
     """One drive across four snapshots = exactly one logged entry."""
     s1 = snap(T0, 10_000.0, 80)                               # parked at home

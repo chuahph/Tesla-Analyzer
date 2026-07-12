@@ -842,19 +842,26 @@ def process_snapshot(
             drives.append(d)
 
     # --- Charges: open while charging, close when it stops -----------------
+    # Charging can never coincide with the car actively driving — a
+    # "Charging" reading seen alongside is_driving(cur) is a stale/glitched
+    # telemetry value (observed case: a regen-braking SoC uptick mid-drive
+    # briefly misread as "started charging", logging a phantom session at
+    # neither trip endpoint with SoC going the wrong way), not a real
+    # session. Treat it as a reason to close out (if one was open) or never
+    # open one at all.
     if open_charge:
         open_charge = {
             **open_charge,
             "max_kw": max(open_charge.get("max_kw", 0.0), cur.get("charger_kw") or 0.0),
             "fast": bool(open_charge.get("fast") or cur.get("fast")),
         }
-        if not cur.get("charging"):
+        if not cur.get("charging") or is_driving(cur):
             c = _charge_from(open_charge, cur, capacity_kwh, price_per_kwh, drive_min_km,
                              price_per_kwh_dc)
             if c:
                 charges.append(c)
             open_charge = None
-    elif cur.get("charging"):
+    elif cur.get("charging") and not is_driving(cur):
         base = prev or cur
         open_charge = {
             "ts": base["ts"],
@@ -885,12 +892,17 @@ def process_snapshot(
         # _split_gap_events for why the plain whole-gap charge reconstruction
         # below would drop or shrink this session.
         charges.append(split_charge)
-    elif prev:
+    elif prev and not is_driving(cur):
         # A whole charge happened between snapshots. When the session meter
         # proves how much (see _gap_meter_total — it resets at plug-in, so a
         # changed value across a parked gap IS this session's total), use
         # that real measurement; otherwise match cur's value to force the
         # range/SoC estimate instead of a spurious stale-meter delta.
+        # is_driving(cur) excluded: same reasoning as the live open/close
+        # branches above — a SoC delta across a gap that ends with the car
+        # actively driving isn't proof a charge happened (a regen uptick is
+        # the observed real-world cause), and split_charge above already
+        # only ever covers a charge-then-drive gap that ends back at rest.
         meter_total = _gap_meter_total(prev, cur)
         cur_kwh = cur.get("energy_added_kwh") or 0.0
         c = _charge_from(
