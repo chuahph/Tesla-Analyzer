@@ -578,13 +578,13 @@ def test_idle_inducer_detects_sentry_and_climate_but_never_a_negative():
         s.add(BatteryReading(vehicle_id=v.id, ts=datetime(2026, 7, 1, 8, 10),
                               soc=80, range_km=300, sentry_mode=True, climate_on=False))
         s.commit()
-        assert _idle_inducer(s, v.id, gap_start, gap_end) == "Sentry Mode may have been on"
+        assert _idle_inducer(s, v.id, gap_start, gap_end) == "Sentry Mode (maybe)"
 
         # Climate also seen on inside the gap -> both mentioned.
         s.add(BatteryReading(vehicle_id=v.id, ts=datetime(2026, 7, 1, 9, 0),
                               soc=79, range_km=299, sentry_mode=False, climate_on=True))
         s.commit()
-        assert _idle_inducer(s, v.id, gap_start, gap_end) == "Sentry Mode & climate may have been on"
+        assert _idle_inducer(s, v.id, gap_start, gap_end) == "Sentry Mode & climate (maybe)"
 
         s.query(BatteryReading).filter(BatteryReading.vehicle_id == v.id).delete()
         s.query(Vehicle).filter(Vehicle.id == v.id).delete()
@@ -617,7 +617,7 @@ def test_idle_inducer_prefers_cabin_overheat_protection_over_generic_climate():
                               cabin_overheat_protection="On",
                               cabin_overheat_protection_actively_cooling=True))
         s.commit()
-        assert _idle_inducer(s, v.id, gap_start, gap_end) == "cabin overheat protection may have been on"
+        assert _idle_inducer(s, v.id, gap_start, gap_end) == "cabin overheat protection (maybe)"
 
         # FanOnly still counts as active, as long as it's really cooling.
         s.query(BatteryReading).filter(BatteryReading.vehicle_id == v.id).delete()
@@ -626,7 +626,7 @@ def test_idle_inducer_prefers_cabin_overheat_protection_over_generic_climate():
                               cabin_overheat_protection="FanOnly",
                               cabin_overheat_protection_actively_cooling=True))
         s.commit()
-        assert _idle_inducer(s, v.id, gap_start, gap_end) == "cabin overheat protection may have been on"
+        assert _idle_inducer(s, v.id, gap_start, gap_end) == "cabin overheat protection (maybe)"
 
         # The setting is "On" (as it almost always is) but it never actually
         # triggered this gap -> must NOT claim COP; falls back to the
@@ -637,7 +637,7 @@ def test_idle_inducer_prefers_cabin_overheat_protection_over_generic_climate():
                               cabin_overheat_protection="On",
                               cabin_overheat_protection_actively_cooling=False))
         s.commit()
-        assert _idle_inducer(s, v.id, gap_start, gap_end) == "climate may have been on"
+        assert _idle_inducer(s, v.id, gap_start, gap_end) == "climate (maybe)"
 
         # Setting Off, and never actively cooling -> no COP claim either way.
         s.query(BatteryReading).filter(BatteryReading.vehicle_id == v.id).delete()
@@ -646,7 +646,7 @@ def test_idle_inducer_prefers_cabin_overheat_protection_over_generic_climate():
                               cabin_overheat_protection="Off",
                               cabin_overheat_protection_actively_cooling=False))
         s.commit()
-        assert _idle_inducer(s, v.id, gap_start, gap_end) == "climate may have been on"
+        assert _idle_inducer(s, v.id, gap_start, gap_end) == "climate (maybe)"
 
         s.query(BatteryReading).filter(BatteryReading.vehicle_id == v.id).delete()
         s.query(Vehicle).filter(Vehicle.id == v.id).delete()

@@ -184,15 +184,16 @@ def _idle_inducer(session: Session, vehicle_id: int, start_iso: str, end_iso: st
     docstring: sync deliberately stops polling once the car sleeps, so it
     can't know what a Sentry/climate toggle did hours into the gap).
 
-    Only ever a positive detection ("Sentry Mode may have been on"): a
-    reading showing it off, or no reading at all for this gap, says nothing
+    Only ever a positive detection ("Sentry Mode (maybe)"): a reading
+    showing it off, or no reading at all for this gap, says nothing
     reliable about the rest of the (unobserved) gap, so it's never reported
-    as a confirmed negative. Phrased as "may have been" rather than a flat
-    "was on" for the same reason — sync polls periodically, not
-    continuously, so a single reading can't tell a multi-hour run apart
-    from a few-second automatic blip (e.g. a brief door-open waking the car
-    into a quick cabin-check cycle); reported as a "was on" duration claim
-    that's confirmed for the whole gap, it isn't."""
+    as a confirmed negative. Suffixed "(maybe)" rather than a flat "was on"
+    for the same reason — sync polls periodically, not continuously, so a
+    single reading can't tell a multi-hour run apart from a few-second
+    automatic blip (e.g. a brief door-open waking the car into a quick
+    cabin-check cycle); reported as a "was on" duration claim that's
+    confirmed for the whole gap, it isn't. Kept short (this renders inline
+    in a KPI card subtitle, where every character fights for one line)."""
     rows = session.scalars(
         select(BatteryReading).where(
             BatteryReading.vehicle_id == vehicle_id,
@@ -218,12 +219,12 @@ def _idle_inducer(session: Session, vehicle_id: int, start_iso: str, end_iso: st
     ) if hit]
     if not reasons:
         return None
-    # "may have been", not "was"/"were" — see docstring: a single reading
-    # can't confirm it ran for the gap's whole duration, only that it was
-    # observed on at some point within it. Deliberately number-invariant
-    # ("may have been" reads fine whether reasons has one item or several),
-    # unlike "was"/"were" which would need to track the count.
-    return f"{' & '.join(reasons)} may have been on"
+    # "(maybe)", not "was"/"were on" — see docstring: a single reading can't
+    # confirm it ran for the gap's whole duration, only that it was observed
+    # on at some point within it. Short and number-invariant (no was/were to
+    # pick), since this renders inline in a KPI card subtitle already
+    # crowded with the gap's own days/ended-at text.
+    return f"{' & '.join(reasons)} (maybe)"
 
 
 def _live_eta(session: Session, snap: dict, live: dict, capacity_kwh: float) -> dict | None:
