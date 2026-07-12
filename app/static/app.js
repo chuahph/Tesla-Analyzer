@@ -502,11 +502,11 @@ function renderKpis(d) {
       const kmAt = (pct) => Math.max(soc - pct, 0) / 100 * bal.full_charge_kwh / whPerKm * 1000;
       const totalKm = kmAt(0) + (drv.available ? drv.total_distance_km : 0);
       const thresholds = [];
-      if (soc > 50) thresholds.push(`${fmt(kmAt(50), 0)} km to 50%`);
-      if (soc > 20) thresholds.push(`${fmt(kmAt(20), 0)} km to 20%`);
-      thresholds.push(`${fmt(kmAt(0), 0)} km to 0%`);
-      thresholds.push(`at ${fmt(whPerKm, 0)} Wh/km${measured ? "" : " rated"}`);
-      cards.push(kpiCard("Estimated Range", fmt(totalKm, 0) + " km",
+      if (soc > 50) thresholds.push(`${fmt(kmAt(50), 1, true)} km to 50%`);
+      if (soc > 20) thresholds.push(`${fmt(kmAt(20), 1, true)} km to 20%`);
+      thresholds.push(`${fmt(kmAt(0), 1, true)} km to 0%`);
+      thresholds.push(`at ${fmt(whPerKm, 1, true)} Wh/km${measured ? "" : " rated"}`);
+      cards.push(kpiCard("Estimated Range", fmt(totalKm, 1, true) + " km",
         thresholds.join(" · "), "violet"));
     }
     // Longest Idle: the single biggest qualifying parked gap this window,
@@ -522,8 +522,8 @@ function renderKpis(d) {
       const longestH = bal.vampire_longest_hours;
       const inducer = bal.vampire_longest_inducer ? ` · ${bal.vampire_longest_inducer}` : "";
       cards.push(longestH != null
-        ? kpiCard("Longest Idle", fmt(longestH, 0) + " h",
-            `${fmt(longestH / 24, 1)} days · ended ${tripWhen(bal.vampire_longest_end)}${inducer}`, "violet")
+        ? kpiCard("Longest Idle", fmt(longestH, 1, true) + " h",
+            `${fmt(longestH / 24, 1, true)} days · ended ${tripWhen(bal.vampire_longest_end)}${inducer}`, "violet")
         : kpiCard("Longest Idle", "—", "no qualifying parked gap yet", "violet"));
     }
     // TCO: what this window's distance would have cost in an equivalent
