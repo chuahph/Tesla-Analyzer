@@ -184,10 +184,15 @@ def _idle_inducer(session: Session, vehicle_id: int, start_iso: str, end_iso: st
     docstring: sync deliberately stops polling once the car sleeps, so it
     can't know what a Sentry/climate toggle did hours into the gap).
 
-    Only ever a positive detection ("Sentry Mode was on"): a reading
-    showing it off, or no reading at all for this gap, says nothing
+    Only ever a positive detection ("Sentry Mode may have been on"): a
+    reading showing it off, or no reading at all for this gap, says nothing
     reliable about the rest of the (unobserved) gap, so it's never reported
-    as a confirmed negative."""
+    as a confirmed negative. Phrased as "may have been" rather than a flat
+    "was on" for the same reason — sync polls periodically, not
+    continuously, so a single reading can't tell a multi-hour run apart
+    from a few-second automatic blip (e.g. a brief door-open waking the car
+    into a quick cabin-check cycle); reported as a "was on" duration claim
+    that's confirmed for the whole gap, it isn't."""
     rows = session.scalars(
         select(BatteryReading).where(
             BatteryReading.vehicle_id == vehicle_id,
@@ -213,8 +218,12 @@ def _idle_inducer(session: Session, vehicle_id: int, start_iso: str, end_iso: st
     ) if hit]
     if not reasons:
         return None
-    verb = "was" if len(reasons) == 1 else "were"
-    return f"{' & '.join(reasons)} {verb} on"
+    # "may have been", not "was"/"were" — see docstring: a single reading
+    # can't confirm it ran for the gap's whole duration, only that it was
+    # observed on at some point within it. Deliberately number-invariant
+    # ("may have been" reads fine whether reasons has one item or several),
+    # unlike "was"/"were" which would need to track the count.
+    return f"{' & '.join(reasons)} may have been on"
 
 
 def _live_eta(session: Session, snap: dict, live: dict, capacity_kwh: float) -> dict | None:
