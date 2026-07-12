@@ -390,8 +390,14 @@ function renderKpis(d) {
       `${fmt(drv.total_drives)} drives · ${fmt(drv.total_duration_h)} h`, "blue"));
     // Efficiency is unknown when the drive logged no energy (range gap).
     if (eff.available && eff.avg_efficiency_wh_per_km) {
+      // Same "kWh used" figure as the Battery Used card below — bal.used_kwh
+      // when available (for a since-charge window that's the ground-truth
+      // SoC delta, not driving_analysis.analyze()'s own bottom-up estimate;
+      // see routes.py's summary()) — so the two cards never show two
+      // different numbers under the same label.
+      const usedKwh = bal && bal.used_kwh != null ? bal.used_kwh : (drv.total_energy_used_kwh ?? drv.total_energy_kwh);
       cards.push(kpiCard("Avg Efficiency", fmt(eff.avg_efficiency_wh_per_km) + " Wh/km",
-        `${fmt(drv.total_energy_used_kwh ?? drv.total_energy_kwh, 1)} kWh used · ${eff.vs_rated_pct >= 0 ? "+" : ""}${fmt(eff.vs_rated_pct, 1)}% vs rated`,
+        `${fmt(usedKwh, 1)} kWh used · ${eff.vs_rated_pct >= 0 ? "+" : ""}${fmt(eff.vs_rated_pct, 1)}% vs rated`,
         effTone(eff.vs_rated_pct)));
     } else {
       cards.push(kpiCard("Avg Efficiency", "—",
@@ -2082,6 +2088,7 @@ if (exportBtn) exportBtn.addEventListener("click", exportCsv);
 function buildReport(d) {
   const drv = d.driving || {}, chg = d.charging || {}, eff = d.efficiency || {};
   const b = d.battery || {}, v = d.vehicle || {}, cur = d.currency || "";
+  const bal = d.battery_balance;
   const windowText = d.window_label || `last ${d.window_days} days`;
   const row = (k, val) => val != null && val !== ""
     ? `<tr><td>${k}</td><td>${val}</td></tr>` : "";
@@ -2089,6 +2096,15 @@ function buildReport(d) {
     `<tr><td>${tripWhen(t.start_time)}</td><td>${t.distance_km} km</td>` +
     `<td>${t.wh_per_km != null ? t.wh_per_km + " Wh/km" : "—"}</td>` +
     `<td>${t.cost != null ? cur + " " + fmt(t.cost, 2) : "—"}</td></tr>`).join("");
+  // Same "kWh used" figure as the Battery Used/Avg Efficiency KPI cards —
+  // bal.used_kwh/used_pct when available (for a since-charge window that's
+  // the ground-truth SoC delta, not driving_analysis.analyze()'s own
+  // bottom-up estimate; see routes.py's summary()) — so the report never
+  // shows a different number than what's on screen.
+  const repUsedKwh = drv.available
+    ? (bal && bal.used_kwh != null ? bal.used_kwh : drv.total_energy_used_kwh) : null;
+  const repUsedPct = drv.available
+    ? (bal && bal.used_pct != null ? bal.used_pct : drv.soc_used_pct) : null;
   return `
     <h1>Tesla Analyzer — ${windowText}</h1>
     <p class="rep-sub">${[v.year, v.model, v.name].filter(Boolean).join(" · ")}
@@ -2096,9 +2112,9 @@ function buildReport(d) {
     <h2>Driving</h2>
     <table>${
       row("Distance", drv.available ? fmt(drv.total_distance_km) + " km · " + fmt(drv.total_drives) + " drives" : null)
-    }${row("Energy used", drv.total_energy_used_kwh != null
-      ? fmt(drv.total_energy_used_kwh, 1) + " kWh (" + (drv.soc_used_pct <= 100
-          ? fmt(drv.soc_used_pct, 1) + "% battery" : "≈ " + fmt(drv.soc_used_pct / 100, 1) + " full charges") + ")"
+    }${row("Energy used", repUsedKwh != null
+      ? fmt(repUsedKwh, 1) + " kWh" + (repUsedPct != null ? " (" + (repUsedPct <= 100
+          ? fmt(repUsedPct, 1) + "% battery" : "≈ " + fmt(repUsedPct / 100, 1) + " full charges") + ")" : "")
       : null)
     }${row("Avg efficiency", eff.avg_efficiency_wh_per_km ? fmt(eff.avg_efficiency_wh_per_km) + " Wh/km" : null)
     }${row("Driving cost", drv.total_cost != null ? cur + " " + fmt(drv.total_cost, 2) + (drv.cost_per_km != null ? " (" + cur + " " + fmt(drv.cost_per_km, 3) + "/km)" : "") : null)
