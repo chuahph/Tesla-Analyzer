@@ -460,17 +460,19 @@ function renderKpis(d) {
     if (bal) {
       const vampirePct = bal.used_pct != null && bal.full_charge_kwh > 0
         ? bal.vampire_kwh / bal.full_charge_kwh * 100 : null;
-      if (bal.vampire_gaps > 0) {
-        const gapInfo = `${bal.vampire_gaps} parked gap${bal.vampire_gaps === 1 ? "" : "s"} · ${fmt(bal.vampire_hours, 0)} h parked`;
-        cards.push(vampirePct != null
-          ? kpiCard(`Vampire Drain${vampireInfoBtn}`, fmt(vampirePct, 1, true) + "%",
-              `${fmt(bal.vampire_kwh, 1)} kWh of ${fmt(bal.full_charge_kwh, 1)} kWh full pack · ${gapInfo}`,
-              "amber")
-          : kpiCard(`Vampire Drain${vampireInfoBtn}`, `${fmt(bal.vampire_kwh, 1)} kWh`, gapInfo, "amber"));
-      } else {
-        cards.push(kpiCard(`Vampire Drain${vampireInfoBtn}`, vampirePct != null ? "0.0%" : "0 kWh",
-          "no qualifying parked gap (1h+, charge-free) in this window", "amber"));
-      }
+      // vampire_gaps/_hours only count gaps >=1h (the "parked gap" narrative);
+      // vampire_kwh itself sums EVERY charge-free gap, any duration — so a
+      // window full of only short (<1h) stops can still show real kWh here
+      // even though vampire_gaps is 0. Don't let a 0 gap count hide nonzero
+      // kWh (see driving_analysis.vampire_drain()'s kWh/narrative split).
+      const gapInfo = bal.vampire_gaps > 0
+        ? `${bal.vampire_gaps} parked gap${bal.vampire_gaps === 1 ? "" : "s"} · ${fmt(bal.vampire_hours, 0)} h parked`
+        : (bal.vampire_kwh > 0 ? "no single gap 1h+ — several shorter stops" : "no qualifying parked gap (charge-free) in this window");
+      cards.push(vampirePct != null
+        ? kpiCard(`Vampire Drain${vampireInfoBtn}`, fmt(vampirePct, 1, true) + "%",
+            `${fmt(bal.vampire_kwh, 1)} kWh of ${fmt(bal.full_charge_kwh, 1)} kWh full pack · ${gapInfo}`,
+            "amber")
+        : kpiCard(`Vampire Drain${vampireInfoBtn}`, `${fmt(bal.vampire_kwh, 1)} kWh`, gapInfo, "amber"));
     }
     if (bal) {
       const v = d.vehicle || {};
