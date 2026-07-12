@@ -1359,6 +1359,34 @@ def test_edit_charge_rate_recalculates_cost():
         settings.app_passcode = old
 
 
+def test_pricing_prefs_home_defaults_before_first_save():
+    """Before the Rates page has ever been saved, Home defaults to AC RM0.90
+    / DC RM1.13 per kWh — not the generic TNB-ToU-average placeholder."""
+    settings = get_settings()
+    old = settings.app_passcode
+    settings.app_passcode = ""
+    from app import state
+    from app.database import SessionLocal
+
+    keys = (
+        state.PRICE_PUBLIC_AC_KEY, state.PRICE_PUBLIC_DC_KEY,
+        state.PRICE_HOME_AC_KEY, state.PRICE_HOME_DC_KEY,
+        state.PRICE_OFFICE_AC_KEY, state.PRICE_OFFICE_DC_KEY,
+        state.DEFAULT_PRICE_SOURCE_KEY, state.PRICE_UPDATED_AT_KEY,
+    )
+    try:
+        with SessionLocal() as s:
+            state.delete(s, *keys)
+        with TestClient(app) as client:  # startup seeds demo data
+            rates = client.get("/api/pricing-prefs").json()["rates"]
+            assert rates["home_ac"] == 0.90
+            assert rates["home_dc"] == 1.13
+    finally:
+        settings.app_passcode = old
+        with SessionLocal() as s:
+            state.delete(s, *keys)
+
+
 def test_pricing_prefs_updated_at_tracks_last_save():
     """No live TNB/public-charger rate feed exists to auto-refresh from, so
     the Rates page shows when the numbers were last saved instead — None

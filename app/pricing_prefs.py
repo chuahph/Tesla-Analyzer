@@ -32,8 +32,8 @@ HOME_OFFICE_MATCH_RADIUS_KM = 2.0
 # Sensible starting points shown the first time the Rates page is opened —
 # never applied silently to an already-saved preference.
 DEFAULT_RATES = {
-    "home_ac": 0.44,    # ~TNB residential ToU blended average
-    "home_dc": 0.44,
+    "home_ac": 0.90,
+    "home_dc": 1.13,
     "office_ac": 0.57,
     "office_dc": 0.57,
 }
