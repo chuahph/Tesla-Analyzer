@@ -490,28 +490,24 @@ function renderKpis(d) {
         `so a real small loss over a few hours doesn't always cross a full point; that just means ` +
         `0 kWh is attributed to it, not that nothing happened.</div>`);
     }
-    // Estimated Range: how far the CURRENT battery balance (not this
-    // window's — the latest known SoC) goes before hitting 50%, 20%, and
-    // 0%, at this window's own measured efficiency when there's enough
-    // driving to measure one, else the car's rated spec.
+    // Estimated Range: total km this charge cycle is good for — this
+    // window's distance already driven, plus how far the CURRENT battery
+    // balance (not this window's — the latest known SoC) still goes before
+    // hitting 0%. Wh/km is this window's own measured efficiency when
+    // there's enough driving to measure one, else the car's rated spec.
     if (bal && bal.current_soc_pct != null && bal.full_charge_kwh > 0) {
       const measured = eff && eff.available && eff.avg_efficiency_wh_per_km;
       const whPerKm = measured || (eff && eff.rated_wh_per_km) || 150;
       const soc = bal.current_soc_pct;
       const kmAt = (pct) => Math.max(soc - pct, 0) / 100 * bal.full_charge_kwh / whPerKm * 1000;
+      const totalKm = kmAt(0) + (drv.available ? drv.total_distance_km : 0);
       const thresholds = [];
       if (soc > 50) thresholds.push(`${fmt(kmAt(50), 0)} km to 50%`);
       if (soc > 20) thresholds.push(`${fmt(kmAt(20), 0)} km to 20%`);
+      thresholds.push(`${fmt(kmAt(0), 0)} km to 0%`);
       thresholds.push(`at ${fmt(whPerKm, 0)} Wh/km${measured ? "" : " rated"}`);
-      // First bullet pairs the battery status banner's own figure (current
-      // %) with the Distance card's own figure (this window's total km) —
-      // the two numbers a driver already has in view elsewhere on the page,
-      // giving this card's projection some immediate grounding.
-      const socDist = drv.available
-        ? `${fmt(soc, 0)}% · ${fmt(drv.total_distance_km, 1)} km`
-        : `${fmt(soc, 0)}% now`;
-      cards.push(kpiCard("Estimated Range", fmt(kmAt(0), 0) + " km",
-        `${socDist} · ${thresholds.join(" · ")}`, "violet"));
+      cards.push(kpiCard("Estimated Range", fmt(totalKm, 0) + " km",
+        thresholds.join(" · "), "violet"));
     }
     // Longest Idle: the single biggest qualifying parked gap this window,
     // separate from Vampire Drain's aggregate — "that's when I was away for
