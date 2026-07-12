@@ -1915,29 +1915,6 @@ def summary(
         "vampire_longest_end": vd_longest["end"] if vd_longest else None,
     }
 
-    # Time Breakdown: how the window's own elapsed wall-clock time split
-    # between driving, idle/parked (vampire gaps), and charging — ties
-    # Vampire Drain's hours together with the rest of the window instead of
-    # leaving it as an isolated figure. since is None for a plain N-day
-    # window (see _window()'s own since=None handling), where the window is
-    # simply "days ago -> now"; the special windows (current/last drive,
-    # since charge) already have a concrete since.
-    window_hours = (now - since).total_seconds() / 3600.0 if since is not None else days * 24.0
-    driving_hours = (driving.get("total_duration_h") or 0.0) if driving.get("available") else 0.0
-    charging_hours = (charging.get("total_duration_h") or 0.0) if charging.get("available") else 0.0
-    idle_hours = vd.get("hours", 0.0)
-    # Whatever's left: short/excluded gaps below the vampire threshold, a
-    # charge-containing gap, measurement gaps, etc. — not a real "unknown"
-    # bucket, just everything this breakdown doesn't otherwise categorize.
-    other_hours = max(window_hours - driving_hours - charging_hours - idle_hours, 0.0)
-    time_breakdown = {
-        "window_hours": round(window_hours, 1),
-        "driving_hours": round(driving_hours, 1),
-        "idle_hours": round(idle_hours, 1),
-        "charging_hours": round(charging_hours, 1),
-        "other_hours": round(other_hours, 1),
-    }
-
     # Petrol comparator (TCO): what an equivalent petrol car would have cost
     # to run this window's distance, at the configured price/consumption.
     # Both settings default to 0 (disabled) — no assumed "average car" figure
@@ -2038,7 +2015,6 @@ def summary(
         "efficiency": efficiency,
         "battery": battery,
         "battery_balance": battery_balance,
-        "time_breakdown": time_breakdown,
         "petrol_comparison": petrol_comparison,
         "week_compare": week_compare,
         "narrative": narrative_lines,

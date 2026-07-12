@@ -490,18 +490,23 @@ function renderKpis(d) {
         `so a real small loss over a few hours doesn't always cross a full point; that just means ` +
         `0 kWh is attributed to it, not that nothing happened.</div>`);
     }
-    // Time Breakdown: how the window's own elapsed wall-clock time split
-    // between driving, idle/parked (Vampire Drain's own hours), and
-    // charging — ties those hours to the rest of the window instead of
-    // leaving Vampire Drain's figure floating on its own. Headlines idle %
-    // since that's the figure most worth a second look.
-    const tb = d.time_breakdown;
-    if (tb && tb.window_hours > 0) {
-      const idlePct = tb.idle_hours / tb.window_hours * 100;
-      cards.push(kpiCard("Time Breakdown", fmt(idlePct, 0) + "% idle",
-        `${fmt(tb.driving_hours, 0)}h driving · ${fmt(tb.idle_hours, 0)}h idle · ` +
-        `${fmt(tb.charging_hours, 0)}h charging of ${fmt(tb.window_hours, 0)}h`,
-        "violet"));
+    // Estimated Range: how far the CURRENT battery balance (not this
+    // window's — the latest known SoC) goes before hitting 50%, 20%, and
+    // 0%, at this window's own measured efficiency when there's enough
+    // driving to measure one, else the car's rated spec. A stale-SoC note
+    // covers the gap between the last logged reading and "right now" (the
+    // car may have driven or charged since).
+    if (bal && bal.current_soc_pct != null && bal.full_charge_kwh > 0) {
+      const measured = eff && eff.available && eff.avg_efficiency_wh_per_km;
+      const whPerKm = measured || (eff && eff.rated_wh_per_km) || 150;
+      const soc = bal.current_soc_pct;
+      const kmAt = (pct) => Math.max(soc - pct, 0) / 100 * bal.full_charge_kwh / whPerKm * 1000;
+      const thresholds = [];
+      if (soc > 50) thresholds.push(`${fmt(kmAt(50), 0)} km to 50%`);
+      if (soc > 20) thresholds.push(`${fmt(kmAt(20), 0)} km to 20%`);
+      thresholds.push(`at ${fmt(whPerKm, 0)} Wh/km${measured ? " this window" : " rated"}`);
+      cards.push(kpiCard("Estimated Range", fmt(kmAt(0), 0) + " km",
+        `${fmt(soc, 0)}% now · ${thresholds.join(" · ")}`, "violet"));
     }
     // Longest Idle: the single biggest qualifying parked gap this window,
     // separate from Vampire Drain's aggregate — "that's when I was away for

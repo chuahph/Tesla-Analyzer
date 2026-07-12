@@ -400,7 +400,6 @@
       available: true,
       total_sessions: charges.length,
       total_energy_kwh: round(totalEnergy, 1),
-      total_duration_h: round(charges.reduce((a, c) => a + (c.duration_min || 0), 0) / 60.0, 1),
       total_cost: round(totalCost, 2),
       avg_cost_per_kwh: round(safeDiv(totalCost, totalEnergy), 3),
       ac_sessions: ac.length,
@@ -781,11 +780,28 @@
     }
     const vd = driving.available ? (driving.vampire_drain || {}) : {};
     const vdLongest = vd.longest || null;
+    // "Current" SoC proxy — static mode has no live telemetry/periodic
+    // readings stream (unlike the server, which reads the latest
+    // BatteryReading), so approximate it as the end_soc of whichever of the
+    // most recent drive or charge (across the WHOLE dataset, not just this
+    // window) happened last.
+    let currentSoc = null;
+    const lastDriveEver = allDrives.length
+      ? [...allDrives].sort((a, b) => new Date(b.end_time) - new Date(a.end_time))[0] : null;
+    if (lastDriveEver && lc) {
+      currentSoc = new Date(lastDriveEver.end_time) > new Date(lc.end_time)
+        ? lastDriveEver.end_soc : lc.end_soc;
+    } else if (lastDriveEver) {
+      currentSoc = lastDriveEver.end_soc;
+    } else if (lc) {
+      currentSoc = lc.end_soc;
+    }
     const batteryBalance = {
       full_charge_kwh: round(capacity, 1),
       charged_kwh: round(charging.total_energy_kwh || 0, 1),
       used_kwh: round(usedKwh, 1),
       used_pct: usedPct,
+      current_soc_pct: currentSoc != null ? round(currentSoc, 1) : null,
       trip_kwh: driving.available ? round(driving.trip_energy_used_kwh || 0, 1) : 0,
       vampire_kwh: vd.kwh || 0.0,
       vampire_hours: vd.hours || 0.0,
@@ -793,24 +809,6 @@
       vampire_longest_hours: vdLongest ? vdLongest.hours : null,
       vampire_longest_start: vdLongest ? vdLongest.start : null,
       vampire_longest_end: vdLongest ? vdLongest.end : null,
-    };
-
-    // Time Breakdown: how the window's own elapsed wall-clock time split
-    // between driving, idle (vampire) and charging — mirrors
-    // app/api/routes.py's summary(). since is always a concrete timestamp
-    // here (unlike the Python side, where a plain N-day window leaves it
-    // null and _window() fills it in) — see the branch above.
-    const windowHours = (Date.now() - since) / 3600000.0;
-    const drivingHours = driving.available ? (driving.total_duration_h || 0) : 0;
-    const chargingHours = charging.available ? (charging.total_duration_h || 0) : 0;
-    const idleHours = vd.hours || 0;
-    const otherHours = Math.max(windowHours - drivingHours - chargingHours - idleHours, 0);
-    const timeBreakdown = {
-      window_hours: round(windowHours, 1),
-      driving_hours: round(drivingHours, 1),
-      idle_hours: round(idleHours, 1),
-      charging_hours: round(chargingHours, 1),
-      other_hours: round(otherHours, 1),
     };
 
     return {
@@ -821,7 +819,6 @@
       currency,
       last_charge: lastCharge,
       battery_balance: batteryBalance,
-      time_breakdown: timeBreakdown,
       driving, charging, efficiency, battery, recommendations,
     };
   }

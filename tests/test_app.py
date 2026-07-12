@@ -465,30 +465,6 @@ def test_summary_reports_battery_balance():
         settings.app_passcode = old
 
 
-def test_summary_reports_time_breakdown():
-    """time_breakdown splits the window's own elapsed wall-clock time into
-    driving / idle (vampire) / charging / other — the four always sum back
-    to window_hours exactly (other_hours is defined as the remainder)."""
-    settings = get_settings()
-    old = settings.app_passcode
-    settings.app_passcode = ""
-    try:
-        with TestClient(app) as client:  # startup seeds demo data
-            body = client.get("/api/summary?days=30").json()
-            tb = body["time_breakdown"]
-            assert set(tb) == {
-                "window_hours", "driving_hours", "idle_hours", "charging_hours", "other_hours",
-            }
-            assert tb["window_hours"] == 30 * 24.0
-            for k in ("driving_hours", "idle_hours", "charging_hours", "other_hours"):
-                assert tb[k] >= 0
-            assert round(
-                tb["driving_hours"] + tb["idle_hours"] + tb["charging_hours"] + tb["other_hours"], 1
-            ) == round(tb["window_hours"], 1)
-    finally:
-        settings.app_passcode = old
-
-
 def test_place_label_prefers_specific_feature_over_broad_district():
     """The label should name the actual spot (POI/street) rather than the
     broader neighbourhood the old zoom-16 logic settled on, and area should

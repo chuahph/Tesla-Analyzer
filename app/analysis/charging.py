@@ -131,9 +131,6 @@ def analyze(charges: list[Charge], drives: list[Drive] | None = None) -> dict[st
         "available": True,
         "total_sessions": len(charges),
         "total_energy_kwh": round(total_energy, 1),
-        # Wall-clock time plugged in this window — the "charging" slice of
-        # the Time Breakdown KPI (see app/api/routes.py summary()).
-        "total_duration_h": round(sum(c.duration_min for c in charges) / 60.0, 1),
         "total_cost": round(total_cost, 2),
         "ac_cost": round(sum(c.cost for c in ac), 2),
         "dc_cost": round(sum(c.cost for c in dc), 2),
