@@ -502,10 +502,9 @@ function renderKpis(d) {
       const thresholds = [];
       if (soc > 50) thresholds.push(`${fmt(kmAt(50), 0)} km to 50%`);
       if (soc > 20) thresholds.push(`${fmt(kmAt(20), 0)} km to 20%`);
-      thresholds.push(`${fmt(kmAt(0), 0)} km to 0%`);
       thresholds.push(`at ${fmt(whPerKm, 0)} Wh/km${measured ? "" : " rated"}`);
       cards.push(kpiCard("Estimated Range", fmt(kmAt(0), 0) + " km",
-        thresholds.join(" · "), "violet"));
+        `${fmt(soc, 0)}% now · ${thresholds.join(" · ")}`, "violet"));
     }
     // Longest Idle: the single biggest qualifying parked gap this window,
     // separate from Vampire Drain's aggregate — "that's when I was away for
