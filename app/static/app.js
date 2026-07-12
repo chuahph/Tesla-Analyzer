@@ -503,7 +503,7 @@ function renderKpis(d) {
       if (soc > 50) thresholds.push(`${fmt(kmAt(50), 0)} km to 50%`);
       if (soc > 20) thresholds.push(`${fmt(kmAt(20), 0)} km to 20%`);
       thresholds.push(`${fmt(kmAt(0), 0)} km to 0%`);
-      thresholds.push(`at ${fmt(whPerKm, 0)} Wh/km${measured ? " this window" : " rated"}`);
+      thresholds.push(`at ${fmt(whPerKm, 0)} Wh/km${measured ? "" : " rated"}`);
       cards.push(kpiCard("Estimated Range", fmt(kmAt(0), 0) + " km",
         thresholds.join(" · "), "violet"));
     }
