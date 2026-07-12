@@ -236,10 +236,12 @@ def test_total_battery_used_measures_each_trip_at_its_best_precision():
 
 
 def test_vampire_drain_function_thresholds_and_excludes_charged_gaps():
-    """vampire_drain() in isolation: a short gap (below the threshold) is
-    treated as a normal daytime stop, not idle/standby, and doesn't count;
-    a gap with a charge inside it isn't a pure drain measurement and is
-    skipped entirely, not netted against the charge."""
+    """vampire_drain() in isolation: a short gap (below the threshold) still
+    contributes its measured kWh to the total (any real drain counts) but
+    doesn't count toward the "parked gaps/hours" narrative, which is
+    reserved for genuine idle stretches; a gap with a charge inside it isn't
+    a pure drain measurement and is skipped entirely — from both kWh and the
+    narrative — rather than netted against the charge."""
     from datetime import datetime
 
     from app.analysis.driving import VAMPIRE_MIN_GAP_HOURS, vampire_drain
@@ -252,14 +254,18 @@ def test_vampire_drain_function_thresholds_and_excludes_charged_gaps():
 
     assert VAMPIRE_MIN_GAP_HOURS == 1.0
 
-    # A gap just under the threshold: real SoC drop, but short enough to
-    # read as a normal errand stop rather than genuine parked/idle time.
+    # A gap just under the threshold: real SoC drop, short enough to read as
+    # a normal errand stop rather than genuine parked/idle time — so it
+    # doesn't count toward gaps/hours, but its kWh still counts toward the
+    # total (excluding it there would make trip + vampire kWh undercount
+    # true battery used).
     short = [
         d(datetime(2026, 7, 4, 8, 0), datetime(2026, 7, 4, 8, 10), 80, 80),
         d(datetime(2026, 7, 4, 8, 55), datetime(2026, 7, 4, 9, 5), 79, 79),
     ]
     r = vampire_drain(short, [], 75.0)
-    assert r == {"kwh": 0.0, "hours": 0.0, "gaps": 0, "gap_list": [], "longest": None}
+    assert r == {"kwh": round(1 / 100.0 * 75.0, 2), "hours": 0.0, "gaps": 0,
+                 "gap_list": [], "longest": None}
 
     # Same gap, now long enough (3h) — counts.
     long_gap = [

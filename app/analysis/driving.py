@@ -27,10 +27,16 @@ def vampire_drain(
     energy_used_kwh, since it happens in the *gap* between trips, not during
     one — this is the only place it gets measured.
 
-    Only gaps at least VAMPIRE_MIN_GAP_HOURS long are counted — see that
-    constant. A charge starting inside a gap invalidates it as a pure-drain
-    measurement (the charge itself moved SoC upward), so that gap is skipped
-    entirely rather than netted against the charge.
+    The kWh total sums *every* charge-free gap, any duration — a 15-minute
+    errand-stop still drains real energy, and excluding it would make
+    trip kWh + vampire kWh fall short of total battery used. The narrative
+    fields (``hours``/``gaps``/``gap_list``/``longest``) stay scoped to gaps
+    at least VAMPIRE_MIN_GAP_HOURS long, though — see that constant — so
+    "N parked gaps, Yh parked" reads as genuine idle stretches, not every
+    red-light stop. A charge starting inside a gap invalidates it as a
+    pure-drain measurement (the charge itself moved SoC upward), so that gap
+    is skipped entirely (from both the kWh total and the narrative) rather
+    than netted against the charge.
 
     ``anchor``, if given, is ``(end_time, end_soc)`` for a boundary *before*
     the first drive — typically the last charge that ended before the
@@ -71,23 +77,22 @@ def vampire_drain(
     for a, b in zip(chain, chain[1:]):
         gap_start, gap_end = a.end_time, b.start_time
         gap_hours = (gap_end - gap_start).total_seconds() / 3600.0
-        if gap_hours < VAMPIRE_MIN_GAP_HOURS:
+        if gap_hours <= 0:
             continue
         while ci < len(charge_starts) and charge_starts[ci] < gap_start:
             ci += 1
         if ci < len(charge_starts) and charge_starts[ci] < gap_end:
             continue  # a charge happened in this gap — not a pure-drain measurement
-        # A qualifying (long enough, charge-free) gap counts as parked time
-        # even if SoC happened to read unchanged — SoC is only integer
-        # precision, so a real sub-1% loss (very plausible over just a few
-        # hours) doesn't necessarily cross a whole point and show up here.
-        # Zero drop just means zero measured *kwh* for this gap, not that it
-        # didn't happen — excluding the gap outright would keep undercounting
-        # "hours parked" for exactly the low-drain cars this feature is
-        # supposed to reassure.
+        # A charge-free gap counts as parked drain even if SoC happened to
+        # read unchanged — SoC is only integer precision, so a real sub-1%
+        # loss (very plausible over just a short stop) doesn't necessarily
+        # cross a whole point and show up here. Zero drop just means zero
+        # measured *kwh* for this gap, not that it didn't happen.
         drop_pct = max(a.end_soc - b.start_soc, 0.0)
         kwh = drop_pct / 100.0 * capacity_kwh
         total_kwh += kwh
+        if gap_hours < VAMPIRE_MIN_GAP_HOURS:
+            continue  # too short to count toward the "parked gaps/hours" narrative
         total_hours += gap_hours
         gap_list.append({
             "before_drive_id": getattr(b, "id", None),

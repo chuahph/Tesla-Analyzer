@@ -482,12 +482,13 @@ function renderKpis(d) {
         `Battery Health card below for that %.`;
       cards.push(`<div id="battpack-info" class="info-pop hidden kpi-info">${packNote}</div>`);
       cards.push(`<div id="vampire-info" class="info-pop hidden kpi-info">${packNote}<br><br>` +
-        `A parked gap counts as vampire drain only when it's ` +
-        `<strong>at least 1 hour</strong> between two drives (shorter stops read as a normal ` +
-        `errand, not idle standby) and has <strong>no charge</strong> in it (a charge moves SoC ` +
-        `upward, so it can't be isolated as pure drain). A qualifying gap still counts toward ` +
-        `hours/gaps even if SoC happened to read unchanged — SoC is only whole-percent precision, ` +
-        `so a real small loss over a few hours doesn't always cross a full point; that just means ` +
+        `Any gap between two drives with <strong>no charge</strong> in it (a charge moves SoC ` +
+        `upward, so it can't be isolated as pure drain) counts toward the kWh/% shown here, no ` +
+        `matter how short — even a quick errand stop drains a little. The "parked gaps · hours ` +
+        `parked" note only counts gaps of <strong>at least 1 hour</strong> though, so that count ` +
+        `reads as genuine idle stretches rather than every red-light stop. A gap still adds its ` +
+        `kWh even if SoC happened to read unchanged — SoC is only whole-percent precision, so a ` +
+        `real small loss over a short stop doesn't always cross a full point; that just means ` +
         `0 kWh is attributed to it, not that nothing happened.</div>`);
     }
     // Estimated Range: total km this charge cycle is good for — this

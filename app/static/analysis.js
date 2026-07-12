@@ -188,15 +188,17 @@
       const gapStart = new Date(a.end_time).getTime();
       const gapEnd = new Date(b.start_time).getTime();
       const gapHours = (gapEnd - gapStart) / 3600000.0;
-      if (gapHours < VAMPIRE_MIN_GAP_HOURS) continue;
+      if (gapHours <= 0) continue;
       while (ci < chargeStarts.length && chargeStarts[ci] < gapStart) ci++;
       if (ci < chargeStarts.length && chargeStarts[ci] < gapEnd) continue;
-      // A qualifying gap counts as parked time even with zero measured
-      // drop — SoC is only integer precision, so a real sub-1% loss over a
-      // few hours doesn't necessarily cross a point (mirror driving.py).
+      // Every charge-free gap counts toward kWh, any duration — a real
+      // sub-1% loss over a short stop doesn't necessarily cross an integer
+      // SoC point (mirror driving.py). Only >=1h gaps also feed the
+      // "parked gaps/hours" narrative below.
       const dropPct = Math.max((a.end_soc || 0) - (b.start_soc || 0), 0.0);
       const kwh = (dropPct / 100.0) * capacity;
       totalKwh += kwh;
+      if (gapHours < VAMPIRE_MIN_GAP_HOURS) continue;
       totalHours += gapHours;
       gapList.push({
         before_drive_id: b.id ?? null,
