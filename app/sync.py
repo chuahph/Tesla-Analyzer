@@ -163,10 +163,19 @@ def snapshot_from_vehicle_data(data: dict[str, Any]) -> dict[str, Any]:
         "sentry_mode": vs.get("sentry_mode") if "sentry_mode" in vs else None,
         "climate_on": cl.get("is_climate_on") if "is_climate_on" in cl else None,
         # Tesla reports this as a tri-state string ("Off"/"On"/"FanOnly"), not
-        # a bool — "FanOnly" still counts as active for drain purposes (it's
-        # still running the cabin fan, just not full AC).
+        # a bool — but it's the *setting* (whether COP is allowed to run at
+        # all), which most owners leave "On" permanently as a safety
+        # default, regardless of whether it's ever actually triggered. NOT a
+        # drain signal by itself — see cabin_overheat_protection_actively_
+        # cooling below for whether it's really running right now.
         "cabin_overheat_protection": cl.get("cabin_overheat_protection")
         if "cabin_overheat_protection" in cl else None,
+        # The live flag: is COP actually cooling the cabin right now (drawing
+        # real power), as opposed to merely being enabled as a setting above.
+        "cabin_overheat_protection_actively_cooling": (
+            cl.get("cabin_overheat_protection_actively_cooling")
+            if "cabin_overheat_protection_actively_cooling" in cl else None
+        ),
     }
 
 

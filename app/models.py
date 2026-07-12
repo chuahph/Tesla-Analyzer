@@ -119,8 +119,17 @@ class BatteryReading(Base):
     sentry_mode: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     climate_on: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     # Tri-state string ("Off"/"On"/"FanOnly"), not a bool — Tesla's own shape
-    # for this field. None when unreported, same rule as the two above.
+    # for this field. None when unreported, same rule as the two above. This
+    # is the car's *setting* for whether COP is allowed to run at all (most
+    # owners leave it "On" permanently as a safety default) — NOT whether it
+    # is actually running right now. Use cabin_overheat_protection_actively_
+    # cooling below for that; checking this field alone flags COP as a drain
+    # cause on almost every reading, whether it ever actually activated.
     cabin_overheat_protection: Mapped[str | None] = mapped_column(String(10), nullable=True)
+    # The live "is it actually cooling right now" flag Tesla reports
+    # alongside cabin_overheat_protection above — this is the one that means
+    # COP is really drawing power, not just enabled as a setting.
+    cabin_overheat_protection_actively_cooling: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
 
 
 class Charge(Base):

@@ -34,10 +34,15 @@ def test_snapshot_parses_vehicle_data_ms_timestamp_and_miles():
 
 
 def test_snapshot_parses_sentry_and_climate_as_none_when_unreported():
-    """sentry_mode/climate_on/cabin_overheat_protection are None (not False)
-    when Tesla's payload omits the field entirely — an older car/software or
-    a permission gap — so a caller can tell "unknown" apart from a confirmed
-    off. Present and true when Tesla does report them."""
+    """sentry_mode/climate_on/cabin_overheat_protection(_actively_cooling)
+    are None (not False) when Tesla's payload omits the field entirely — an
+    older car/software or a permission gap — so a caller can tell "unknown"
+    apart from a confirmed off. Present and true when Tesla does report
+    them. cabin_overheat_protection ("Off"/"On"/"FanOnly") is the COP
+    *setting*; cabin_overheat_protection_actively_cooling is the separate
+    live "is it really running" flag — they're independent fields, so a car
+    with COP left enabled as a setting but not currently triggered reports
+    "On" alongside actively_cooling=False."""
     unreported = snapshot_from_vehicle_data({
         "drive_state": {"timestamp": 1_760_000_000, "shift_state": "P"},
         "charge_state": {"battery_level": 72},
@@ -47,16 +52,35 @@ def test_snapshot_parses_sentry_and_climate_as_none_when_unreported():
     assert unreported["sentry_mode"] is None
     assert unreported["climate_on"] is None
     assert unreported["cabin_overheat_protection"] is None
+    assert unreported["cabin_overheat_protection_actively_cooling"] is None
 
     reported = snapshot_from_vehicle_data({
         "drive_state": {"timestamp": 1_760_000_000, "shift_state": "P"},
         "charge_state": {"battery_level": 72},
-        "climate_state": {"is_climate_on": True, "cabin_overheat_protection": "FanOnly"},
+        "climate_state": {
+            "is_climate_on": True, "cabin_overheat_protection": "FanOnly",
+            "cabin_overheat_protection_actively_cooling": True,
+        },
         "vehicle_state": {"sentry_mode": True},
     })
     assert reported["sentry_mode"] is True
     assert reported["cabin_overheat_protection"] == "FanOnly"
+    assert reported["cabin_overheat_protection_actively_cooling"] is True
     assert reported["climate_on"] is True
+
+    # The common real-world case this bug was about: COP left "On" as a
+    # permanent setting but not actually triggered right now.
+    enabled_but_idle = snapshot_from_vehicle_data({
+        "drive_state": {"timestamp": 1_760_000_000, "shift_state": "P"},
+        "charge_state": {"battery_level": 72},
+        "climate_state": {
+            "is_climate_on": False, "cabin_overheat_protection": "On",
+            "cabin_overheat_protection_actively_cooling": False,
+        },
+        "vehicle_state": {"sentry_mode": True},
+    })
+    assert enabled_but_idle["cabin_overheat_protection"] == "On"
+    assert enabled_but_idle["cabin_overheat_protection_actively_cooling"] is False
 
 
 def test_charge_from_rejects_soc_recalibration_blip_with_negligible_real_energy():

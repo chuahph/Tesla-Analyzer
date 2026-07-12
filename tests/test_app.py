@@ -593,9 +593,15 @@ def test_idle_inducer_detects_sentry_and_climate_but_never_a_negative():
 
 def test_idle_inducer_prefers_cabin_overheat_protection_over_generic_climate():
     """Cabin overheat protection is a specific reason climate_on went true —
-    when a reading shows it On (or FanOnly, which still counts as active),
-    the label names that specifically instead of also/separately claiming
-    generic "climate was on" for the same underlying HVAC activity."""
+    when a reading shows it actively cooling, the label names that
+    specifically instead of also/separately claiming generic "climate was
+    on" for the same underlying HVAC activity. cabin_overheat_protection
+    ("Off"/"On"/"FanOnly") alone is just the car's *setting* — most owners
+    leave it "On" permanently as a safety default — so it must NOT be
+    reported as a drain cause unless cabin_overheat_protection_actively_
+    cooling actually confirms it ran (reported live: a user's idle gap was
+    labelled "cabin overheat protection was on" purely because the setting
+    was left enabled, not because it ever activated)."""
     from app.api.routes import _idle_inducer
     from app.database import SessionLocal
     from app.models import BatteryReading, Vehicle
@@ -608,24 +614,37 @@ def test_idle_inducer_prefers_cabin_overheat_protection_over_generic_climate():
 
         s.add(BatteryReading(vehicle_id=v.id, ts=datetime(2026, 7, 1, 12, 0),
                               soc=80, range_km=300, climate_on=True,
-                              cabin_overheat_protection="On"))
+                              cabin_overheat_protection="On",
+                              cabin_overheat_protection_actively_cooling=True))
         s.commit()
         assert _idle_inducer(s, v.id, gap_start, gap_end) == "cabin overheat protection was on"
 
-        # FanOnly still counts as active.
+        # FanOnly still counts as active, as long as it's really cooling.
         s.query(BatteryReading).filter(BatteryReading.vehicle_id == v.id).delete()
         s.add(BatteryReading(vehicle_id=v.id, ts=datetime(2026, 7, 1, 12, 0),
                               soc=80, range_km=300, climate_on=True,
-                              cabin_overheat_protection="FanOnly"))
+                              cabin_overheat_protection="FanOnly",
+                              cabin_overheat_protection_actively_cooling=True))
         s.commit()
         assert _idle_inducer(s, v.id, gap_start, gap_end) == "cabin overheat protection was on"
 
-        # Off is not active, but climate_on is still true from something
-        # else -> falls back to the generic label.
+        # The setting is "On" (as it almost always is) but it never actually
+        # triggered this gap -> must NOT claim COP; falls back to the
+        # generic label since climate_on is still true from something else.
         s.query(BatteryReading).filter(BatteryReading.vehicle_id == v.id).delete()
         s.add(BatteryReading(vehicle_id=v.id, ts=datetime(2026, 7, 1, 12, 0),
                               soc=80, range_km=300, climate_on=True,
-                              cabin_overheat_protection="Off"))
+                              cabin_overheat_protection="On",
+                              cabin_overheat_protection_actively_cooling=False))
+        s.commit()
+        assert _idle_inducer(s, v.id, gap_start, gap_end) == "climate was on"
+
+        # Setting Off, and never actively cooling -> no COP claim either way.
+        s.query(BatteryReading).filter(BatteryReading.vehicle_id == v.id).delete()
+        s.add(BatteryReading(vehicle_id=v.id, ts=datetime(2026, 7, 1, 12, 0),
+                              soc=80, range_km=300, climate_on=True,
+                              cabin_overheat_protection="Off",
+                              cabin_overheat_protection_actively_cooling=False))
         s.commit()
         assert _idle_inducer(s, v.id, gap_start, gap_end) == "climate was on"
 
