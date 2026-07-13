@@ -390,17 +390,17 @@ function renderKpis(d) {
       `${fmt(drv.total_drives)} drives · ${fmt(drv.total_duration_h)} h`, "blue"));
     // Efficiency is unknown when the drive logged no energy (range gap).
     if (eff.available && eff.avg_efficiency_wh_per_km) {
-      // The Wh/km headline here is a DRIVING-only ratio (energy over
-      // distance actually covered) — so its kWh subtitle has to be
-      // driving-only too, or the two numbers stop multiplying out against
-      // Distance (reported live: Tesla's own dashboard showed 7.9 kWh over
-      // 52.8 km at 150.7 Wh/km, matching math; this card was showing 9 kWh
-      // — Battery Used's GROSS total, idle included — next to 149 Wh/km
-      // over 51 km, which doesn't multiply out at all). bal.trip_kwh is
-      // Battery Used's own driving-only component (bal.used_kwh minus
-      // idle) — same reconciled object as that card, just the right piece
-      // of it for this one.
-      const usedKwh = bal && bal.trip_kwh != null ? bal.trip_kwh : (drv.total_energy_kwh ?? drv.total_energy_used_kwh);
+      // eff.avg_efficiency_wh_per_km comes from efficiency_analysis.analyze()
+      // — its OWN drive filter (energy-bearing AND not a <40 Wh/km
+      // contamination-excluded reading), computed independently of
+      // driving_analysis.analyze()'s eff_drives/_trip_kwh(). bal.trip_kwh
+      // (tried previously) sums a DIFFERENT set of drives with a different
+      // per-trip rule, so it never quite multiplied out against this Wh/km
+      // either (reported live: 13.2 kWh over 84.2 km implies 156.8 Wh/km,
+      // not the 153 shown). eff.total_energy_kwh is the exact number
+      // efficiency_analysis divided to get this ratio in the first place —
+      // guaranteed to multiply back out exactly, by construction.
+      const usedKwh = eff.total_energy_kwh;
       cards.push(kpiCard("Avg Efficiency", fmt(eff.avg_efficiency_wh_per_km) + " Wh/km",
         `${fmt(usedKwh, 1)} kWh used · ${eff.vs_rated_pct >= 0 ? "+" : ""}${fmt(eff.vs_rated_pct, 1)}% vs rated`,
         effTone(eff.vs_rated_pct)));
@@ -2119,15 +2119,11 @@ function buildReport(d) {
     `<tr><td>${tripWhen(t.start_time)}</td><td>${t.distance_km} km</td>` +
     `<td>${t.wh_per_km != null ? t.wh_per_km + " Wh/km" : "—"}</td>` +
     `<td>${t.cost != null ? cur + " " + fmt(t.cost, 2) : "—"}</td></tr>`).join("");
-  // Driving-only kWh, same figure as the Avg Efficiency KPI card (see
-  // renderKpis) — paired here with Distance/Avg efficiency in the same
-  // table, so it has to be the driving-only piece (bal.trip_kwh) not
-  // Battery Used's gross total, or "kWh (%battery)" stops multiplying out
-  // against the distance/Wh/km rows right next to it. % is derived from
-  // that same kWh (not a separately-sourced field) so the two never drift
-  // apart from each other either.
-  const repUsedKwh = drv.available
-    ? (bal && bal.trip_kwh != null ? bal.trip_kwh : drv.total_energy_kwh) : null;
+  // Same kWh figure as the Avg Efficiency KPI card (see renderKpis) —
+  // eff.total_energy_kwh, the exact number efficiency_analysis.analyze()
+  // divided to get the Avg efficiency Wh/km row right below this one, so
+  // the two always multiply out exactly against each other.
+  const repUsedKwh = drv.available ? (eff.total_energy_kwh ?? null) : null;
   const repUsedPct = drv.available && bal && bal.full_charge_kwh > 0 && repUsedKwh != null
     ? repUsedKwh / bal.full_charge_kwh * 100 : null;
   // km per 1% battery: deliberately the GROSS % (trip + idle), same
