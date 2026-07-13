@@ -883,14 +883,13 @@ function renderLists(d) {
   wireInfoButtons(list);
   wireTagChips(list);
   wirePlacePins(list);
-  // "Show more": only meaningful for a plain day-count window truncated to
-  // recentTripsLimit — "since charge" already lists every trip and "current
-  // drive" is always just the one (see driving_analysis.analyze()'s
-  // recent_trips_limit), so total_drives can never exceed what's shown there.
+  // "Show more": every window (including since-charge) caps recent_trips
+  // at 5 by default now — "current drive" is the only exception, always
+  // just the one trip (see driving_analysis.analyze()'s recent_trips_limit),
+  // so total_drives can never exceed what's shown there.
   const showMoreBtn = document.getElementById("show-more-trips");
   if (showMoreBtn) {
-    const rangeVal = document.getElementById("range").value;
-    const capped = rangeVal !== "charge" && rangeVal !== "drive";
+    const capped = document.getElementById("range").value !== "drive";
     const hasMore = capped && d.driving.total_drives > recent.length;
     showMoreBtn.classList.toggle("hidden", !hasMore);
     if (hasMore) {
@@ -1440,12 +1439,11 @@ const STATIC_MODE = window.TA_STATIC === true || typeof window.SUMMARY_URL === "
 const DEMO_URL = window.DEMO_URL || "data/demo.json";
 const STORE_KEY = "ta_dataset";
 let demoCache = null;
-// How many trips a plain day-count window's Recent Trips list shows — the
-// "Show more" button bumps this and reloads; the window-change handler
-// resets it back to 5 so switching windows always starts collapsed again.
-// Meaningless for "since charge" (already lists every trip — see
-// driving_analysis.analyze()'s recent_trips_limit) or "current drive"
-// (always just the one trip), so left at its default there; unused.
+// How many trips Recent Trips shows, for any window — the "Show more"
+// button bumps this and reloads; the window-change handler resets it back
+// to 5 so switching windows always starts collapsed again. Meaningless for
+// "current drive" (always just the one trip — see driving_analysis.
+// analyze()'s recent_trips_limit), so left at its default there; unused.
 let recentTripsLimit = 5;
 
 function importedDataset() {
@@ -1471,7 +1469,8 @@ async function load() {
       mode = ds.source === "imported" ? "imported" : "demo";
     } else {
       const extra = currentDrive ? "&current_drive=1" : (sinceCharge ? "&since_charge=1" : "");
-      const tripsExtra = !sinceCharge && !currentDrive ? `&trips_limit=${recentTripsLimit}` : "";
+      // current_drive is always just the one trip — no cap to raise there.
+      const tripsExtra = !currentDrive ? `&trips_limit=${recentTripsLimit}` : "";
       const res = await fetch(`/api/summary?days=${days}${extra}${tripsExtra}`);
       if (!res.ok) throw new Error(await res.text());
       d = await res.json();
@@ -1628,8 +1627,8 @@ rangeSel.addEventListener("change", () => {
 });
 
 // "Show more" trips: bump the cap by 5 and reload (see renderLists()'s
-// visibility logic — only ever shown for a plain day-count window, since
-// "since charge" already lists every trip and "current drive" is just one).
+// visibility logic — hidden only for "current drive", which is always
+// just the one trip).
 document.getElementById("show-more-trips")?.addEventListener("click", () => {
   recentTripsLimit += 5;
   load();

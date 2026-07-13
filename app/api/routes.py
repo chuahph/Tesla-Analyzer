@@ -1796,11 +1796,10 @@ def summary(
     With ``since_charge`` the window starts when the most recent charging
     session ended. With ``current_drive`` it covers the drive in progress
     (plus a live-trip readout) or, if the car is parked, the last drive.
-    ``trips_limit`` raises how many trips ``driving.recent_trips`` lists for
-    a plain day-count window (still 5 by default there) — the "Show more"
-    button reissues this same request with a bigger number rather than a
-    separate paginated endpoint, since since_charge windows already list
-    every trip regardless.
+    ``trips_limit`` raises how many trips ``driving.recent_trips`` lists
+    (5 by default for any window, including since_charge) — the "Show
+    more" button reissues this same request with a bigger number rather
+    than a separate paginated endpoint.
     """
     import json as _json
 
@@ -1922,13 +1921,12 @@ def summary(
     driving = driving_analysis.analyze(
         drives, settings.rated_wh_per_km, capacity_kwh, price_fn,
         charges=charges, vampire_anchor=vampire_anchor,
-        # A since-charge window has its own natural bound (one charge
-        # cycle's driving) — list every trip in it rather than truncating
-        # to the usual 5, which silently hid a whole day's trips once a
-        # charge cycle passed 5 drives (reported live). A plain day-count
-        # window stays capped at 5 unless the caller explicitly asks for
-        # more via trips_limit (the "Show more" button).
-        recent_trips_limit=None if since_charge else (trips_limit or 5))
+        # Every window (including since-charge) caps recent_trips at 5 by
+        # default — a since-charge cycle can still run past 5 drives, and
+        # the "Show more" button (trips_limit) is how a caller sees the
+        # rest, same as any other window, rather than an uncapped window
+        # dumping the whole cycle into one long list.
+        recent_trips_limit=trips_limit or 5)
     charging = charging_analysis.analyze(charges, drives)
     efficiency = efficiency_analysis.analyze(drives, settings.rated_wh_per_km)
 

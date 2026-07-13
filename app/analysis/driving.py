@@ -322,11 +322,10 @@ def analyze(drives: list[Drive], rated_wh_per_km: float = 150.0,
     (optional) is ``(end_time, end_soc)`` for a boundary before this window's
     first drive (e.g. a "since charge" window's own last charge) — see
     vampire_drain()'s docstring for why this matters. ``recent_trips_limit``
-    caps how many of the most recent drives get a full ``recent_trips`` entry
-    — 5 by default (a sensible list length for a wide day-based window), but
-    a "since charge" window has its own natural, usually-small bound (one
-    charge cycle's worth of driving), so callers pass None there to list
-    every drive rather than silently truncating a real trip out of view."""
+    caps how many of the most recent drives get a full ``recent_trips``
+    entry — 5 by default for any window, ``None`` to list every drive (the
+    caller's own "show more" affordance raises this rather than the window
+    itself deciding whether to cap)."""
     if not drives:
         return {"available": False}
     price_at = energy_price if callable(energy_price) else (lambda _dt: energy_price)

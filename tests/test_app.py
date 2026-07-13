@@ -542,14 +542,16 @@ def test_since_charge_battery_used_anchors_to_actual_soc_not_bottom_up_estimate(
         settings.battery_capacity_kwh = old_cap
 
 
-def test_since_charge_lists_every_trip_not_just_5():
+def test_recent_trips_capped_at_5_for_any_window_but_show_more_raises_it():
     """Reported live: "why all 12th July trip missing" -- with a charge
     cycle spanning more than 5 drives, recent_trips only ever showed the 5
     most recent, so every earlier trip that cycle silently disappeared from
     the list even though the window's own aggregate KPIs still covered all
-    of them. A since-charge window now lists every drive since the charge,
-    not just the last 5 -- a plain day-count window keeps the 5-trip cap
-    (no natural bound of its own to rely on instead)."""
+    of them. First fix made since-charge windows list every trip
+    unconditionally; a follow-up request unified this instead -- every
+    window (since-charge included) caps at 5 by default, and trips_limit
+    (the "Show more" button) raises it the same way everywhere, rather than
+    since-charge being a special uncapped case."""
     settings = get_settings()
     old_pc = settings.app_passcode
     settings.app_passcode = ""
@@ -583,20 +585,18 @@ def test_since_charge_lists_every_trip_not_just_5():
             try:
                 since = client.get("/api/summary?since_charge=true").json()
                 assert since["driving"]["total_drives"] == 7
-                assert len(since["driving"]["recent_trips"]) == 7  # not capped at 5
+                assert len(since["driving"]["recent_trips"]) == 5  # capped, same as any window
 
                 days = client.get("/api/summary?days=90").json()
                 assert days["driving"]["total_drives"] == 7
-                assert len(days["driving"]["recent_trips"]) == 5  # plain window still capped
+                assert len(days["driving"]["recent_trips"]) == 5  # plain window, same cap
 
-                # "Show more" button: trips_limit raises the cap on a plain
-                # day-count window.
+                # "Show more" button: trips_limit raises the cap, for either
+                # window shape.
                 more = client.get("/api/summary?days=90&trips_limit=10").json()
                 assert len(more["driving"]["recent_trips"]) == 7  # all there are, under the raised cap
 
-                # since_charge already lists everything -- trips_limit has
-                # nothing to add there and is ignored.
-                since_more = client.get("/api/summary?since_charge=true&trips_limit=2").json()
+                since_more = client.get("/api/summary?since_charge=true&trips_limit=10").json()
                 assert len(since_more["driving"]["recent_trips"]) == 7
             finally:
                 client.post("/api/active-vehicle", json={"vin": "DEMO0SAMPLE0000001"})

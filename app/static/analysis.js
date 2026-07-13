@@ -321,10 +321,9 @@
       eco_score: windowScore,
       eco_grade: windowScore != null ? scoreGrade(windowScore) : null,
       behaviour: analyzeBehaviour(effDrives, effKm, effKwh, effs),
-      // recentTripsLimit null -> no cap (see driving.py's analyze() for why
-      // a since-charge window passes null: its own natural bound already
-      // keeps this reasonable, and 5 would silently truncate a real trip
-      // out of view once a charge cycle passed 5 drives).
+      // recentTripsLimit null -> no cap; 5 by default for any window, with
+      // the caller's "Show more" affordance raising it (see driving.py's
+      // analyze()).
       recent_trips: [...drives]
         .sort((a, b) => new Date(b.start_time) - new Date(a.start_time))
         .slice(0, recentTripsLimit === null ? undefined : recentTripsLimit)
@@ -765,13 +764,10 @@
     // all) is invisible to vampireDrain() (see its docstring).
     const vampireAnchor = windowLabel === "since last charge" && lc
       ? { end_time: lc.end_time, end_soc: lc.end_soc } : undefined;
-    // A since-charge window has its own natural bound (one charge cycle's
-    // driving) — list every trip rather than truncating to the usual 5,
-    // which silently hid a whole day's trips once a charge cycle passed 5
-    // drives (mirrors routes.py's summary()). Plain day-count windows stay
-    // capped at 5 by default, but the caller (a "Show more" button) can
-    // raise it via opts.tripsLimit.
-    const recentTripsLimit = windowLabel === "since last charge" ? null : (opts.tripsLimit || 5);
+    // Every window (including since-charge) caps recent_trips at 5 by
+    // default; the caller (a "Show more" button) raises it via
+    // opts.tripsLimit (mirrors routes.py's summary()).
+    const recentTripsLimit = opts.tripsLimit || 5;
     const driving = analyzeDriving(drives, rated, capacity, charges, vampireAnchor, recentTripsLimit);
     const charging = analyzeCharging(charges, drives);
     const efficiency = analyzeEfficiency(drives, rated);
