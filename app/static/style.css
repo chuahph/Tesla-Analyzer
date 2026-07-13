@@ -168,6 +168,7 @@ header {
 .trip-score.tone-amber { color: var(--amber); background: rgba(245,158,11,.14); }
 .trip-score.tone-red   { color: #ff6b70; background: rgba(232,33,39,.14); }
 .trip-cond .info-btn { width: 17px; height: 17px; font-size: 10px; margin-left: 4px; }
+#show-more-trips { width: 100%; margin-top: 10px; }
 /* Trip/charge delete tools + per-row checkbox — same layout and checkbox
    styling for both, just a different list they're wired against. */
 .trip-tools { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }

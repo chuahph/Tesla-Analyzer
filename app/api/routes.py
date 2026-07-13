@@ -1788,6 +1788,7 @@ def summary(
     days: int = Query(90, ge=1, le=730),
     since_charge: bool = Query(False),
     current_drive: bool = Query(False),
+    trips_limit: int | None = Query(None, ge=1, le=500),
     session: Session = Depends(get_session),
 ):
     """The single endpoint the dashboard consumes: full analysis + recommendations.
@@ -1795,6 +1796,11 @@ def summary(
     With ``since_charge`` the window starts when the most recent charging
     session ended. With ``current_drive`` it covers the drive in progress
     (plus a live-trip readout) or, if the car is parked, the last drive.
+    ``trips_limit`` raises how many trips ``driving.recent_trips`` lists for
+    a plain day-count window (still 5 by default there) — the "Show more"
+    button reissues this same request with a bigger number rather than a
+    separate paginated endpoint, since since_charge windows already list
+    every trip regardless.
     """
     import json as _json
 
@@ -1919,8 +1925,10 @@ def summary(
         # A since-charge window has its own natural bound (one charge
         # cycle's driving) — list every trip in it rather than truncating
         # to the usual 5, which silently hid a whole day's trips once a
-        # charge cycle passed 5 drives (reported live).
-        recent_trips_limit=None if since_charge else 5)
+        # charge cycle passed 5 drives (reported live). A plain day-count
+        # window stays capped at 5 unless the caller explicitly asks for
+        # more via trips_limit (the "Show more" button).
+        recent_trips_limit=None if since_charge else (trips_limit or 5))
     charging = charging_analysis.analyze(charges, drives)
     efficiency = efficiency_analysis.analyze(drives, settings.rated_wh_per_km)
 

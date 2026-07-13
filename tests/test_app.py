@@ -588,6 +588,16 @@ def test_since_charge_lists_every_trip_not_just_5():
                 days = client.get("/api/summary?days=90").json()
                 assert days["driving"]["total_drives"] == 7
                 assert len(days["driving"]["recent_trips"]) == 5  # plain window still capped
+
+                # "Show more" button: trips_limit raises the cap on a plain
+                # day-count window.
+                more = client.get("/api/summary?days=90&trips_limit=10").json()
+                assert len(more["driving"]["recent_trips"]) == 7  # all there are, under the raised cap
+
+                # since_charge already lists everything -- trips_limit has
+                # nothing to add there and is ignored.
+                since_more = client.get("/api/summary?since_charge=true&trips_limit=2").json()
+                assert len(since_more["driving"]["recent_trips"]) == 7
             finally:
                 client.post("/api/active-vehicle", json={"vin": "DEMO0SAMPLE0000001"})
                 with SessionLocal() as s:

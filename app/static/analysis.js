@@ -768,8 +768,10 @@
     // A since-charge window has its own natural bound (one charge cycle's
     // driving) — list every trip rather than truncating to the usual 5,
     // which silently hid a whole day's trips once a charge cycle passed 5
-    // drives (mirrors routes.py's summary()).
-    const recentTripsLimit = windowLabel === "since last charge" ? null : 5;
+    // drives (mirrors routes.py's summary()). Plain day-count windows stay
+    // capped at 5 by default, but the caller (a "Show more" button) can
+    // raise it via opts.tripsLimit.
+    const recentTripsLimit = windowLabel === "since last charge" ? null : (opts.tripsLimit || 5);
     const driving = analyzeDriving(drives, rated, capacity, charges, vampireAnchor, recentTripsLimit);
     const charging = analyzeCharging(charges, drives);
     const efficiency = analyzeEfficiency(drives, rated);
