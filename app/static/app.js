@@ -413,11 +413,22 @@ function renderKpis(d) {
     // Always present so the box never "disappears"; "—" until energy data lands.
     // Wide windows drain the pack many times over — phrase that as full
     // charges rather than a ">100%" that reads as a glitch.
-    const socSub = drv.soc_used_pct == null ? "real-world range"
-      : drv.soc_used_pct <= 100 ? `${fmt(drv.soc_used_pct, 1)}% battery used`
-      : `${fmt(drv.soc_used_pct / 100, 1)} full charges used`;
-    cards.push(drv.km_per_soc_pct
-      ? kpiCard("km / 1% Battery", fmt(drv.km_per_soc_pct, 1) + " km", socSub, "teal")
+    // This is deliberately the GROSS % (trip + idle, same total as Battery
+    // Used above) — "real-world range" is meant to include the cost of
+    // standby drain, not just driving (see driving_analysis.analyze()'s own
+    // docstring on km_per_soc_pct). For a since-charge window bal.used_pct
+    // is that same total anchored to the real SoC delta (see routes.py's
+    // summary()), not analyze()'s own bottom-up estimate — use it so this
+    // card and Battery Used are always talking about the same %, the same
+    // fix already applied to Avg Efficiency (driving-only there instead).
+    const socPct = bal && bal.used_pct != null ? bal.used_pct : drv.soc_used_pct;
+    const kmPerSoc = socPct != null && socPct >= 0.2 && drv.total_distance_km
+      ? drv.total_distance_km / socPct : null;
+    const socSub = socPct == null ? "real-world range"
+      : socPct <= 100 ? `${fmt(socPct, 1)}% battery used`
+      : `${fmt(socPct / 100, 1)} full charges used`;
+    cards.push(kmPerSoc
+      ? kpiCard("km / 1% Battery", fmt(kmPerSoc, 1) + " km", socSub, "teal")
       : kpiCard("km / 1% Battery", "—", "waiting on range data from a synced drive", "teal"));
     // Battery Used: % of the full (degradation-adjusted) pack — same basis
     // as km/1% Battery's soc_used_pct and every trip's own soc_used_pct, so
@@ -2119,6 +2130,12 @@ function buildReport(d) {
     ? (bal && bal.trip_kwh != null ? bal.trip_kwh : drv.total_energy_kwh) : null;
   const repUsedPct = drv.available && bal && bal.full_charge_kwh > 0 && repUsedKwh != null
     ? repUsedKwh / bal.full_charge_kwh * 100 : null;
+  // km per 1% battery: deliberately the GROSS % (trip + idle), same
+  // ground-truth total as Battery Used when available — see renderKpis'
+  // km / 1% Battery card for the matching fix/reasoning.
+  const repSocPct = drv.available ? (bal && bal.used_pct != null ? bal.used_pct : drv.soc_used_pct) : null;
+  const repKmPerSoc = repSocPct != null && repSocPct >= 0.2 && drv.total_distance_km
+    ? drv.total_distance_km / repSocPct : null;
   return `
     <h1>Tesla Analyzer — ${windowText}</h1>
     <p class="rep-sub">${[v.year, v.model, v.name].filter(Boolean).join(" · ")}
@@ -2132,7 +2149,7 @@ function buildReport(d) {
       : null)
     }${row("Avg efficiency", eff.avg_efficiency_wh_per_km ? fmt(eff.avg_efficiency_wh_per_km) + " Wh/km" : null)
     }${row("Driving cost", drv.total_cost != null ? cur + " " + fmt(drv.total_cost, 2) + (drv.cost_per_km != null ? " (" + cur + " " + fmt(drv.cost_per_km, 3) + "/km)" : "") : null)
-    }${row("km per 1% battery", drv.km_per_soc_pct ? fmt(drv.km_per_soc_pct, 1) + " km" : null)}</table>
+    }${row("km per 1% battery", repKmPerSoc ? fmt(repKmPerSoc, 1) + " km" : null)}</table>
     <h2>Charging</h2>
     <table>${
       row("Energy added", chg.available ? fmt(chg.total_energy_kwh, 1) + " kWh · " + fmt(chg.total_sessions) + " sessions" : null)
