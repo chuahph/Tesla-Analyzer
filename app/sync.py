@@ -788,16 +788,39 @@ def process_snapshot(
                     k: cur.get(k) for k in
                     ("ts", "odo_km", "soc", "range_km", "out_temp", "lat", "lon")
                 }
-                # If this parked reading arrived after a long unpolled gap during
+                # If this parked reading arrived after an unpolled gap during
                 # which the car was still moving (poor signal on arrival, synced
-                # much later), cur's timestamp is the *sync* time, not when the
-                # car actually stopped — trusting it balloons the duration. The
-                # car covered the gap's distance and then parked, so estimate the
-                # real stop as the last reading plus the time to drive that
-                # distance at the trip's moving pace.
-                if prev and gap_min > PARK_END_MIN and moved >= drive_min_km:
+                # later), cur's timestamp is the *sync* time, not when the car
+                # actually stopped — trusting it balloons the duration with a
+                # trailing tail of pure idle logged as if it were still driving
+                # (reported live: a 7-min gap with the car parked after the
+                # first ~1 min, logged as one 7-min "trip" at an impossible 2
+                # km/h / 800 Wh/km). Only when the gap's own average implied
+                # speed reads below a normal driving pace (CITY_SPEED_KMH) —
+                # at or above it, the whole gap already looks like real
+                # driving throughout, nothing to trim. A real (nonzero) speed
+                # reading seen this trip is direct evidence it was genuinely
+                # moving, so a shorter gap (IDLE_STREAK_MIN) is trusted; with
+                # none at all — shift never confirmed in gear and moving,
+                # just briefly nonzero odometer jitter — require the longer
+                # PARK_END_MIN gap before assuming a floor pace covered it.
+                # Below 60s of estimated correction isn't worth the
+                # imprecision either way. The car covered the gap's distance
+                # and then parked, so estimate the real stop as the last
+                # reading plus the time to drive that distance at the trip's
+                # moving pace.
+                min_gap = IDLE_STREAK_MIN if open_trip.get("max_speed", 0.0) > 0 else PARK_END_MIN
+                if prev and gap_min >= min_gap and implied < CITY_SPEED_KMH and moved >= drive_min_km:
                     pace = max(open_trip.get("max_speed", 0.0) * 0.65, CITY_SPEED_KMH)
-                    stop["ts"] = min(cur["ts"], prev["ts"] + moved / pace * 3600.0)
+                    est_stop = min(cur["ts"], prev["ts"] + moved / pace * 3600.0)
+                    # Worth applying once it trims at least a minute of idle
+                    # off the tail — not the estimate's own travel time (a
+                    # short real move, like a final parking shuffle, always
+                    # implies a travel time under a minute at any plausible
+                    # pace, which would otherwise block exactly the case this
+                    # exists to fix).
+                    if cur["ts"] - est_stop >= 60:
+                        stop["ts"] = est_stop
                 open_trip["stop_at"] = stop
             stop_at = open_trip["stop_at"]
             parked_min = (cur["ts"] - stop_at["ts"]) / 60.0
@@ -816,24 +839,47 @@ def process_snapshot(
         base = cur if _was_parked_since(prev, cur) else (prev or cur)
         open_trip = _open_trip_at(base, cur, prev)
         # Symmetric to the arrival case: if the first *driving* reading only came
-        # through after a long unpolled gap (poor signal at power-on), the last
+        # through after an unpolled gap (poor signal at power-on), the last
         # parked reading is well before the car actually set off, so counting
         # from it inflates the start. When the car covered the gap's distance
         # slower than a steady city pace, it sat parked for part of it — start
         # the clock from when driving plausibly began, from the odometer, not
-        # from the stale parked reading's timestamp.
-        if base is prev and prev:
+        # from the stale parked reading's timestamp. Applied regardless of
+        # which base was picked above (reported live: a "was parked since"
+        # gap picked base=cur, so a real ~4-5 min head start before the first
+        # driving reading arrived was never corrected for at all — the two
+        # branches need the same fix, not just the base=prev one). A gap with
+        # negligible real movement (the genuine overnight-sleep case) still
+        # estimates a start close to cur either way, so this doesn't regress
+        # that case.
+        if prev:
             gap_min = (cur["ts"] - prev["ts"]) / 60.0
             moved = cur["odo_km"] - prev["odo_km"]
-            if gap_min > PARK_END_MIN and moved >= drive_min_km:
+            implied = moved / (gap_min / 60.0) if gap_min > 0 else 0.0
+            # Same evidence-gated threshold as the arrival-side correction:
+            # only when the gap's own average implied speed reads below a
+            # normal driving pace (CITY_SPEED_KMH) — at or above it, the
+            # whole gap already looks like real driving throughout, nothing
+            # to back-estimate. A real (nonzero) speed on this first driving
+            # reading is direct evidence the car's already moving, so a
+            # shorter gap (IDLE_STREAK_MIN) is trusted; a bare
+            # in-gear-but-still-0-speed reading has no such evidence, so
+            # require the longer PARK_END_MIN gap before assuming a floor
+            # pace covered it (a normal, close-to-real-time power-on
+            # shouldn't get backdated on a hunch). Below 60s of estimated
+            # correction isn't worth the imprecision either way.
+            min_gap = IDLE_STREAK_MIN if (cur.get("speed_kmh") or 0.0) > 0 else PARK_END_MIN
+            if gap_min >= min_gap and implied < CITY_SPEED_KMH and moved >= drive_min_km:
                 # Same pace model as the arrival-side estimate: ``cur`` is the
                 # first driving reading, so its instantaneous speed is real
                 # evidence of the pace, not just an assumption — prefer it
                 # over the flat city-speed floor when it implies a faster
                 # start (e.g. already on a fast road when first seen).
                 pace = max((cur.get("speed_kmh") or 0.0) * 0.65, CITY_SPEED_KMH)
-                est_start = cur["ts"] - moved / pace * 3600.0
-                open_trip["ts"] = min(max(est_start, prev["ts"]), cur["ts"])
+                shift_sec = moved / pace * 3600.0
+                if shift_sec >= 60:
+                    est_start = cur["ts"] - shift_sec
+                    open_trip["ts"] = min(max(est_start, prev["ts"]), cur["ts"])
     elif prev and split_drive:
         # A charge and a drive both happened in this gap — see
         # _split_gap_events for why the plain whole-gap drive reconstruction

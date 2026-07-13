@@ -928,6 +928,53 @@ def test_power_on_estimate_uses_observed_speed_not_flat_assumption():
     assert 5 < back_min < 10
 
 
+def test_short_blind_gap_arrival_does_not_inflate_duration():
+    """Reported live: a real trip ended, the car parked within about a
+    minute, but the next poll only landed 7 minutes later — logged as one
+    7-minute "trip" covering just 0.2 km (avg 2 km/h, 800 Wh/km — an
+    impossible reading for real driving). The prior fix
+    (test_arrival_after_signal_gap_does_not_inflate_duration) only
+    triggered past a 15-minute blind gap; a shorter-but-still-real gap like
+    this one needs the same correction, gated on the gap's own implied
+    speed reading too slow to be real driving (not just its length)."""
+    s1 = snap(T0, 10_000.0, 80, shift="D", speed=60)              # driving
+    s2 = snap(T0 + 60, 10_001.0, 79.9, shift="D", speed=55)       # still driving, 1 km on
+    # 7-min blind gap: only 0.2 km further -- the car parked within the
+    # first ~minute and sat still the rest of the gap.
+    s3 = snap(T0 + 60 + 420, 10_001.2, 79.8, locked=True)
+    _, _, trip, _ = step(s1, s2)
+    d, _, trip, _ = step(s2, s3, trip)
+    assert trip is None and len(d) == 1
+    drive = d[0]
+    # Duration ends near the real stop (s2 + ~a few tens of seconds at a
+    # realistic pace for 0.2 km), not stretched out to the full 7-min gap.
+    assert drive["duration_min"] < 2
+    assert drive["distance_km"] == 1.2
+
+
+def test_short_blind_gap_power_on_does_not_delay_start():
+    """Reported live: the 2nd-to-last trip's logged start was ~4-5 minutes
+    later than when the car actually set off — a real head start before the
+    first driving reading arrived, on a gap too short (under 15 min) for the
+    existing "was parked since" anchor-at-cur logic to back-estimate at
+    all. A real (nonzero) speed on the first driving reading is itself
+    direct evidence of a head start; the correction now applies at that
+    reading regardless of which anchor (prev or cur) was initially picked."""
+    s1 = snap(T0, 10_000.0, 80)                                    # parked
+    # 12-min gap, then first driving reading already at a real road speed,
+    # having covered 5 km -- implies driving started partway through the
+    # gap, not right at either endpoint.
+    s2 = snap(T0 + 720, 10_005.0, 78, shift="D", speed=50)
+    _, _, trip, _ = step(s1, s2)
+    assert trip is not None
+    # Backdated from s2 toward s1, not pinned to s2 (a delayed start) nor
+    # stretched all the way back to s1 (12 min, which would fold in the
+    # whole parked gap).
+    assert trip["ts"] > s1["ts"]
+    back_min = (s2["ts"] - trip["ts"]) / 60.0
+    assert 1 < back_min < 12
+
+
 def test_stale_prev_does_not_backdate_open_trip_start():
     """A drive seen right after an overnight park must anchor its start to *now*,
     not to last night's stale snapshot (which would add hours of idle time)."""
