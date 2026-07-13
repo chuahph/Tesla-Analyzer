@@ -217,7 +217,8 @@
   }
 
   // --- driving (mirror app/analysis/driving.py) ---
-  function analyzeDriving(drives, rated, capacity, charges, vampireAnchor) {
+  function analyzeDriving(drives, rated, capacity, charges, vampireAnchor, recentTripsLimit) {
+    if (recentTripsLimit === undefined) recentTripsLimit = 5;
     rated = rated || RATED_WH_PER_KM;
     capacity = capacity || 75.0;
     if (!drives.length) return { available: false };
@@ -320,9 +321,13 @@
       eco_score: windowScore,
       eco_grade: windowScore != null ? scoreGrade(windowScore) : null,
       behaviour: analyzeBehaviour(effDrives, effKm, effKwh, effs),
+      // recentTripsLimit null -> no cap (see driving.py's analyze() for why
+      // a since-charge window passes null: its own natural bound already
+      // keeps this reasonable, and 5 would silently truncate a real trip
+      // out of view once a charge cycle passed 5 drives).
       recent_trips: [...drives]
         .sort((a, b) => new Date(b.start_time) - new Date(a.start_time))
-        .slice(0, 5)
+        .slice(0, recentTripsLimit === null ? undefined : recentTripsLimit)
         .map((d) => ({
           id: d.id,
           start_time: d.start_time,
@@ -760,7 +765,12 @@
     // all) is invisible to vampireDrain() (see its docstring).
     const vampireAnchor = windowLabel === "since last charge" && lc
       ? { end_time: lc.end_time, end_soc: lc.end_soc } : undefined;
-    const driving = analyzeDriving(drives, rated, capacity, charges, vampireAnchor);
+    // A since-charge window has its own natural bound (one charge cycle's
+    // driving) — list every trip rather than truncating to the usual 5,
+    // which silently hid a whole day's trips once a charge cycle passed 5
+    // drives (mirrors routes.py's summary()).
+    const recentTripsLimit = windowLabel === "since last charge" ? null : 5;
+    const driving = analyzeDriving(drives, rated, capacity, charges, vampireAnchor, recentTripsLimit);
     const charging = analyzeCharging(charges, drives);
     const efficiency = analyzeEfficiency(drives, rated);
     const v = dataset.vehicle || {};

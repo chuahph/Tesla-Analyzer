@@ -1915,7 +1915,12 @@ def summary(
         price_fn = lambda _dt, _rate=rate: _rate  # noqa: E731
     driving = driving_analysis.analyze(
         drives, settings.rated_wh_per_km, capacity_kwh, price_fn,
-        charges=charges, vampire_anchor=vampire_anchor)
+        charges=charges, vampire_anchor=vampire_anchor,
+        # A since-charge window has its own natural bound (one charge
+        # cycle's driving) — list every trip in it rather than truncating
+        # to the usual 5, which silently hid a whole day's trips once a
+        # charge cycle passed 5 drives (reported live).
+        recent_trips_limit=None if since_charge else 5)
     charging = charging_analysis.analyze(charges, drives)
     efficiency = efficiency_analysis.analyze(drives, settings.rated_wh_per_km)
 

@@ -311,7 +311,8 @@ def _insights(drives: list[Drive]) -> list[str]:
 def analyze(drives: list[Drive], rated_wh_per_km: float = 150.0,
             capacity_kwh: float = 75.0, energy_price: float = 0.0,
             charges: list[Charge] | None = None,
-            vampire_anchor: tuple[datetime, float] | None = None) -> dict[str, Any]:
+            vampire_anchor: tuple[datetime, float] | None = None,
+            recent_trips_limit: int | None = 5) -> dict[str, Any]:
     """``energy_price`` is either a flat RM/kWh float, or a
     ``datetime -> RM/kWh`` callable (time-of-use pricing — see app.tariff) for
     per-trip rates by when each drive happened. ``charges`` (optional) is this
@@ -320,7 +321,12 @@ def analyze(drives: list[Drive], rated_wh_per_km: float = 150.0,
     every gap between drives is assumed charge-free. ``vampire_anchor``
     (optional) is ``(end_time, end_soc)`` for a boundary before this window's
     first drive (e.g. a "since charge" window's own last charge) — see
-    vampire_drain()'s docstring for why this matters."""
+    vampire_drain()'s docstring for why this matters. ``recent_trips_limit``
+    caps how many of the most recent drives get a full ``recent_trips`` entry
+    — 5 by default (a sensible list length for a wide day-based window), but
+    a "since charge" window has its own natural, usually-small bound (one
+    charge cycle's worth of driving), so callers pass None there to list
+    every drive rather than silently truncating a real trip out of view."""
     if not drives:
         return {"available": False}
     price_at = energy_price if callable(energy_price) else (lambda _dt: energy_price)
@@ -624,6 +630,6 @@ def analyze(drives: list[Drive], rated_wh_per_km: float = 150.0,
                 # window, the gap was too short, or a charge happened in it.
                 "vampire_before": vampire_by_drive_id.get(getattr(d, "id", None)),
             }
-            for d in sorted(drives, key=lambda x: x.start_time, reverse=True)[:5]
+            for d in sorted(drives, key=lambda x: x.start_time, reverse=True)[:recent_trips_limit]
         ],
     }

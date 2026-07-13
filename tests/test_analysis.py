@@ -417,6 +417,37 @@ def test_recent_trips_vampire_before_annotation():
     assert trips[drives[2].id]["vampire_before"] is None
 
 
+def test_recent_trips_limit_defaults_to_5_but_none_means_uncapped():
+    """Reported live: a "since charge" window with more than 5 drives since
+    the last charge only ever showed the 5 most recent — every earlier trip
+    that charge cycle silently vanished from Recent Trips, even though the
+    window's own aggregate KPIs (Distance, Battery Used, ...) correctly
+    covered all of them. recent_trips_limit=None lists every drive instead,
+    for callers (a since-charge window) whose own natural bound already
+    keeps the list reasonable; the default (5) is unchanged for callers
+    that don't have such a bound (a plain day-count window)."""
+    from datetime import datetime, timedelta
+
+    from app.analysis.driving import analyze
+    from app.models import Drive
+
+    def d(i):
+        start = datetime(2026, 7, 4, 8, 0) + timedelta(hours=i)
+        return Drive(id=i + 1, start_time=start, end_time=start + timedelta(minutes=10),
+                     distance_km=3.0, duration_min=10.0, avg_speed_kmh=30, max_speed_kmh=45,
+                     start_soc=80 - i, end_soc=79 - i, energy_used_kwh=0.3, outside_temp_c=28.0)
+
+    drives = [d(i) for i in range(7)]
+
+    default = analyze(drives, 150.0, 75.0)
+    assert len(default["recent_trips"]) == 5
+    assert [t["id"] for t in default["recent_trips"]] == [7, 6, 5, 4, 3]  # most recent first
+
+    uncapped = analyze(drives, 150.0, 75.0, recent_trips_limit=None)
+    assert len(uncapped["recent_trips"]) == 7
+    assert [t["id"] for t in uncapped["recent_trips"]] == [7, 6, 5, 4, 3, 2, 1]
+
+
 def test_zero_energy_drive_does_not_dilute_efficiency():
     """A 0-kWh drive (range gap) must not lower Wh/km or inflate the score."""
     from datetime import datetime

@@ -542,6 +542,63 @@ def test_since_charge_battery_used_anchors_to_actual_soc_not_bottom_up_estimate(
         settings.battery_capacity_kwh = old_cap
 
 
+def test_since_charge_lists_every_trip_not_just_5():
+    """Reported live: "why all 12th July trip missing" -- with a charge
+    cycle spanning more than 5 drives, recent_trips only ever showed the 5
+    most recent, so every earlier trip that cycle silently disappeared from
+    the list even though the window's own aggregate KPIs still covered all
+    of them. A since-charge window now lists every drive since the charge,
+    not just the last 5 -- a plain day-count window keeps the 5-trip cap
+    (no natural bound of its own to rely on instead)."""
+    settings = get_settings()
+    old_pc = settings.app_passcode
+    settings.app_passcode = ""
+    try:
+        with TestClient(app) as client:  # startup seeds demo data
+            from datetime import timedelta
+
+            from app.database import SessionLocal
+            from app.models import Charge, Drive, Vehicle
+
+            with SessionLocal() as s:
+                v = Vehicle(vin="TESTVIN-ALLTRIPS", name="Test", model="Model 3")
+                s.add(v)
+                s.commit()
+                s.add(Charge(
+                    vehicle_id=v.id,
+                    start_time=datetime(2026, 7, 1, 7, 30), end_time=datetime(2026, 7, 1, 8, 0),
+                    duration_min=30, start_soc=60, end_soc=100, energy_added_kwh=28.0,
+                    charge_type="AC", max_power_kw=7, location="Home", cost=25.2,
+                ))
+                for i in range(7):  # more than the old 5-trip cap
+                    start = datetime(2026, 7, 1, 9, 0) + timedelta(hours=i)
+                    s.add(Drive(
+                        vehicle_id=v.id, start_time=start, end_time=start + timedelta(minutes=10),
+                        distance_km=5, duration_min=10, start_soc=90 - i, end_soc=89 - i,
+                        energy_used_kwh=0.5, avg_speed_kmh=30, max_speed_kmh=50, outside_temp_c=28,
+                    ))
+                s.commit()
+
+            client.post("/api/active-vehicle", json={"vin": "TESTVIN-ALLTRIPS"})
+            try:
+                since = client.get("/api/summary?since_charge=true").json()
+                assert since["driving"]["total_drives"] == 7
+                assert len(since["driving"]["recent_trips"]) == 7  # not capped at 5
+
+                days = client.get("/api/summary?days=90").json()
+                assert days["driving"]["total_drives"] == 7
+                assert len(days["driving"]["recent_trips"]) == 5  # plain window still capped
+            finally:
+                client.post("/api/active-vehicle", json={"vin": "DEMO0SAMPLE0000001"})
+                with SessionLocal() as s:
+                    s.query(Drive).filter(Drive.vehicle_id == v.id).delete()
+                    s.query(Charge).filter(Charge.vehicle_id == v.id).delete()
+                    s.query(Vehicle).filter(Vehicle.id == v.id).delete()
+                    s.commit()
+    finally:
+        settings.app_passcode = old_pc
+
+
 def test_idle_inducer_detects_sentry_and_climate_but_never_a_negative():
     """_idle_inducer() only ever reports a POSITIVE detection from
     BatteryReading rows actually logged inside the gap — a reading showing
