@@ -431,7 +431,7 @@ canvas { max-height: 260px; }
 /* Weekly/daily efficiency trend lines and the few-bar charts carry less
    visual detail than the others — a shorter box reads just as clearly and
    takes less scroll. */
-#effTrendChart, #effDailyTrendChart, #speedBandChart, #effTempChart, #socTargetChart { max-height: 170px; }
+#effTrendChart, #effDailyTrendChart, #speedBandChart, #effTempChart, #socTargetChart, #tripsHourChart { max-height: 170px; }
 
 .narrative-body { margin: 0; font-size: 14.5px; line-height: 1.7; color: var(--text); }
 
@@ -782,7 +782,7 @@ footer { padding: 18px 28px; color: var(--muted); font-size: 12px; border-top: 1
   .kpi .value { font-size: 19px; }
   .card { padding: 14px 14px; }
   canvas { max-height: 210px; }
-  #effTrendChart, #effDailyTrendChart, #speedBandChart, #effTempChart, #socTargetChart { max-height: 140px; }
+  #effTrendChart, #effDailyTrendChart, #speedBandChart, #effTempChart, #socTargetChart, #tripsHourChart { max-height: 140px; }
   .modal-card { padding: 22px 18px; }
   .rec { flex-direction: column; gap: 8px; }
 }
