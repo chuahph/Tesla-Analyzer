@@ -207,9 +207,8 @@ function carCard(car) {
   name.textContent = car.name || "My Tesla";
   const sub = document.createElement("span");
   sub.className = "car-card-sub";
-  const last4 = (car.vin || "").slice(-4);
   const realVin = car.vin && !/^(DEMO|IMPORT|LINKED)/.test(car.vin);
-  sub.textContent = [car.model, realVin && last4 ? "VIN …" + last4 : ""]
+  sub.textContent = [car.model, realVin ? car.vin : ""]
     .filter(Boolean).join(" · ") || "Tap to view analytics";
   main.append(name, sub);
   const go = document.createElement("span");
