@@ -132,29 +132,33 @@ header {
 /* Window driving score banner at the top of the dashboard — also carries
    the driving-behaviour breakdown, so there's one score, not two. */
 .score-banner {
-  display: flex; align-items: flex-start; gap: 16px;
+  display: flex; align-items: flex-start; gap: 12px;
   background: linear-gradient(180deg, #1a1f28, var(--panel));
   border: 1px solid var(--border); border-left: 4px solid var(--muted);
-  border-radius: 12px; padding: 14px 18px; margin-bottom: 16px;
+  border-radius: 12px; padding: 10px 14px; margin-bottom: 12px;
   box-shadow: 0 1px 3px rgba(0, 0, 0, .3);
 }
-.score-behaviour { margin-top: 10px; padding-top: 8px; border-top: 1px solid var(--border); }
+.score-behaviour { margin-top: 8px; padding-top: 6px; border-top: 1px solid var(--border); }
 .score-banner.tone-green  { border-left-color: var(--green); }
 .score-banner.tone-blue   { border-left-color: var(--accent-2); }
 .score-banner.tone-amber  { border-left-color: var(--amber); }
 .score-banner.tone-red    { border-left-color: var(--accent); }
 .score-ring {
-  font-size: 40px; font-weight: 800; line-height: 1;
+  font-size: 32px; font-weight: 800; line-height: 1;
   flex: 0 0 auto; font-variant-numeric: tabular-nums;
 }
-.score-ring span { font-size: 15px; font-weight: 600; color: var(--muted); }
+.score-ring span { font-size: 12px; font-weight: 600; color: var(--muted); }
 .score-banner.tone-green .score-ring { color: var(--green); }
 .score-banner.tone-blue  .score-ring { color: var(--accent-2); }
 .score-banner.tone-amber .score-ring { color: var(--amber); }
 .score-banner.tone-red   .score-ring { color: #ff6b70; }
 .score-text { flex: 1 1 auto; min-width: 0; }
-.score-grade { font-size: 15px; font-weight: 700; display: flex; align-items: center; }
-.score-sub { color: var(--muted); font-size: 12.5px; margin-top: 3px; }
+.score-grade { font-size: 13px; font-weight: 700; display: flex; align-items: center; }
+.score-sub { color: var(--muted); font-size: 11px; margin-top: 3px; }
+/* Behaviour breakdown lines (quartile/hot-weather/etc.) are the same
+   .bat-line class the Battery Health card uses elsewhere — scoped here so
+   only this box's copy shrinks. */
+.score-behaviour .bat-line { font-size: 11px; }
 
 /* Per-trip score badge + head row. */
 .trip-head { display: flex; align-items: baseline; gap: 8px; width: 100%; }

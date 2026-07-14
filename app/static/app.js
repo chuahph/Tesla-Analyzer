@@ -401,7 +401,7 @@ function renderKpis(d) {
       // efficiency_analysis divided to get this ratio in the first place —
       // guaranteed to multiply back out exactly, by construction.
       const usedKwh = eff.total_energy_kwh;
-      cards.push(kpiCard("Avg Efficiency", fmt(eff.avg_efficiency_wh_per_km) + " Wh/km",
+      cards.push(kpiCard("Avg Efficiency", fmt(eff.avg_efficiency_wh_per_km, 1, true) + " Wh/km",
         `${fmt(usedKwh, 1)} kWh used · ${eff.vs_rated_pct >= 0 ? "+" : ""}${fmt(eff.vs_rated_pct, 1)}% vs rated`,
         effTone(eff.vs_rated_pct)));
     } else {
