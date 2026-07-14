@@ -508,16 +508,6 @@
         <canvas id="effDailyTrendChart"></canvas>
       </div>
       <div class="card">
-        <h2>🛣️ Distance by Speed Band
-          <button class="info-btn" data-info="info-speedband">!</button></h2>
-        <div id="info-speedband" class="info-pop hidden">
-          Total <strong>km driven grouped by each trip's average speed</strong> — City (&lt;30),
-          Urban (30–60), Rural (60–90), Highway (90+ km/h). Shows where your mileage happens;
-          highway km cost the most energy per km (aerodynamic drag rises with speed²).
-        </div>
-        <canvas id="speedBandChart"></canvas>
-      </div>
-      <div class="card">
         <h2>🕒 Trips by Hour of Day
           <button class="info-btn" data-info="info-tripshour">!</button></h2>
         <div id="info-tripshour" class="info-pop hidden">
@@ -527,6 +517,16 @@
           certain hours (e.g. hot afternoons, cold mornings) run less efficiently.
         </div>
         <canvas id="tripsHourChart"></canvas>
+      </div>
+      <div class="card">
+        <h2>🛣️ Distance by Speed Band
+          <button class="info-btn" data-info="info-speedband">!</button></h2>
+        <div id="info-speedband" class="info-pop hidden">
+          Total <strong>km driven grouped by each trip's average speed</strong> — City (&lt;30),
+          Urban (30–60), Rural (60–90), Highway (90+ km/h). Shows where your mileage happens;
+          highway km cost the most energy per km (aerodynamic drag rises with speed²).
+        </div>
+        <canvas id="speedBandChart"></canvas>
       </div>
       <div class="card">
         <h2>⚡ Charging: AC vs DC Energy
