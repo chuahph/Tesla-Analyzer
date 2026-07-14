@@ -178,7 +178,7 @@ header {
 .trip-tools { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
 .trip-check, .charge-check { width: 20px; height: 20px; flex: 0 0 auto; accent-color: var(--accent); cursor: pointer; }
 .trip.selectable, .charge.selectable { cursor: pointer; }
-.bat-line { color: var(--muted); font-size: 11px; line-height: 1.15; margin-bottom: 1px; }
+.bat-line { color: var(--muted); font-size: 12px; line-height: 1.2; margin-bottom: 1px; }
 .bat-line strong { color: var(--text); }
 .bat-line strong.tone-good { color: var(--green); }
 .bat-line strong.tone-bad { color: var(--amber); }
