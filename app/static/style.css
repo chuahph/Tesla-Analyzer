@@ -144,21 +144,21 @@ header {
 .score-banner.tone-amber  { border-left-color: var(--amber); }
 .score-banner.tone-red    { border-left-color: var(--accent); }
 .score-ring {
-  font-size: 32px; font-weight: 800; line-height: 1;
+  font-size: 36px; font-weight: 800; line-height: 1;
   flex: 0 0 auto; font-variant-numeric: tabular-nums;
 }
-.score-ring span { font-size: 12px; font-weight: 600; color: var(--muted); }
+.score-ring span { font-size: 13px; font-weight: 600; color: var(--muted); }
 .score-banner.tone-green .score-ring { color: var(--green); }
 .score-banner.tone-blue  .score-ring { color: var(--accent-2); }
 .score-banner.tone-amber .score-ring { color: var(--amber); }
 .score-banner.tone-red   .score-ring { color: #ff6b70; }
 .score-text { flex: 1 1 auto; min-width: 0; }
-.score-grade { font-size: 13px; font-weight: 700; display: flex; align-items: center; }
-.score-sub { color: var(--muted); font-size: 11px; margin-top: 3px; }
+.score-grade { font-size: 14.5px; font-weight: 700; display: flex; align-items: center; }
+.score-sub { color: var(--muted); font-size: 12.5px; margin-top: 3px; }
 /* Behaviour breakdown lines (quartile/hot-weather/etc.) are the same
    .bat-line class the Battery Health card uses elsewhere — scoped here so
-   only this box's copy shrinks. */
-.score-behaviour .bat-line { font-size: 11px; }
+   this box's copy can size independently. */
+.score-behaviour .bat-line { font-size: 12px; }
 
 /* Per-trip score badge + head row. */
 .trip-head { display: flex; align-items: baseline; gap: 8px; width: 100%; }
@@ -358,11 +358,13 @@ main { padding: 24px 28px 60px; max-width: 1280px; margin: 0 auto; }
   border-radius: 12px;
   padding: 14px 16px;
   box-shadow: 0 1px 3px rgba(0, 0, 0, .3);
-  /* Uniform height so all boxes align in a tidy grid. */
+  /* Uniform height so all boxes align in a tidy grid — tall enough that
+     even the shortest single-line card matches Battery Used/Vampire
+     Drain's own height once their longer sub text wraps to two lines. */
   display: flex;
   flex-direction: column;
   justify-content: center;
-  min-height: 84px;
+  min-height: 120px;
 }
 /* A coloured rail + faint matching glow per KPI makes the row scannable at a
    glance, and lets a tone read as good/bad on cards that assign one from the
@@ -433,14 +435,14 @@ canvas { max-height: 260px; }
   padding: 8px 0; border-bottom: 1px solid var(--border); font-size: 14px;
 }
 .plain-list li:last-child { border-bottom: none; }
-.plain-list .count { color: var(--muted); font-variant-numeric: tabular-nums; font-size: 12.5px; }
+.plain-list .count { color: var(--muted); font-variant-numeric: tabular-nums; font-size: 11.5px; }
 .plain-list li.empty { color: var(--muted); }
-#insights-body li { font-size: 13px; }
-#topRoutes li { font-size: 13px; padding: 5px 0; }
+#insights-body li { font-size: 12px; }
+#topRoutes li { font-size: 12px; padding: 5px 0; }
 /* Recent trips: route on the first line, the numbers on a muted second line —
    avoids the awkward mid-route wrapping of a single-line row. */
 .plain-list li.trip { flex-direction: column; align-items: flex-start; gap: 2px; }
-.trip-route { font-weight: 600; font-size: 12.5px; }
+.trip-route { font-weight: 600; font-size: 11.5px; }
 .trip-meta { color: var(--muted); font-size: 11px; font-variant-numeric: tabular-nums; }
 /* Parked/vampire-drain gap right before a trip — a slim aside between two
    trip rows, not a row of its own peer with them. */
@@ -770,7 +772,7 @@ footer { padding: 18px 28px; color: var(--muted); font-size: 12px; border-top: 1
   main { padding: 12px 12px 40px; }
   .card-grid { grid-template-columns: 1fr; gap: 10px; margin-bottom: 12px; }
   .kpi-grid { grid-template-columns: repeat(2, 1fr); gap: 8px; margin-bottom: 12px; }
-  .kpi { padding: 12px 14px; min-height: 74px; }
+  .kpi { padding: 12px 14px; min-height: 104px; }
   .kpi .value { font-size: 19px; }
   .card { padding: 14px 14px; }
   canvas { max-height: 210px; }
