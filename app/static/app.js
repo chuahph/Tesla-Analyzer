@@ -145,12 +145,61 @@ async function openCar(vin) {
   await load();
 }
 
+// Tesla's own exterior paint names — vehicle.trim is seeded server-side
+// from vehicle_config.exterior_color (see routes.py's link handler), so a
+// real car's trim string usually contains one of these verbatim (e.g.
+// "LR AWD PEARL WHITE MULTI-COAT"). Checked most-specific first; a plain
+// colour word (BLACK, WHITE, ...) is the fallback for anything unmatched
+// but still colour-ish. Not a VIN field — Tesla VINs don't encode paint —
+// this is the actual build-spec colour, which is what a "colour matching
+// the car's spec" reads as at a glance.
+const PAINT_COLORS = [
+  ["ULTRA RED", "#b1181a"], ["RED MULTI-COAT", "#7a2430"],
+  ["SOLID BLACK", "#1c1c1e"], ["PEARL WHITE", "#eef0f2"],
+  ["MIDNIGHT SILVER", "#54585d"], ["DEEP BLUE METALLIC", "#1a3a5c"],
+  ["QUICKSILVER", "#a7a9ac"], ["STEALTH GREY", "#4a4d51"],
+  ["BLACK", "#1c1c1e"], ["WHITE", "#eef0f2"], ["SILVER", "#c3c5c7"],
+  ["GREY", "#57595d"], ["GRAY", "#57595d"], ["BLUE", "#1e4a78"],
+  ["RED", "#9c1c1c"], ["GREEN", "#2f5233"],
+];
+const DEFAULT_PAINT = "#8b8f96"; // demo/imported cars with no known colour
+function carPaintColor(trim) {
+  const t = String(trim || "").toUpperCase();
+  const hit = PAINT_COLORS.find(([needle]) => t.includes(needle));
+  return hit ? hit[1] : DEFAULT_PAINT;
+}
+// Model Y/X read as an SUV/crossover silhouette; 3/S (and anything
+// unrecognised) stay a sedan — the VIN-decoded/API car_type already
+// resolves to "Model 3/Y/S/X" server-side (see vin.py), so this is
+// literally the car's own spec, not a guess.
+function carBodyType(model) {
+  return /model\s*[yx]/i.test(String(model || "")) ? "suv" : "sedan";
+}
+// A minimal side-profile car icon built from rects/circles (no hand-drawn
+// path data to get subtly wrong) — body colour follows the resolved paint;
+// a translucent white stroke keeps the silhouette visible against both
+// very dark and very light paints once it sits on the icon box's own
+// dark background.
+function carIconSvg(color, bodyType) {
+  const cabin = bodyType === "suv"
+    ? `<rect x="6" y="2" width="20" height="8" rx="3"/>`
+    : `<rect x="9" y="4" width="14" height="7" rx="3"/>`;
+  return `<svg viewBox="0 0 32 20" width="30" height="19" aria-hidden="true">
+    <g fill="${color}" stroke="rgba(255,255,255,.28)" stroke-width="0.6">
+      <rect x="2" y="10" width="28" height="6" rx="3"/>
+      ${cabin}
+    </g>
+    <circle cx="9" cy="17" r="3" fill="#171b22" stroke="rgba(255,255,255,.2)" stroke-width="0.5"/>
+    <circle cx="23" cy="17" r="3" fill="#171b22" stroke="rgba(255,255,255,.2)" stroke-width="0.5"/>
+  </svg>`;
+}
+
 function carCard(car) {
   const btn = document.createElement("button");
   btn.className = "car-card";
   const ico = document.createElement("span");
   ico.className = "car-card-ico";
-  ico.textContent = "🚗";
+  ico.innerHTML = carIconSvg(carPaintColor(car.trim), carBodyType(car.model));
   const main = document.createElement("span");
   main.className = "car-card-main";
   const name = document.createElement("span");
