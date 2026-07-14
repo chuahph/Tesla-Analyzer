@@ -484,7 +484,11 @@
         <div id="info-efftemp" class="info-pop hidden">
           Average <strong>Wh/km grouped by the outside temperature</strong> during each drive
           (10°C bands). Shows how weather drives consumption — cold raises it (cabin/battery
-          heating) and high heat raises it too (A/C). Each bar is the mean Wh/km of that band's drives.
+          heating) and high heat raises it too (A/C). Each bar is the mean Wh/km of that band's
+          drives — but a bar can also be skewed by <strong>traffic or route</strong>, not just
+          temperature (a slow, stop-go trip or a hilly climb raises Wh/km on its own). Hover a
+          bar for its trip count and average speed; faded bars have too few trips to trust, and
+          a bar with unusually low average speed likely reflects traffic more than weather.
         </div>
         <canvas id="effTempChart"></canvas>
       </div>

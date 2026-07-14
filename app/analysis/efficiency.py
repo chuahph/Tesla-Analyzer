@@ -40,11 +40,25 @@ def analyze(drives: list[Drive], rated_wh_per_km: float) -> dict[str, Any]:
     _energy = sum(d.energy_used_kwh for d in drives)
     avg_eff = _energy * 1000.0 / _distance if _distance else 0.0
 
-    # Efficiency vs outside temperature.
-    by_temp: dict[str, list[float]] = defaultdict(list)
+    # Efficiency vs outside temperature. Each bucket also carries its trip
+    # count and average speed — a bucket's Wh/km can be dragged around by
+    # traffic/route composition (a handful of slow, stop-go trips, or one
+    # highland climb) just as easily as by temperature itself, especially
+    # when few trips ever land in it (common for the colder buckets in a
+    # tropical climate). Surfacing n and avg speed alongside the Wh/km lets
+    # the UI flag "thin or slow" buckets rather than presenting every bar as
+    # equally trustworthy evidence of a temperature effect.
+    by_temp: dict[str, list[Drive]] = defaultdict(list)
     for d in drives:
-        by_temp[_temp_bucket(d.outside_temp_c)].append(d.wh_per_km)
-    eff_by_temp = {k: round(mean(v), 1) for k, v in by_temp.items()}
+        by_temp[_temp_bucket(d.outside_temp_c)].append(d)
+    eff_by_temp = {
+        k: {
+            "wh_per_km": round(mean([d.wh_per_km for d in v]), 1),
+            "n": len(v),
+            "avg_speed_kmh": round(mean([d.avg_speed_kmh for d in v]), 1),
+        }
+        for k, v in by_temp.items()
+    }
 
     temp_slope, _ = linregress(
         [d.outside_temp_c for d in drives], effs

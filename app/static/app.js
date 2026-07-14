@@ -701,9 +701,47 @@ function renderCharts(d) {
   showCard("acdcChart", chg.available);
 
   if (eff.available) {
+    // A bucket's Wh/km can be dragged around by traffic/route composition
+    // (a few slow, stop-go trips, or one highland climb) just as easily as
+    // by temperature — especially with few trips in it, common for the
+    // colder buckets in a tropical climate. Bars backed by fewer than 3
+    // trips render faded with a hatch-like lower opacity, and every bar's
+    // tooltip surfaces the trip count and average speed so a low/slow bar
+    // reads as "thin evidence," not a confirmed temperature effect.
     const t = eff.efficiency_by_temp;
-    makeChart("effTempChart", barConfig(Object.keys(t).map(k => k + "°C"),
-      Object.values(t), "Wh/km", "#3b82f6"));
+    const tempLabels = Object.keys(t);
+    const THIN_N = 3;
+    makeChart("effTempChart", {
+      type: "bar",
+      data: { labels: tempLabels.map(k => k + "°C"), datasets: [{
+        label: "Wh/km", data: tempLabels.map(k => t[k].wh_per_km),
+        backgroundColor: tempLabels.map(k => t[k].n < THIN_N ? "#3b82f680" : "#3b82f6"),
+        hoverBackgroundColor: tempLabels.map(k => t[k].n < THIN_N ? "#3b82f6a0" : "#3b82f6cc"),
+        borderRadius: 6, maxBarThickness: 44 }] },
+      options: {
+        responsive: true, maintainAspectRatio: false,
+        plugins: {
+          legend: { display: false },
+          tooltip: { callbacks: {
+            label: (c) => {
+              const b = t[tempLabels[c.dataIndex]];
+              return ` ${fmt(b.wh_per_km, 1)} Wh/km · ${b.n} trip${b.n === 1 ? "" : "s"} · avg ${fmt(b.avg_speed_kmh)} km/h`;
+            },
+            afterLabel: (c) => {
+              const b = t[tempLabels[c.dataIndex]];
+              return b.n < THIN_N
+                ? "Only a few trips here — could reflect traffic/route, not temperature"
+                : "";
+            },
+          } },
+        },
+        scales: {
+          x: { grid: { display: false }, border: { display: false } },
+          y: { beginAtZero: true, border: { display: false }, grid: { color: GRID },
+            ticks: { maxTicksLimit: 6 } },
+        },
+      },
+    });
 
     const w = eff.weekly_efficiency;
     makeChart("effTrendChart", {

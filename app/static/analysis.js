@@ -472,10 +472,17 @@
       note: "No energy data yet — efficiency needs a synced drive with battery range readings." };
     const effs = dr.map(whPerKm);
 
+    // Each bucket also carries its trip count and average speed — mirror of
+    // efficiency.py's note: a bucket's Wh/km can be skewed by traffic/route
+    // as easily as by temperature, especially with few trips in it.
     const byTemp = new Map();
-    dr.forEach((d) => { const b = tempBucket(d.outside_temp_c); (byTemp.get(b) || byTemp.set(b, []).get(b)).push(whPerKm(d)); });
+    dr.forEach((d) => { const b = tempBucket(d.outside_temp_c); (byTemp.get(b) || byTemp.set(b, []).get(b)).push(d); });
     const effByTemp = new Map();
-    byTemp.forEach((v, k) => effByTemp.set(k, round(mean(v), 1)));
+    byTemp.forEach((v, k) => effByTemp.set(k, {
+      wh_per_km: round(mean(v.map(whPerKm)), 1),
+      n: v.length,
+      avg_speed_kmh: round(mean(v.map((d) => d.avg_speed_kmh)), 1),
+    }));
     const [tslope] = linregress(dr.map((d) => d.outside_temp_c), effs);
 
     const weekly = new Map();

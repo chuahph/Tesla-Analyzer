@@ -907,6 +907,36 @@ def test_efficiency_analysis(seeded):
     assert result["worst_efficiency_wh_per_km"] >= result["best_efficiency_wh_per_km"]
     # Cold weather should be less efficient -> negative slope of Wh/km vs temp.
     assert result["temp_efficiency_slope_wh_per_c"] < 0
+    # Each temperature bucket carries its trip count and average speed
+    # alongside Wh/km, so a thin or slow (traffic-skewed) bucket can be
+    # told apart from a genuine temperature effect.
+    for bucket in result["efficiency_by_temp"].values():
+        assert set(bucket) == {"wh_per_km", "n", "avg_speed_kmh"}
+        assert bucket["n"] >= 1
+
+
+def test_efficiency_by_temp_bucket_reports_count_and_avg_speed():
+    """A bucket with one slow trip and one fast trip: Wh/km averages the two,
+    n counts them, and avg_speed_kmh is their mean speed — not conflated with
+    a different bucket's drives."""
+    from datetime import datetime
+
+    def mk(hour, wh_per_km, speed, temp):
+        kwh = wh_per_km * 10.0 / 1000.0
+        return Drive(start_time=datetime(2026, 7, 4, hour, 0),
+                     end_time=datetime(2026, 7, 4, hour, 20),
+                     distance_km=10.0, duration_min=20, avg_speed_kmh=speed,
+                     max_speed_kmh=speed * 1.3, start_soc=80, end_soc=75,
+                     energy_used_kwh=kwh, outside_temp_c=temp)
+    drives = [
+        mk(8, 140.0, 60.0, 25.0),   # 20-30C bucket, fast
+        mk(9, 160.0, 20.0, 25.0),   # 20-30C bucket, slow (traffic)
+        mk(18, 200.0, 15.0, 12.0),  # 10-20C bucket, single slow trip
+    ]
+    result = efficiency_analysis.analyze(drives, rated_wh_per_km=150)
+    by_temp = result["efficiency_by_temp"]
+    assert by_temp["20-30"] == {"wh_per_km": 150.0, "n": 2, "avg_speed_kmh": 40.0}
+    assert by_temp["10-20"] == {"wh_per_km": 200.0, "n": 1, "avg_speed_kmh": 15.0}
 
 
 def test_daily_efficiency_groups_by_calendar_day_not_week():
