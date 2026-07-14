@@ -356,7 +356,7 @@ main { padding: 24px 28px 60px; max-width: 1280px; margin: 0 auto; }
   background: linear-gradient(180deg, #1a1f28, var(--panel));
   border: 1px solid var(--border);
   border-radius: 12px;
-  padding: 14px 16px;
+  padding: 10px 14px;
   box-shadow: 0 1px 3px rgba(0, 0, 0, .3);
   /* Uniform height so all boxes align in a tidy grid — tall enough that
      even the shortest single-line card matches Battery Used/Vampire
@@ -364,7 +364,7 @@ main { padding: 24px 28px 60px; max-width: 1280px; margin: 0 auto; }
   display: flex;
   flex-direction: column;
   justify-content: center;
-  min-height: 120px;
+  min-height: 100px;
 }
 /* A coloured rail + faint matching glow per KPI makes the row scannable at a
    glance, and lets a tone read as good/bad on cards that assign one from the
@@ -384,8 +384,8 @@ main { padding: 24px 28px 60px; max-width: 1280px; margin: 0 auto; }
 }
 .kpi-empty { grid-column: 1 / -1; }
 .kpi-empty .sub { margin-top: 6px; line-height: 1.5; }
-.kpi .value { font-size: 21px; font-weight: 700; margin-top: 2px; font-variant-numeric: tabular-nums; line-height: 1.1; }
-.kpi .sub { color: var(--muted); font-size: 10px; margin-top: 2px; line-height: 1.25; }
+.kpi .value { font-size: 21px; font-weight: 700; margin-top: 1px; font-variant-numeric: tabular-nums; line-height: 1.1; }
+.kpi .sub { color: var(--muted); font-size: 10px; margin-top: 1px; line-height: 1.15; }
 .kpi-empty { min-height: 0; }
 .kpi-info { grid-column: 1 / -1; }
 
@@ -772,7 +772,7 @@ footer { padding: 18px 28px; color: var(--muted); font-size: 12px; border-top: 1
   main { padding: 12px 12px 40px; }
   .card-grid { grid-template-columns: 1fr; gap: 10px; margin-bottom: 12px; }
   .kpi-grid { grid-template-columns: repeat(2, 1fr); gap: 8px; margin-bottom: 12px; }
-  .kpi { padding: 12px 14px; min-height: 104px; }
+  .kpi { padding: 9px 12px; min-height: 92px; }
   .kpi .value { font-size: 19px; }
   .card { padding: 14px 14px; }
   canvas { max-height: 210px; }
