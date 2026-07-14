@@ -435,7 +435,7 @@ canvas { max-height: 260px; }
 /* Trips by Hour has a bottom legend the others don't, which eats into its
    plot area — taller so its actual Y-axis row height (not just the outer
    box) still matches the efficiency trend charts, plus a bit more room. */
-#tripsHourChart { max-height: 212px; }
+#tripsHourChart { max-height: 226px; }
 
 .narrative-body { margin: 0; font-size: 14.5px; line-height: 1.7; color: var(--text); }
 
@@ -787,7 +787,7 @@ footer { padding: 18px 28px; color: var(--muted); font-size: 12px; border-top: 1
   .card { padding: 14px 14px; }
   canvas { max-height: 210px; }
   #effTrendChart, #effDailyTrendChart, #speedBandChart, #effTempChart, #socTargetChart { max-height: 140px; }
-  #tripsHourChart { max-height: 178px; }
+  #tripsHourChart { max-height: 192px; }
   .modal-card { padding: 22px 18px; }
   .rec { flex-direction: column; gap: 8px; }
 }

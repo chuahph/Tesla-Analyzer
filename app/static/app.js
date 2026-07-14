@@ -836,8 +836,12 @@ function renderCharts(d) {
           // trip-count range. autoSkip is off because the bottom legend
           // eats into this chart's plot area (unlike the legend-less
           // efficiency charts), which would otherwise thin ticks below 6.
+          // precision: 0 on the trip-count axis only — a fixed 6-tick split
+          // of a small integer range would otherwise land on fractional
+          // values (e.g. 4.6 trips), which reads as wrong for a whole-number
+          // count. Wh/km on y1 keeps normal decimal ticks.
           y: { beginAtZero: true, border: { display: false }, grid: { color: GRID },
-            ticks: { count: EFF_Y_TICKS, autoSkip: false } },
+            ticks: { count: EFF_Y_TICKS, autoSkip: false, precision: 0 } },
           y1: { beginAtZero: true, position: "right", border: { display: false },
             grid: { display: false }, ticks: { count: EFF_Y_TICKS, autoSkip: false } },
         },
