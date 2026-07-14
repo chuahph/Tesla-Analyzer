@@ -347,6 +347,14 @@ def test_summary_since_charge_window():
                 "used_since_kwh", "source", "battery_kwh_at_end",
             }
             assert lc["used_since_kwh"] >= 0
+            # Energy Charged/AC-DC Energy/Charging Cost (and Driving Cost,
+            # gated on the same chg.available in the frontend) must still
+            # populate in the since-charge view, based on that one boundary
+            # charge — not go blank just because no NEW charge happened yet.
+            assert since["charging"]["available"] is True
+            assert since["charging"]["total_sessions"] == 1
+            assert since["charging"]["total_energy_kwh"] == round(lc["energy_added_kwh"], 1)
+            assert since["charging"]["total_cost"] == round(lc["cost"], 2)
             assert lc["end_time"] <= since["generated_at"]
             assert full["last_charge"] == lc  # same last charge regardless of window
     finally:

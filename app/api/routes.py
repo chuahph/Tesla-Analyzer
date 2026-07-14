@@ -1927,7 +1927,19 @@ def summary(
         # rest, same as any other window, rather than an uncapped window
         # dumping the whole cycle into one long list.
         recent_trips_limit=trips_limit or 5)
-    charging = charging_analysis.analyze(charges, drives)
+    # A since-charge window's own `charges` list is always empty by
+    # definition (it starts right where last_charge ends, so no charge can
+    # have happened "since" yet) — without this, Energy Charged/AC-DC
+    # Energy/Charging Cost (and Driving Cost, nested under the same
+    # chg.available gate in the frontend) would all vanish for every
+    # since-charge view. Fall back to the one charge that's actually fueling
+    # this window's driving, so those KPIs read "what did my last charge
+    # cost, and what's it powering" instead of going blank.
+    charging = (
+        charging_analysis.analyze([last_charge], drives)
+        if since_charge and not charges and last_charge is not None
+        else charging_analysis.analyze(charges, drives)
+    )
     efficiency = efficiency_analysis.analyze(drives, settings.rated_wh_per_km)
 
     # This week vs last week (rolling 7-day windows anchored at now), regardless

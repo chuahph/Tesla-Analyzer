@@ -802,7 +802,15 @@
     // opts.tripsLimit (mirrors routes.py's summary()).
     const recentTripsLimit = opts.tripsLimit || 5;
     const driving = analyzeDriving(drives, rated, capacity, charges, vampireAnchor, recentTripsLimit);
-    const charging = analyzeCharging(charges, drives);
+    // A since-charge window's own `charges` list is always empty by
+    // definition (it starts right where lc ends) — mirror routes.py's
+    // summary(): fall back to the one charge actually fueling this
+    // window's driving, so Energy Charged/AC-DC Energy/Charging Cost (and
+    // Driving Cost, gated on the same chg.available in app.js) don't go
+    // blank for every since-charge view.
+    const charging = (windowLabel === "since last charge" && !charges.length && lc)
+      ? analyzeCharging([lc], drives)
+      : analyzeCharging(charges, drives);
     const efficiency = analyzeEfficiency(drives, rated);
     const v = dataset.vehicle || {};
     const battery = analyzeBattery(
