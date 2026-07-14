@@ -167,6 +167,32 @@ def test_km_per_soc_from_net_drop_on_short_trips():
     assert r["km_per_soc_pct"] == 3.0
 
 
+def test_efficiency_by_hour_is_distance_weighted_with_gaps_for_quiet_hours():
+    """Trips-by-hour's efficiency overlay: distance-weighted Wh/km per hour,
+    None (not 0) for hours with no energy-bearing trip."""
+    from datetime import datetime
+
+    from app.analysis.driving import analyze
+    from app.models import Drive
+
+    def d(hour, dist, kwh):
+        return Drive(start_time=datetime(2026, 7, 4, hour, 0),
+                     end_time=datetime(2026, 7, 4, hour, 10),
+                     distance_km=dist, duration_min=10.0, avg_speed_kmh=30,
+                     max_speed_kmh=45, start_soc=80, end_soc=79,
+                     energy_used_kwh=kwh, outside_temp_c=30.0)
+    # Two trips both starting at hour 8: distance-weighted, not a plain mean
+    # of the two per-trip ratios (150 and 200 Wh/km would average to 175;
+    # distance-weighted over 1+4 km gives 190).
+    drives = [d(8, 1.0, 0.15), d(8, 4.0, 0.8)]
+    r = analyze(drives, 150.0, 75.0)
+    eh = r["efficiency_by_hour"]
+    assert eh["8"] == round((0.15 + 0.8) * 1000.0 / 5.0, 1)
+    # Every other hour has no trips at all -> None, not 0.
+    assert eh["0"] is None
+    assert eh["23"] is None
+
+
 def test_total_energy_used_includes_parking_drain():
     """The 'kWh used' headline reflects gross battery drain (parking/idle/
     overnight), not just the driving energy summed per trip."""
@@ -881,6 +907,25 @@ def test_efficiency_analysis(seeded):
     assert result["worst_efficiency_wh_per_km"] >= result["best_efficiency_wh_per_km"]
     # Cold weather should be less efficient -> negative slope of Wh/km vs temp.
     assert result["temp_efficiency_slope_wh_per_c"] < 0
+
+
+def test_daily_efficiency_groups_by_calendar_day_not_week():
+    """Daily trend (unlike weekly) keeps two drives a few days apart in the
+    same week as separate entries."""
+    from datetime import datetime
+
+    def mk(day, kwh_per_km):
+        return Drive(start_time=datetime(2026, 7, day, 8, 0),
+                     end_time=datetime(2026, 7, day, 8, 30),
+                     distance_km=10.0, duration_min=30, avg_speed_kmh=40,
+                     max_speed_kmh=60, start_soc=80, end_soc=75,
+                     energy_used_kwh=kwh_per_km * 10.0 / 1000.0, outside_temp_c=28)
+    # 6 and 8 July 2026 are both within ISO week 2026-W27, but should still
+    # be two distinct keys in the daily trend.
+    drives = [mk(6, 150.0), mk(8, 170.0)]
+    result = efficiency_analysis.analyze(drives, rated_wh_per_km=150)
+    assert result["daily_efficiency"] == {"2026-07-06": 150.0, "2026-07-08": 170.0}
+    assert len(result["weekly_efficiency"]) == 1
 
 
 # --- recommendations -------------------------------------------------------

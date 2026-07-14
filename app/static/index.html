@@ -498,6 +498,16 @@
         <canvas id="effTrendChart"></canvas>
       </div>
       <div class="card">
+        <h2>📅 Daily Efficiency Trend
+          <button class="info-btn" data-info="info-effdaily">!</button></h2>
+        <div id="info-effdaily" class="info-pop hidden">
+          Your <strong>average Wh/km per calendar day</strong> across the window — the mean of each
+          day's drives. A finer-grained view than the weekly trend, useful for spotting single bad
+          days (extreme heat, heavy traffic) rather than a whole week's drift.
+        </div>
+        <canvas id="effDailyTrendChart"></canvas>
+      </div>
+      <div class="card">
         <h2>🛣️ Distance by Speed Band
           <button class="info-btn" data-info="info-speedband">!</button></h2>
         <div id="info-speedband" class="info-pop hidden">
@@ -511,8 +521,10 @@
         <h2>🕒 Trips by Hour of Day
           <button class="info-btn" data-info="info-tripshour">!</button></h2>
         <div id="info-tripshour" class="info-pop hidden">
-          <strong>Number of trips that started in each hour</strong> (0–23, Malaysia time).
-          Reveals your commute rhythm and how much driving falls in peak-hour traffic.
+          Bars show the <strong>number of trips that started in each hour</strong> (0–23, Malaysia
+          time); the line overlays <strong>average Wh/km for trips starting that hour</strong>.
+          Reveals your commute rhythm, how much driving falls in peak-hour traffic, and whether
+          certain hours (e.g. hot afternoons, cold mornings) run less efficiently.
         </div>
         <canvas id="tripsHourChart"></canvas>
       </div>

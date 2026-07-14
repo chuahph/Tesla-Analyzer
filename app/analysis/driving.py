@@ -413,6 +413,25 @@ def analyze(drives: list[Drive], rated_wh_per_km: float = 150.0,
     by_weekday = Counter(d.start_time.weekday() for d in drives)
     weekdays = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
 
+    # Average efficiency for trips starting in each hour — distance-weighted
+    # (energy over distance), same convention as avg_efficiency_wh_per_km,
+    # so one long trip in an otherwise-quiet hour doesn't skew it. None for
+    # hours with no energy-bearing trips, so the frontend line has a real gap
+    # rather than a misleading 0 Wh/km.
+    eff_energy_by_hour: dict[int, float] = defaultdict(float)
+    eff_distance_by_hour: dict[int, float] = defaultdict(float)
+    for d in eff_drives:
+        h = d.start_time.hour
+        eff_energy_by_hour[h] += d.energy_used_kwh
+        eff_distance_by_hour[h] += d.distance_km
+    efficiency_by_hour = {
+        str(h): (
+            round(eff_energy_by_hour[h] * 1000.0 / eff_distance_by_hour[h], 1)
+            if eff_distance_by_hour.get(h) else None
+        )
+        for h in range(24)
+    }
+
     # Most frequent routes. Grouped by the coarser start/end *area* (a
     # district/suburb bucket, stable across GPS jitter between repeat visits
     # to "the same place" — the specific matched POI/building can legitimately
@@ -525,6 +544,7 @@ def analyze(drives: list[Drive], rated_wh_per_km: float = 150.0,
         "longest_trip_km": round(max(distances), 1),
         "distance_by_speed_band": {k: round(v, 1) for k, v in sorted(by_speed.items())},
         "trips_by_hour": {str(h): by_hour.get(h, 0) for h in range(24)},
+        "efficiency_by_hour": efficiency_by_hour,
         "trips_by_weekday": {weekdays[i]: by_weekday.get(i, 0) for i in range(7)},
         "top_routes": routes.most_common(5),
         "speed_efficiency_slope_wh_per_kmh": round(speed_slope, 3),

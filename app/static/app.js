@@ -695,6 +695,7 @@ function renderCharts(d) {
 
   showCard("effTempChart", eff.available);
   showCard("effTrendChart", eff.available);
+  showCard("effDailyTrendChart", eff.available);
   showCard("speedBandChart", drv.available);
   showCard("tripsHourChart", drv.available);
   showCard("acdcChart", chg.available);
@@ -720,6 +721,26 @@ function renderCharts(d) {
           y: { border: { display: false }, grid: { color: GRID }, ticks: { maxTicksLimit: 6 } },
         } },
     });
+
+    // Same shape as the weekly trend, grouped by calendar day instead —
+    // finer-grained, so a single bad day (heat, traffic) doesn't get
+    // smoothed away by a whole week's average.
+    const dd = eff.daily_efficiency;
+    makeChart("effDailyTrendChart", {
+      type: "line",
+      data: { labels: Object.keys(dd), datasets: [{
+        label: "Wh/km", data: Object.values(dd), borderColor: "#e82127", borderWidth: 2,
+        backgroundColor: "rgba(232,33,39,.06)", fill: true, tension: .35,
+        pointRadius: 0, pointHitRadius: 12, pointHoverRadius: 4,
+        pointBackgroundColor: "#e82127" }] },
+      options: { responsive: true, maintainAspectRatio: false,
+        plugins: { legend: { display: false },
+          tooltip: { callbacks: { label: (c) => ` ${fmt(c.parsed.y, 0)} Wh/km` } } },
+        scales: {
+          x: { grid: { display: false }, border: { display: false }, ticks: { maxTicksLimit: 8 } },
+          y: { border: { display: false }, grid: { color: GRID }, ticks: { maxTicksLimit: 6 } },
+        } },
+    });
   }
 
   if (drv.available) {
@@ -727,9 +748,43 @@ function renderCharts(d) {
     makeChart("speedBandChart", barConfig(Object.keys(sb), Object.values(sb),
       "km", "#22c55e", "km"));
 
+    // Trip-count bars with an average-efficiency line overlaid on its own
+    // scale — shows commute rhythm and whether particular hours (hot
+    // afternoons, cold mornings) run less efficiently, in one chart.
     const th = drv.trips_by_hour;
-    makeChart("tripsHourChart", barConfig(Object.keys(th).map(h => h + "h"),
-      Object.values(th), "trips", "#f59e0b", "trips"));
+    const eh = drv.efficiency_by_hour || {};
+    makeChart("tripsHourChart", {
+      data: {
+        labels: Object.keys(th).map(h => h + "h"),
+        datasets: [
+          { type: "bar", label: "Trips", data: Object.values(th), yAxisID: "y",
+            backgroundColor: "#f59e0b", hoverBackgroundColor: "#f59e0bcc",
+            borderRadius: 6, maxBarThickness: 44 },
+          { type: "line", label: "Wh/km", data: Object.keys(th).map(h => eh[h] ?? null),
+            yAxisID: "y1", borderColor: "#e82127", borderWidth: 2, tension: .35,
+            spanGaps: true, pointRadius: 0, pointHitRadius: 12, pointHoverRadius: 4,
+            pointBackgroundColor: "#e82127" },
+        ],
+      },
+      options: {
+        responsive: true, maintainAspectRatio: false,
+        plugins: {
+          legend: { display: true, position: "bottom",
+            labels: { usePointStyle: true, boxWidth: 8, boxHeight: 8, padding: 16 } },
+          tooltip: { callbacks: { label: (c) =>
+            c.dataset.yAxisID === "y1"
+              ? (c.parsed.y == null ? " No energy data" : ` ${fmt(c.parsed.y, 0)} Wh/km`)
+              : ` ${fmt(c.parsed.y, 0)} trips` } },
+        },
+        scales: {
+          x: { grid: { display: false }, border: { display: false } },
+          y: { beginAtZero: true, border: { display: false }, grid: { color: GRID },
+            ticks: { maxTicksLimit: 6 } },
+          y1: { beginAtZero: true, position: "right", border: { display: false },
+            grid: { display: false }, ticks: { maxTicksLimit: 6 } },
+        },
+      },
+    });
   }
 
   if (chg.available) {

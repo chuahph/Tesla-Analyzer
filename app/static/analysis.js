@@ -245,6 +245,15 @@
         routes.set(r, (routes.get(r) || 0) + 1);
       }
     });
+    // Distance-weighted average Wh/km per hour-of-day — mirror of
+    // efficiency_by_hour in driving.py. null for hours with no energy-bearing
+    // trips, so the frontend line has a real gap, not a misleading 0 Wh/km.
+    const effEnergyByHour = new Map(), effDistByHour = new Map();
+    effDrives.forEach((d) => {
+      const h = new Date(d.start_time).getHours();
+      effEnergyByHour.set(h, (effEnergyByHour.get(h) || 0) + d.energy_used_kwh);
+      effDistByHour.set(h, (effDistByHour.get(h) || 0) + d.distance_km);
+    });
     const [slope] = linregress(effDrives.map((d) => d.avg_speed_kmh), effs);
     const totKm = dist.reduce((a, b) => a + b, 0);
     const totKwh = drives.reduce((a, d) => a + d.energy_used_kwh, 0);
@@ -284,6 +293,11 @@
     const distBand = {}; [...bySpeed.keys()].sort().forEach((k) => distBand[k] = round(bySpeed.get(k), 1));
     const tbh = {}; for (let h = 0; h < 24; h++) tbh[String(h)] = byHour.get(h) || 0;
     const tbw = {}; for (let i = 0; i < 7; i++) tbw[WEEKDAYS[i]] = byWd.get(i) || 0;
+    const ebh = {};
+    for (let h = 0; h < 24; h++) {
+      const dst = effDistByHour.get(h);
+      ebh[String(h)] = dst ? round(effEnergyByHour.get(h) * 1000.0 / dst, 1) : null;
+    }
 
     // Zero energy = missing range reading (data gap), not real 0 Wh/km.
     // Energy-bearing drives only, so phantom 0-energy distance can't dilute it.
@@ -313,6 +327,7 @@
       longest_trip_km: round(Math.max(...dist), 1),
       distance_by_speed_band: distBand,
       trips_by_hour: tbh,
+      efficiency_by_hour: ebh,
       trips_by_weekday: tbw,
       top_routes: counterTop(routes, 5),
       speed_efficiency_slope_wh_per_kmh: round(slope, 3),
@@ -467,6 +482,16 @@
     dr.forEach((d) => { const iso = isoWeek(new Date(d.start_time)); const key = `${iso.year}-W${String(iso.week).padStart(2, "0")}`; (weekly.get(key) || weekly.set(key, []).get(key)).push(whPerKm(d)); });
     const weeklyEff = {}; [...weekly.keys()].sort().forEach((k) => weeklyEff[k] = round(mean(weekly.get(k)), 1));
 
+    // Daily efficiency trend (mirror app/analysis/efficiency.py) — finer
+    // grained than weekly, so a single bad day isn't smoothed away.
+    const daily = new Map();
+    dr.forEach((d) => {
+      const dt = new Date(d.start_time);
+      const key = `${dt.getFullYear()}-${String(dt.getMonth() + 1).padStart(2, "0")}-${String(dt.getDate()).padStart(2, "0")}`;
+      (daily.get(key) || daily.set(key, []).get(key)).push(whPerKm(d));
+    });
+    const dailyEff = {}; [...daily.keys()].sort().forEach((k) => dailyEff[k] = round(mean(daily.get(k)), 1));
+
     const totalDist = dr.reduce((a, d) => a + d.distance_km, 0);
     const actualEnergy = dr.reduce((a, d) => a + d.energy_used_kwh, 0);
     const ratedEnergy = rated * totalDist / 1000.0;
@@ -484,6 +509,7 @@
       efficiency_by_temp: sortedObj(effByTemp),
       temp_efficiency_slope_wh_per_c: round(tslope, 2),
       weekly_efficiency: weeklyEff,
+      daily_efficiency: dailyEff,
       best_decile_efficiency_wh_per_km: round(mean(best), 1),
       total_distance_km: round(totalDist, 1),
       total_energy_kwh: round(actualEnergy, 1),
