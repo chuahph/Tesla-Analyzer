@@ -869,6 +869,17 @@
     const tripKwh = groundTruthUsedKwh != null
       ? Math.max(round(round(usedKwh, 1) - vampireKwh, 1), 0.0)
       : (driving.available ? round(driving.trip_energy_used_kwh || 0, 1) : 0);
+    // driving.total_cost/cost_per_km is still the bottom-up total priced at
+    // this window's flat last-charge rate — same one-directional bias as
+    // above, so it can disagree with both Battery Used and Charging Cost.
+    // Since-charge windows always price at a single flat rate (lc.cost /
+    // lc.energy_added_kwh), so re-anchor to the ground-truth total at that
+    // same rate (mirrors routes.py's summary()).
+    if (groundTruthUsedKwh != null && driving.total_distance_km && lc.energy_added_kwh) {
+      const rate = lc.cost / lc.energy_added_kwh;
+      driving.total_cost = round(usedKwh * rate, 2);
+      driving.cost_per_km = round(usedKwh * rate / driving.total_distance_km, 3);
+    }
     const batteryBalance = {
       full_charge_kwh: round(capacity, 1),
       charged_kwh: round(charging.total_energy_kwh || 0, 1),

@@ -2038,6 +2038,21 @@ def summary(
         max(round(round(used_kwh, 1) - vampire_kwh, 1), 0.0) if ground_truth_used_kwh is not None
         else (round(driving.get("trip_energy_used_kwh") or 0.0, 1) if driving.get("available") else 0.0)
     )
+    # Driving Cost (drv.total_cost/cost_per_km) is still driving_analysis.
+    # analyze()'s own bottom-up total_energy_used_kwh, priced at this same
+    # window's flat last-charge rate — so it carries the exact same
+    # one-directional bias described above and can silently disagree with
+    # both Battery Used and Charging Cost (e.g. a Driving Cost RM/km that
+    # implies more energy was used than the last charge even added). Since
+    # since-charge windows always price at a single flat rate (see
+    # _last_charge_price_fn), that rate is exactly last_charge.cost /
+    # last_charge.energy_added_kwh — re-anchor to the ground-truth total at
+    # that same rate so all three cost/energy figures reconcile.
+    if (ground_truth_used_kwh is not None and driving.get("total_distance_km")
+            and last_charge.energy_added_kwh):
+        rate = last_charge.cost / last_charge.energy_added_kwh
+        driving["total_cost"] = round(used_kwh * rate, 2)
+        driving["cost_per_km"] = round(used_kwh * rate / driving["total_distance_km"], 3)
     vd_longest = vd.get("longest")
     longest_inducer = (
         _idle_inducer(session, vehicle.id, vd_longest["start"], vd_longest["end"])

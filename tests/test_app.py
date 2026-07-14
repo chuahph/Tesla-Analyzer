@@ -550,6 +550,78 @@ def test_since_charge_battery_used_anchors_to_actual_soc_not_bottom_up_estimate(
         settings.battery_capacity_kwh = old_cap
 
 
+def test_since_charge_driving_cost_anchors_to_ground_truth_not_bottom_up_estimate():
+    """Reported live: Driving Cost showed RM 0.246/km while Charging Cost
+    showed RM 23.67/100km (RM 0.2367/km) from the very same charge — Driving
+    Cost was still pricing driving_analysis.analyze()'s own bottom-up
+    total_energy_used_kwh (the same one-directional max() bias as
+    Battery Used, see the SOCTRUTH test above), not the ground-truth SoC
+    delta. Same fixture shape: three trips whose measured kWh is
+    deliberately under their own integer SoC drop, so the bottom-up total
+    (4.2 kWh) overshoots the true 3.5 kWh drop — Driving Cost must be priced
+    off the smaller, correct total instead."""
+    settings = get_settings()
+    old_pc, old_cap = settings.app_passcode, settings.battery_capacity_kwh
+    settings.app_passcode = ""
+    settings.battery_capacity_kwh = 70.0
+    try:
+        with TestClient(app) as client:  # startup seeds demo data
+            from app.database import SessionLocal
+            from app.models import BatteryReading, Charge, Drive, Vehicle
+
+            with SessionLocal() as s:
+                v = Vehicle(vin="TESTVIN-COSTTRUTH", name="Test", model="Model 3")
+                s.add(v)
+                s.commit()
+                # 12.6 / 14.0 = RM 0.9/kWh — the flat rate every since-charge
+                # trip (and the recomputed Driving Cost) should be priced at.
+                s.add(Charge(
+                    vehicle_id=v.id,
+                    start_time=datetime(2026, 7, 1, 7, 30), end_time=datetime(2026, 7, 1, 8, 0),
+                    duration_min=30, start_soc=80, end_soc=100, energy_added_kwh=14.0,
+                    charge_type="AC", max_power_kw=7, location="Home", cost=12.6,
+                ))
+                for start, end, ssoc, esoc in [
+                    (datetime(2026, 7, 1, 8, 10), datetime(2026, 7, 1, 8, 20), 100, 98),
+                    (datetime(2026, 7, 1, 8, 30), datetime(2026, 7, 1, 8, 40), 98, 96),
+                    (datetime(2026, 7, 1, 8, 50), datetime(2026, 7, 1, 9, 0), 96, 94),
+                ]:
+                    s.add(Drive(
+                        vehicle_id=v.id, start_time=start, end_time=end,
+                        distance_km=5, duration_min=10, start_soc=ssoc, end_soc=esoc,
+                        energy_used_kwh=0.5, avg_speed_kmh=30, max_speed_kmh=50, outside_temp_c=28,
+                    ))
+                s.add(BatteryReading(
+                    vehicle_id=v.id, ts=datetime(2026, 7, 1, 9, 10),
+                    soc=95, range_km=350.0, odo_km=1000.0,
+                ))
+                s.commit()
+
+            client.post("/api/active-vehicle", json={"vin": "TESTVIN-COSTTRUTH"})
+            try:
+                body = client.get("/api/summary?since_charge=true").json()
+                bal, drv, chg = body["battery_balance"], body["driving"], body["charging"]
+                assert bal["used_kwh"] == 3.5  # ground truth (ratified by the SOCTRUTH test)
+                # 3.5 kWh * RM 0.9/kWh = RM 3.15 — not 4.2 kWh's RM 3.78.
+                assert drv["total_cost"] == 3.15
+                assert drv["cost_per_km"] == round(3.15 / 15.0, 3)
+                # Driving Cost's implied per-kWh rate now matches Charging
+                # Cost's (the whole point) — both trace back to the same
+                # RM 0.9/kWh the charge was actually paid at.
+                assert round(drv["total_cost"] / bal["used_kwh"], 3) == round(chg["total_cost"] / chg["total_energy_kwh"], 3)
+            finally:
+                client.post("/api/active-vehicle", json={"vin": "DEMO0SAMPLE0000001"})
+                with SessionLocal() as s:
+                    s.query(Drive).filter(Drive.vehicle_id == v.id).delete()
+                    s.query(Charge).filter(Charge.vehicle_id == v.id).delete()
+                    s.query(BatteryReading).filter(BatteryReading.vehicle_id == v.id).delete()
+                    s.query(Vehicle).filter(Vehicle.id == v.id).delete()
+                    s.commit()
+    finally:
+        settings.app_passcode = old_pc
+        settings.battery_capacity_kwh = old_cap
+
+
 def test_recent_trips_capped_at_5_for_any_window_but_show_more_raises_it():
     """Reported live: "why all 12th July trip missing" -- with a charge
     cycle spanning more than 5 drives, recent_trips only ever showed the 5
