@@ -760,10 +760,12 @@ function renderCharts(d) {
           tooltip: { callbacks: { label: (c) => ` ${fmt(c.parsed.y, 0)} Wh/km` } } },
         scales: {
           x: { grid: { display: false }, border: { display: false }, ticks: { maxTicksLimit: 8 } },
-          // A fixed tick count (not just a ceiling) so the gridline spacing
-          // is always identical to the daily chart below, regardless of
-          // how each window's own Wh/km range happens to differ.
-          y: { border: { display: false }, grid: { color: GRID }, ticks: { count: EFF_Y_TICKS } },
+          // A fixed tick count (not just a ceiling), with autoSkip off so a
+          // shorter mobile box can't silently thin it back down — always
+          // identical to the daily chart below, regardless of how each
+          // window's own Wh/km range happens to differ.
+          y: { border: { display: false }, grid: { color: GRID },
+            ticks: { count: EFF_Y_TICKS, autoSkip: false } },
         } },
     });
 
@@ -783,10 +785,12 @@ function renderCharts(d) {
           tooltip: { callbacks: { label: (c) => ` ${fmt(c.parsed.y, 0)} Wh/km` } } },
         scales: {
           x: { grid: { display: false }, border: { display: false }, ticks: { maxTicksLimit: 8 } },
-          // Same fixed tick count as the weekly chart above — the row gap
-          // follows it exactly rather than each chart auto-picking its own
-          // "nice" step from its own (typically wider/noisier) daily range.
-          y: { border: { display: false }, grid: { color: GRID }, ticks: { count: EFF_Y_TICKS } },
+          // Same fixed tick count (and autoSkip off) as the weekly chart
+          // above — the row gap follows it exactly rather than each chart
+          // auto-picking its own "nice" step from its own (typically
+          // wider/noisier) daily range.
+          y: { border: { display: false }, grid: { color: GRID },
+            ticks: { count: EFF_Y_TICKS, autoSkip: false } },
         } },
     });
   }
@@ -826,10 +830,16 @@ function renderCharts(d) {
         },
         scales: {
           x: { grid: { display: false }, border: { display: false } },
+          // Same fixed tick count as the weekly/daily efficiency trend
+          // charts (see EFF_Y_TICKS) so this chart's gridline row gap
+          // matches theirs instead of auto-picking its own step from the
+          // trip-count range. autoSkip is off because the bottom legend
+          // eats into this chart's plot area (unlike the legend-less
+          // efficiency charts), which would otherwise thin ticks below 6.
           y: { beginAtZero: true, border: { display: false }, grid: { color: GRID },
-            ticks: { maxTicksLimit: 6 } },
+            ticks: { count: EFF_Y_TICKS, autoSkip: false } },
           y1: { beginAtZero: true, position: "right", border: { display: false },
-            grid: { display: false }, ticks: { maxTicksLimit: 6 } },
+            grid: { display: false }, ticks: { count: EFF_Y_TICKS, autoSkip: false } },
         },
       },
     });
