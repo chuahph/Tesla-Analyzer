@@ -178,11 +178,11 @@ header {
 .trip-tools { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
 .trip-check, .charge-check { width: 20px; height: 20px; flex: 0 0 auto; accent-color: var(--accent); cursor: pointer; }
 .trip.selectable, .charge.selectable { cursor: pointer; }
-.bat-line { color: var(--muted); font-size: 13px; line-height: 1.6; }
+.bat-line { color: var(--muted); font-size: 12px; line-height: 1.6; }
 .bat-line strong { color: var(--text); }
 .bat-line strong.tone-good { color: var(--green); }
 .bat-line strong.tone-bad { color: var(--amber); }
-.bat-note { color: var(--muted); font-size: 13px; line-height: 1.6; margin: 6px 0; }
+.bat-note { color: var(--muted); font-size: 12px; line-height: 1.6; margin: 6px 0; }
 
 /* Brand grows to fill the row (min-width:0 lets the VIN subtitle ellipsis
    instead of pushing under the back button). */
@@ -429,13 +429,14 @@ canvas { max-height: 260px; }
   padding: 8px 0; border-bottom: 1px solid var(--border); font-size: 14px;
 }
 .plain-list li:last-child { border-bottom: none; }
-.plain-list .count { color: var(--muted); font-variant-numeric: tabular-nums; }
+.plain-list .count { color: var(--muted); font-variant-numeric: tabular-nums; font-size: 12.5px; }
 .plain-list li.empty { color: var(--muted); }
+#insights-body li { font-size: 13px; }
 /* Recent trips: route on the first line, the numbers on a muted second line —
    avoids the awkward mid-route wrapping of a single-line row. */
 .plain-list li.trip { flex-direction: column; align-items: flex-start; gap: 2px; }
-.trip-route { font-weight: 600; font-size: 13.5px; }
-.trip-meta { color: var(--muted); font-size: 12.5px; font-variant-numeric: tabular-nums; }
+.trip-route { font-weight: 600; font-size: 12.5px; }
+.trip-meta { color: var(--muted); font-size: 11px; font-variant-numeric: tabular-nums; }
 /* Parked/vampire-drain gap right before a trip — a slim aside between two
    trip rows, not a row of its own peer with them. */
 .plain-list li.vampire-note {
