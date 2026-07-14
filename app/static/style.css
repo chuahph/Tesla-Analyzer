@@ -96,7 +96,7 @@ header {
 .clock.build:empty { display: none; }
 
 /* Battery health card */
-.bat-health { font-size: 40px; font-weight: 800; color: var(--green); margin: 4px 0 10px; }
+.bat-health { font-size: 40px; font-weight: 800; color: var(--green); margin: 4px 0 6px; }
 .bat-health.warn { color: var(--amber); }
 .bat-health.bad { color: #ff6b70; }
 /* "!" info toggle: a small round button that reveals an explanation popover. */
@@ -178,7 +178,7 @@ header {
 .trip-tools { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
 .trip-check, .charge-check { width: 20px; height: 20px; flex: 0 0 auto; accent-color: var(--accent); cursor: pointer; }
 .trip.selectable, .charge.selectable { cursor: pointer; }
-.bat-line { color: var(--muted); font-size: 12px; line-height: 1.6; }
+.bat-line { color: var(--muted); font-size: 12px; line-height: 1.35; margin-bottom: 3px; }
 .bat-line strong { color: var(--text); }
 .bat-line strong.tone-good { color: var(--green); }
 .bat-line strong.tone-bad { color: var(--amber); }
