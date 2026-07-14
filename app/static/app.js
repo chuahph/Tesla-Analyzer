@@ -4,6 +4,10 @@ const charts = {};
 let lastData = null;   // most recent /summary payload, for re-rendering lists
 const GRID = "#262b34";
 const TICK = "#9aa4b2";
+// Shared Y-axis tick count for the weekly/daily efficiency trend charts —
+// a fixed count (not just a maxTicksLimit ceiling) so their gridline row
+// gap always matches exactly, regardless of each chart's own Wh/km range.
+const EFF_Y_TICKS = 6;
 Chart.defaults.color = TICK;
 Chart.defaults.borderColor = GRID;
 Chart.defaults.font.family = "-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif";
@@ -756,7 +760,10 @@ function renderCharts(d) {
           tooltip: { callbacks: { label: (c) => ` ${fmt(c.parsed.y, 0)} Wh/km` } } },
         scales: {
           x: { grid: { display: false }, border: { display: false }, ticks: { maxTicksLimit: 8 } },
-          y: { border: { display: false }, grid: { color: GRID }, ticks: { maxTicksLimit: 6 } },
+          // A fixed tick count (not just a ceiling) so the gridline spacing
+          // is always identical to the daily chart below, regardless of
+          // how each window's own Wh/km range happens to differ.
+          y: { border: { display: false }, grid: { color: GRID }, ticks: { count: EFF_Y_TICKS } },
         } },
     });
 
@@ -776,7 +783,10 @@ function renderCharts(d) {
           tooltip: { callbacks: { label: (c) => ` ${fmt(c.parsed.y, 0)} Wh/km` } } },
         scales: {
           x: { grid: { display: false }, border: { display: false }, ticks: { maxTicksLimit: 8 } },
-          y: { border: { display: false }, grid: { color: GRID }, ticks: { maxTicksLimit: 6 } },
+          // Same fixed tick count as the weekly chart above — the row gap
+          // follows it exactly rather than each chart auto-picking its own
+          // "nice" step from its own (typically wider/noisier) daily range.
+          y: { border: { display: false }, grid: { color: GRID }, ticks: { count: EFF_Y_TICKS } },
         } },
     });
   }
