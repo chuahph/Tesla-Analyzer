@@ -466,6 +466,16 @@
         </div>
       </div>
       <div class="card">
+        <h2>🛣️ Distance by Speed Band
+          <button class="info-btn" data-info="info-speedband">!</button></h2>
+        <div id="info-speedband" class="info-pop hidden">
+          Total <strong>km driven grouped by each trip's average speed</strong> — City (&lt;30),
+          Urban (30–60), Rural (60–90), Highway (90+ km/h). Shows where your mileage happens;
+          highway km cost the most energy per km (aerodynamic drag rises with speed²).
+        </div>
+        <canvas id="speedBandChart"></canvas>
+      </div>
+      <div class="card">
         <h2>📍 Recent Charges
           <button id="btn-default-source" class="default-source-btn hidden" title="Default source for new charges — tap to change">🌐</button>
         </h2>
@@ -523,16 +533,6 @@
         <canvas id="tripsHourChart"></canvas>
       </div>
       <div class="card">
-        <h2>🛣️ Distance by Speed Band
-          <button class="info-btn" data-info="info-speedband">!</button></h2>
-        <div id="info-speedband" class="info-pop hidden">
-          Total <strong>km driven grouped by each trip's average speed</strong> — City (&lt;30),
-          Urban (30–60), Rural (60–90), Highway (90+ km/h). Shows where your mileage happens;
-          highway km cost the most energy per km (aerodynamic drag rises with speed²).
-        </div>
-        <canvas id="speedBandChart"></canvas>
-      </div>
-      <div class="card">
         <h2>⚡ Charging: AC vs DC Energy
           <button class="info-btn" data-info="info-acdc">!</button></h2>
         <div id="info-acdc" class="info-pop hidden">
@@ -552,7 +552,7 @@
         </div>
         <canvas id="socTargetChart"></canvas>
       </div>
-      <div class="card full">
+      <div class="card full" id="recommendations-card">
         <h2>💡 Recommendations to improve efficiency &amp; battery health</h2>
         <div id="recommendations"></div>
       </div>

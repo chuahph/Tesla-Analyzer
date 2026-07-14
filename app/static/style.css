@@ -96,7 +96,7 @@ header {
 .clock.build:empty { display: none; }
 
 /* Battery health card */
-.bat-health { font-size: 40px; font-weight: 800; color: var(--green); margin: 4px 0 4px; }
+.bat-health { font-size: 40px; font-weight: 800; color: var(--green); margin: 4px 0 2px; }
 .bat-health.warn { color: var(--amber); }
 .bat-health.bad { color: #ff6b70; }
 /* "!" info toggle: a small round button that reveals an explanation popover. */
@@ -178,7 +178,7 @@ header {
 .trip-tools { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
 .trip-check, .charge-check { width: 20px; height: 20px; flex: 0 0 auto; accent-color: var(--accent); cursor: pointer; }
 .trip.selectable, .charge.selectable { cursor: pointer; }
-.bat-line { color: var(--muted); font-size: 12px; line-height: 1.2; margin-bottom: 2px; }
+.bat-line { color: var(--muted); font-size: 11px; line-height: 1.15; margin-bottom: 1px; }
 .bat-line strong { color: var(--text); }
 .bat-line strong.tone-good { color: var(--green); }
 .bat-line strong.tone-bad { color: var(--amber); }
@@ -421,6 +421,12 @@ main { padding: 24px 28px 60px; max-width: 1280px; margin: 0 auto; }
   padding-bottom: 10px; border-bottom: 1px solid var(--border);
 }
 .card h2 .info-btn { width: 18px; height: 18px; font-size: 11px; vertical-align: 1px; }
+/* This title is the longest in the app — shrink it (and forbid wrapping,
+   with an ellipsis as a last resort on very narrow screens) so it always
+   reads as one line instead of an oddly wrapped heading. */
+#recommendations-card h2 {
+  font-size: 12.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
 canvas { max-height: 260px; }
 /* Weekly/daily efficiency trend lines and the few-bar charts carry less
    visual detail than the others — a shorter box reads just as clearly and
@@ -437,7 +443,7 @@ canvas { max-height: 260px; }
 .plain-list li:last-child { border-bottom: none; }
 .plain-list .count { color: var(--muted); font-variant-numeric: tabular-nums; font-size: 11.5px; }
 .plain-list li.empty { color: var(--muted); }
-#insights-body li { font-size: 12px; }
+#insights-body li { font-size: 12px; padding: 4px 0; }
 #topRoutes li { font-size: 12px; padding: 5px 0; }
 /* Recent trips: route on the first line, the numbers on a muted second line —
    avoids the awkward mid-route wrapping of a single-line row. */
