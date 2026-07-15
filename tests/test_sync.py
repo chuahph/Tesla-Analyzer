@@ -958,6 +958,32 @@ def test_power_on_estimate_uses_observed_speed_not_flat_assumption():
     assert 5 < back_min < 10
 
 
+def test_power_on_backdate_reanchors_odo_and_soc_not_just_timestamp():
+    """Reported live: parked-gap "vampire drain" kWh reading noticeably
+    higher than expected, "should belong to trip kWh" instead. Cause: when
+    a blind gap's own implied speed is low enough to count as "was parked"
+    (_was_parked_since), the new trip's start *timestamp* gets backdated
+    from cur (the first driving reading) toward when driving plausibly
+    began -- but odo_km/soc stayed anchored to cur's already-driven values,
+    so the "catch-up" distance/energy covered before cur arrived silently
+    fell out of the trip and surfaced one gap earlier as parked drain
+    instead of driving energy. odo/soc must be re-anchored to prev's
+    (genuinely still-parked, unmoved) values right alongside the timestamp,
+    the same anchor the was_parked=False branch already uses by default."""
+    s1 = snap(T0, 10_000.0, 60.0, locked=True)                    # parks & locks
+    # 60-min blind gap (no network) -- but the car only actually set off in
+    # the last ~2 min of it, covering 1 km before this first driving
+    # reading (a real, nonzero speed) arrives.
+    s2 = snap(T0 + 3600, 10_001.0, 59.7, shift="D", speed=40)
+    _, _, trip, _ = step(s1, s2)
+    assert trip is not None
+    assert trip["ts"] < s2["ts"]                     # timestamp backdated, as before
+    # odo/SoC no longer silently pinned to cur's already-driven values --
+    # the 1 km / 0.3% covered just before cur now counts toward the trip.
+    assert trip["odo_km"] == s1["odo_km"]
+    assert trip["soc"] == s1["soc"]
+
+
 def test_short_blind_gap_arrival_does_not_inflate_duration():
     """Reported live: a real trip ended, the car parked within about a
     minute, but the next poll only landed 7 minutes later — logged as one

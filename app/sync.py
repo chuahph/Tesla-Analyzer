@@ -913,6 +913,22 @@ def process_snapshot(
                 if shift_sec >= 60:
                     est_start = cur["ts"] - shift_sec
                     open_trip["ts"] = min(max(est_start, prev["ts"]), cur["ts"])
+                    if was_parked:
+                        # base=cur anchored the trip's own odo/SoC to the
+                        # *first driving* reading, which already reflects the
+                        # "catch-up" distance/energy this correction just
+                        # proved happened before cur arrived — left as cur's,
+                        # that chunk would silently vanish from the trip and
+                        # surface one gap earlier as vampire drain instead
+                        # (reported live: parked-gap kWh reading noticeably
+                        # higher than expected, "should belong to trip kWh").
+                        # prev genuinely hadn't moved yet (the car doesn't
+                        # move while parked), so its odo/SoC are the correct
+                        # baseline for wherever within [prev, est_start]
+                        # departure actually began — same anchor the
+                        # was_parked=False branch already uses by default.
+                        open_trip["odo_km"] = prev["odo_km"]
+                        open_trip["soc"] = prev["soc"]
     elif prev and split_drive:
         # A charge and a drive both happened in this gap — see
         # _split_gap_events for why the plain whole-gap drive reconstruction
