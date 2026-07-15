@@ -1,5 +1,5 @@
 """App-level tests: passcode gate boundaries and the Tesla partner key path."""
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from fastapi.testclient import TestClient
 
@@ -1354,6 +1354,81 @@ def test_tag_drive_endpoint():
             assert client.post("/api/data/tag-drive", json={"id": 9_999_999, "tag": "work"}).status_code == 404
             # Missing id -> 400.
             assert client.post("/api/data/tag-drive", json={"tag": "work"}).status_code == 400
+    finally:
+        settings.app_passcode = old
+
+
+def test_edit_drive_endpoint():
+    """Manually correcting a trip's start/end time (a no-signal park/departure
+    the sync-time estimate still got wrong) must recompute duration/avg speed
+    from the new times, while leaving distance/energy exactly as recorded --
+    those come from the odometer/SoC readings at the trip's edges, not the
+    clock. Also covers the validation paths: end <= start, unknown id, and
+    an edit that would overlap another logged trip."""
+    from app.database import SessionLocal
+    from app.models import Drive
+
+    settings = get_settings()
+    old = settings.app_passcode
+    settings.app_passcode = ""
+    try:
+        with TestClient(app) as client:  # startup seeds demo data
+            with SessionLocal() as s:
+                # Demo data isn't guaranteed gap-free between every pair, so
+                # pick a trip with a real gap on both sides -- shrinking its
+                # own window by 2 minutes then can't newly overlap anything.
+                rows = s.query(Drive).order_by(Drive.start_time).all()
+                drive = next(
+                    d for i, d in enumerate(rows)
+                    if 0 < i < len(rows) - 1
+                    and rows[i - 1].end_time < d.start_time
+                    and d.end_time < rows[i + 1].start_time
+                )
+                nxt_start = next(r.start_time for r in rows if r.start_time > drive.end_time)
+                drive_id = drive.id
+                orig_distance = drive.distance_km
+                orig_energy = drive.energy_used_kwh
+                # Shrink the window from the start side by 2 minutes -- still
+                # fully inside the original span, so this can't newly overlap
+                # anything that didn't already overlap the original trip.
+                new_start = (drive.start_time + timedelta(minutes=2)).isoformat(timespec="minutes")
+                end_iso = drive.end_time.isoformat(timespec="minutes")
+
+            resp = client.post("/api/data/edit-drive",
+                                json={"id": drive_id, "start_time": new_start, "end_time": end_iso})
+            assert resp.status_code == 200
+            body = resp.json()
+            assert body["start_time"] == new_start
+            with SessionLocal() as s:
+                d = s.get(Drive, drive_id)
+                assert d.start_time.isoformat(timespec="minutes") == new_start
+                # Distance/energy untouched -- they come from the odometer/SoC
+                # readings, not the clock.
+                assert d.distance_km == orig_distance
+                assert d.energy_used_kwh == orig_energy
+                # Duration/avg speed recalculated from the new (shorter) span.
+                expected_min = round((d.end_time - d.start_time).total_seconds() / 60.0, 1)
+                assert d.duration_min == expected_min
+                assert d.avg_speed_kmh == round(d.distance_km / (expected_min / 60.0), 1)
+
+            # End <= start is rejected.
+            bad = client.post("/api/data/edit-drive",
+                               json={"id": drive_id, "start_time": end_iso, "end_time": new_start})
+            assert bad.status_code == 400
+
+            # Unknown id -> 404.
+            assert client.post("/api/data/edit-drive",
+                                json={"id": 9_999_999, "start_time": new_start}).status_code == 404
+            # Missing id -> 400.
+            assert client.post("/api/data/edit-drive", json={"start_time": new_start}).status_code == 400
+            # Neither field given -> 400.
+            assert client.post("/api/data/edit-drive", json={"id": drive_id}).status_code == 400
+
+            # Stretching a trip's end out to swallow the next trip's start
+            # is rejected as an overlap, not silently corrupting both rows.
+            overlap_end = (nxt_start + timedelta(minutes=5)).isoformat(timespec="minutes")
+            resp = client.post("/api/data/edit-drive", json={"id": drive_id, "end_time": overlap_end})
+            assert resp.status_code == 400
     finally:
         settings.app_passcode = old
 

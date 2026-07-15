@@ -99,6 +99,50 @@ def tag_drive(session, drive_id: int, tag: str) -> bool:
     return True
 
 
+def edit_drive(session, drive_id: int, start_time, end_time) -> Drive | None:
+    """Manually correct a trip's logged start and/or end time (a no-signal
+    park/departure the sync-time estimate still got wrong). Pass None for
+    whichever side isn't changing.
+
+    distance_km and energy_used_kwh are left exactly as recorded: they come
+    from the odometer/battery-% readings at the trip's edges, which a clock
+    correction doesn't change. duration_min and avg_speed_kmh *do* depend on
+    the timestamps, so they're recalculated; idle_min is clamped so it can
+    never exceed the (possibly now shorter) duration.
+
+    Raises ValueError if the result is invalid (end <= start) or overlaps
+    another logged trip for the same vehicle.
+    """
+    drive = session.get(Drive, drive_id)
+    if drive is None:
+        return None
+    if start_time is not None:
+        drive.start_time = start_time
+    if end_time is not None:
+        drive.end_time = end_time
+    if drive.end_time <= drive.start_time:
+        raise ValueError("End time must be after start time.")
+    overlap = (
+        session.query(Drive)
+        .filter(
+            Drive.vehicle_id == drive.vehicle_id,
+            Drive.id != drive.id,
+            Drive.start_time < drive.end_time,
+            Drive.end_time > drive.start_time,
+        )
+        .first()
+    )
+    if overlap is not None:
+        raise ValueError("That would overlap another logged trip.")
+    dt_min = (drive.end_time - drive.start_time).total_seconds() / 60.0
+    drive.duration_min = round(dt_min, 1)
+    drive.avg_speed_kmh = round(drive.distance_km / (dt_min / 60.0), 1) if dt_min > 0 else 0.0
+    drive.max_speed_kmh = round(max(drive.max_speed_kmh, drive.avg_speed_kmh), 1)
+    drive.idle_min = round(min(drive.idle_min, dt_min), 1)
+    session.commit()
+    return drive
+
+
 def replace_with_import(
     session, drives: list[dict], charges: list[dict], *, name: str = "Imported Tesla"
 ) -> dict:

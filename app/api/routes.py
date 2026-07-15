@@ -469,6 +469,43 @@ def tag_drive(payload: dict = Body(...), session: Session = Depends(get_session)
     return {"id": drive_id, "tag": tag}
 
 
+@router.post("/data/edit-drive")
+def edit_drive(payload: dict = Body(...), session: Session = Depends(get_session)):
+    """Manually correct a trip's start and/or end time — for a no-signal
+    park/departure the sync-time estimate still got wrong (see sync.py's
+    pace-based corrections, which fix this going forward but can't rewrite
+    already-logged trips). distance_km/energy_used_kwh are untouched (they
+    come from the odometer/SoC readings, not the clock); duration_min and
+    avg_speed_kmh are recalculated from the new times.
+    """
+    drive_id = payload.get("id")
+    if not isinstance(drive_id, int):
+        raise HTTPException(400, "Missing or invalid 'id'.")
+    start_time = end_time = None
+    try:
+        if payload.get("start_time"):
+            start_time = datetime.fromisoformat(payload["start_time"])
+        if payload.get("end_time"):
+            end_time = datetime.fromisoformat(payload["end_time"])
+    except ValueError:
+        raise HTTPException(400, "Invalid 'start_time'/'end_time' (expected ISO format).")
+    if start_time is None and end_time is None:
+        raise HTTPException(400, "Provide 'start_time' and/or 'end_time'.")
+    try:
+        drive = services.edit_drive(session, drive_id, start_time, end_time)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    if drive is None:
+        raise HTTPException(404, "Trip not found.")
+    return {
+        "id": drive.id,
+        "start_time": drive.start_time.isoformat(timespec="minutes"),
+        "end_time": drive.end_time.isoformat(timespec="minutes"),
+        "duration_min": drive.duration_min,
+        "avg_speed_kmh": drive.avg_speed_kmh,
+    }
+
+
 # --- Named places (geofenced Home/Office/... trip labels) -----------------
 
 

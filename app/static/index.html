@@ -707,6 +707,34 @@
     </div>
   </div>
 
+  <!-- Modal: manually correct one already-logged trip's start/end time — for
+       a no-signal park or departure the sync-time estimate still got wrong.
+       Distance and energy stay as recorded (they come from the odometer/
+       battery-% readings, not the clock); duration and average speed are
+       recalculated from the new times. The ✎ button on a Recent Trips row
+       opens this. -->
+  <div id="edit-drive-modal" class="modal hidden">
+    <div class="modal-card">
+      <button class="modal-close" data-close>×</button>
+      <h2>✎ Fix trip time</h2>
+      <p class="modal-sub" id="edit-drive-summary"></p>
+      <form id="edit-drive-form" class="service-form">
+        <label class="field">
+          <span class="field-label">Start time</span>
+          <input type="datetime-local" id="edit-drive-start" required>
+        </label>
+        <label class="field">
+          <span class="field-label">End time</span>
+          <input type="datetime-local" id="edit-drive-end" required>
+        </label>
+        <p class="modal-hint">Distance and energy used stay as recorded — only
+          duration and average speed are recalculated from the new times.</p>
+        <button type="submit" class="btn btn-accent">Save</button>
+      </form>
+      <span id="edit-drive-status" class="status"></span>
+    </div>
+  </div>
+
   <!-- Modal: one place to set Public/Home/Office AC & DC rates and which
        source new charges assume by default. A new charge auto-matches
        Home/Office by GPS (within ~2km of a Place named "Home"/"Office"),

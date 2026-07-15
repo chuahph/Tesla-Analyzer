@@ -399,6 +399,59 @@ function wireTagChips(root) {
   });
 }
 
+// ✎ on a Recent Trips row opens the "Fix trip time" modal, pre-filled from
+// that trip's own currently-logged start/end.
+function wireTripEditButtons(root) {
+  root.querySelectorAll(".trip-edit[data-trip-id]").forEach((btn) => {
+    btn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      openEditDriveModal(+btn.dataset.tripId, btn.dataset.start, btn.dataset.end, btn.dataset.route);
+    });
+  });
+}
+
+function openEditDriveModal(driveId, startTime, endTime, route) {
+  const form = document.getElementById("edit-drive-form");
+  form.dataset.driveId = driveId;
+  document.getElementById("edit-drive-summary").textContent = route || "";
+  // start/end already arrive as "YYYY-MM-DDTHH:MM" (isoformat, minute
+  // precision) — exactly what <input type="datetime-local"> expects.
+  document.getElementById("edit-drive-start").value = startTime || "";
+  document.getElementById("edit-drive-end").value = endTime || "";
+  setStatus(document.getElementById("edit-drive-status"), "", "");
+  openModal("edit-drive-modal");
+}
+
+function setupEditDriveModal() {
+  const form = document.getElementById("edit-drive-form");
+  if (!form) return;
+  form.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const statusEl = document.getElementById("edit-drive-status");
+    const start_time = document.getElementById("edit-drive-start").value;
+    const end_time = document.getElementById("edit-drive-end").value;
+    if (!start_time || !end_time) {
+      setStatus(statusEl, "Enter both a start and end time.", "err");
+      return;
+    }
+    if (end_time <= start_time) {
+      setStatus(statusEl, "End time must be after start time.", "err");
+      return;
+    }
+    try {
+      const resp = await fetch("/api/data/edit-drive", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ id: +form.dataset.driveId, start_time, end_time }),
+      });
+      if (!resp.ok) throw new Error((await resp.json()).detail || "Failed");
+      closeModal("edit-drive-modal");
+      load();   // refresh so the corrected duration/avg speed show immediately
+    } catch (err) {
+      setStatus(statusEl, err.message, "err");
+    }
+  });
+}
+
 function renderKpis(d) {
   const drv = d.driving, chg = d.charging, eff = d.efficiency, cur = d.currency;
   const cards = [];
@@ -1050,6 +1103,14 @@ function renderLists(d) {
         ? `<button class="trip-tag trip-tag-${t.tag || "none"}" data-trip-id="${t.id}" data-tag="${t.tag || ""}" title="Tap to set work/personal">` +
           `${t.tag === "work" ? "💼 Work" : t.tag === "personal" ? "🏠 Personal" : "+ tag"}</button>`
         : "";
+      // Fix trip time: for a no-signal park/departure the sync-time estimate
+      // still got wrong (self-hosted only — needs a real trip id to persist
+      // against, and a live backend to save to).
+      const editBtn = t.id != null && !tripSelectMode && !STATIC_MODE
+        ? `<button class="trip-edit" data-trip-id="${t.id}" data-start="${t.start_time || ""}" ` +
+          `data-end="${t.end_time || ""}" data-route="${(t.route || "").replace(/"/g, "&quot;")}" ` +
+          `title="Fix start/end time">✎</button>`
+        : "";
       // Parked gap right before this trip, if it was long enough and
       // charge-free to count as vampire/standby drain (see
       // driving_analysis.vampire_drain()) — its own slim row rather than
@@ -1061,7 +1122,7 @@ function renderLists(d) {
         : "";
       return `${vampireNote}<li class="trip${tripSelectMode ? " selectable" : ""}">` +
         `<span class="trip-head">${check}${score}${dq}${distFlag}<span class="trip-route">${when}${t.route ? "<br>" + routeHtml : ""}${mapLink}</span></span>` +
-        `<span class="trip-meta">${t.distance_km} km · ${t.duration_min} min${speed}${kwh}${whkm}${soc}${cost}${tagChip}</span>${cond}</li>`;
+        `<span class="trip-meta">${t.distance_km} km · ${t.duration_min} min${speed}${kwh}${whkm}${soc}${cost}${tagChip}${editBtn}</span>${cond}</li>`;
     })
     .join("");
   const list = document.getElementById("recentTrips");
@@ -1069,6 +1130,7 @@ function renderLists(d) {
   wireInfoButtons(list);
   wireTagChips(list);
   wirePlacePins(list);
+  wireTripEditButtons(list);
   // "Show more": every window (including since-charge) caps recent_trips
   // at 5 by default now — "current drive" is the only exception, always
   // just the one trip (see driving_analysis.analyze()'s recent_trips_limit),
@@ -2771,6 +2833,7 @@ function setupAddChargeButton() {
 }
 if (!STATIC_MODE) setupAddChargeButton();
 if (!STATIC_MODE) setupEditChargeModal();
+if (!STATIC_MODE) setupEditDriveModal();
 if (!STATIC_MODE) setupRatesModal();
 if (!STATIC_MODE) setupDefaultSourceButton();
 if (!STATIC_MODE) loadPricingPrefs();

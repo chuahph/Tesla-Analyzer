@@ -594,6 +594,7 @@ footer { padding: 18px 28px; color: var(--muted); font-size: 12px; border-top: 1
 .modal-card.modal-wide { max-width: 760px; }
 .modal-card h2 { margin: 0 0 8px; font-size: 18px; padding-right: 44px; }
 .modal-sub { color: var(--muted); font-size: 13px; line-height: 1.5; margin: 0 0 16px; }
+.modal-hint { color: var(--muted); font-size: 12px; line-height: 1.4; margin: -4px 0 12px; }
 .modal-close {
   position: absolute; top: 8px; right: 8px;
   width: 44px; height: 44px;                 /* touch target */
@@ -860,6 +861,13 @@ footer { padding: 18px 28px; color: var(--muted); font-size: 12px; border-top: 1
   opacity: .55; padding: 0 2px; vertical-align: middle;
 }
 .place-pin:hover { opacity: 1; }
+
+/* Fix-trip-time (✎) button on a Recent Trips row. */
+.trip-edit {
+  border: none; background: none; cursor: pointer; font-size: 12px;
+  opacity: .55; padding: 0 2px; vertical-align: middle; margin-left: 4px;
+}
+.trip-edit:hover { opacity: 1; }
 
 /* Places (geofence) manager modal list. */
 .places-list { list-style: none; margin: 0 0 12px; padding: 0; }
