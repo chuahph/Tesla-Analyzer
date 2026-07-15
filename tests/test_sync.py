@@ -889,6 +889,36 @@ def test_arrival_after_signal_gap_does_not_inflate_duration():
     assert drive["avg_speed_kmh"] > 40
 
 
+def test_arrival_stop_estimate_uses_last_seen_speed_not_trip_peak():
+    """Reported live: a drive that cruised fast earlier (highway) but had
+    already slowed onto a local road by the last live reading, then lost
+    signal, slowed further and parked ~1-2 min later in a no-coverage spot.
+    The stop estimate must use *prev*'s own last-seen speed as the pace
+    evidence for that final stretch — the same real-evidence-over-assumption
+    model already used on the power-on side — not the trip's much faster
+    earlier peak, which would imply the short remaining distance was covered
+    almost instantly and record the stop mere seconds after the last live
+    reading instead of the genuine slow-down-and-park it actually was."""
+    from app.sync import _dt
+    s0 = snap(T0, 10_000.0, 80)                                 # parked
+    s1 = snap(T0 + 300, 10_002.0, 79, shift="D", speed=100)     # driving fast, opens trip
+    s2 = snap(T0 + 600, 10_012.0, 76, shift="D", speed=40)      # slowed, last live reading
+    # 17-min no-signal gap: only 0.3 km further -- the car finished slowing
+    # and parked within the first couple of minutes, then sat still.
+    s3 = snap(T0 + 600 + 17 * 60, 10_012.3, 75.8, locked=True)
+    _, _, trip, _ = step(s0, s1)
+    assert trip is not None
+    _, _, trip, _ = step(s1, s2, trip)
+    assert trip.get("max_speed") == 100          # trip's peak, well above prev's own 40
+    d, _, trip, _ = step(s2, s3, trip)
+    assert trip is None and len(d) == 1
+    drive = d[0]
+    # Stop estimate lands meaningfully after the last live reading (using its
+    # 40 km/h pace, not the earlier 100 km/h peak) -- not mere seconds later.
+    end_delta_sec = (drive["end_time"] - _dt(s2["ts"])).total_seconds()
+    assert end_delta_sec > 25
+
+
 def test_power_on_polled_late_does_not_inflate_start():
     """Poor signal at power-on: the first driving reading arrives long after the
     car set off. The start must be estimated from the odometer, not stretched

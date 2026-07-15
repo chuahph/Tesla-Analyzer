@@ -808,10 +808,19 @@ def process_snapshot(
                 # imprecision either way. The car covered the gap's distance
                 # and then parked, so estimate the real stop as the last
                 # reading plus the time to drive that distance at the trip's
-                # moving pace.
+                # moving pace — using *prev*'s own last-seen speed, not the
+                # trip's peak, as the pace evidence (symmetric to the
+                # power-on side using cur's first-seen speed): reported live,
+                # a drive that had cruised much faster earlier still had that
+                # early peak drive the pace estimate for the final,
+                # already-slower-by-prev approach into a no-signal parking
+                # spot, understating a genuine ~1-2 min slow-down-and-park by
+                # assuming it was covered at the earlier, faster pace —
+                # recording the stop just seconds after the last live
+                # reading instead of when the car actually parked.
                 min_gap = IDLE_STREAK_MIN if open_trip.get("max_speed", 0.0) > 0 else PARK_END_MIN
                 if prev and gap_min >= min_gap and implied < CITY_SPEED_KMH and moved >= drive_min_km:
-                    pace = max(open_trip.get("max_speed", 0.0) * 0.65, CITY_SPEED_KMH)
+                    pace = max((prev.get("speed_kmh") or 0.0) * 0.65, CITY_SPEED_KMH)
                     est_stop = min(cur["ts"], prev["ts"] + moved / pace * 3600.0)
                     # Worth applying once it trims at least a minute of idle
                     # off the tail — not the estimate's own travel time (a
