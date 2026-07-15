@@ -690,36 +690,34 @@ function renderKpis(d) {
     // Driving Cost sits immediately left of Charging Cost so the two money
     // figures for the same window are directly comparable side by side —
     // but their own per-km/per-100km figures are NOT directly comparable to
-    // each other (different formulas, see costInfoBtn below), so both carry
-    // the same explainer.
-    const costInfoBtn = `<button class="info-btn" data-info="cost-info" title="Why don't these per-km figures match?">!</button>`;
+    // each other (different formulas), so each carries its own "!" pointing
+    // at its own explanation, not one popover duplicated under both.
+    const drivingCostInfoBtn = `<button class="info-btn" data-info="driving-cost-info" title="How is this calculated?">!</button>`;
+    const chargingCostInfoBtn = `<button class="info-btn" data-info="charging-cost-info" title="How is this calculated?">!</button>`;
     const showDrivingCost = drv.available && drv.total_cost != null;
     const showChargingCost = chg.total_cost != null && chg.total_cost > 0;
     if (showDrivingCost) {
-      cards.push(kpiCard(`Driving Cost${costInfoBtn}`, `${cur} ${fmt(drv.total_cost, 1, true)}`,
+      cards.push(kpiCard(`Driving Cost${drivingCostInfoBtn}`, `${cur} ${fmt(drv.total_cost, 1, true)}`,
         drv.cost_per_km != null ? `${cur} ${fmt(drv.cost_per_km, 3)} / km` : "", "violet"));
+      cards.push(`<div id="driving-cost-info" class="info-pop hidden kpi-info">` +
+        `RM/km is the energy actually <strong>consumed</strong> (driving + standby drain) so far, ` +
+        `priced at what you paid per kWh, divided by km driven — "what this trip has cost so far." ` +
+        `Charging Cost's RM/100km uses a different formula (the whole charging session, not just ` +
+        `what's been driven), so the two won't match by design.</div>`);
     }
     // What the window's charging cost, with the per-100km "fuel cost" figure
     // a petrol driver can compare directly.
     if (showChargingCost) {
       const per100 = chg.cost_per_100km != null ? ` · ${cur} ${fmt(chg.cost_per_100km, 2)}/100km` : "";
-      cards.push(kpiCard(`Charging Cost${costInfoBtn}`, `${cur} ${fmt(chg.total_cost, 1, true)}`,
+      cards.push(kpiCard(`Charging Cost${chargingCostInfoBtn}`, `${cur} ${fmt(chg.total_cost, 1, true)}`,
         `AC ${cur} ${fmt(chg.ac_cost, 2)} · DC ${cur} ${fmt(chg.dc_cost, 2)}${per100}`, "blue"));
-    }
-    // One shared explainer for both — appended whenever either card used the
-    // button above, so a lone Driving Cost (or lone Charging Cost) card
-    // never points its "!" at a popover that doesn't exist.
-    if (showDrivingCost || showChargingCost) {
-      cards.push(`<div id="cost-info" class="info-pop hidden kpi-info">` +
-        `<strong>Driving Cost</strong>'s RM/km is the energy actually <strong>consumed</strong> ` +
-        `(driving + standby drain) so far, priced at what you paid per kWh, divided by km driven — ` +
-        `"what this trip has cost so far."<br><br>` +
-        `<strong>Charging Cost</strong>'s RM/100km is the cost of the <strong>whole charging ` +
-        `session</strong> (every kWh added, even what hasn't been driven yet) divided by the same ` +
-        `km — "what this tank of electricity cost, relative to how far it's taken you so far." ` +
-        `Right after a charge that's usually higher, since most of the energy is still sitting in ` +
-        `the pack; it settles down as more distance accrues on the same charge. The two won't match ` +
-        `by design — they're answering different questions, not the same one measured two ways.</div>`);
+      cards.push(`<div id="charging-cost-info" class="info-pop hidden kpi-info">` +
+        `RM/100km is the cost of the <strong>whole charging session</strong> (every kWh added, even ` +
+        `what hasn't been driven yet) divided by km driven so far — "what this tank of electricity ` +
+        `cost, relative to how far it's taken you so far." Right after a charge that's usually ` +
+        `higher, since most of the energy is still sitting in the pack; it settles down as more ` +
+        `distance accrues on the same charge. Driving Cost's RM/km uses a different formula, so the ` +
+        `two won't match by design.</div>`);
     }
   }
   if (!cards.length) {
