@@ -836,7 +836,31 @@ def process_snapshot(
         # stale (the car sat parked/asleep since), in which case the drive began
         # just now, not back then, so start it here. Anchoring to a stale prev
         # would backdate the start by hours and fold overnight drain into it.
-        base = cur if _was_parked_since(prev, cur) else (prev or cur)
+        # _was_parked_since alone only fires past STALE_ANCHOR_MIN (15 min) —
+        # too coarse for a *confirmed* park (prev itself reads shift P, zero
+        # speed, not just "gap too short to tell"): reported live, a car
+        # parked and locked, then a short network gap (a few minutes) before
+        # the next poll caught it already driving again — the gap was well
+        # under 15 min, so this fell through to base=prev, backdating the new
+        # trip's start straight into the park and showing zero gap against
+        # the previous trip's end. When prev is confirmed parked, trust a
+        # shorter gap too, but only when BOTH the gap's own implied speed
+        # stayed low throughout (below PARK_SPEED_KMH) AND cur itself already
+        # shows a real nonzero speed — direct evidence the car was already
+        # moving normally by the time it was observed, meaning most of the
+        # gap was still parked, not a slow, still-in-progress departure. A
+        # zero-speed "just shifted into gear" cur (a car easing out of a
+        # parking spot, still creeping) is exactly the ordinary case this
+        # must NOT touch: implied speed reads low there too, but the car has
+        # been continuously, gradually departing since prev, and the gap
+        # genuinely belongs to this trip.
+        was_parked = _was_parked_since(prev, cur)
+        if (not was_parked and prev and not is_driving(prev)
+                and (cur.get("speed_kmh") or 0.0) > 0):
+            gap_h = (cur["ts"] - prev["ts"]) / 3600.0
+            implied_kmh = (cur["odo_km"] - prev["odo_km"]) / max(gap_h, 1e-9)
+            was_parked = implied_kmh < PARK_SPEED_KMH
+        base = cur if was_parked else (prev or cur)
         open_trip = _open_trip_at(base, cur, prev)
         # Symmetric to the arrival case: if the first *driving* reading only came
         # through after an unpolled gap (poor signal at power-on), the last

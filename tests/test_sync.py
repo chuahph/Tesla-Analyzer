@@ -975,6 +975,29 @@ def test_short_blind_gap_power_on_does_not_delay_start():
     assert 1 < back_min < 12
 
 
+def test_confirmed_park_then_short_gap_does_not_start_new_trip_at_zero_gap():
+    """Reported live: a trip ended with the car genuinely parked and locked;
+    a network gap of a few minutes then passed before the next poll caught
+    it already driving again (not a slow, still-in-progress departure — the
+    park was real and confirmed). Because that gap was well under
+    STALE_ANCHOR_MIN, _was_parked_since alone said "no", so the new trip's
+    start got backdated straight to the parked reading -- showing zero gap
+    against the previous trip's end and an impossibly slow, stretched-out
+    2nd trip. Confirmed-parked prev + a real (nonzero) speed already on the
+    first driving reading (direct evidence it wasn't just starting to
+    creep) should anchor the new trip at/near cur instead."""
+    s1 = snap(T0, 10_000.0, 80, shift="D", speed=20)               # driving
+    s2 = snap(T0 + 30, 10_000.2, 79.8, locked=True)                # parks & locks
+    # Short (2-min) network gap, then already driving again at a real pace.
+    s3 = snap(T0 + 30 + 120, 10_000.4, 79.6, shift="D", speed=25)
+    _, _, trip, _ = step(s1, s2)
+    assert trip is None                                            # 1st trip closed
+    _, _, trip, _ = step(s2, s3, trip)
+    assert trip is not None
+    assert trip["ts"] > s2["ts"]           # not backdated into the park
+    assert trip["ts"] == s3["ts"]          # anchored at (or right by) the resume
+
+
 def test_stale_prev_does_not_backdate_open_trip_start():
     """A drive seen right after an overnight park must anchor its start to *now*,
     not to last night's stale snapshot (which would add hours of idle time)."""
