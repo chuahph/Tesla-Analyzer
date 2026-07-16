@@ -104,7 +104,36 @@ const centerTextPlugin = {
     ctx.restore();
   },
 };
-Chart.register(barLabelsPlugin, centerTextPlugin);
+// Inline plugin: a small value label beside a line dataset's *last* point —
+// the current/most-recent reading is legible on the chart itself, not just
+// on hover. Opt-in via options.plugins.lastPointLabel = { fmt, color }.
+const lastPointLabelPlugin = {
+  id: "lastPointLabel",
+  afterDatasetsDraw(chart, _args, opts) {
+    if (!opts || typeof opts.fmt !== "function") return;
+    const ds = opts.datasetIndex || 0;
+    const meta = chart.getDatasetMeta(ds);
+    if (!meta || meta.hidden || !meta.data.length) return;
+    const i = meta.data.length - 1;
+    const v = chart.data.datasets[ds].data[i];
+    if (v == null) return;
+    const el = meta.data[i];
+    const { ctx, chartArea } = chart;
+    ctx.save();
+    ctx.font = "700 11px " + Chart.defaults.font.family;
+    ctx.fillStyle = opts.color || "#e6e9ef";
+    const text = opts.fmt(v);
+    // Flip to the left of the point when the label wouldn't fit to the
+    // right within the plot area — the last point sits at (or very near)
+    // the chart's own right edge by definition, so this is the common case.
+    const rightFits = el.x + 8 + ctx.measureText(text).width <= chartArea.right;
+    ctx.textAlign = rightFits ? "left" : "right";
+    ctx.textBaseline = "middle";
+    ctx.fillText(text, el.x + (rightFits ? 8 : -8), el.y);
+    ctx.restore();
+  },
+};
+Chart.register(barLabelsPlugin, centerTextPlugin, lastPointLabelPlugin);
 
 function kpiCard(label, value, sub, tone) {
   return `<div class="kpi${tone ? " tone-" + tone : ""}"><div class="label">${label}</div>
@@ -801,10 +830,29 @@ function renderKpis(d) {
       `<div class="kpi kpi-empty"><div class="label">No activity ${label}</div>` +
       `<div class="sub">Your stats appear here after the next synced drive or charge — ` +
       `or pick a longer window (e.g. 7 days) above.</div></div>`;
+    document.getElementById("show-more-kpis")?.classList.add("hidden");
     return;
   }
   document.getElementById("kpis").innerHTML = cards.join("");
   wireInfoButtons(document.getElementById("kpis"));
+  // Collapse to the first KPI_COLLAPSED_COUNT boxes so the dashboard opens
+  // on a short, scannable row instead of a wall of 10+ figures — "Show more"
+  // reveals the rest in place (no reload; every box is already in the DOM).
+  // kpi-info popovers (the driving/charging-cost "!" explainers) don't carry
+  // the plain .kpi class, so this selector only ever touches real KPI boxes.
+  const kpiEls = [...document.querySelectorAll("#kpis .kpi:not(.kpi-empty)")];
+  const moreBtn = document.getElementById("show-more-kpis");
+  if (moreBtn) {
+    const hasMore = kpiEls.length > KPI_COLLAPSED_COUNT;
+    moreBtn.classList.toggle("hidden", !hasMore);
+    if (hasMore) {
+      kpiEls.forEach((el, i) => {
+        el.classList.toggle("hidden", !kpisExpanded && i >= KPI_COLLAPSED_COUNT);
+      });
+      moreBtn.textContent = kpisExpanded
+        ? "Show fewer ▲" : `Show ${kpiEls.length - KPI_COLLAPSED_COUNT} more ▾`;
+    }
+  }
 }
 
 function barConfig(labels, data, label, color, unit, labelFmt) {
@@ -966,8 +1014,13 @@ function renderCharts(d) {
         pointHitRadius: 12, pointHoverRadius: 5,
         pointBackgroundColor: "#e82127", pointBorderColor: "#171b22", pointBorderWidth: 2 }] },
       options: { responsive: true, maintainAspectRatio: false,
+        // Headroom for the last-point label (below) so it isn't clipped
+        // against the card edge when the latest week is also the peak.
+        layout: { padding: { top: 16 } },
         plugins: { legend: { display: false },
-          tooltip: { callbacks: { label: (c) => ` ${fmt(c.parsed.y, 0)} Wh/km` } } },
+          tooltip: { callbacks: { label: (c) => ` ${fmt(c.parsed.y, 0)} Wh/km` } },
+          // Small value label right at the current week's own point.
+          lastPointLabel: { fmt: (v) => fmt(v, 0) } },
         scales: {
           x: { grid: { display: false }, border: { display: false }, ticks: { maxTicksLimit: 8 } },
           // A fixed tick count (not just a ceiling), with autoSkip off so a
@@ -992,8 +1045,10 @@ function renderCharts(d) {
         pointHitRadius: 12, pointHoverRadius: 5,
         pointBackgroundColor: "#e82127", pointBorderColor: "#171b22", pointBorderWidth: 2 }] },
       options: { responsive: true, maintainAspectRatio: false,
+        layout: { padding: { top: 16 } },
         plugins: { legend: { display: false },
-          tooltip: { callbacks: { label: (c) => ` ${fmt(c.parsed.y, 0)} Wh/km` } } },
+          tooltip: { callbacks: { label: (c) => ` ${fmt(c.parsed.y, 0)} Wh/km` } },
+          lastPointLabel: { fmt: (v) => fmt(v, 0) } },
         scales: {
           x: { grid: { display: false }, border: { display: false }, ticks: { maxTicksLimit: 8 } },
           // Same fixed tick count (and autoSkip off) as the weekly chart
@@ -1790,6 +1845,13 @@ let demoCache = null;
 // "current drive" (always just the one trip — see driving_analysis.
 // analyze()'s recent_trips_limit), so left at its default there; unused.
 let recentTripsLimit = 5;
+// Whether the KPI grid is showing every box or just the first
+// KPI_COLLAPSED_COUNT — a pure client-side toggle (unlike recentTripsLimit,
+// every KPI is already in the payload, so "show more" just reveals DOM
+// already on the page instead of reloading). Reset to collapsed alongside
+// recentTripsLimit whenever the window changes.
+let kpisExpanded = false;
+const KPI_COLLAPSED_COUNT = 4;
 
 function importedDataset() {
   try { return JSON.parse(localStorage.getItem(STORE_KEY)); } catch (_) { return null; }
@@ -1947,6 +2009,7 @@ const rangeSel = document.getElementById("range");
 let lastRange = rangeSel.value;
 rangeSel.addEventListener("change", () => {
   recentTripsLimit = 5;   // switching windows always starts Recent Trips collapsed again
+  kpisExpanded = false;   // ...and the KPI grid too
   if (rangeSel.value !== "custom") {
     lastRange = rangeSel.value;
     load();
@@ -1977,6 +2040,13 @@ rangeSel.addEventListener("change", () => {
 document.getElementById("show-more-trips")?.addEventListener("click", () => {
   recentTripsLimit += 5;
   load();
+});
+
+// Expand/collapse the KPI grid — a pure re-render from the already-loaded
+// data (see kpisExpanded), no server round-trip needed.
+document.getElementById("show-more-kpis")?.addEventListener("click", () => {
+  kpisExpanded = !kpisExpanded;
+  if (lastData) renderKpis(lastData);
 });
 
 /* ------------------------------------------------------------------ */

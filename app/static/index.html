@@ -426,6 +426,9 @@
     <section id="score-banner" class="score-banner" style="display:none"></section>
     <hr id="sep-score" class="sep" style="display:none" />
     <section id="kpis" class="kpi-grid"></section>
+    <!-- Expand/collapse the KPI grid beyond the first 4 boxes — filled in by
+         renderKpis() in app.js, hidden entirely when there's nothing to add. -->
+    <button id="show-more-kpis" class="btn btn-mini hidden"></button>
     <!-- Rolling 7-day pulse vs the week before, filled by app.js. -->
     <section id="week-compare" class="week-compare" style="display:none"></section>
     <hr class="sep" />
