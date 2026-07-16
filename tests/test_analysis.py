@@ -958,6 +958,28 @@ def test_daily_efficiency_groups_by_calendar_day_not_week():
     assert len(result["weekly_efficiency"]) == 1
 
 
+def test_weekly_and_daily_distance_km_sum_alongside_efficiency():
+    """Distance trends carry the same keys as their efficiency counterparts
+    (same underlying drives, same grouping) but sum km rather than average
+    Wh/km — two trips landing on the same day/week must add together."""
+    from datetime import datetime
+
+    def mk(day, distance_km, wh_per_km=150.0):
+        return Drive(start_time=datetime(2026, 7, day, 8, 0),
+                     end_time=datetime(2026, 7, day, 8, 30),
+                     distance_km=distance_km, duration_min=30, avg_speed_kmh=40,
+                     max_speed_kmh=60, start_soc=80, end_soc=75,
+                     energy_used_kwh=wh_per_km * distance_km / 1000.0, outside_temp_c=28)
+    # Two same-day trips (6 Jul) must sum; 8 Jul is a separate day but the
+    # same ISO week, so the weekly total covers all three.
+    drives = [mk(6, 10.0), mk(6, 5.0), mk(8, 20.0)]
+    result = efficiency_analysis.analyze(drives, rated_wh_per_km=150)
+    assert result["daily_distance_km"] == {"2026-07-06": 15.0, "2026-07-08": 20.0}
+    assert list(result["weekly_distance_km"].values()) == [35.0]
+    assert set(result["daily_distance_km"]) == set(result["daily_efficiency"])
+    assert set(result["weekly_distance_km"]) == set(result["weekly_efficiency"])
+
+
 # --- recommendations -------------------------------------------------------
 
 def test_recommendations_built(seeded):

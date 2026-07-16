@@ -8,6 +8,20 @@ const TICK = "#9aa4b2";
 // a fixed count (not just a maxTicksLimit ceiling) so their gridline row
 // gap always matches exactly, regardless of each chart's own Wh/km range.
 const EFF_Y_TICKS = 6;
+
+// Shared by every chart pairing a zero-based bar/left-axis series with a
+// naturally-high-riding right-axis line (trip counts vs Wh/km, distance vs
+// Wh/km): a line whose real-world values never approach 0 always rides near
+// the top of its own zero-based axis, so a tall bar on a tight axis crosses
+// right through it. Give the bar axis extra headroom — 2.2x the tallest bar,
+// rounded up to a whole-number tick step — so bars settle into the chart's
+// lower half and leave the top clear for the line.
+function barAxisHeadroom(maxVal, ticks = EFF_Y_TICKS) {
+  if (!(maxVal > 0)) return undefined;
+  const step = Math.ceil((maxVal * 2.2) / (ticks - 1));
+  return step * (ticks - 1) || undefined;
+}
+
 Chart.defaults.color = TICK;
 Chart.defaults.borderColor = GRID;
 Chart.defaults.font.family = "-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif";
@@ -1013,32 +1027,55 @@ function renderCharts(d) {
     });
 
     const w = eff.weekly_efficiency;
+    const wd = eff.weekly_distance_km || {};
+    const wDistAxisMax = barAxisHeadroom(Math.max(0, ...Object.values(wd)));
     makeChart("effTrendChart", {
-      type: "line",
-      data: { labels: Object.keys(w), datasets: [{
-        label: "Wh/km", data: Object.values(w), borderColor: "#e82127", borderWidth: 2.5,
-        backgroundColor: (c) => vGradient(c.chart, "#e82127", 0.24, 0), fill: true, tension: .35,
-        // Mark just the latest point so the current week is easy to spot.
-        pointRadius: (c) => c.dataIndex === c.dataset.data.length - 1 ? 4 : 0,
-        pointHitRadius: 12, pointHoverRadius: 5,
-        pointBackgroundColor: "#e82127", pointBorderColor: "#171b22", pointBorderWidth: 2 }] },
+      data: { labels: Object.keys(w), datasets: [
+        { type: "bar", label: "Distance", data: Object.keys(w).map(k => wd[k] ?? 0),
+          yAxisID: "y", backgroundColor: (c) => vGradient(c.chart, "#22c55e", 1, 0.35),
+          hoverBackgroundColor: (c) => vGradient(c.chart, "#22c55e", 1, 0.6),
+          borderRadius: 5, borderSkipped: false, maxBarThickness: 44 },
+        { type: "line", label: "Wh/km", data: Object.values(w), yAxisID: "y1",
+          borderColor: "#e82127", borderWidth: 2.5,
+          backgroundColor: (c) => vGradient(c.chart, "#e82127", 0.24, 0), fill: true, tension: .35,
+          // Mark just the latest point so the current week is easy to spot.
+          pointRadius: (c) => c.dataIndex === c.dataset.data.length - 1 ? 4 : 0,
+          pointHitRadius: 12, pointHoverRadius: 5,
+          pointBackgroundColor: "#e82127", pointBorderColor: "#171b22", pointBorderWidth: 2 },
+      ] },
       options: { responsive: true, maintainAspectRatio: false,
         // Headroom for the point labels (below) so one near the top of a
         // peak isn't clipped against the card edge.
         layout: { padding: { top: 16 } },
-        plugins: { legend: { display: false },
-          tooltip: { callbacks: { label: (c) => ` ${fmt(c.parsed.y, 0)} Wh/km` } },
+        plugins: {
+          legend: { display: true, position: "bottom",
+            labels: { usePointStyle: true, boxWidth: 8, boxHeight: 8, padding: 16 } },
+          tooltip: { callbacks: { label: (c) =>
+            c.dataset.yAxisID === "y1"
+              ? ` ${fmt(c.parsed.y, 0)} Wh/km`
+              : ` ${fmt(c.parsed.y, 0)} km` } },
           // Every week's own value labelled right on its point (thins out
           // automatically if the row ever gets too dense to fit them all).
-          allPointLabels: { fmt: (v) => fmt(v, 0) } },
+          // Red tint matches the line itself, distinguishing it from the
+          // distance bars' own (unlabelled) amount shown only on hover.
+          allPointLabels: { datasetIndex: 1, color: "#ff9a9e", fmt: (v) => fmt(v, 0) },
+        },
         scales: {
           x: { grid: { display: false }, border: { display: false }, ticks: { maxTicksLimit: 8 } },
+          // Extra headroom on the distance axis (see barAxisHeadroom) keeps
+          // its bars in the chart's lower half so they never cross the
+          // Wh/km line, which — beginAtZero on its own axis — naturally
+          // rides near the top since real efficiency values are nowhere
+          // near 0.
+          y: { beginAtZero: true, border: { display: false }, grid: { color: GRID },
+            max: wDistAxisMax, ticks: { count: EFF_Y_TICKS, autoSkip: false, color: "#22c55e" } },
           // A fixed tick count (not just a ceiling), with autoSkip off so a
           // shorter mobile box can't silently thin it back down — always
           // identical to the daily chart below, regardless of how each
           // window's own Wh/km range happens to differ.
-          y: { border: { display: false }, grid: { color: GRID },
-            ticks: { count: EFF_Y_TICKS, autoSkip: false } },
+          y1: { beginAtZero: true, position: "right", border: { display: false },
+            grid: { display: false },
+            ticks: { count: EFF_Y_TICKS, autoSkip: false, color: "#ff9a9e" } },
         } },
     });
 
@@ -1046,30 +1083,46 @@ function renderCharts(d) {
     // finer-grained, so a single bad day (heat, traffic) doesn't get
     // smoothed away by a whole week's average.
     const dd = eff.daily_efficiency;
+    const ddist = eff.daily_distance_km || {};
+    const dDistAxisMax = barAxisHeadroom(Math.max(0, ...Object.values(ddist)));
     makeChart("effDailyTrendChart", {
-      type: "line",
-      data: { labels: Object.keys(dd), datasets: [{
-        label: "Wh/km", data: Object.values(dd), borderColor: "#e82127", borderWidth: 2.5,
-        backgroundColor: (c) => vGradient(c.chart, "#e82127", 0.24, 0), fill: true, tension: .35,
-        pointRadius: (c) => c.dataIndex === c.dataset.data.length - 1 ? 4 : 0,
-        pointHitRadius: 12, pointHoverRadius: 5,
-        pointBackgroundColor: "#e82127", pointBorderColor: "#171b22", pointBorderWidth: 2 }] },
+      data: { labels: Object.keys(dd), datasets: [
+        { type: "bar", label: "Distance", data: Object.keys(dd).map(k => ddist[k] ?? 0),
+          yAxisID: "y", backgroundColor: (c) => vGradient(c.chart, "#22c55e", 1, 0.35),
+          hoverBackgroundColor: (c) => vGradient(c.chart, "#22c55e", 1, 0.6),
+          borderRadius: 3, borderSkipped: false, maxBarThickness: 20 },
+        { type: "line", label: "Wh/km", data: Object.values(dd), yAxisID: "y1",
+          borderColor: "#e82127", borderWidth: 2.5,
+          backgroundColor: (c) => vGradient(c.chart, "#e82127", 0.24, 0), fill: true, tension: .35,
+          pointRadius: (c) => c.dataIndex === c.dataset.data.length - 1 ? 4 : 0,
+          pointHitRadius: 12, pointHoverRadius: 5,
+          pointBackgroundColor: "#e82127", pointBorderColor: "#171b22", pointBorderWidth: 2 },
+      ] },
       options: { responsive: true, maintainAspectRatio: false,
         layout: { padding: { top: 16 } },
-        plugins: { legend: { display: false },
-          tooltip: { callbacks: { label: (c) => ` ${fmt(c.parsed.y, 0)} Wh/km` } },
+        plugins: {
+          legend: { display: true, position: "bottom",
+            labels: { usePointStyle: true, boxWidth: 8, boxHeight: 8, padding: 16 } },
+          tooltip: { callbacks: { label: (c) =>
+            c.dataset.yAxisID === "y1"
+              ? ` ${fmt(c.parsed.y, 0)} Wh/km`
+              : ` ${fmt(c.parsed.y, 0)} km` } },
           // Same as the weekly chart above — every day's value labelled on
           // its own point, thinning out automatically once ~90 daily points
           // no longer have room for all of them.
-          allPointLabels: { fmt: (v) => fmt(v, 0) } },
+          allPointLabels: { datasetIndex: 1, color: "#ff9a9e", fmt: (v) => fmt(v, 0) },
+        },
         scales: {
           x: { grid: { display: false }, border: { display: false }, ticks: { maxTicksLimit: 8 } },
+          y: { beginAtZero: true, border: { display: false }, grid: { color: GRID },
+            max: dDistAxisMax, ticks: { count: EFF_Y_TICKS, autoSkip: false, color: "#22c55e" } },
           // Same fixed tick count (and autoSkip off) as the weekly chart
           // above — the row gap follows it exactly rather than each chart
           // auto-picking its own "nice" step from its own (typically
           // wider/noisier) daily range.
-          y: { border: { display: false }, grid: { color: GRID },
-            ticks: { count: EFF_Y_TICKS, autoSkip: false } },
+          y1: { beginAtZero: true, position: "right", border: { display: false },
+            grid: { display: false },
+            ticks: { count: EFF_Y_TICKS, autoSkip: false, color: "#ff9a9e" } },
         } },
     });
   }
@@ -1084,14 +1137,7 @@ function renderCharts(d) {
     // afternoons, cold mornings) run less efficiently, in one chart.
     const th = drv.trips_by_hour;
     const eh = drv.efficiency_by_hour || {};
-    // The Wh/km line naturally rides near the top of its own zero-based axis
-    // (real efficiency values never approach 0), so without help the busiest
-    // hour's bar — also near the top of *its* axis — crosses right through
-    // it. Give the bar axis extra headroom, rounded to a whole-number step,
-    // so bars settle into the chart's lower half and leave the top clear.
-    const tripMax = Math.max(0, ...Object.values(th));
-    const tripAxisStep = tripMax > 0 ? Math.ceil((tripMax * 2.2) / (EFF_Y_TICKS - 1)) : 0;
-    const tripAxisMax = tripAxisStep * (EFF_Y_TICKS - 1) || undefined;
+    const tripAxisMax = barAxisHeadroom(Math.max(0, ...Object.values(th)));
     makeChart("tripsHourChart", {
       data: {
         labels: Object.keys(th).map(h => h + "h"),

@@ -490,18 +490,28 @@
     const [tslope] = linregress(dr.map((d) => d.outside_temp_c), effs);
 
     const weekly = new Map();
-    dr.forEach((d) => { const iso = isoWeek(new Date(d.start_time)); const key = `${iso.year}-W${String(iso.week).padStart(2, "0")}`; (weekly.get(key) || weekly.set(key, []).get(key)).push(whPerKm(d)); });
+    const weeklyDist = new Map();
+    dr.forEach((d) => {
+      const iso = isoWeek(new Date(d.start_time));
+      const key = `${iso.year}-W${String(iso.week).padStart(2, "0")}`;
+      (weekly.get(key) || weekly.set(key, []).get(key)).push(whPerKm(d));
+      weeklyDist.set(key, (weeklyDist.get(key) || 0) + d.distance_km);
+    });
     const weeklyEff = {}; [...weekly.keys()].sort().forEach((k) => weeklyEff[k] = round(mean(weekly.get(k)), 1));
+    const weeklyDistKm = {}; [...weeklyDist.keys()].sort().forEach((k) => weeklyDistKm[k] = round(weeklyDist.get(k), 1));
 
     // Daily efficiency trend (mirror app/analysis/efficiency.py) — finer
     // grained than weekly, so a single bad day isn't smoothed away.
     const daily = new Map();
+    const dailyDist = new Map();
     dr.forEach((d) => {
       const dt = new Date(d.start_time);
       const key = `${dt.getFullYear()}-${String(dt.getMonth() + 1).padStart(2, "0")}-${String(dt.getDate()).padStart(2, "0")}`;
       (daily.get(key) || daily.set(key, []).get(key)).push(whPerKm(d));
+      dailyDist.set(key, (dailyDist.get(key) || 0) + d.distance_km);
     });
     const dailyEff = {}; [...daily.keys()].sort().forEach((k) => dailyEff[k] = round(mean(daily.get(k)), 1));
+    const dailyDistKm = {}; [...dailyDist.keys()].sort().forEach((k) => dailyDistKm[k] = round(dailyDist.get(k), 1));
 
     const totalDist = dr.reduce((a, d) => a + d.distance_km, 0);
     const actualEnergy = dr.reduce((a, d) => a + d.energy_used_kwh, 0);
@@ -521,6 +531,8 @@
       temp_efficiency_slope_wh_per_c: round(tslope, 2),
       weekly_efficiency: weeklyEff,
       daily_efficiency: dailyEff,
+      weekly_distance_km: weeklyDistKm,
+      daily_distance_km: dailyDistKm,
       best_decile_efficiency_wh_per_km: round(mean(best), 1),
       total_distance_km: round(totalDist, 1),
       total_energy_kwh: round(actualEnergy, 1),

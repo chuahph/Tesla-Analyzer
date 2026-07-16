@@ -66,17 +66,24 @@ def analyze(drives: list[Drive], rated_wh_per_km: float) -> dict[str, Any]:
 
     # Weekly efficiency trend (detect seasonal drift / degradation).
     weekly: dict[str, list[float]] = defaultdict(list)
+    weekly_dist: dict[str, float] = defaultdict(float)
     for d in drives:
         iso = d.start_time.isocalendar()
         key = f"{iso.year}-W{iso.week:02d}"
         weekly[key].append(d.wh_per_km)
+        weekly_dist[key] += d.distance_km
     weekly_eff = {k: round(mean(v), 1) for k, v in sorted(weekly.items())}
+    weekly_distance_km = {k: round(v, 1) for k, v in sorted(weekly_dist.items())}
 
     # Daily efficiency trend (finer-grained than weekly — spot single bad days).
     daily: dict[str, list[float]] = defaultdict(list)
+    daily_dist: dict[str, float] = defaultdict(float)
     for d in drives:
-        daily[d.start_time.date().isoformat()].append(d.wh_per_km)
+        key = d.start_time.date().isoformat()
+        daily[key].append(d.wh_per_km)
+        daily_dist[key] += d.distance_km
     daily_eff = {k: round(mean(v), 1) for k, v in sorted(daily.items())}
+    daily_distance_km = {k: round(v, 1) for k, v in sorted(daily_dist.items())}
 
     # Energy that "should have" been used at the rated figure vs actual.
     total_distance = sum(d.distance_km for d in drives)
@@ -98,6 +105,8 @@ def analyze(drives: list[Drive], rated_wh_per_km: float) -> dict[str, Any]:
         "temp_efficiency_slope_wh_per_c": round(temp_slope, 2),
         "weekly_efficiency": weekly_eff,
         "daily_efficiency": daily_eff,
+        "weekly_distance_km": weekly_distance_km,
+        "daily_distance_km": daily_distance_km,
         "best_decile_efficiency_wh_per_km": round(mean(best), 1),
         "total_distance_km": round(total_distance, 1),
         "total_energy_kwh": round(actual_energy, 1),
