@@ -1059,9 +1059,9 @@ function renderCharts(d) {
 
     const w = eff.weekly_efficiency;
     const wd = eff.weekly_distance_km || {};
-    // "2026-W16" -> "W16" — the year rarely earns its width on an axis label;
-    // it's still in the tooltip's underlying data if ever needed.
-    const wLabels = Object.keys(w).map((k) => k.replace(/^\d{4}-/, ""));
+    // "2026-W16" -> "W16'26" — short enough for an axis label but keeps the
+    // year visible (matters once a window spans a year boundary).
+    const wLabels = Object.keys(w).map((k) => k.replace(/^(\d{2})(\d{2})-W(\d+)/, "W$3'$2"));
     const wDistAxisMax = barAxisHeadroom(Math.max(0, ...Object.values(wd)), EFF_Y_TICKS, 1.7);
     makeChart("effTrendChart", {
       data: { labels: wLabels, datasets: [
@@ -1122,12 +1122,13 @@ function renderCharts(d) {
     // smoothed away by a whole week's average.
     const dd = eff.daily_efficiency;
     const ddist = eff.daily_distance_km || {};
-    // "2026-04-17" -> "17 Apr" — same short day-first form recent trips/
-    // charges already use elsewhere, and the year is rarely worth an axis
-    // label's width within one window.
+    // "2026-04-17" -> "17 Apr '26" — same short day-first form recent trips/
+    // charges already use elsewhere, plus a 2-digit year (matters once a
+    // window spans a year boundary — a plain "17 Apr" alone can't tell two
+    // Aprils a year apart apart).
     const dLabels = Object.keys(dd).map((k) => {
-      const [, m, day] = k.split("-");
-      return `${+day} ${TRIP_MONTHS[+m - 1]}`;
+      const [y, m, day] = k.split("-");
+      return `${+day} ${TRIP_MONTHS[+m - 1]} '${y.slice(2)}`;
     });
     const dDistAxisMax = barAxisHeadroom(Math.max(0, ...Object.values(ddist)), EFF_Y_TICKS, 1.7);
     makeChart("effDailyTrendChart", {
