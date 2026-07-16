@@ -1110,14 +1110,14 @@ function renderCharts(d) {
           // rides near the top since real efficiency values are nowhere
           // near 0.
           y: { beginAtZero: true, border: { display: false }, grid: { color: GRID },
-            max: wDistAxisMax, ticks: { count: EFF_Y_TICKS, autoSkip: false, color: "#22c55e" } },
+            max: wDistAxisMax, ticks: { count: EFF_Y_TICKS, autoSkip: false, color: "#22c55e", font: { size: 9 } } },
           // A fixed tick count (not just a ceiling), with autoSkip off so a
           // shorter mobile box can't silently thin it back down — always
           // identical to the daily chart below, regardless of how each
           // window's own Wh/km range happens to differ.
           y1: { beginAtZero: true, position: "right", border: { display: false },
             grid: { display: false },
-            ticks: { count: EFF_Y_TICKS, autoSkip: false, color: "#ff9a9e" } },
+            ticks: { count: EFF_Y_TICKS, autoSkip: false, color: "#ff9a9e", font: { size: 9 } } },
         } },
     });
 
@@ -1171,14 +1171,14 @@ function renderCharts(d) {
           x: { grid: { display: false }, border: { display: false },
             ticks: { maxTicksLimit: 8, font: { size: 8 }, maxRotation: 0, minRotation: 0 } },
           y: { beginAtZero: true, border: { display: false }, grid: { color: GRID },
-            max: dDistAxisMax, ticks: { count: EFF_Y_TICKS, autoSkip: false, color: "#22c55e" } },
+            max: dDistAxisMax, ticks: { count: EFF_Y_TICKS, autoSkip: false, color: "#22c55e", font: { size: 9 } } },
           // Same fixed tick count (and autoSkip off) as the weekly chart
           // above — the row gap follows it exactly rather than each chart
           // auto-picking its own "nice" step from its own (typically
           // wider/noisier) daily range.
           y1: { beginAtZero: true, position: "right", border: { display: false },
             grid: { display: false },
-            ticks: { count: EFF_Y_TICKS, autoSkip: false, color: "#ff9a9e" } },
+            ticks: { count: EFF_Y_TICKS, autoSkip: false, color: "#ff9a9e", font: { size: 9 } } },
         } },
     });
   }
@@ -1253,9 +1253,9 @@ function renderCharts(d) {
           // so it's obvious at a glance which scale a number belongs to.
           y: { beginAtZero: true, border: { display: false }, grid: { color: GRID },
             max: tripAxisMax,
-            ticks: { count: EFF_Y_TICKS, autoSkip: false, precision: 0, color: "#f59e0b" } },
+            ticks: { count: EFF_Y_TICKS, autoSkip: false, precision: 0, color: "#f59e0b", font: { size: 9 } } },
           y1: { beginAtZero: true, position: "right", border: { display: false },
-            grid: { display: false }, ticks: { count: EFF_Y_TICKS, autoSkip: false, color: "#ff9a9e" } },
+            grid: { display: false }, ticks: { count: EFF_Y_TICKS, autoSkip: false, color: "#ff9a9e", font: { size: 9 } } },
         },
       },
     });
