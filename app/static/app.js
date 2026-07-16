@@ -34,6 +34,78 @@ function makeChart(id, config) {
   charts[id] = new Chart(ctx, config);
 }
 
+// --- Chart visual helpers -------------------------------------------------
+// A #rrggbb colour with an alpha (0..1) applied, as an 8-digit hex string.
+function alpha(hex, a) {
+  const v = Math.round(Math.max(0, Math.min(1, a)) * 255).toString(16).padStart(2, "0");
+  return hex + v;
+}
+// Vertical fill gradient (brighter at the top, fading down) so a flat bar or
+// area reads with a little depth instead of a solid block. Returns the plain
+// colour until the plot area exists — Chart.js re-evaluates scriptable
+// colours once after layout, when chartArea is available.
+function vGradient(chart, hex, topA, botA) {
+  const area = chart.chartArea;
+  if (!area) return alpha(hex, topA);
+  const g = chart.ctx.createLinearGradient(0, area.top, 0, area.bottom);
+  g.addColorStop(0, alpha(hex, topA));
+  g.addColorStop(1, alpha(hex, botA));
+  return g;
+}
+
+// Inline plugin: draw each bar's own value just above it, so exact figures are
+// legible at a glance (bars that differ by a few percent otherwise look
+// identical). Opt-in per chart via options.plugins.barLabels = { fmt } — dense
+// charts (24-hour trips) leave it off, low-count ones (speed band, temperature)
+// switch it on.
+const barLabelsPlugin = {
+  id: "barLabels",
+  afterDatasetsDraw(chart, _args, opts) {
+    if (!opts || typeof opts.fmt !== "function") return;
+    const ds = opts.datasetIndex || 0;
+    const meta = chart.getDatasetMeta(ds);
+    if (!meta || meta.hidden) return;
+    const { ctx } = chart;
+    ctx.save();
+    ctx.font = "700 11px " + Chart.defaults.font.family;
+    ctx.fillStyle = opts.color || "#c9d1dc";
+    ctx.textAlign = "center";
+    ctx.textBaseline = "bottom";
+    meta.data.forEach((el, i) => {
+      const v = chart.data.datasets[ds].data[i];
+      if (v == null) return;
+      ctx.fillText(opts.fmt(v), el.x, el.y - 5);
+    });
+    ctx.restore();
+  },
+};
+
+// Inline plugin: a headline number (and caption) in a doughnut's empty centre —
+// the ring shows the proportion, the centre shows the magnitude. Opt-in via
+// options.plugins.centerText = { value, label }.
+const centerTextPlugin = {
+  id: "centerText",
+  afterDraw(chart, _args, opts) {
+    if (!opts || opts.value == null || !chart.chartArea) return;
+    const { ctx, chartArea } = chart;
+    const cx = (chartArea.left + chartArea.right) / 2;
+    const cy = (chartArea.top + chartArea.bottom) / 2;
+    ctx.save();
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.fillStyle = "#e6e9ef";
+    ctx.font = "800 23px " + Chart.defaults.font.family;
+    ctx.fillText(String(opts.value), cx, cy - (opts.label ? 9 : 0));
+    if (opts.label) {
+      ctx.fillStyle = TICK;
+      ctx.font = "600 11px " + Chart.defaults.font.family;
+      ctx.fillText(opts.label, cx, cy + 13);
+    }
+    ctx.restore();
+  },
+};
+Chart.register(barLabelsPlugin, centerTextPlugin);
+
 function kpiCard(label, value, sub, tone) {
   return `<div class="kpi${tone ? " tone-" + tone : ""}"><div class="label">${label}</div>
     <div class="value">${value}</div><div class="sub">${sub || ""}</div></div>`;
@@ -735,19 +807,25 @@ function renderKpis(d) {
   wireInfoButtons(document.getElementById("kpis"));
 }
 
-function barConfig(labels, data, label, color, unit) {
+function barConfig(labels, data, label, color, unit, labelFmt) {
   unit = unit || label;
   return {
     type: "bar",
-    data: { labels, datasets: [{ label, data, backgroundColor: color,
-      hoverBackgroundColor: color + "cc", borderRadius: 6, maxBarThickness: 44 }] },
+    data: { labels, datasets: [{ label, data,
+      backgroundColor: (c) => vGradient(c.chart, color, 1, 0.4),
+      hoverBackgroundColor: (c) => vGradient(c.chart, color, 1, 0.62),
+      borderRadius: 6, borderSkipped: false, maxBarThickness: 46 }] },
     options: {
       responsive: true, maintainAspectRatio: false,
+      // Headroom so a tall bar's value label isn't clipped at the top edge.
+      layout: { padding: { top: labelFmt ? 16 : 0 } },
       plugins: {
         legend: { display: false },
         tooltip: { callbacks: {
           label: (c) => ` ${fmt(c.parsed.y, 1)} ${unit}`,
         } },
+        // Exact value atop each bar (opt-in — a caller passes a formatter).
+        barLabels: labelFmt ? { fmt: labelFmt } : undefined,
       },
       scales: {
         x: { grid: { display: false }, border: { display: false } },
@@ -839,13 +917,23 @@ function renderCharts(d) {
       type: "bar",
       data: { labels: tempLabels.map(k => k + "°C"), datasets: [{
         label: "Wh/km", data: tempLabels.map(k => t[k].wh_per_km),
-        backgroundColor: tempLabels.map(k => t[k].n < THIN_N ? "#3b82f680" : "#3b82f6"),
-        hoverBackgroundColor: tempLabels.map(k => t[k].n < THIN_N ? "#3b82f6a0" : "#3b82f6cc"),
-        borderRadius: 6, maxBarThickness: 44 }] },
+        // A thin-evidence bucket (< 3 trips) renders faded so it reads as
+        // "not much data here", not a confirmed temperature effect.
+        backgroundColor: (c) => {
+          const thin = t[tempLabels[c.dataIndex]].n < THIN_N;
+          return vGradient(c.chart, "#3b82f6", thin ? 0.42 : 1, thin ? 0.14 : 0.4);
+        },
+        hoverBackgroundColor: (c) => {
+          const thin = t[tempLabels[c.dataIndex]].n < THIN_N;
+          return vGradient(c.chart, "#3b82f6", thin ? 0.6 : 1, thin ? 0.24 : 0.62);
+        },
+        borderRadius: 6, borderSkipped: false, maxBarThickness: 46 }] },
       options: {
         responsive: true, maintainAspectRatio: false,
+        layout: { padding: { top: 16 } },
         plugins: {
           legend: { display: false },
+          barLabels: { fmt: (v) => fmt(v, 0) },
           tooltip: { callbacks: {
             label: (c) => {
               const b = t[tempLabels[c.dataIndex]];
@@ -871,10 +959,12 @@ function renderCharts(d) {
     makeChart("effTrendChart", {
       type: "line",
       data: { labels: Object.keys(w), datasets: [{
-        label: "Wh/km", data: Object.values(w), borderColor: "#e82127", borderWidth: 2,
-        backgroundColor: "rgba(232,33,39,.06)", fill: true, tension: .35,
-        pointRadius: 0, pointHitRadius: 12, pointHoverRadius: 4,
-        pointBackgroundColor: "#e82127" }] },
+        label: "Wh/km", data: Object.values(w), borderColor: "#e82127", borderWidth: 2.5,
+        backgroundColor: (c) => vGradient(c.chart, "#e82127", 0.24, 0), fill: true, tension: .35,
+        // Mark just the latest point so the current week is easy to spot.
+        pointRadius: (c) => c.dataIndex === c.dataset.data.length - 1 ? 4 : 0,
+        pointHitRadius: 12, pointHoverRadius: 5,
+        pointBackgroundColor: "#e82127", pointBorderColor: "#171b22", pointBorderWidth: 2 }] },
       options: { responsive: true, maintainAspectRatio: false,
         plugins: { legend: { display: false },
           tooltip: { callbacks: { label: (c) => ` ${fmt(c.parsed.y, 0)} Wh/km` } } },
@@ -896,10 +986,11 @@ function renderCharts(d) {
     makeChart("effDailyTrendChart", {
       type: "line",
       data: { labels: Object.keys(dd), datasets: [{
-        label: "Wh/km", data: Object.values(dd), borderColor: "#e82127", borderWidth: 2,
-        backgroundColor: "rgba(232,33,39,.06)", fill: true, tension: .35,
-        pointRadius: 0, pointHitRadius: 12, pointHoverRadius: 4,
-        pointBackgroundColor: "#e82127" }] },
+        label: "Wh/km", data: Object.values(dd), borderColor: "#e82127", borderWidth: 2.5,
+        backgroundColor: (c) => vGradient(c.chart, "#e82127", 0.24, 0), fill: true, tension: .35,
+        pointRadius: (c) => c.dataIndex === c.dataset.data.length - 1 ? 4 : 0,
+        pointHitRadius: 12, pointHoverRadius: 5,
+        pointBackgroundColor: "#e82127", pointBorderColor: "#171b22", pointBorderWidth: 2 }] },
       options: { responsive: true, maintainAspectRatio: false,
         plugins: { legend: { display: false },
           tooltip: { callbacks: { label: (c) => ` ${fmt(c.parsed.y, 0)} Wh/km` } } },
@@ -918,7 +1009,7 @@ function renderCharts(d) {
   if (drv.available) {
     const sb = drv.distance_by_speed_band;
     makeChart("speedBandChart", barConfig(Object.keys(sb), Object.values(sb),
-      "km", "#22c55e", "km"));
+      "km", "#22c55e", "km", (v) => fmt(v, 0) + " km"));
 
     // Trip-count bars with an average-efficiency line overlaid on its own
     // scale — shows commute rhythm and whether particular hours (hot
@@ -930,12 +1021,13 @@ function renderCharts(d) {
         labels: Object.keys(th).map(h => h + "h"),
         datasets: [
           { type: "bar", label: "Trips", data: Object.values(th), yAxisID: "y",
-            backgroundColor: "#f59e0b", hoverBackgroundColor: "#f59e0bcc",
-            borderRadius: 6, maxBarThickness: 44 },
+            backgroundColor: (c) => vGradient(c.chart, "#f59e0b", 1, 0.35),
+            hoverBackgroundColor: (c) => vGradient(c.chart, "#f59e0b", 1, 0.6),
+            borderRadius: 5, borderSkipped: false, maxBarThickness: 44 },
           { type: "line", label: "Wh/km", data: Object.keys(th).map(h => eh[h] ?? null),
-            yAxisID: "y1", borderColor: "#e82127", borderWidth: 2, tension: .35,
-            spanGaps: true, pointRadius: 0, pointHitRadius: 12, pointHoverRadius: 4,
-            pointBackgroundColor: "#e82127" },
+            yAxisID: "y1", borderColor: "#e82127", borderWidth: 2.5, tension: .35,
+            spanGaps: true, pointRadius: 0, pointHitRadius: 12, pointHoverRadius: 5,
+            pointBackgroundColor: "#e82127", pointBorderColor: "#171b22", pointBorderWidth: 2 },
         ],
       },
       options: {
@@ -975,13 +1067,19 @@ function renderCharts(d) {
       type: "doughnut",
       data: { labels: ["AC (home/dest)", "DC (fast)"],
         datasets: [{ data: [chg.ac_energy_kwh, chg.dc_energy_kwh],
-          backgroundColor: ["#22c55e", "#e82127"],
-          borderColor: "#171b22", borderWidth: 3, hoverOffset: 6 }] },
-      options: { responsive: true, maintainAspectRatio: false, cutout: "62%",
-        plugins: { legend: { position: "bottom",
-          labels: { usePointStyle: true, boxWidth: 8, boxHeight: 8, padding: 16 } },
+          backgroundColor: ["#22c55e", "#ef4444"],
+          hoverBackgroundColor: ["#2dd46a", "#f45a5a"],
+          borderColor: "#171b22", borderWidth: 3, borderRadius: 4, hoverOffset: 8 }] },
+      options: { responsive: true, maintainAspectRatio: false, cutout: "64%",
+        plugins: {
+          legend: { position: "bottom",
+            labels: { usePointStyle: true, boxWidth: 8, boxHeight: 8, padding: 16 } },
           tooltip: { callbacks: { label: (c) =>
-            ` ${fmt(c.parsed, 0)} kWh (${acdcTotal ? Math.round(100 * c.parsed / acdcTotal) : 0}%)` } } } },
+            ` ${fmt(c.parsed, 0)} kWh (${acdcTotal ? Math.round(100 * c.parsed / acdcTotal) : 0}%)` } },
+          // Total charged in the hole — the ring shows the split, the centre
+          // the magnitude, so the two together read at a glance.
+          centerText: { value: fmt(acdcTotal, 0), label: "kWh total" },
+        } },
     });
 
     const st = chg.end_soc_targets;
@@ -989,7 +1087,7 @@ function renderCharts(d) {
     showCard("socTargetChart", hasSoc);
     if (hasSoc) {
       makeChart("socTargetChart", barConfig(Object.keys(st).map(s => s + "%"),
-        Object.values(st), "sessions", "#3b82f6", "sessions"));
+        Object.values(st), "sessions", "#a78bfa", "sessions", (v) => fmt(v, 0)));
     }
   } else {
     showCard("socTargetChart", false);
@@ -1598,9 +1696,10 @@ function renderBattery(d) {
         type: "line",
         data: { labels: trend.map((p) => p.month), datasets: [{
           label: "km", data: trend.map((p) => p.full_range_km),
-          borderColor: "#2dd4bf", borderWidth: 2, tension: .3,
-          backgroundColor: "rgba(45,212,191,.08)", fill: true,
-          pointRadius: 2, pointBackgroundColor: "#2dd4bf" }] },
+          borderColor: "#2dd4bf", borderWidth: 2.5, tension: .3,
+          backgroundColor: (c) => vGradient(c.chart, "#2dd4bf", 0.22, 0), fill: true,
+          pointRadius: (c) => c.dataIndex === c.dataset.data.length - 1 ? 4 : 2,
+          pointBackgroundColor: "#2dd4bf", pointBorderColor: "#171b22", pointBorderWidth: 2 }] },
         options: { responsive: true, maintainAspectRatio: false,
           plugins: { legend: { display: false },
             tooltip: { callbacks: { label: (c) => ` ${fmt(c.parsed.y)} km projected full range` } } },
