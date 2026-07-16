@@ -2077,6 +2077,7 @@ async function load() {
     renderInsights(d);
     renderNarrative(d);
     renderRecommendations(d.recommendations);
+    renderQuickNav();
 
     const now = new Date();
     const windowText = d.window_label || `${d.window_days}-day window`;
@@ -2167,6 +2168,30 @@ document.getElementById("show-more-kpis")?.addEventListener("click", () => {
   kpisExpanded = !kpisExpanded;
   if (lastData) renderKpis(lastData);
 });
+
+// Quick-nav shortcut bar: jump to a card by id (scroll-margin-top on .card
+// clears the sticky header), or back to the top for the "Top" button.
+// Delegated on the container since the buttons never change.
+document.getElementById("quick-nav")?.addEventListener("click", (e) => {
+  const btn = e.target.closest(".qn-btn");
+  if (!btn) return;
+  if (btn.hasAttribute("data-scroll-top")) {
+    window.scrollTo({ top: 0, behavior: "smooth" });
+    return;
+  }
+  const target = document.getElementById(btn.dataset.target);
+  if (target) target.scrollIntoView({ behavior: "smooth", block: "start" });
+});
+
+// Show only the shortcuts whose target card is actually on screen right now
+// (Battery Health, Efficiency and Charging cards all hide themselves when
+// their data isn't available) — a shortcut to a hidden card would be dead.
+function renderQuickNav() {
+  document.querySelectorAll("#quick-nav .qn-btn[data-target]").forEach((btn) => {
+    const target = document.getElementById(btn.dataset.target);
+    btn.classList.toggle("hidden", !target || target.offsetParent === null);
+  });
+}
 
 /* ------------------------------------------------------------------ */
 /* Data-source buttons: import file + link account                     */

@@ -387,6 +387,42 @@ body.view-home > footer { display: none; }
 
 main { padding: 24px 28px 60px; max-width: 1280px; margin: 0 auto; }
 
+/* Jump-to-section shortcut bar, top of the dashboard. Grid (same pattern as
+   .kpi-grid below) rather than flex: every button gets an equal share of
+   each row's width regardless of its label length, and a narrow phone gets
+   more rows instead of squeezed, unreadable buttons. */
+.quick-nav {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(84px, 1fr));
+  gap: 8px;
+  margin-bottom: 16px;
+}
+.quick-nav.hidden { display: none; }
+.qn-btn {
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  gap: 3px;
+  background: linear-gradient(180deg, #1c222c, var(--panel-2));
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 9px 4px;
+  min-height: 56px;
+  color: var(--text);
+  font: inherit;
+  cursor: pointer;
+  box-shadow: var(--elev-1);
+  transition: transform .16s ease, border-color .16s ease, box-shadow .16s ease;
+}
+.qn-btn .qn-ico { font-size: 18px; line-height: 1; }
+.qn-btn .qn-label {
+  font-size: 10.5px; font-weight: 600; color: var(--muted);
+  letter-spacing: .2px; white-space: nowrap;
+}
+@media (hover: hover) {
+  .qn-btn:hover { transform: translateY(-1px); border-color: var(--border-lift); box-shadow: var(--elev-2); }
+}
+.qn-btn:active { transform: translateY(0); }
+.qn-btn.hidden { display: none; }
+
 /* Soft, transparent fading rule between the major dashboard sections
    (score → KPIs → cards). Fades in from and out to nothing so it reads as a
    gentle separation rather than a hard line. */
@@ -475,6 +511,10 @@ main { padding: 24px 28px 60px; max-width: 1280px; margin: 0 auto; }
   padding: 18px 20px;
   box-shadow: var(--elev-1);
   transition: transform .18s ease, box-shadow .18s ease, border-color .18s ease;
+  /* Clears the sticky header when a quick-nav jump (or a native #anchor)
+     lands a card at the very top of the viewport — without this its title
+     scrolls in right underneath the header instead of below it. */
+  scroll-margin-top: 106px;
   /* Content cards stay in the DOM across refreshes (only their display:none
      toggles, the first time real data exists for them), so this plays once
      per card rather than on every reload — staggered by grid position below. */
@@ -867,6 +907,11 @@ footer { padding: 18px 28px; color: var(--muted); font-size: 12px; border-top: 1
   .bottom-actions #btn-import, .bottom-actions #btn-link { flex: 1 1 42%; }
   .bottom-actions #btn-export, .bottom-actions #btn-guide { flex: 1 1 42%; }
   main { padding: 12px 12px 40px; }
+  .quick-nav { grid-template-columns: repeat(auto-fit, minmax(72px, 1fr)); gap: 6px; margin-bottom: 12px; }
+  .qn-btn { min-height: 50px; padding: 7px 3px; }
+  .qn-btn .qn-ico { font-size: 16px; }
+  .qn-btn .qn-label { font-size: 9.5px; }
+  .card { scroll-margin-top: 122px; }
   .card-grid { grid-template-columns: 1fr; gap: 10px; margin-bottom: 12px; }
   .kpi-grid { grid-template-columns: repeat(2, 1fr); gap: 8px; margin-bottom: 12px; }
   .kpi { padding: 6px 9px; min-height: 83px; }

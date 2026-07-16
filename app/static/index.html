@@ -422,6 +422,19 @@
   </div>
 
   <main id="dashboard">
+    <!-- Jump-to-section shortcuts — every button the same size (see .qn-btn)
+         regardless of label length, so the row reads as one tidy strip.
+         Each button is hidden by app.js (renderQuickNav) when its target
+         card isn't currently shown. -->
+    <nav id="quick-nav" class="quick-nav" aria-label="Jump to section">
+      <button class="qn-btn" data-target="battery-card"><span class="qn-ico">🔋</span><span class="qn-label">Battery</span></button>
+      <button class="qn-btn" data-target="trips-card"><span class="qn-ico">🧭</span><span class="qn-label">Trips</span></button>
+      <button class="qn-btn" data-target="charges-card"><span class="qn-ico">📍</span><span class="qn-label">Charges</span></button>
+      <button class="qn-btn" data-target="efficiency-card"><span class="qn-ico">🌡️</span><span class="qn-label">Efficiency</span></button>
+      <button class="qn-btn" data-target="charging-card"><span class="qn-ico">⚡</span><span class="qn-label">Charging</span></button>
+      <button class="qn-btn" data-target="recommendations-card"><span class="qn-ico">💡</span><span class="qn-label">Tips</span></button>
+      <button class="qn-btn" data-scroll-top><span class="qn-ico">⬆️</span><span class="qn-label">Top</span></button>
+    </nav>
     <!-- Driving score for the whole window (above the KPI boxes), filled by app.js. -->
     <section id="score-banner" class="score-banner" style="display:none"></section>
     <hr id="sep-score" class="sep" style="display:none" />
@@ -454,7 +467,7 @@
         <h2>🔁 Top Routes</h2>
         <ul id="topRoutes" class="plain-list"></ul>
       </div>
-      <div class="card">
+      <div class="card" id="trips-card">
         <h2>🧭 Recent Trips</h2>
         <!-- Work/personal totals for the window; hidden until something's tagged. -->
         <div id="tag-summary" class="tag-summary" style="display:none"></div>
@@ -478,7 +491,7 @@
         </div>
         <canvas id="speedBandChart"></canvas>
       </div>
-      <div class="card">
+      <div class="card" id="charges-card">
         <h2>📍 Recent Charges
           <button id="btn-default-source" class="default-source-btn hidden" title="Default source for new charges — tap to change">🌐</button>
         </h2>
@@ -491,7 +504,7 @@
           <button id="cancel-select-charges" class="btn btn-mini hidden">Cancel</button>
         </div>
       </div>
-      <div class="card">
+      <div class="card" id="efficiency-card">
         <h2>🌡️ Efficiency vs Temperature
           <button class="info-btn" data-info="info-efftemp">!</button></h2>
         <div id="info-efftemp" class="info-pop hidden">
@@ -535,7 +548,7 @@
         </div>
         <canvas id="tripsHourChart"></canvas>
       </div>
-      <div class="card">
+      <div class="card" id="charging-card">
         <h2>⚡ Charging: AC vs DC Energy
           <button class="info-btn" data-info="info-acdc">!</button></h2>
         <div id="info-acdc" class="info-pop hidden">
