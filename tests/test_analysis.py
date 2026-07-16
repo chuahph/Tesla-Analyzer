@@ -1022,6 +1022,35 @@ def test_smart_charging_advisor_sizes_saving_from_peak_hour_energy():
     assert not any(r["title"].startswith("Smart charging") for r in recs3)
 
 
+def test_dc_savings_uses_dc_own_rate_not_blended_average():
+    """The "move DC energy to home AC" saving must be sized from DC's own
+    rate, not the AC+DC blended avg_cost_per_kwh -- blending in (cheaper) AC
+    sessions understates DC's real premium over home charging. Here: 70 kWh
+    AC @ RM0.20/kWh (RM14) + 30 kWh DC @ RM0.60/kWh (RM18) = RM32 total,
+    avg RM0.32/kWh. Sizing off the blend would say (0.32-0.20)*30 = RM3.60;
+    sizing off DC's own RM0.60 rate says (0.60-0.20)*30 = RM12.00 -- the
+    real gap."""
+    charging = {
+        "available": True,
+        "full_charge_share_pct": 0.0,
+        "dc_energy_share_pct": 30.0,  # > 25 -> triggers the recommendation
+        "total_sessions": 5,
+        "charges_by_hour": {},
+        "ac_cost": 14.0,
+        "dc_cost": 18.0,
+        "ac_energy_kwh": 70.0,
+        "dc_energy_kwh": 30.0,
+        "avg_cost_per_kwh": round((14.0 + 18.0) / 100.0, 3),  # 0.32
+    }
+    recs = recommendations_engine.build(
+        {"available": False}, charging, {"available": False},
+        energy_price=0.20, currency="RM",
+    )
+    dc_rec = next(r for r in recs if "DC fast charging" in r["title"])
+    assert "12" in dc_rec["estimated_saving"]
+    assert "3.60" not in dc_rec["estimated_saving"] and "3.6" not in dc_rec["estimated_saving"]
+
+
 def test_recommendations_empty_data():
     recs = recommendations_engine.build(
         {"available": False}, {"available": False}, {"available": False},

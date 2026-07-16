@@ -184,6 +184,12 @@ def build(
 
         dc_share = charging["dc_energy_share_pct"]
         if dc_share > 25:
+            # DC's own rate, not the AC+DC blended avg_cost_per_kwh -- blending
+            # in (cheaper) AC sessions understates DC's real premium over home
+            # charging, sometimes by a lot (e.g. mostly-AC account with one DC
+            # top-up: the blended average sits close to the AC rate, making
+            # "switch DC to home AC" look like almost no saving at all).
+            dc_rate = charging["dc_cost"] / charging["dc_energy_kwh"] if charging["dc_energy_kwh"] else 0.0
             recs.append(
                 _rec(
                     "Battery health",
@@ -193,7 +199,7 @@ def build(
                     "and is more expensive per kWh than home AC. Shifting routine charging "
                     "to overnight AC at home extends battery life and lowers cost.",
                     f"Up to {currency} "
-                    f"{(charging['avg_cost_per_kwh'] - energy_price) * charging['dc_energy_kwh']:.0f}"
+                    f"{max(dc_rate - energy_price, 0.0) * charging['dc_energy_kwh']:.0f}"
                     " saved by moving DC energy to home AC",
                 )
             )

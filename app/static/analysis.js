@@ -387,6 +387,8 @@
     const totalCost = charges.reduce((a, c) => a + c.cost, 0);
     const acEnergy = ac.reduce((a, c) => a + c.energy_added_kwh, 0);
     const dcEnergy = dc.reduce((a, c) => a + c.energy_added_kwh, 0);
+    const acCost = ac.reduce((a, c) => a + c.cost, 0);
+    const dcCost = dc.reduce((a, c) => a + c.cost, 0);
 
     const targets = new Map();
     charges.forEach((c) => { const k = Math.round(c.end_soc / 5) * 5; targets.set(k, (targets.get(k) || 0) + 1); });
@@ -422,6 +424,8 @@
       total_sessions: charges.length,
       total_energy_kwh: round(totalEnergy, 1),
       total_cost: round(totalCost, 2),
+      ac_cost: round(acCost, 2),
+      dc_cost: round(dcCost, 2),
       avg_cost_per_kwh: round(safeDiv(totalCost, totalEnergy), 3),
       ac_sessions: ac.length,
       dc_sessions: dc.length,
@@ -692,9 +696,13 @@
       }
       const dcShare = charging.dc_energy_share_pct;
       if (dcShare > 25) {
+        // DC's own rate, not the AC+DC blended average -- blending in
+        // (cheaper) AC sessions understates DC's real premium over home
+        // charging, sometimes by a lot.
+        const dcRate = safeDiv(charging.dc_cost, charging.dc_energy_kwh);
         recs.push(rec("Battery health", "medium", `${dcShare.toFixed(0)}% of energy comes from DC fast charging`,
           "Heavy reliance on Superchargers/DC adds heat and stress to the pack and is more expensive per kWh than home AC. Shifting routine charging to overnight AC at home extends battery life and lowers cost.",
-          `Up to ${currency} ${((charging.avg_cost_per_kwh - price) * charging.dc_energy_kwh).toFixed(0)} saved by moving DC energy to home AC`));
+          `Up to ${currency} ${(Math.max(dcRate - price, 0) * charging.dc_energy_kwh).toFixed(0)} saved by moving DC energy to home AC`));
       }
       const byHour = charging.charges_by_hour;
       let peak = 0; Object.keys(byHour).forEach((h) => { if (+h >= 7 && +h <= 21) peak += byHour[h]; });
