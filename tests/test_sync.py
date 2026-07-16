@@ -468,11 +468,41 @@ def test_energy_averages_full_range_projection_from_both_endpoints():
     full_end_only = to["range_km"] / (to["soc"] / 100.0)
     energy_end_only = max(frm["range_km"] - to["range_km"], 0.0) / full_end_only * capacity_kwh
 
-    # The averaged result sits strictly between what either endpoint alone
+    # The combined result sits strictly between what either endpoint alone
     # would have given -- neither fully trusting the (rounded-down) start nor
     # the (rounded-up) end reading.
     lo, hi = sorted([energy_start_only, energy_end_only])
     assert lo < energy < hi
+
+
+def test_energy_precision_weights_toward_higher_soc_endpoint():
+    """On a wide-SoC-span trip the two endpoints' full-range projections
+    disagree: the same absolute ±0.5-point integer rounding is a much larger
+    *fraction* of a low-SoC reading, so its projection is the noisier one.
+    Combining as total-range / total-SoC (100*(r0+r1)/(soc0+soc1)) leans on
+    the higher-SoC, more reliable endpoint -- landing closer to the true full
+    range than a plain average of the two projections would."""
+    from app.sync import _energy_kwh
+
+    capacity_kwh = 60.0
+    true_full = 500.0
+    # A long trip 80% -> 20%, true SoCs .4 above each integer -> both ranges
+    # come from the same true 500 km pack; the low-SoC (20%) endpoint's
+    # projection is far noisier than the high-SoC (80%) one.
+    frm = {"range_km": true_full * 0.804, "soc": 80}   # proj 80% -> 502.5 km
+    to = {"range_km": true_full * 0.204, "soc": 20}    # proj 20% -> 510.0 km
+    energy = _energy_kwh(frm, to, capacity_kwh)
+
+    proj_hi = frm["range_km"] / (frm["soc"] / 100.0)    # reliable endpoint
+    proj_lo = to["range_km"] / (to["soc"] / 100.0)      # noisy endpoint
+    full_plain_mean = (proj_hi + proj_lo) / 2.0
+    energy_plain_mean = max(frm["range_km"] - to["range_km"], 0.0) / full_plain_mean * capacity_kwh
+    energy_true = max(frm["range_km"] - to["range_km"], 0.0) / true_full * capacity_kwh
+
+    # Precision-weighted lands closer to the truth than the plain average --
+    # both overshoot slightly (both projections read high here), but the
+    # weighted one overshoots less because it trusts the 80% reading more.
+    assert abs(energy - energy_true) < abs(energy_plain_mean - energy_true)
 
 
 def test_max_speed_never_below_average():
