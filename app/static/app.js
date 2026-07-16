@@ -69,9 +69,13 @@ function vGradient(chart, hex, topA, botA) {
 
 // Inline plugin: draw each bar's own value just above it, so exact figures are
 // legible at a glance (bars that differ by a few percent otherwise look
-// identical). Opt-in per chart via options.plugins.barLabels = { fmt, size } —
-// size (default 11) lets a dense chart (24-hour trips) use a tinier label than
-// a low-count one (speed band, temperature).
+// identical). Skips a label that would overlap the one drawn just before it
+// (by horizontal reach vs text width — same collision avoidance as
+// allPointLabelsPlugin below), so a wide chart (24 hours) gets every bar
+// labelled while a dense one (90 daily bars) thins itself out automatically
+// instead of the numbers running together. Opt-in per chart via
+// options.plugins.barLabels = { fmt, size, color } — size (default 11) lets a
+// dense chart use a tinier label than a low-count one (speed band, temperature).
 const barLabelsPlugin = {
   id: "barLabels",
   afterDatasetsDraw(chart, _args, opts) {
@@ -85,10 +89,15 @@ const barLabelsPlugin = {
     ctx.fillStyle = opts.color || "#c9d1dc";
     ctx.textAlign = "center";
     ctx.textBaseline = "bottom";
+    let claimedRight = -Infinity;
     meta.data.forEach((el, i) => {
       const v = chart.data.datasets[ds].data[i];
       if (!v) return;   // skip 0/null — an empty hour needn't say "0"
-      ctx.fillText(opts.fmt(v), el.x, el.y - 4);
+      const text = opts.fmt(v);
+      const halfW = ctx.measureText(text).width / 2;
+      if (el.x - halfW < claimedRight) return;   // would collide -- skip
+      ctx.fillText(text, el.x, el.y - 4);
+      claimedRight = el.x + halfW + 3;   // small gap before the next label
     });
     ctx.restore();
   },
@@ -1054,11 +1063,13 @@ function renderCharts(d) {
             c.dataset.yAxisID === "y1"
               ? ` ${fmt(c.parsed.y, 0)} Wh/km`
               : ` ${fmt(c.parsed.y, 0)} km` } },
-          // Every week's own value labelled right on its point (thins out
-          // automatically if the row ever gets too dense to fit them all).
-          // Red tint matches the line itself, distinguishing it from the
-          // distance bars' own (unlabelled) amount shown only on hover.
-          allPointLabels: { datasetIndex: 1, color: "#ff9a9e", fmt: (v) => fmt(v, 0) },
+          // Small km label above each distance bar, and every week's Wh/km
+          // value right on its line point — different colours (green vs
+          // red, echoing each series' own hue) so the two number sets read
+          // as distinct at a glance even when a bar and a point land close
+          // together vertically.
+          barLabels: { datasetIndex: 0, size: 9, color: "#4ade80", fmt: (v) => fmt(v, 0) },
+          allPointLabels: { datasetIndex: 1, size: 9, color: "#ff9a9e", fmt: (v) => fmt(v, 0) },
         },
         scales: {
           x: { grid: { display: false }, border: { display: false }, ticks: { maxTicksLimit: 8 } },
@@ -1107,10 +1118,11 @@ function renderCharts(d) {
             c.dataset.yAxisID === "y1"
               ? ` ${fmt(c.parsed.y, 0)} Wh/km`
               : ` ${fmt(c.parsed.y, 0)} km` } },
-          // Same as the weekly chart above — every day's value labelled on
-          // its own point, thinning out automatically once ~90 daily points
-          // no longer have room for all of them.
-          allPointLabels: { datasetIndex: 1, color: "#ff9a9e", fmt: (v) => fmt(v, 0) },
+          // Same as the weekly chart above — every day's distance and Wh/km
+          // value labelled on its own bar/point, thinning out automatically
+          // once ~90 daily entries no longer have room for all of them.
+          barLabels: { datasetIndex: 0, size: 9, color: "#4ade80", fmt: (v) => fmt(v, 0) },
+          allPointLabels: { datasetIndex: 1, size: 9, color: "#ff9a9e", fmt: (v) => fmt(v, 0) },
         },
         scales: {
           x: { grid: { display: false }, border: { display: false }, ticks: { maxTicksLimit: 8 } },
