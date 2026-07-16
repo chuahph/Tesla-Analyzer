@@ -85,7 +85,12 @@
       </select>
       <span id="mode-badge" class="badge">…</span>
     </div>
-    <!-- Jump-to-section shortcuts, right in the header next to Sync so
+    <!-- Car status: battery on one line, condition/remark on the next. -->
+    <div id="sync-status" class="status" style="display:none">
+      <span id="sync-batt"></span>
+      <span id="sync-cond"></span>
+    </div>
+    <!-- Jump-to-section shortcuts, right in the header below Sync/status so
          they scroll along with it instead of needing their own separate
          sticky positioning — every button the same size (see .qn-btn)
          regardless of label length, so the row reads as one tidy strip.
@@ -100,11 +105,6 @@
       <button class="qn-btn" data-target="recommendations-card"><span class="qn-ico">💡</span><span class="qn-label">Tips</span></button>
       <button class="qn-btn" data-scroll-top><span class="qn-ico">⬆️</span><span class="qn-label">Top</span></button>
     </nav>
-    <!-- Car status: battery on one line, condition/remark on the next. -->
-    <div id="sync-status" class="status" style="display:none">
-      <span id="sync-batt"></span>
-      <span id="sync-cond"></span>
-    </div>
   </header>
 
   <!-- Modal: Load Tesla data export -->

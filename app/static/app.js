@@ -1083,7 +1083,8 @@ function renderCharts(d) {
         layout: { padding: { top: 8 } },
         plugins: {
           legend: { display: true, position: "bottom",
-            labels: { usePointStyle: true, boxWidth: 8, boxHeight: 8, padding: 16 } },
+            labels: { usePointStyle: true, boxWidth: 8, boxHeight: 8, padding: 10,
+              font: { size: 10.5 } } },
           tooltip: { callbacks: { label: (c) =>
             c.dataset.yAxisID === "y1"
               ? ` ${fmt(c.parsed.y, 0)} Wh/km`
@@ -1150,7 +1151,8 @@ function renderCharts(d) {
         layout: { padding: { top: 8 } },
         plugins: {
           legend: { display: true, position: "bottom",
-            labels: { usePointStyle: true, boxWidth: 8, boxHeight: 8, padding: 16 } },
+            labels: { usePointStyle: true, boxWidth: 8, boxHeight: 8, padding: 10,
+              font: { size: 10.5 } } },
           tooltip: { callbacks: { label: (c) =>
             c.dataset.yAxisID === "y1"
               ? ` ${fmt(c.parsed.y, 0)} Wh/km`
@@ -1212,7 +1214,8 @@ function renderCharts(d) {
         layout: { padding: { top: 14 } },
         plugins: {
           legend: { display: true, position: "bottom",
-            labels: { usePointStyle: true, boxWidth: 8, boxHeight: 8, padding: 16 } },
+            labels: { usePointStyle: true, boxWidth: 8, boxHeight: 8, padding: 10,
+              font: { size: 10.5 } } },
           // Tiny trip-count label above each bar — 24 of them is dense, so
           // a small size and skipping empty hours (see barLabelsPlugin)
           // keeps it readable instead of a wall of "0"s.

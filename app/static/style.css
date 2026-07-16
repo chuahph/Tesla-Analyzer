@@ -566,9 +566,10 @@ canvas { max-height: 260px; }
    legend plus a second (distance/trip-count) axis, which eats into the plot
    area more than a single-series chart — taller so their actual Y-axis row
    height (not just the outer box) still reads clearly instead of cramped.
-   Trimmed down from 226px now that straight (unrotated) x-axis labels no
-   longer need the extra room a diagonal date/hour label used to cost. */
-#tripsHourChart, #effTrendChart, #effDailyTrendChart { max-height: 200px; }
+   Trimmed down twice already (from 226px, then 200px) as straight x-axis
+   labels and a smaller/tighter legend both freed up room that no longer
+   needed spending on height. */
+#tripsHourChart, #effTrendChart, #effDailyTrendChart { max-height: 180px; }
 
 .narrative-body { margin: 0; font-size: 14.5px; line-height: 1.7; color: var(--text); }
 
@@ -931,7 +932,7 @@ footer { padding: 18px 28px; color: var(--muted); font-size: 12px; border-top: 1
   .card { padding: 14px 14px; }
   canvas { max-height: 210px; }
   #speedBandChart, #effTempChart, #socTargetChart { max-height: 140px; }
-  #tripsHourChart, #effTrendChart, #effDailyTrendChart { max-height: 165px; }
+  #tripsHourChart, #effTrendChart, #effDailyTrendChart { max-height: 148px; }
   .modal-card { padding: 22px 18px; }
   .rec { flex-direction: column; gap: 8px; }
 }
