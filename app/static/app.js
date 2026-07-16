@@ -2236,6 +2236,19 @@ function syncQuickNavOffset() {
   nav.style.top = `${Math.round(header.getBoundingClientRect().height)}px`;
 }
 window.addEventListener("resize", syncQuickNavOffset);
+// A ResizeObserver on the header itself catches every real cause its height
+// can change after the explicit calls above already ran — the subtitle
+// wrapping differently once the VIN text loads in, the sync-status row
+// showing/hiding, a device rotation changing the safe-area inset — without
+// having to remember to call syncQuickNavOffset() at each one by hand. This
+// is what actually fixes the sticky bar visibly overlapping the header for
+// a moment when one of those happens after the last explicit call: reading
+// the header live on render/resize alone still leaves a stale offset until
+// the *next* one of those specific moments.
+if (window.ResizeObserver) {
+  const headerEl = document.querySelector("header");
+  if (headerEl) new ResizeObserver(syncQuickNavOffset).observe(headerEl);
+}
 
 /* ------------------------------------------------------------------ */
 /* Data-source buttons: import file + link account                     */
