@@ -1099,7 +1099,7 @@ function renderCharts(d) {
         },
         scales: {
           x: { grid: { display: false }, border: { display: false },
-            ticks: { maxTicksLimit: 8, font: { size: 9.5 } } },
+            ticks: { maxTicksLimit: 8, font: { size: 8 } } },
           // Extra headroom on the distance axis (see barAxisHeadroom) keeps
           // its bars in the chart's lower half so they never cross the
           // Wh/km line, which — beginAtZero on its own axis — naturally
@@ -1122,13 +1122,12 @@ function renderCharts(d) {
     // smoothed away by a whole week's average.
     const dd = eff.daily_efficiency;
     const ddist = eff.daily_distance_km || {};
-    // "2026-04-17" -> "17 Apr '26" — same short day-first form recent trips/
-    // charges already use elsewhere, plus a 2-digit year (matters once a
-    // window spans a year boundary — a plain "17 Apr" alone can't tell two
-    // Aprils a year apart apart).
+    // "2026-04-17" -> "17/04/26" — compact numeric day/month/year, short
+    // enough for a dense axis while still telling two same-day-and-month
+    // entries a year apart apart.
     const dLabels = Object.keys(dd).map((k) => {
       const [y, m, day] = k.split("-");
-      return `${+day} ${TRIP_MONTHS[+m - 1]} '${y.slice(2)}`;
+      return `${day}/${m}/${y.slice(2)}`;
     });
     const dDistAxisMax = barAxisHeadroom(Math.max(0, ...Object.values(ddist)), EFF_Y_TICKS, 1.7);
     makeChart("effDailyTrendChart", {
@@ -1161,7 +1160,7 @@ function renderCharts(d) {
         },
         scales: {
           x: { grid: { display: false }, border: { display: false },
-            ticks: { maxTicksLimit: 8, font: { size: 9.5 } } },
+            ticks: { maxTicksLimit: 8, font: { size: 8 } } },
           y: { beginAtZero: true, border: { display: false }, grid: { color: GRID },
             max: dDistAxisMax, ticks: { count: EFF_Y_TICKS, autoSkip: false, color: "#22c55e" } },
           // Same fixed tick count (and autoSkip off) as the weekly chart
