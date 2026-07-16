@@ -1132,11 +1132,13 @@ function renderCharts(d) {
           // precision: 0 on the trip-count axis only — a fixed 6-tick split
           // of a small integer range would otherwise land on fractional
           // values (e.g. 4.6 trips), which reads as wrong for a whole-number
-          // count. Wh/km on y1 keeps normal decimal ticks.
+          // count. Wh/km on y1 keeps normal decimal ticks. Each axis's tick
+          // colour matches its own series (amber for Trips, red for Wh/km)
+          // so it's obvious at a glance which scale a number belongs to.
           y: { beginAtZero: true, border: { display: false }, grid: { color: GRID },
-            ticks: { count: EFF_Y_TICKS, autoSkip: false, precision: 0 } },
+            ticks: { count: EFF_Y_TICKS, autoSkip: false, precision: 0, color: "#f59e0b" } },
           y1: { beginAtZero: true, position: "right", border: { display: false },
-            grid: { display: false }, ticks: { count: EFF_Y_TICKS, autoSkip: false } },
+            grid: { display: false }, ticks: { count: EFF_Y_TICKS, autoSkip: false, color: "#ff9a9e" } },
         },
       },
     });
