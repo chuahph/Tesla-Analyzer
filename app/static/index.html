@@ -85,6 +85,21 @@
       </select>
       <span id="mode-badge" class="badge">…</span>
     </div>
+    <!-- Jump-to-section shortcuts, right in the header next to Sync so
+         they scroll along with it instead of needing their own separate
+         sticky positioning — every button the same size (see .qn-btn)
+         regardless of label length, so the row reads as one tidy strip.
+         Each button is hidden by app.js (renderQuickNav) when its target
+         card isn't currently shown. -->
+    <nav id="quick-nav" class="quick-nav" aria-label="Jump to section">
+      <button class="qn-btn" data-target="battery-card"><span class="qn-ico">🔋</span><span class="qn-label">Battery</span></button>
+      <button class="qn-btn" data-target="trips-card"><span class="qn-ico">🧭</span><span class="qn-label">Trips</span></button>
+      <button class="qn-btn" data-target="charges-card"><span class="qn-ico">📍</span><span class="qn-label">Charges</span></button>
+      <button class="qn-btn" data-target="efficiency-card"><span class="qn-ico">🌡️</span><span class="qn-label">Efficiency</span></button>
+      <button class="qn-btn" data-target="charging-card"><span class="qn-ico">⚡</span><span class="qn-label">Charging</span></button>
+      <button class="qn-btn" data-target="recommendations-card"><span class="qn-ico">💡</span><span class="qn-label">Tips</span></button>
+      <button class="qn-btn" data-scroll-top><span class="qn-ico">⬆️</span><span class="qn-label">Top</span></button>
+    </nav>
     <!-- Car status: battery on one line, condition/remark on the next. -->
     <div id="sync-status" class="status" style="display:none">
       <span id="sync-batt"></span>
@@ -422,19 +437,6 @@
   </div>
 
   <main id="dashboard">
-    <!-- Jump-to-section shortcuts — every button the same size (see .qn-btn)
-         regardless of label length, so the row reads as one tidy strip.
-         Each button is hidden by app.js (renderQuickNav) when its target
-         card isn't currently shown. -->
-    <nav id="quick-nav" class="quick-nav" aria-label="Jump to section">
-      <button class="qn-btn" data-target="battery-card"><span class="qn-ico">🔋</span><span class="qn-label">Battery</span></button>
-      <button class="qn-btn" data-target="trips-card"><span class="qn-ico">🧭</span><span class="qn-label">Trips</span></button>
-      <button class="qn-btn" data-target="charges-card"><span class="qn-ico">📍</span><span class="qn-label">Charges</span></button>
-      <button class="qn-btn" data-target="efficiency-card"><span class="qn-ico">🌡️</span><span class="qn-label">Efficiency</span></button>
-      <button class="qn-btn" data-target="charging-card"><span class="qn-ico">⚡</span><span class="qn-label">Charging</span></button>
-      <button class="qn-btn" data-target="recommendations-card"><span class="qn-ico">💡</span><span class="qn-label">Tips</span></button>
-      <button class="qn-btn" data-scroll-top><span class="qn-ico">⬆️</span><span class="qn-label">Top</span></button>
-    </nav>
     <!-- Driving score for the whole window (above the KPI boxes), filled by app.js. -->
     <section id="score-banner" class="score-banner" style="display:none"></section>
     <hr id="sep-score" class="sep" style="display:none" />

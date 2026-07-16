@@ -277,7 +277,6 @@ function showHome() {
 function showCar() {
   document.body.classList.remove("view-home");
   window.scrollTo(0, 0);
-  syncQuickNavOffset();
 }
 
 // Enter a car's dashboard. On the backend, set it as the active car first so the
@@ -1098,8 +1097,12 @@ function renderCharts(d) {
           allPointLabels: { datasetIndex: 1, size: 9, color: "#ff9a9e", fmt: (v) => fmt(v, 0) },
         },
         scales: {
+          // Straight (no rotation) — short enough at maxTicksLimit:8 spread
+          // across the plot width to never need the angled fallback, so
+          // forcing it off keeps the axis row a single flat line instead of
+          // a diagonal one, freeing up the vertical room that used to cost.
           x: { grid: { display: false }, border: { display: false },
-            ticks: { maxTicksLimit: 8, font: { size: 8 } } },
+            ticks: { maxTicksLimit: 8, font: { size: 8 }, maxRotation: 0, minRotation: 0 } },
           // Extra headroom on the distance axis (see barAxisHeadroom) keeps
           // its bars in the chart's lower half so they never cross the
           // Wh/km line, which — beginAtZero on its own axis — naturally
@@ -1159,8 +1162,12 @@ function renderCharts(d) {
           allPointLabels: { datasetIndex: 1, size: 9, color: "#ff9a9e", fmt: (v) => fmt(v, 0) },
         },
         scales: {
+          // Straight (no rotation) — short enough at maxTicksLimit:8 spread
+          // across the plot width to never need the angled fallback, so
+          // forcing it off keeps the axis row a single flat line instead of
+          // a diagonal one, freeing up the vertical room that used to cost.
           x: { grid: { display: false }, border: { display: false },
-            ticks: { maxTicksLimit: 8, font: { size: 8 } } },
+            ticks: { maxTicksLimit: 8, font: { size: 8 }, maxRotation: 0, minRotation: 0 } },
           y: { beginAtZero: true, border: { display: false }, grid: { color: GRID },
             max: dDistAxisMax, ticks: { count: EFF_Y_TICKS, autoSkip: false, color: "#22c55e" } },
           // Same fixed tick count (and autoSkip off) as the weekly chart
@@ -1223,7 +1230,12 @@ function renderCharts(d) {
               : ` ${fmt(c.parsed.y, 0)} trips` } },
         },
         scales: {
-          x: { grid: { display: false }, border: { display: false } },
+          // Straight (no rotation) — "0h".."23h" is short enough to never
+          // need the angled fallback, so forcing it off keeps the axis row
+          // flat instead of diagonal, freeing up the vertical room that
+          // used to cost.
+          x: { grid: { display: false }, border: { display: false },
+            ticks: { maxRotation: 0, minRotation: 0 } },
           // Same fixed tick count as the weekly/daily efficiency trend
           // charts (see EFF_Y_TICKS) so this chart's gridline row gap
           // matches theirs instead of auto-picking its own step from the
@@ -2219,34 +2231,6 @@ function renderQuickNav() {
     const target = document.getElementById(btn.dataset.target);
     btn.classList.toggle("hidden", !target || target.offsetParent === null);
   });
-  syncQuickNavOffset();
-}
-
-// Keeps the sticky quick-nav pinned right below the header, whatever the
-// header's own height happens to be right now — read live rather than
-// hard-coded, since it differs between desktop and mobile layouts and grows
-// further on a notched phone (env(safe-area-inset-top)) or whenever the
-// subtitle/sync-status rows show or hide. Re-run on resize/orientation
-// change and every render (see renderQuickNav) so it never drifts stale.
-function syncQuickNavOffset() {
-  const nav = document.getElementById("quick-nav");
-  const header = document.querySelector("header");
-  if (!nav || !header || header.style.display === "none") return;
-  nav.style.top = `${Math.round(header.getBoundingClientRect().height)}px`;
-}
-window.addEventListener("resize", syncQuickNavOffset);
-// A ResizeObserver on the header itself catches every real cause its height
-// can change after the explicit calls above already ran — the subtitle
-// wrapping differently once the VIN text loads in, the sync-status row
-// showing/hiding, a device rotation changing the safe-area inset — without
-// having to remember to call syncQuickNavOffset() at each one by hand. This
-// is what actually fixes the sticky bar visibly overlapping the header for
-// a moment when one of those happens after the last explicit call: reading
-// the header live on render/resize alone still leaves a stale offset until
-// the *next* one of those specific moments.
-if (window.ResizeObserver) {
-  const headerEl = document.querySelector("header");
-  if (headerEl) new ResizeObserver(syncQuickNavOffset).observe(headerEl);
 }
 
 /* ------------------------------------------------------------------ */

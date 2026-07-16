@@ -387,30 +387,23 @@ body.view-home > footer { display: none; }
 
 main { padding: 24px 28px 60px; max-width: 1280px; margin: 0 auto; }
 
-/* Jump-to-section shortcut bar, top of the dashboard. Flex with nowrap —
-   unlike a grid's auto-fit, this guarantees one row on any screen width:
-   every button gets an equal share (flex: 1 1 0) and shrinks together as
-   the row narrows, rather than wrapping to a second row.
-   Sticky, right below the header, so it's reachable while scrolled deep
-   into the dashboard — `top` is set inline by app.js (syncQuickNavOffset)
-   to the header's own *current* rendered height, since that varies by
-   breakpoint and by a notched phone's safe-area inset; the value here is
-   only the fallback before that first runs. */
+/* Jump-to-section shortcut bar, inside the header right below Sync/Window
+   (see index.html) — riding along with the header's own sticky position
+   instead of needing separate stickiness logic (a stale offset there kept
+   causing it to visibly overlap the header whenever the header's height
+   changed for a reason nothing had re-synced it against, e.g. the
+   sync-status row showing/hiding from a background poll). width:100% forces
+   it onto its own row in the header's wrapping flex layout, the same way
+   #sync-status already does below it. Flex with nowrap — unlike a grid's
+   auto-fit, this guarantees one row on any screen width: every button gets
+   an equal share (flex: 1 1 0) and shrinks together as the row narrows,
+   rather than wrapping to a second row. */
 .quick-nav {
+  width: 100%;
   display: flex;
   flex-wrap: nowrap;
   gap: 6px;
-  margin-bottom: 16px;
-  position: sticky;
-  top: 92px;
-  z-index: 9;
-  /* Fully opaque — a solid backdrop behind the whole row, not just each
-     button, so scrolled-past card content never shows through the gaps
-     between buttons while it's pinned. A translucent/blurred backdrop (like
-     the header's) would still let card text bleed through here since it's
-     sitting over actively-scrolling content rather than the page's own
-     empty top margin. */
-  background: #14181f;
+  margin: 0;
 }
 .quick-nav.hidden { display: none; }
 .qn-btn {
@@ -572,8 +565,10 @@ canvas { max-height: 260px; }
 /* Trips by Hour and the two efficiency trend charts all carry a bottom
    legend plus a second (distance/trip-count) axis, which eats into the plot
    area more than a single-series chart — taller so their actual Y-axis row
-   height (not just the outer box) still reads clearly instead of cramped. */
-#tripsHourChart, #effTrendChart, #effDailyTrendChart { max-height: 226px; }
+   height (not just the outer box) still reads clearly instead of cramped.
+   Trimmed down from 226px now that straight (unrotated) x-axis labels no
+   longer need the extra room a diagonal date/hour label used to cost. */
+#tripsHourChart, #effTrendChart, #effDailyTrendChart { max-height: 200px; }
 
 .narrative-body { margin: 0; font-size: 14.5px; line-height: 1.7; color: var(--text); }
 
@@ -924,7 +919,7 @@ footer { padding: 18px 28px; color: var(--muted); font-size: 12px; border-top: 1
   .bottom-actions #btn-import, .bottom-actions #btn-link { flex: 1 1 42%; }
   .bottom-actions #btn-export, .bottom-actions #btn-guide { flex: 1 1 42%; }
   main { padding: 12px 12px 40px; }
-  .quick-nav { gap: 4px; margin-bottom: 12px; }
+  .quick-nav { gap: 4px; }
   .qn-btn { min-height: 44px; padding: 5px 1px; gap: 1px; }
   .qn-btn .qn-ico { font-size: 13px; }
   .qn-btn .qn-label { font-size: 8px; }
@@ -936,7 +931,7 @@ footer { padding: 18px 28px; color: var(--muted); font-size: 12px; border-top: 1
   .card { padding: 14px 14px; }
   canvas { max-height: 210px; }
   #speedBandChart, #effTempChart, #socTargetChart { max-height: 140px; }
-  #tripsHourChart, #effTrendChart, #effDailyTrendChart { max-height: 192px; }
+  #tripsHourChart, #effTrendChart, #effDailyTrendChart { max-height: 165px; }
   .modal-card { padding: 22px 18px; }
   .rec { flex-direction: column; gap: 8px; }
 }
