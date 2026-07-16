@@ -193,6 +193,59 @@ def test_two_drives_split_across_an_unseen_nap():
     assert d[0]["distance_km"] == 8.0            # 10005 -> 10013
 
 
+def test_short_gap_departure_keeps_pre_poll_stretch():
+    """Reported live (checked against the car's own trip meter): a 4.1 km
+    drive logged as 3.6 km, its kWh short by the same first stretch.
+
+    The last parked reading was only a short poll gap old when the first
+    *driving* reading caught the car already 0.4 km out at a low implied
+    speed (still pulling out of the neighbourhood) — was_parked rightly
+    starts the trip's clock at cur, but anchoring odometer/SoC/range there
+    too discards that pull-out. A parked car cannot move, so the odometer
+    gain between prev and cur is this trip's own first stretch and must be
+    kept: baseline from prev, clock from cur.
+    """
+    s1 = snap(T0, 28_163.0, 52, range_km=234.0)                # parked
+    # 2-min gap: first driving poll lands 0.4 km out (implied 12 km/h < 15).
+    s2 = snap(T0 + 120, 28_163.4, 52, shift="D", speed=45, range_km=233.5)
+    s3 = snap(T0 + 300, 28_165.5, 51, shift="D", speed=50, range_km=231.5)
+    s4 = snap(T0 + 420, 28_167.1, 51, locked=True, range_km=230.9)
+
+    _, _, trip, _ = step(s1, s2)
+    assert trip is not None
+    assert trip["odo_km"] == 28_163.0            # baseline at the parked reading
+    assert trip["soc"] == 52
+    assert trip["range_km"] == 234.0             # energy baseline moves with it
+
+    _, _, trip, _ = step(s2, s3, trip)
+    d, _, trip, _ = step(s3, s4, trip)
+    (drive,) = d
+    assert drive["distance_km"] == 4.1           # full 28163.0 -> 28167.1 span
+    # Energy from the parked baseline's range delta, not the mid-departure one.
+    full = 100.0 * (234.0 + 230.9) / (52 + 51)
+    assert abs(drive["energy_used_kwh"] - (234.0 - 230.9) / full * 60.0) < 0.01
+
+
+def test_parked_reanchor_carries_range_km_for_energy():
+    """The ≥5-min-gap start correction restored odo and SoC from the parked
+    prev but forgot range_km — and _energy_kwh derives energy from the range
+    delta *first*, so the trip's energy stayed anchored at the first driving
+    reading (and mixed prev's SoC with cur's range when projecting the full
+    pack). The whole baseline must move together."""
+    s1 = snap(T0, 10_000.0, 60, range_km=270.0)                # parked
+    # 6-min gap, 1.2 km out (implied 12 km/h): the est-start correction runs.
+    s2 = snap(T0 + 360, 10_001.2, 60, shift="D", speed=45, range_km=268.9)
+
+    _, _, trip, _ = step(s1, s2)
+    assert trip is not None
+    assert trip["odo_km"] == 10_000.0
+    assert trip["soc"] == 60
+    assert trip["range_km"] == 270.0             # was left at 268.9 before
+    # Clock back-estimated from the 1.2 km at the city-pace floor (144 s),
+    # not left at the first driving reading.
+    assert trip["ts"] == s2["ts"] - 1.2 / 30.0 * 3600.0
+
+
 def test_trailing_park_excluded_even_with_driver_aboard():
     """A ~11 min drive then a long sit with the driver still aboard (A/C on) must
     log an ~11 min trip — not 30+ — with the parked idle time/energy excluded."""

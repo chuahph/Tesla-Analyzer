@@ -923,6 +923,24 @@ def process_snapshot(
             gap_min = (cur["ts"] - prev["ts"]) / 60.0
             moved = cur["odo_km"] - prev["odo_km"]
             implied = moved / (gap_min / 60.0) if gap_min > 0 else 0.0
+            # A confirmed-parked prev from only a short gap ago is this
+            # trip's true odometer/energy baseline even when the timestamp
+            # correction below is too weakly evidenced to run (sub-60s
+            # shift): a parked car cannot move, so whatever the odometer
+            # gained in the gap is the trip's own first stretch — leaving
+            # the anchor at cur silently drops it (reported live, checked
+            # against the car's own trip meter: a 4.1 km drive logged as
+            # 3.6 km, its kWh short by the same stretch — every short trip
+            # whose first driving poll lands mid-departure loses up to a
+            # poll gap's worth of low-speed pull-out this way). Bounded to
+            # STALE_ANCHOR_MIN so a long blind gap (an unobserved errand,
+            # then parked again) can't fold a *different* drive's distance
+            # or hours of standby drain into this one.
+            if (was_parked and not is_driving(prev) and moved >= drive_min_km
+                    and gap_min <= STALE_ANCHOR_MIN):
+                open_trip["odo_km"] = prev["odo_km"]
+                open_trip["soc"] = prev["soc"]
+                open_trip["range_km"] = prev.get("range_km")
             # Same evidence-gated threshold as the arrival-side correction:
             # only when the gap's own average implied speed reads below a
             # normal driving pace (CITY_SPEED_KMH) — at or above it, the
@@ -934,8 +952,14 @@ def process_snapshot(
             # require the longer PARK_END_MIN gap before assuming a floor
             # pace covered it (a normal, close-to-real-time power-on
             # shouldn't get backdated on a hunch). Below 60s of estimated
-            # correction isn't worth the imprecision either way.
+            # correction isn't worth the imprecision either way. When
+            # was_parked already anchored the start at cur, no gap floor at
+            # all: any odometer movement proves the trip began before cur,
+            # so a ≥60s back-estimate can only move the start closer to the
+            # truth, never inflate it.
             min_gap = IDLE_STREAK_MIN if (cur.get("speed_kmh") or 0.0) > 0 else PARK_END_MIN
+            if was_parked:
+                min_gap = 0.0
             if gap_min >= min_gap and implied < CITY_SPEED_KMH and moved >= drive_min_km:
                 # Same pace model as the arrival-side estimate: ``cur`` is the
                 # first driving reading, so its instantaneous speed is real
@@ -961,8 +985,14 @@ def process_snapshot(
                         # baseline for wherever within [prev, est_start]
                         # departure actually began — same anchor the
                         # was_parked=False branch already uses by default.
+                        # range_km must move with soc: _energy_kwh derives
+                        # energy from the range delta *first*, so restoring
+                        # soc alone left the energy uncorrected — and worse,
+                        # handed it a mismatched pair (prev's soc against
+                        # cur's range) to project the full pack from.
                         open_trip["odo_km"] = prev["odo_km"]
                         open_trip["soc"] = prev["soc"]
+                        open_trip["range_km"] = prev.get("range_km")
     elif prev and split_drive:
         # A charge and a drive both happened in this gap — see
         # _split_gap_events for why the plain whole-gap drive reconstruction
