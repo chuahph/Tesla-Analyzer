@@ -55,9 +55,9 @@ function vGradient(chart, hex, topA, botA) {
 
 // Inline plugin: draw each bar's own value just above it, so exact figures are
 // legible at a glance (bars that differ by a few percent otherwise look
-// identical). Opt-in per chart via options.plugins.barLabels = { fmt } — dense
-// charts (24-hour trips) leave it off, low-count ones (speed band, temperature)
-// switch it on.
+// identical). Opt-in per chart via options.plugins.barLabels = { fmt, size } —
+// size (default 11) lets a dense chart (24-hour trips) use a tinier label than
+// a low-count one (speed band, temperature).
 const barLabelsPlugin = {
   id: "barLabels",
   afterDatasetsDraw(chart, _args, opts) {
@@ -67,14 +67,14 @@ const barLabelsPlugin = {
     if (!meta || meta.hidden) return;
     const { ctx } = chart;
     ctx.save();
-    ctx.font = "700 11px " + Chart.defaults.font.family;
+    ctx.font = `700 ${opts.size || 11}px ` + Chart.defaults.font.family;
     ctx.fillStyle = opts.color || "#c9d1dc";
     ctx.textAlign = "center";
     ctx.textBaseline = "bottom";
     meta.data.forEach((el, i) => {
       const v = chart.data.datasets[ds].data[i];
-      if (v == null) return;
-      ctx.fillText(opts.fmt(v), el.x, el.y - 5);
+      if (!v) return;   // skip 0/null — an empty hour needn't say "0"
+      ctx.fillText(opts.fmt(v), el.x, el.y - 4);
     });
     ctx.restore();
   },
@@ -104,36 +104,40 @@ const centerTextPlugin = {
     ctx.restore();
   },
 };
-// Inline plugin: a small value label beside a line dataset's *last* point —
-// the current/most-recent reading is legible on the chart itself, not just
-// on hover. Opt-in via options.plugins.lastPointLabel = { fmt, color }.
-const lastPointLabelPlugin = {
-  id: "lastPointLabel",
+// Inline plugin: a small value label above every point on a line dataset —
+// skips a label that would overlap the one drawn just before it (by
+// horizontal reach vs text width), so a sparse chart (a handful of weeks)
+// gets every point labelled as intended while a dense one (90 daily points)
+// thins itself out automatically instead of turning into an unreadable
+// smear. Opt-in via options.plugins.allPointLabels = { fmt, color }.
+const allPointLabelsPlugin = {
+  id: "allPointLabels",
   afterDatasetsDraw(chart, _args, opts) {
     if (!opts || typeof opts.fmt !== "function") return;
     const ds = opts.datasetIndex || 0;
     const meta = chart.getDatasetMeta(ds);
-    if (!meta || meta.hidden || !meta.data.length) return;
-    const i = meta.data.length - 1;
-    const v = chart.data.datasets[ds].data[i];
-    if (v == null) return;
-    const el = meta.data[i];
+    if (!meta || meta.hidden) return;
     const { ctx, chartArea } = chart;
     ctx.save();
-    ctx.font = "700 11px " + Chart.defaults.font.family;
-    ctx.fillStyle = opts.color || "#e6e9ef";
-    const text = opts.fmt(v);
-    // Flip to the left of the point when the label wouldn't fit to the
-    // right within the plot area — the last point sits at (or very near)
-    // the chart's own right edge by definition, so this is the common case.
-    const rightFits = el.x + 8 + ctx.measureText(text).width <= chartArea.right;
-    ctx.textAlign = rightFits ? "left" : "right";
-    ctx.textBaseline = "middle";
-    ctx.fillText(text, el.x + (rightFits ? 8 : -8), el.y);
+    ctx.font = "700 10px " + Chart.defaults.font.family;
+    ctx.fillStyle = opts.color || "#c9d1dc";
+    ctx.textAlign = "center";
+    ctx.textBaseline = "bottom";
+    let claimedRight = -Infinity;
+    meta.data.forEach((el, i) => {
+      const v = chart.data.datasets[ds].data[i];
+      if (v == null) return;
+      const text = opts.fmt(v);
+      const halfW = ctx.measureText(text).width / 2;
+      if (el.x - halfW < claimedRight) return;   // would collide -- skip
+      const y = Math.max(el.y - 6, chartArea.top + 10);
+      ctx.fillText(text, el.x, y);
+      claimedRight = el.x + halfW + 3;   // small gap before the next label
+    });
     ctx.restore();
   },
 };
-Chart.register(barLabelsPlugin, centerTextPlugin, lastPointLabelPlugin);
+Chart.register(barLabelsPlugin, centerTextPlugin, allPointLabelsPlugin);
 
 function kpiCard(label, value, sub, tone) {
   return `<div class="kpi${tone ? " tone-" + tone : ""}"><div class="label">${label}</div>
@@ -1018,13 +1022,14 @@ function renderCharts(d) {
         pointHitRadius: 12, pointHoverRadius: 5,
         pointBackgroundColor: "#e82127", pointBorderColor: "#171b22", pointBorderWidth: 2 }] },
       options: { responsive: true, maintainAspectRatio: false,
-        // Headroom for the last-point label (below) so it isn't clipped
-        // against the card edge when the latest week is also the peak.
+        // Headroom for the point labels (below) so one near the top of a
+        // peak isn't clipped against the card edge.
         layout: { padding: { top: 16 } },
         plugins: { legend: { display: false },
           tooltip: { callbacks: { label: (c) => ` ${fmt(c.parsed.y, 0)} Wh/km` } },
-          // Small value label right at the current week's own point.
-          lastPointLabel: { fmt: (v) => fmt(v, 0) } },
+          // Every week's own value labelled right on its point (thins out
+          // automatically if the row ever gets too dense to fit them all).
+          allPointLabels: { fmt: (v) => fmt(v, 0) } },
         scales: {
           x: { grid: { display: false }, border: { display: false }, ticks: { maxTicksLimit: 8 } },
           // A fixed tick count (not just a ceiling), with autoSkip off so a
@@ -1052,7 +1057,10 @@ function renderCharts(d) {
         layout: { padding: { top: 16 } },
         plugins: { legend: { display: false },
           tooltip: { callbacks: { label: (c) => ` ${fmt(c.parsed.y, 0)} Wh/km` } },
-          lastPointLabel: { fmt: (v) => fmt(v, 0) } },
+          // Same as the weekly chart above — every day's value labelled on
+          // its own point, thinning out automatically once ~90 daily points
+          // no longer have room for all of them.
+          allPointLabels: { fmt: (v) => fmt(v, 0) } },
         scales: {
           x: { grid: { display: false }, border: { display: false }, ticks: { maxTicksLimit: 8 } },
           // Same fixed tick count (and autoSkip off) as the weekly chart
@@ -1091,9 +1099,15 @@ function renderCharts(d) {
       },
       options: {
         responsive: true, maintainAspectRatio: false,
+        // Headroom so a tall hour's tiny trip-count label isn't clipped.
+        layout: { padding: { top: 14 } },
         plugins: {
           legend: { display: true, position: "bottom",
             labels: { usePointStyle: true, boxWidth: 8, boxHeight: 8, padding: 16 } },
+          // Tiny trip-count label above each bar — 24 of them is dense, so
+          // a small size and skipping empty hours (see barLabelsPlugin)
+          // keeps it readable instead of a wall of "0"s.
+          barLabels: { datasetIndex: 0, size: 9, fmt: (v) => fmt(v, 0) },
           tooltip: { callbacks: { label: (c) =>
             c.dataset.yAxisID === "y1"
               ? (c.parsed.y == null ? " No energy data" : ` ${fmt(c.parsed.y, 0)} Wh/km`)
