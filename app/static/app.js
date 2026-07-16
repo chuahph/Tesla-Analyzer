@@ -2187,16 +2187,24 @@ document.getElementById("show-more-kpis")?.addEventListener("click", () => {
   if (lastData) renderKpis(lastData);
 });
 
-// Quick-nav shortcut bar: jump to a card by id. Offsets by the header's own
-// *current* rendered height (read live, not a fixed CSS guess) plus a small
-// gap — a static scroll-margin-top would need one value for desktop and
-// another for mobile, and still undershoot on a notched iPhone where
-// env(safe-area-inset-top) makes the real header taller than either guess.
-// Reading it live gets this right in every case without tracking it by hand.
-// Delegated on the container since the buttons never change.
+// Quick-nav shortcut bar: jump to a card by id, or scroll to the very top
+// for the "Top" button — worth having again now the bar stays pinned on
+// screen while scrolled deep into a long dashboard. Offsets card jumps by
+// the header's own *current* rendered height (read live, not a fixed CSS
+// guess) plus a small gap — a static scroll-margin-top would need one value
+// for desktop and another for mobile, and still undershoot on a notched
+// iPhone where env(safe-area-inset-top) makes the real header taller than
+// either guess. Reading it live gets this right in every case without
+// tracking it by hand. Delegated on the container since the buttons never
+// change.
 document.getElementById("quick-nav")?.addEventListener("click", (e) => {
   const btn = e.target.closest(".qn-btn");
-  const target = btn && document.getElementById(btn.dataset.target);
+  if (!btn) return;
+  if (btn.hasAttribute("data-scroll-top")) {
+    window.scrollTo({ top: 0, behavior: "smooth" });
+    return;
+  }
+  const target = document.getElementById(btn.dataset.target);
   if (!target) return;
   const headerH = document.querySelector("header")?.getBoundingClientRect().height || 0;
   const top = target.getBoundingClientRect().top + window.scrollY - headerH - 14;
