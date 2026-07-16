@@ -13,12 +13,16 @@ const EFF_Y_TICKS = 6;
 // naturally-high-riding right-axis line (trip counts vs Wh/km, distance vs
 // Wh/km): a line whose real-world values never approach 0 always rides near
 // the top of its own zero-based axis, so a tall bar on a tight axis crosses
-// right through it. Give the bar axis extra headroom — 2.2x the tallest bar,
-// rounded up to a whole-number tick step — so bars settle into the chart's
-// lower half and leave the top clear for the line.
-function barAxisHeadroom(maxVal, ticks = EFF_Y_TICKS) {
+// right through it. Give the bar axis extra headroom — by default 2.2x the
+// tallest bar, rounded up to a whole-number tick step — so bars settle into
+// the chart's lower half and leave the top clear for the line. A lower
+// multiplier trades away some of that safety margin for less empty space in
+// the middle of the chart — still enough clearance once other spacing (a
+// taller box, a lighter tick font) has already reduced how tight the two
+// series ride, but tuned per chart rather than raised globally.
+function barAxisHeadroom(maxVal, ticks = EFF_Y_TICKS, multiplier = 2.2) {
   if (!(maxVal > 0)) return undefined;
-  const step = Math.ceil((maxVal * 2.2) / (ticks - 1));
+  const step = Math.ceil((maxVal * multiplier) / (ticks - 1));
   return step * (ticks - 1) || undefined;
 }
 
@@ -273,6 +277,7 @@ function showHome() {
 function showCar() {
   document.body.classList.remove("view-home");
   window.scrollTo(0, 0);
+  syncQuickNavOffset();
 }
 
 // Enter a car's dashboard. On the backend, set it as the active car first so the
@@ -1054,9 +1059,12 @@ function renderCharts(d) {
 
     const w = eff.weekly_efficiency;
     const wd = eff.weekly_distance_km || {};
-    const wDistAxisMax = barAxisHeadroom(Math.max(0, ...Object.values(wd)));
+    // "2026-W16" -> "W16" — the year rarely earns its width on an axis label;
+    // it's still in the tooltip's underlying data if ever needed.
+    const wLabels = Object.keys(w).map((k) => k.replace(/^\d{4}-/, ""));
+    const wDistAxisMax = barAxisHeadroom(Math.max(0, ...Object.values(wd)), EFF_Y_TICKS, 1.7);
     makeChart("effTrendChart", {
-      data: { labels: Object.keys(w), datasets: [
+      data: { labels: wLabels, datasets: [
         { type: "bar", label: "Distance", data: Object.keys(w).map(k => wd[k] ?? 0),
           yAxisID: "y", backgroundColor: (c) => vGradient(c.chart, "#22c55e", 1, 0.35),
           hoverBackgroundColor: (c) => vGradient(c.chart, "#22c55e", 1, 0.6),
@@ -1070,9 +1078,10 @@ function renderCharts(d) {
           pointBackgroundColor: "#e82127", pointBorderColor: "#171b22", pointBorderWidth: 2 },
       ] },
       options: { responsive: true, maintainAspectRatio: false,
-        // Headroom for the point labels (below) so one near the top of a
-        // peak isn't clipped against the card edge.
-        layout: { padding: { top: 16 } },
+        // Slim headroom for the point labels (below) so one near the top of
+        // a peak isn't clipped against the card edge — most of the room
+        // those labels need already comes from the axis headroom below.
+        layout: { padding: { top: 8 } },
         plugins: {
           legend: { display: true, position: "bottom",
             labels: { usePointStyle: true, boxWidth: 8, boxHeight: 8, padding: 16 } },
@@ -1089,10 +1098,6 @@ function renderCharts(d) {
           allPointLabels: { datasetIndex: 1, size: 9, color: "#ff9a9e", fmt: (v) => fmt(v, 0) },
         },
         scales: {
-          // Smaller than the default tick font — a full "2026-W16" or
-          // "2026-04-17" date is a lot wider than the trip/hour labels other
-          // charts show here, so it needs to shrink to keep reading cleanly
-          // at an angle instead of crowding its neighbours.
           x: { grid: { display: false }, border: { display: false },
             ticks: { maxTicksLimit: 8, font: { size: 9.5 } } },
           // Extra headroom on the distance axis (see barAxisHeadroom) keeps
@@ -1117,9 +1122,16 @@ function renderCharts(d) {
     // smoothed away by a whole week's average.
     const dd = eff.daily_efficiency;
     const ddist = eff.daily_distance_km || {};
-    const dDistAxisMax = barAxisHeadroom(Math.max(0, ...Object.values(ddist)));
+    // "2026-04-17" -> "17 Apr" — same short day-first form recent trips/
+    // charges already use elsewhere, and the year is rarely worth an axis
+    // label's width within one window.
+    const dLabels = Object.keys(dd).map((k) => {
+      const [, m, day] = k.split("-");
+      return `${+day} ${TRIP_MONTHS[+m - 1]}`;
+    });
+    const dDistAxisMax = barAxisHeadroom(Math.max(0, ...Object.values(ddist)), EFF_Y_TICKS, 1.7);
     makeChart("effDailyTrendChart", {
-      data: { labels: Object.keys(dd), datasets: [
+      data: { labels: dLabels, datasets: [
         { type: "bar", label: "Distance", data: Object.keys(dd).map(k => ddist[k] ?? 0),
           yAxisID: "y", backgroundColor: (c) => vGradient(c.chart, "#22c55e", 1, 0.35),
           hoverBackgroundColor: (c) => vGradient(c.chart, "#22c55e", 1, 0.6),
@@ -1132,7 +1144,7 @@ function renderCharts(d) {
           pointBackgroundColor: "#e82127", pointBorderColor: "#171b22", pointBorderWidth: 2 },
       ] },
       options: { responsive: true, maintainAspectRatio: false,
-        layout: { padding: { top: 16 } },
+        layout: { padding: { top: 8 } },
         plugins: {
           legend: { display: true, position: "bottom",
             labels: { usePointStyle: true, boxWidth: 8, boxHeight: 8, padding: 16 } },
@@ -1147,10 +1159,6 @@ function renderCharts(d) {
           allPointLabels: { datasetIndex: 1, size: 9, color: "#ff9a9e", fmt: (v) => fmt(v, 0) },
         },
         scales: {
-          // Smaller than the default tick font — a full "2026-W16" or
-          // "2026-04-17" date is a lot wider than the trip/hour labels other
-          // charts show here, so it needs to shrink to keep reading cleanly
-          // at an angle instead of crowding its neighbours.
           x: { grid: { display: false }, border: { display: false },
             ticks: { maxTicksLimit: 8, font: { size: 9.5 } } },
           y: { beginAtZero: true, border: { display: false }, grid: { color: GRID },
@@ -2203,7 +2211,22 @@ function renderQuickNav() {
     const target = document.getElementById(btn.dataset.target);
     btn.classList.toggle("hidden", !target || target.offsetParent === null);
   });
+  syncQuickNavOffset();
 }
+
+// Keeps the sticky quick-nav pinned right below the header, whatever the
+// header's own height happens to be right now — read live rather than
+// hard-coded, since it differs between desktop and mobile layouts and grows
+// further on a notched phone (env(safe-area-inset-top)) or whenever the
+// subtitle/sync-status rows show or hide. Re-run on resize/orientation
+// change and every render (see renderQuickNav) so it never drifts stale.
+function syncQuickNavOffset() {
+  const nav = document.getElementById("quick-nav");
+  const header = document.querySelector("header");
+  if (!nav || !header || header.style.display === "none") return;
+  nav.style.top = `${Math.round(header.getBoundingClientRect().height)}px`;
+}
+window.addEventListener("resize", syncQuickNavOffset);
 
 /* ------------------------------------------------------------------ */
 /* Data-source buttons: import file + link account                     */

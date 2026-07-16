@@ -390,32 +390,47 @@ main { padding: 24px 28px 60px; max-width: 1280px; margin: 0 auto; }
 /* Jump-to-section shortcut bar, top of the dashboard. Flex with nowrap —
    unlike a grid's auto-fit, this guarantees one row on any screen width:
    every button gets an equal share (flex: 1 1 0) and shrinks together as
-   the row narrows, rather than wrapping to a second row. */
+   the row narrows, rather than wrapping to a second row.
+   Sticky, right below the header, so it's reachable while scrolled deep
+   into the dashboard — `top` is set inline by app.js (syncQuickNavOffset)
+   to the header's own *current* rendered height, since that varies by
+   breakpoint and by a notched phone's safe-area inset; the value here is
+   only the fallback before that first runs. */
 .quick-nav {
   display: flex;
   flex-wrap: nowrap;
   gap: 6px;
   margin-bottom: 16px;
+  position: sticky;
+  top: 92px;
+  z-index: 9;
+  /* Fully opaque — a solid backdrop behind the whole row, not just each
+     button, so scrolled-past card content never shows through the gaps
+     between buttons while it's pinned. A translucent/blurred backdrop (like
+     the header's) would still let card text bleed through here since it's
+     sitting over actively-scrolling content rather than the page's own
+     empty top margin. */
+  background: #14181f;
 }
 .quick-nav.hidden { display: none; }
 .qn-btn {
   display: flex; flex-direction: column; align-items: center; justify-content: center;
-  gap: 3px;
+  gap: 2px;
   flex: 1 1 0; min-width: 0;
   background: linear-gradient(180deg, #1c222c, var(--panel-2));
   border: 1px solid var(--border);
   border-radius: 10px;
-  padding: 9px 2px;
-  min-height: 52px;
+  padding: 6px 2px;
+  min-height: 44px;            /* touch target */
   color: var(--text);
   font: inherit;
   cursor: pointer;
   box-shadow: var(--elev-1);
   transition: transform .16s ease, border-color .16s ease, box-shadow .16s ease;
 }
-.qn-btn .qn-ico { font-size: 17px; line-height: 1; }
+.qn-btn .qn-ico { font-size: 15px; line-height: 1; }
 .qn-btn .qn-label {
-  font-size: 10px; font-weight: 600; color: var(--muted);
+  font-size: 9.5px; font-weight: 600; color: var(--muted);
   letter-spacing: .1px; white-space: nowrap;
   max-width: 100%; overflow: hidden; text-overflow: ellipsis;
 }
@@ -910,9 +925,9 @@ footer { padding: 18px 28px; color: var(--muted); font-size: 12px; border-top: 1
   .bottom-actions #btn-export, .bottom-actions #btn-guide { flex: 1 1 42%; }
   main { padding: 12px 12px 40px; }
   .quick-nav { gap: 4px; margin-bottom: 12px; }
-  .qn-btn { min-height: 46px; padding: 6px 1px; gap: 2px; }
-  .qn-btn .qn-ico { font-size: 14px; }
-  .qn-btn .qn-label { font-size: 8.5px; }
+  .qn-btn { min-height: 44px; padding: 5px 1px; gap: 1px; }
+  .qn-btn .qn-ico { font-size: 13px; }
+  .qn-btn .qn-label { font-size: 8px; }
   .card { scroll-margin-top: 122px; }
   .card-grid { grid-template-columns: 1fr; gap: 10px; margin-bottom: 12px; }
   .kpi-grid { grid-template-columns: repeat(2, 1fr); gap: 8px; margin-bottom: 12px; }
