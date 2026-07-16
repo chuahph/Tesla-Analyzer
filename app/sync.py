@@ -796,7 +796,24 @@ def process_snapshot(
             # trip *at that point* — so trailing idle (driver aboard, A/C on) is
             # never counted — once it's clearly over: powered down, charging, or
             # it has sat still past PARK_END_MIN.
-            if not open_trip.get("stop_at"):
+            #
+            # "First stopped" is a proxy for "the car has actually come to
+            # rest" — wrong whenever the first "not driving" reading catches
+            # it still creeping (a large named area/parking lot, not a single
+            # point: shift/speed already read parked-ish before the car
+            # finished pulling in). Freezing right there silently drops that
+            # remaining creep from the trip's own distance/energy — it was
+            # real, forward, odometer-confirmed movement, not idle — and it
+            # never resurfaces anywhere else either (reported live: two
+            # consecutive short trips at the same shared location read ~0.5
+            # km short/long of the car's own display, not from the energy
+            # math but from exactly this). So keep extending stop_at forward
+            # (re-running the same pace-corrected estimate against the
+            # latest reading) for as long as the odometer keeps climbing;
+            # only once two consecutive "not driving" readings agree does
+            # the car actually seem to have stopped, and stop_at freezes for
+            # real.
+            if not open_trip.get("stop_at") or cur["odo_km"] > open_trip["stop_at"]["odo_km"]:
                 stop = {
                     k: cur.get(k) for k in
                     ("ts", "odo_km", "soc", "range_km", "out_temp", "lat", "lon")

@@ -1040,6 +1040,39 @@ def test_short_blind_gap_arrival_does_not_inflate_duration():
     assert drive["distance_km"] == 1.2
 
 
+def test_stop_at_keeps_extending_through_continued_creep():
+    """Reported live: two consecutive trips sharing the same (large, named)
+    parking area read a matched short/long pair against the car's own
+    display -- one trip a bit short, the very next a bit long, roughly
+    cancelling out. Cause: the very first "not driving" reading freezes
+    stop_at right there, even when the car is still genuinely creeping
+    forward (settling into a spot in a large lot, not yet actually
+    stationary) -- real, odometer-confirmed distance/energy after that
+    point silently falls out of the trip, and (since the next trip's own
+    opening anchor correctly starts from wherever the car is *actually*
+    resting once fully stopped) never resurfaces in the next trip either --
+    it's just gone. stop_at must keep extending forward through readings
+    where the odometer is still climbing, and only truly freeze once it
+    stops."""
+    s0 = snap(T0, 10_000.0, 80)                                     # parked at start
+    s1 = snap(T0 + 5, 10_000.0, 80, shift="D", speed=40)            # opens the trip
+    # First "not driving" reading -- but the car is still easing forward
+    # into a large parking area over the next couple of polls.
+    s2 = snap(T0 + 600, 10_004.6, 76, present=True)
+    s3 = snap(T0 + 660, 10_004.8, 76, present=True)                 # still creeping
+    s4 = snap(T0 + 720, 10_004.9, 76, locked=True)                  # truly at rest -> closes
+
+    _, _, trip, _ = step(s0, s1)
+    assert trip is not None
+    _, _, trip, _ = step(s1, s2, trip)
+    _, _, trip, _ = step(s2, s3, trip)
+    d, _, trip, _ = step(s3, s4, trip)
+    assert trip is None and len(d) == 1
+    # The full distance, including the creep after the first "parked"
+    # reading -- not frozen 0.3 km short at s2.
+    assert d[0]["distance_km"] == 4.9
+
+
 def test_short_blind_gap_power_on_does_not_delay_start():
     """Reported live: the 2nd-to-last trip's logged start was ~4-5 minutes
     later than when the car actually set off — a real head start before the
