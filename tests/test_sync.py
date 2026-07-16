@@ -443,6 +443,38 @@ def test_energy_prefers_fine_grained_range_delta():
     assert abs(chg["energy_added_kwh"] - 1.404) < 0.01  # 11.75/502.7*60.05... fine-grained
 
 
+def test_energy_averages_full_range_projection_from_both_endpoints():
+    """Reported live: a short trip's kWh/Wh-per-km read noticeably low
+    against the car's own display. battery_level is only whole-percent
+    precision, so the "full pack range" projection (range / (soc/100)) used
+    to derive fine-grained energy is only as precise as *one* rounded SoC
+    reading -- trusting only the trip's start reading lets that single
+    rounding skew the whole trip. Deriving the projection from *both*
+    endpoints and averaging them can only match or reduce that noise, never
+    make it worse, since each reading's own rounding is at least partly
+    independent of the other's."""
+    from app.sync import _energy_kwh
+
+    capacity_kwh = 60.0
+    # Same true ~500 km full-pack range at both ends, but SoC rounded down at
+    # the start (62.3% -> 62) and rounded up at the end (60.6% -> 61) --
+    # opposite-direction noise that a start-only projection can't see.
+    frm = {"range_km": 311.0, "soc": 62}    # true 62.3% -> full ~= 499.2 km
+    to = {"range_km": 300.0, "soc": 61}     # true 60.6% -> full ~= 495.0 km
+    energy = _energy_kwh(frm, to, capacity_kwh)
+
+    full_start_only = frm["range_km"] / (frm["soc"] / 100.0)
+    energy_start_only = max(frm["range_km"] - to["range_km"], 0.0) / full_start_only * capacity_kwh
+    full_end_only = to["range_km"] / (to["soc"] / 100.0)
+    energy_end_only = max(frm["range_km"] - to["range_km"], 0.0) / full_end_only * capacity_kwh
+
+    # The averaged result sits strictly between what either endpoint alone
+    # would have given -- neither fully trusting the (rounded-down) start nor
+    # the (rounded-up) end reading.
+    lo, hi = sorted([energy_start_only, energy_end_only])
+    assert lo < energy < hi
+
+
 def test_max_speed_never_below_average():
     """A drive with no mid-drive snapshot must not report max speed 0."""
     s1 = snap(T0, 10_000.0, 80)                    # parked

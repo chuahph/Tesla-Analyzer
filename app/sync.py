@@ -319,15 +319,28 @@ def _energy_kwh(frm: dict, to: dict, capacity_kwh: float) -> float:
     whole-percent steps (a 0.6% trip reads as 1% — a huge Wh/km error).
     The rated remaining range is fractional, so prefer its delta scaled
     through the projected full range; fall back to the SoC delta.
+
+    The "full pack range" projection (range / (soc/100)) is only as precise
+    as *one* integer-percent SoC reading — e.g. a true 62.3% reported as 62
+    skews the projected full range, and so the whole trip's energy, by
+    ~0.5% — proportionally much worse on a short trip, where the range
+    delta itself is small next to that fixed rounding error (reported live:
+    a 9 km trip read noticeably low on kWh/Wh-per-km against the car's own
+    display). Averaging the full-range projection from *both* endpoints,
+    not trusting only ``frm``'s, can only ever match or reduce that noise —
+    never make it worse — since each reading's own rounding is at least
+    partly independent of the other's.
     """
     r0 = frm.get("range_km") or 0.0
     r1 = to.get("range_km") or 0.0
     soc0 = frm.get("soc") or 0.0
-    if r0 > 0 and r1 > 0 and soc0 >= 5:
-        full = r0 / (soc0 / 100.0)
+    soc1 = to.get("soc") or 0.0
+    fulls = [r / (s / 100.0) for r, s in ((r0, soc0), (r1, soc1)) if r > 0 and s >= 5]
+    if r0 > 0 and r1 > 0 and fulls:
+        full = sum(fulls) / len(fulls)
         if full > 0:
             return max(r0 - r1, 0.0) / full * capacity_kwh
-    return max(soc0 - (to.get("soc") or 0.0), 0.0) / 100.0 * capacity_kwh
+    return max(soc0 - soc1, 0.0) / 100.0 * capacity_kwh
 
 
 MIN_PLAUSIBLE_WH_PER_KM = 40.0  # below this over a whole trip = contaminated data
