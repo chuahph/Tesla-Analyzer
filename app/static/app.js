@@ -1089,7 +1089,12 @@ function renderCharts(d) {
           allPointLabels: { datasetIndex: 1, size: 9, color: "#ff9a9e", fmt: (v) => fmt(v, 0) },
         },
         scales: {
-          x: { grid: { display: false }, border: { display: false }, ticks: { maxTicksLimit: 8 } },
+          // Smaller than the default tick font — a full "2026-W16" or
+          // "2026-04-17" date is a lot wider than the trip/hour labels other
+          // charts show here, so it needs to shrink to keep reading cleanly
+          // at an angle instead of crowding its neighbours.
+          x: { grid: { display: false }, border: { display: false },
+            ticks: { maxTicksLimit: 8, font: { size: 9.5 } } },
           // Extra headroom on the distance axis (see barAxisHeadroom) keeps
           // its bars in the chart's lower half so they never cross the
           // Wh/km line, which — beginAtZero on its own axis — naturally
@@ -1142,7 +1147,12 @@ function renderCharts(d) {
           allPointLabels: { datasetIndex: 1, size: 9, color: "#ff9a9e", fmt: (v) => fmt(v, 0) },
         },
         scales: {
-          x: { grid: { display: false }, border: { display: false }, ticks: { maxTicksLimit: 8 } },
+          // Smaller than the default tick font — a full "2026-W16" or
+          // "2026-04-17" date is a lot wider than the trip/hour labels other
+          // charts show here, so it needs to shrink to keep reading cleanly
+          // at an angle instead of crowding its neighbours.
+          x: { grid: { display: false }, border: { display: false },
+            ticks: { maxTicksLimit: 8, font: { size: 9.5 } } },
           y: { beginAtZero: true, border: { display: false }, grid: { color: GRID },
             max: dDistAxisMax, ticks: { count: EFF_Y_TICKS, autoSkip: false, color: "#22c55e" } },
           // Same fixed tick count (and autoSkip off) as the weekly chart
@@ -2169,18 +2179,20 @@ document.getElementById("show-more-kpis")?.addEventListener("click", () => {
   if (lastData) renderKpis(lastData);
 });
 
-// Quick-nav shortcut bar: jump to a card by id (scroll-margin-top on .card
-// clears the sticky header), or back to the top for the "Top" button.
+// Quick-nav shortcut bar: jump to a card by id. Offsets by the header's own
+// *current* rendered height (read live, not a fixed CSS guess) plus a small
+// gap — a static scroll-margin-top would need one value for desktop and
+// another for mobile, and still undershoot on a notched iPhone where
+// env(safe-area-inset-top) makes the real header taller than either guess.
+// Reading it live gets this right in every case without tracking it by hand.
 // Delegated on the container since the buttons never change.
 document.getElementById("quick-nav")?.addEventListener("click", (e) => {
   const btn = e.target.closest(".qn-btn");
-  if (!btn) return;
-  if (btn.hasAttribute("data-scroll-top")) {
-    window.scrollTo({ top: 0, behavior: "smooth" });
-    return;
-  }
-  const target = document.getElementById(btn.dataset.target);
-  if (target) target.scrollIntoView({ behavior: "smooth", block: "start" });
+  const target = btn && document.getElementById(btn.dataset.target);
+  if (!target) return;
+  const headerH = document.querySelector("header")?.getBoundingClientRect().height || 0;
+  const top = target.getBoundingClientRect().top + window.scrollY - headerH - 14;
+  window.scrollTo({ top: Math.max(top, 0), behavior: "smooth" });
 });
 
 // Show only the shortcuts whose target card is actually on screen right now

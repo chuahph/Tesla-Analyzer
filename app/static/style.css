@@ -387,35 +387,37 @@ body.view-home > footer { display: none; }
 
 main { padding: 24px 28px 60px; max-width: 1280px; margin: 0 auto; }
 
-/* Jump-to-section shortcut bar, top of the dashboard. Grid (same pattern as
-   .kpi-grid below) rather than flex: every button gets an equal share of
-   each row's width regardless of its label length, and a narrow phone gets
-   more rows instead of squeezed, unreadable buttons. */
+/* Jump-to-section shortcut bar, top of the dashboard. Flex with nowrap —
+   unlike a grid's auto-fit, this guarantees one row on any screen width:
+   every button gets an equal share (flex: 1 1 0) and shrinks together as
+   the row narrows, rather than wrapping to a second row. */
 .quick-nav {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(84px, 1fr));
-  gap: 8px;
+  display: flex;
+  flex-wrap: nowrap;
+  gap: 6px;
   margin-bottom: 16px;
 }
 .quick-nav.hidden { display: none; }
 .qn-btn {
   display: flex; flex-direction: column; align-items: center; justify-content: center;
   gap: 3px;
+  flex: 1 1 0; min-width: 0;
   background: linear-gradient(180deg, #1c222c, var(--panel-2));
   border: 1px solid var(--border);
   border-radius: 10px;
-  padding: 9px 4px;
-  min-height: 56px;
+  padding: 9px 2px;
+  min-height: 52px;
   color: var(--text);
   font: inherit;
   cursor: pointer;
   box-shadow: var(--elev-1);
   transition: transform .16s ease, border-color .16s ease, box-shadow .16s ease;
 }
-.qn-btn .qn-ico { font-size: 18px; line-height: 1; }
+.qn-btn .qn-ico { font-size: 17px; line-height: 1; }
 .qn-btn .qn-label {
-  font-size: 10.5px; font-weight: 600; color: var(--muted);
-  letter-spacing: .2px; white-space: nowrap;
+  font-size: 10px; font-weight: 600; color: var(--muted);
+  letter-spacing: .1px; white-space: nowrap;
+  max-width: 100%; overflow: hidden; text-overflow: ellipsis;
 }
 @media (hover: hover) {
   .qn-btn:hover { transform: translateY(-1px); border-color: var(--border-lift); box-shadow: var(--elev-2); }
@@ -549,14 +551,14 @@ main { padding: 24px 28px 60px; max-width: 1280px; margin: 0 auto; }
   font-size: 12.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
 canvas { max-height: 260px; }
-/* Weekly/daily efficiency trend lines and the few-bar charts carry less
-   visual detail than the others — a shorter box reads just as clearly and
-   takes less scroll. */
-#effTrendChart, #effDailyTrendChart, #speedBandChart, #effTempChart, #socTargetChart { max-height: 170px; }
-/* Trips by Hour has a bottom legend the others don't, which eats into its
-   plot area — taller so its actual Y-axis row height (not just the outer
-   box) still matches the efficiency trend charts, plus a bit more room. */
-#tripsHourChart { max-height: 226px; }
+/* The few-bar charts carry less visual detail than the others — a shorter
+   box reads just as clearly and takes less scroll. */
+#speedBandChart, #effTempChart, #socTargetChart { max-height: 170px; }
+/* Trips by Hour and the two efficiency trend charts all carry a bottom
+   legend plus a second (distance/trip-count) axis, which eats into the plot
+   area more than a single-series chart — taller so their actual Y-axis row
+   height (not just the outer box) still reads clearly instead of cramped. */
+#tripsHourChart, #effTrendChart, #effDailyTrendChart { max-height: 226px; }
 
 .narrative-body { margin: 0; font-size: 14.5px; line-height: 1.7; color: var(--text); }
 
@@ -907,10 +909,10 @@ footer { padding: 18px 28px; color: var(--muted); font-size: 12px; border-top: 1
   .bottom-actions #btn-import, .bottom-actions #btn-link { flex: 1 1 42%; }
   .bottom-actions #btn-export, .bottom-actions #btn-guide { flex: 1 1 42%; }
   main { padding: 12px 12px 40px; }
-  .quick-nav { grid-template-columns: repeat(auto-fit, minmax(72px, 1fr)); gap: 6px; margin-bottom: 12px; }
-  .qn-btn { min-height: 50px; padding: 7px 3px; }
-  .qn-btn .qn-ico { font-size: 16px; }
-  .qn-btn .qn-label { font-size: 9.5px; }
+  .quick-nav { gap: 4px; margin-bottom: 12px; }
+  .qn-btn { min-height: 46px; padding: 6px 1px; gap: 2px; }
+  .qn-btn .qn-ico { font-size: 14px; }
+  .qn-btn .qn-label { font-size: 8.5px; }
   .card { scroll-margin-top: 122px; }
   .card-grid { grid-template-columns: 1fr; gap: 10px; margin-bottom: 12px; }
   .kpi-grid { grid-template-columns: repeat(2, 1fr); gap: 8px; margin-bottom: 12px; }
@@ -918,8 +920,8 @@ footer { padding: 18px 28px; color: var(--muted); font-size: 12px; border-top: 1
   .kpi .value { font-size: 19px; }
   .card { padding: 14px 14px; }
   canvas { max-height: 210px; }
-  #effTrendChart, #effDailyTrendChart, #speedBandChart, #effTempChart, #socTargetChart { max-height: 140px; }
-  #tripsHourChart { max-height: 192px; }
+  #speedBandChart, #effTempChart, #socTargetChart { max-height: 140px; }
+  #tripsHourChart, #effTrendChart, #effDailyTrendChart { max-height: 192px; }
   .modal-card { padding: 22px 18px; }
   .rec { flex-direction: column; gap: 8px; }
 }
