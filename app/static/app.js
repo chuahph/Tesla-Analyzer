@@ -109,7 +109,8 @@ const centerTextPlugin = {
 // horizontal reach vs text width), so a sparse chart (a handful of weeks)
 // gets every point labelled as intended while a dense one (90 daily points)
 // thins itself out automatically instead of turning into an unreadable
-// smear. Opt-in via options.plugins.allPointLabels = { fmt, color }.
+// smear. Opt-in via options.plugins.allPointLabels = { fmt, color, size }
+// (size defaults to 10).
 const allPointLabelsPlugin = {
   id: "allPointLabels",
   afterDatasetsDraw(chart, _args, opts) {
@@ -119,7 +120,7 @@ const allPointLabelsPlugin = {
     if (!meta || meta.hidden) return;
     const { ctx, chartArea } = chart;
     ctx.save();
-    ctx.font = "700 10px " + Chart.defaults.font.family;
+    ctx.font = `700 ${opts.size || 10}px ` + Chart.defaults.font.family;
     ctx.fillStyle = opts.color || "#c9d1dc";
     ctx.textAlign = "center";
     ctx.textBaseline = "bottom";
@@ -1108,6 +1109,13 @@ function renderCharts(d) {
           // a small size and skipping empty hours (see barLabelsPlugin)
           // keeps it readable instead of a wall of "0"s.
           barLabels: { datasetIndex: 0, size: 9, fmt: (v) => fmt(v, 0) },
+          // Same tininess on the Wh/km line's own points (dataset 1) —
+          // collision avoidance (see allPointLabelsPlugin) keeps neighbouring
+          // hours from fighting each other; a red tint matching the line
+          // itself (vs. the bar labels' neutral grey) keeps the two legible
+          // as separate numbers on an hour tall/high enough for both to land
+          // close together.
+          allPointLabels: { datasetIndex: 1, size: 9, color: "#ff9a9e", fmt: (v) => fmt(v, 0) },
           tooltip: { callbacks: { label: (c) =>
             c.dataset.yAxisID === "y1"
               ? (c.parsed.y == null ? " No energy data" : ` ${fmt(c.parsed.y, 0)} Wh/km`)
