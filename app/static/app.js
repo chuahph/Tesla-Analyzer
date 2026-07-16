@@ -841,6 +841,10 @@ function renderKpis(d) {
   // kpi-info popovers (the driving/charging-cost "!" explainers) don't carry
   // the plain .kpi class, so this selector only ever touches real KPI boxes.
   const kpiEls = [...document.querySelectorAll("#kpis .kpi:not(.kpi-empty)")];
+  // Stagger each tile's entrance (see .kpi's riseIn animation in style.css)
+  // by its position, capped so a fully-expanded grid doesn't drag the last
+  // box's appearance out.
+  kpiEls.forEach((el, i) => { el.style.animationDelay = `${Math.min(i, 10) * 35}ms`; });
   const moreBtn = document.getElementById("show-more-kpis");
   if (moreBtn) {
     const hasMore = kpiEls.length > KPI_COLLAPSED_COUNT;

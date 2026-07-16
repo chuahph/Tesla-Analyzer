@@ -23,6 +23,21 @@
 
 * { box-sizing: border-box; }
 
+/* --- Entrance animation ---------------------------------------------------
+   A gentle fade + rise plays whenever a card/KPI tile is freshly inserted or
+   first switches from display:none to rendered — a plain data refresh on an
+   already-visible element never retriggers it, only its first appearance
+   does. Used on .kpi/.card/.score-banner below; staggered per element (see
+   those rules) so a grid fills in left-to-right/top-to-bottom instead of
+   popping in all at once. */
+@keyframes riseIn {
+  from { opacity: 0; transform: translateY(10px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+@media (prefers-reduced-motion: reduce) {
+  * { animation-duration: .001ms !important; animation-delay: 0ms !important; }
+}
+
 html { -webkit-text-size-adjust: 100%; }
 /* Tame the native rubber-band so the custom pull-to-refresh reads cleanly. */
 html, body { overscroll-behavior-y: none; }
@@ -173,6 +188,9 @@ header {
   border: 1px solid var(--border); border-left: 4px solid var(--muted);
   border-radius: 12px; padding: 10px 14px; margin-bottom: 12px;
   box-shadow: var(--elev-1);
+  /* Plays when the banner first switches on (display:none -> flex) — a
+     score update on an already-visible banner doesn't retrigger it. */
+  animation: riseIn .45s cubic-bezier(.22, .61, .36, 1) both;
 }
 .score-behaviour { margin-top: 8px; padding-top: 6px; border-top: 1px solid var(--border); }
 .score-banner.tone-green  { border-left-color: var(--green);    box-shadow: var(--elev-1), inset 7px 0 26px -12px var(--green); }
@@ -396,6 +414,11 @@ main { padding: 24px 28px 60px; max-width: 1280px; margin: 0 auto; }
   padding: 7px 11px;
   box-shadow: var(--elev-1);
   transition: transform .16s ease, box-shadow .16s ease, border-color .16s ease;
+  /* KPI tiles are rebuilt fresh on every renderKpis() call (window switch,
+     Show more), so this naturally replays each time — per-tile delay is
+     stamped inline by app.js (animation-delay), staggering the row left to
+     right instead of popping in all at once. */
+  animation: riseIn .4s cubic-bezier(.22, .61, .36, 1) both;
   /* Uniform height so all boxes align in a tidy grid — tall enough that
      even the shortest single-line card matches Battery Used/Vampire
      Drain's own height once their longer sub text wraps to two lines. */
@@ -452,7 +475,18 @@ main { padding: 24px 28px 60px; max-width: 1280px; margin: 0 auto; }
   padding: 18px 20px;
   box-shadow: var(--elev-1);
   transition: transform .18s ease, box-shadow .18s ease, border-color .18s ease;
+  /* Content cards stay in the DOM across refreshes (only their display:none
+     toggles, the first time real data exists for them), so this plays once
+     per card rather than on every reload — staggered by grid position below. */
+  animation: riseIn .5s cubic-bezier(.22, .61, .36, 1) both;
 }
+.card-grid > .card:nth-child(1) { animation-delay: 0ms; }
+.card-grid > .card:nth-child(2) { animation-delay: 45ms; }
+.card-grid > .card:nth-child(3) { animation-delay: 90ms; }
+.card-grid > .card:nth-child(4) { animation-delay: 135ms; }
+.card-grid > .card:nth-child(5) { animation-delay: 180ms; }
+.card-grid > .card:nth-child(6) { animation-delay: 225ms; }
+.card-grid > .card:nth-child(n+7) { animation-delay: 260ms; }
 /* Gentle lift on hover — pointer devices only, so touch taps aren't affected. */
 @media (hover: hover) {
   .card:hover {
