@@ -1855,7 +1855,7 @@ let recentTripsLimit = 5;
 // already on the page instead of reloading). Reset to collapsed alongside
 // recentTripsLimit whenever the window changes.
 let kpisExpanded = false;
-const KPI_COLLAPSED_COUNT = 4;
+const KPI_COLLAPSED_COUNT = 6;
 
 function importedDataset() {
   try { return JSON.parse(localStorage.getItem(STORE_KEY)); } catch (_) { return null; }
