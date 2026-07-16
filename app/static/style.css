@@ -11,7 +11,14 @@
   --violet: #a78bfa;
   --teal: #2dd4bf;
   --border: #262b34;
+  --border-lift: #313743;  /* brighter hairline used on hover/emphasis */
   --control-h: 33px;   /* uniform height for the top-row controls */
+  /* A shared elevation ladder so every surface casts a consistent shadow —
+     a faint contact shadow plus a soft ambient one, tuned for a dark UI. */
+  --elev-1: 0 1px 2px rgba(0, 0, 0, .35), 0 6px 18px rgba(0, 0, 0, .22);
+  --elev-2: 0 2px 6px rgba(0, 0, 0, .4), 0 14px 34px rgba(0, 0, 0, .3);
+  /* The glassy top highlight every raised surface shares (see .surface-lit). */
+  --edge-hi: inset 0 1px 0 rgba(255, 255, 255, .055);
 }
 
 * { box-sizing: border-box; }
@@ -43,18 +50,35 @@ html, body { overscroll-behavior-y: none; }
 body {
   margin: 0;
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-  /* A whisper of colour in the page backdrop lifts it off flat black without
-     drawing the eye — a soft radial warm/cool wash fixed behind the content. */
-  background: var(--bg);
-  background-image:
-    radial-gradient(1100px 620px at 12% -8%, rgba(232, 33, 39, .06), transparent 60%),
-    radial-gradient(1000px 560px at 100% 0%, rgba(59, 130, 246, .05), transparent 55%);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  /* Colour in the page backdrop lifts it off flat black without drawing the
+     eye: soft warm/cool radial washes at the top corners, a faint teal glow
+     rising from the bottom, and a gentle vertical gradient so the page reads
+     as a lit surface with depth rather than a single flat tone. Fixed behind
+     the content so it stays put while scrolling. */
+  background:
+    radial-gradient(1200px 700px at 6% -12%, rgba(232, 33, 39, .09), transparent 56%),
+    radial-gradient(1100px 640px at 100% -6%, rgba(59, 130, 246, .075), transparent 54%),
+    radial-gradient(1000px 900px at 50% 118%, rgba(45, 212, 191, .05), transparent 60%),
+    linear-gradient(180deg, #0d1015 0%, #0a0c11 55%, #0c0f14 100%);
   background-attachment: fixed;
   color: var(--text);
   /* Respect the iPhone home-indicator / side safe areas. The status-bar inset
      is applied to the sticky header instead, so it never hides the header. */
   padding: 0 env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);
 }
+
+/* Shared glassy top-edge highlight for every raised surface (cards, KPI
+   tiles, the score banner). A pseudo-element rather than a box-shadow so it
+   layers cleanly over the per-tone rail glows without them overwriting it. */
+.card, .kpi, .score-banner { position: relative; }
+.card::before, .kpi::before, .score-banner::before {
+  content: ""; position: absolute; inset: 0; border-radius: inherit;
+  pointer-events: none; box-shadow: var(--edge-hi); z-index: 0;
+}
+/* Keep card content above the highlight layer. */
+.card > *, .kpi > *, .score-banner > * { position: relative; z-index: 1; }
 
 header {
   display: flex;
@@ -66,10 +90,22 @@ header {
      header content is never overlapped, even when the sticky header is at top. */
   padding: calc(18px + env(safe-area-inset-top)) 28px 18px;
   border-bottom: 1px solid var(--border);
+  /* Frosted glass: semi-transparent so content softly blurs beneath as it
+     scrolls under, with a subtle shadow so the header reads as a floating
+     layer rather than a painted band. Falls back to the solid gradient where
+     backdrop-filter isn't supported. */
   background: linear-gradient(180deg, #14181f, #0e1116);
   position: sticky;
   top: 0;
   z-index: 10;
+  box-shadow: 0 1px 0 rgba(255, 255, 255, .03), 0 8px 24px -12px rgba(0, 0, 0, .6);
+}
+@supports ((-webkit-backdrop-filter: blur(1px)) or (backdrop-filter: blur(1px))) {
+  header {
+    background: linear-gradient(180deg, rgba(20, 24, 31, .82), rgba(14, 17, 22, .72));
+    -webkit-backdrop-filter: blur(14px) saturate(1.35);
+    backdrop-filter: blur(14px) saturate(1.35);
+  }
 }
 
 /* Time + build stamp: one compact box pinned to the header's top-right. */
@@ -133,16 +169,16 @@ header {
    the driving-behaviour breakdown, so there's one score, not two. */
 .score-banner {
   display: flex; align-items: flex-start; gap: 12px;
-  background: linear-gradient(180deg, #1a1f28, var(--panel));
+  background: linear-gradient(180deg, #1c222c, var(--panel));
   border: 1px solid var(--border); border-left: 4px solid var(--muted);
   border-radius: 12px; padding: 10px 14px; margin-bottom: 12px;
-  box-shadow: 0 1px 3px rgba(0, 0, 0, .3);
+  box-shadow: var(--elev-1);
 }
 .score-behaviour { margin-top: 8px; padding-top: 6px; border-top: 1px solid var(--border); }
-.score-banner.tone-green  { border-left-color: var(--green); }
-.score-banner.tone-blue   { border-left-color: var(--accent-2); }
-.score-banner.tone-amber  { border-left-color: var(--amber); }
-.score-banner.tone-red    { border-left-color: var(--accent); }
+.score-banner.tone-green  { border-left-color: var(--green);    box-shadow: var(--elev-1), inset 7px 0 26px -12px var(--green); }
+.score-banner.tone-blue   { border-left-color: var(--accent-2); box-shadow: var(--elev-1), inset 7px 0 26px -12px var(--accent-2); }
+.score-banner.tone-amber  { border-left-color: var(--amber);    box-shadow: var(--elev-1), inset 7px 0 26px -12px var(--amber); }
+.score-banner.tone-red    { border-left-color: var(--accent);   box-shadow: var(--elev-1), inset 7px 0 26px -12px var(--accent); }
 .score-ring {
   font-size: 36px; font-weight: 800; line-height: 1;
   flex: 0 0 auto; font-variant-numeric: tabular-nums;
@@ -353,11 +389,12 @@ main { padding: 24px 28px 60px; max-width: 1280px; margin: 0 auto; }
   margin-bottom: 18px;
 }
 .kpi {
-  background: linear-gradient(180deg, #1a1f28, var(--panel));
+  background: linear-gradient(180deg, #1c222c, var(--panel));
   border: 1px solid var(--border);
   border-radius: 12px;
   padding: 7px 11px;
-  box-shadow: 0 1px 3px rgba(0, 0, 0, .3);
+  box-shadow: var(--elev-1);
+  transition: transform .16s ease, box-shadow .16s ease, border-color .16s ease;
   /* Uniform height so all boxes align in a tidy grid — tall enough that
      even the shortest single-line card matches Battery Used/Vampire
      Drain's own height once their longer sub text wraps to two lines. */
@@ -371,12 +408,16 @@ main { padding: 24px 28px 60px; max-width: 1280px; margin: 0 auto; }
    value (efficiency vs rated, battery balance). A wider rail and the inset
    glow give the tones far more visible separation than a thin line alone. */
 .kpi[class*="tone-"] { border-left-width: 5px; border-left-style: solid; }
-.kpi.tone-blue   { border-left-color: var(--accent-2); box-shadow: 0 1px 3px rgba(0,0,0,.3), inset 5px 0 16px -9px var(--accent-2); }
-.kpi.tone-green  { border-left-color: var(--green);    box-shadow: 0 1px 3px rgba(0,0,0,.3), inset 5px 0 16px -9px var(--green); }
-.kpi.tone-amber  { border-left-color: var(--amber);    box-shadow: 0 1px 3px rgba(0,0,0,.3), inset 5px 0 16px -9px var(--amber); }
-.kpi.tone-violet { border-left-color: var(--violet);   box-shadow: 0 1px 3px rgba(0,0,0,.3), inset 5px 0 16px -9px var(--violet); }
-.kpi.tone-teal   { border-left-color: var(--teal);     box-shadow: 0 1px 3px rgba(0,0,0,.3), inset 5px 0 16px -9px var(--teal); }
-.kpi.tone-red    { border-left-color: var(--accent);   box-shadow: 0 1px 3px rgba(0,0,0,.3), inset 5px 0 16px -9px var(--accent); }
+.kpi.tone-blue   { border-left-color: var(--accent-2); box-shadow: var(--elev-1), inset 6px 0 20px -10px var(--accent-2); }
+.kpi.tone-green  { border-left-color: var(--green);    box-shadow: var(--elev-1), inset 6px 0 20px -10px var(--green); }
+.kpi.tone-amber  { border-left-color: var(--amber);    box-shadow: var(--elev-1), inset 6px 0 20px -10px var(--amber); }
+.kpi.tone-violet { border-left-color: var(--violet);   box-shadow: var(--elev-1), inset 6px 0 20px -10px var(--violet); }
+.kpi.tone-teal   { border-left-color: var(--teal);     box-shadow: var(--elev-1), inset 6px 0 20px -10px var(--teal); }
+.kpi.tone-red    { border-left-color: var(--accent);   box-shadow: var(--elev-1), inset 6px 0 20px -10px var(--accent); }
+/* Subtle lift so the KPI row feels as interactive as the cards below it. */
+@media (hover: hover) {
+  .kpi:hover { transform: translateY(-1px); border-color: var(--border-lift); }
+}
 .kpi .label { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: .4px; }
 .kpi .label .info-btn {
   width: 14px; height: 14px; font-size: 9px; margin-left: 4px;
@@ -395,23 +436,28 @@ main { padding: 24px 28px 60px; max-width: 1280px; margin: 0 auto; }
      slot freed by a hidden card so no empty cells are left behind. */
   grid-template-columns: repeat(auto-fit, minmax(340px, 1fr));
   grid-auto-flow: dense;
+  /* Each card sizes to its own content instead of stretching to match the
+     tallest card in its row — a short card (Top Routes, the narrative) no
+     longer grows a large empty void just because Recent Trips beside it is
+     long. The freed space becomes page backdrop, which reads far cleaner. */
+  align-items: start;
   gap: 16px;
   margin-bottom: 18px;
 }
 .card {
-  background: linear-gradient(180deg, #191e26, var(--panel));
+  background: linear-gradient(180deg, #1b212b, var(--panel));
   border: 1px solid var(--border);
   border-radius: 14px;
   padding: 18px 20px;
-  box-shadow: 0 1px 3px rgba(0, 0, 0, .3), 0 6px 20px rgba(0, 0, 0, .18);
+  box-shadow: var(--elev-1);
   transition: transform .18s ease, box-shadow .18s ease, border-color .18s ease;
 }
 /* Gentle lift on hover — pointer devices only, so touch taps aren't affected. */
 @media (hover: hover) {
   .card:hover {
     transform: translateY(-2px);
-    border-color: #313743;
-    box-shadow: 0 2px 6px rgba(0, 0, 0, .35), 0 12px 30px rgba(0, 0, 0, .28);
+    border-color: var(--border-lift);
+    box-shadow: var(--elev-2);
   }
 }
 .card.full { grid-column: 1 / -1; }
