@@ -600,11 +600,16 @@ canvas { max-height: 260px; }
 #recommendations { display: flex; flex-direction: column; gap: 12px; }
 .rec {
   display: flex; gap: 14px; align-items: flex-start;
-  background: var(--panel-2);
+  background: linear-gradient(180deg, #20262f, var(--panel-2));
   border: 1px solid var(--border);
   border-left-width: 4px;
   border-radius: 10px;
   padding: 14px 16px;
+  box-shadow: var(--elev-1);
+  transition: transform .16s ease, border-color .16s ease, box-shadow .16s ease;
+}
+@media (hover: hover) {
+  .rec:hover { transform: translateY(-1px); border-color: var(--border-lift); box-shadow: var(--elev-2); }
 }
 .rec.high { border-left-color: var(--accent); }
 .rec.medium { border-left-color: var(--amber); }
@@ -878,7 +883,9 @@ footer { padding: 18px 28px; color: var(--muted); font-size: 12px; border-top: 1
 .week-compare {
   display: flex; flex-wrap: wrap; gap: 8px 18px; align-items: center;
   margin: 2px 0 14px; padding: 8px 14px;
-  background: var(--panel-2); border: 1px solid var(--border); border-radius: 10px;
+  background: linear-gradient(180deg, #1c222c, var(--panel-2));
+  border: 1px solid var(--border); border-radius: 10px;
+  box-shadow: var(--elev-1);
   font-size: 12.5px; color: var(--muted);
 }
 .week-compare .wk-title { text-transform: uppercase; letter-spacing: .4px; font-size: 10.5px; }

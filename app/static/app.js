@@ -25,6 +25,23 @@ function barAxisHeadroom(maxVal, ticks = EFF_Y_TICKS) {
 Chart.defaults.color = TICK;
 Chart.defaults.borderColor = GRID;
 Chart.defaults.font.family = "-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif";
+// Every chart's tooltip themed once here, globally — a panel-coloured card
+// with the same hairline border and rounded corners as the rest of the UI,
+// instead of Chart.js's plain default black box that reads as unstyled
+// against the rest of the dashboard.
+Object.assign(Chart.defaults.plugins.tooltip, {
+  backgroundColor: "rgba(28, 34, 44, .96)",
+  titleColor: "#e6e9ef",
+  bodyColor: "#e6e9ef",
+  borderColor: GRID,
+  borderWidth: 1,
+  cornerRadius: 8,
+  padding: 10,
+  boxPadding: 5,
+  titleFont: { weight: "700", size: 12 },
+  bodyFont: { size: 12 },
+  titleMarginBottom: 6,
+});
 
 function fmt(n, digits = 0, fixed = false) {
   if (n === null || n === undefined) return "–";
@@ -1851,8 +1868,15 @@ function renderBattery(d) {
           pointRadius: (c) => c.dataIndex === c.dataset.data.length - 1 ? 4 : 2,
           pointBackgroundColor: "#2dd4bf", pointBorderColor: "#171b22", pointBorderWidth: 2 }] },
         options: { responsive: true, maintainAspectRatio: false,
+          // Headroom for the point labels (below) so one near the top of a
+          // peak isn't clipped against the card edge.
+          layout: { padding: { top: 16 } },
           plugins: { legend: { display: false },
-            tooltip: { callbacks: { label: (c) => ` ${fmt(c.parsed.y)} km projected full range` } } },
+            tooltip: { callbacks: { label: (c) => ` ${fmt(c.parsed.y)} km projected full range` } },
+            // Every month's own value labelled right on its point — same
+            // treatment as the efficiency trend charts, teal to match the
+            // line itself.
+            allPointLabels: { color: "#7fe9de", fmt: (v) => fmt(v, 0) } },
           scales: {
             x: { grid: { display: false }, border: { display: false } },
             y: { border: { display: false }, grid: { color: GRID }, ticks: { maxTicksLimit: 5 } },
