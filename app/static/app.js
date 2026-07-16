@@ -1084,6 +1084,14 @@ function renderCharts(d) {
     // afternoons, cold mornings) run less efficiently, in one chart.
     const th = drv.trips_by_hour;
     const eh = drv.efficiency_by_hour || {};
+    // The Wh/km line naturally rides near the top of its own zero-based axis
+    // (real efficiency values never approach 0), so without help the busiest
+    // hour's bar — also near the top of *its* axis — crosses right through
+    // it. Give the bar axis extra headroom, rounded to a whole-number step,
+    // so bars settle into the chart's lower half and leave the top clear.
+    const tripMax = Math.max(0, ...Object.values(th));
+    const tripAxisStep = tripMax > 0 ? Math.ceil((tripMax * 2.2) / (EFF_Y_TICKS - 1)) : 0;
+    const tripAxisMax = tripAxisStep * (EFF_Y_TICKS - 1) || undefined;
     makeChart("tripsHourChart", {
       data: {
         labels: Object.keys(th).map(h => h + "h"),
@@ -1136,6 +1144,7 @@ function renderCharts(d) {
           // colour matches its own series (amber for Trips, red for Wh/km)
           // so it's obvious at a glance which scale a number belongs to.
           y: { beginAtZero: true, border: { display: false }, grid: { color: GRID },
+            max: tripAxisMax,
             ticks: { count: EFF_Y_TICKS, autoSkip: false, precision: 0, color: "#f59e0b" } },
           y1: { beginAtZero: true, position: "right", border: { display: false },
             grid: { display: false }, ticks: { count: EFF_Y_TICKS, autoSkip: false, color: "#ff9a9e" } },
