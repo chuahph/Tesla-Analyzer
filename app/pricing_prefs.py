@@ -77,7 +77,7 @@ def get_rates(session: Session, settings) -> dict[str, float]:
 
 
 def get_default_source(session: Session) -> str:
-    return state.get(session, state.DEFAULT_PRICE_SOURCE_KEY, "public") or "public"
+    return state.get(session, state.DEFAULT_PRICE_SOURCE_KEY, "home") or "home"
 
 
 def get_updated_at(session: Session) -> str | None:

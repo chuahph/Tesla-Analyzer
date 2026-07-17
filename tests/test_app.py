@@ -1038,6 +1038,11 @@ def test_charge_cost_uses_time_of_use_pricing_at_write_time():
     with SessionLocal() as s:
         v = Vehicle(vin="TESTVIN-TOU", name="Test", model="Model 3")
         s.add(v)
+        # This test is about ToU pricing specifically, not about which source a
+        # charge defaults to when nothing else matches — pin it explicitly so
+        # it stays independent of that default (currently "home").
+        from app import state
+        state.put(s, state.DEFAULT_PRICE_SOURCE_KEY, "public")
         s.commit()
 
         # Monday 2pm MYT (peak, per the settings above): start charging.
@@ -1507,6 +1512,12 @@ def test_manual_charge_logs_a_historical_session_additively():
     settings.app_passcode = ""
     try:
         with TestClient(app) as client:  # startup seeds demo data
+            # This test is about the AC/DC rate math specifically, not about
+            # which source a charge defaults to when nothing else matches —
+            # pin it explicitly so it stays independent of that default
+            # (currently "home").
+            client.post("/api/pricing-prefs", json={"rates": {}, "default_source": "public"})
+
             before = client.get("/api/summary?days=730").json()
             before_drives = before["driving"]["total_drives"]
             before_sessions = before["charging"]["total_sessions"]

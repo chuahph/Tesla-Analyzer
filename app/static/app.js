@@ -1552,7 +1552,7 @@ function renderLists(d) {
 let pricingPrefs = null;
 const PRICING_PREFS_FALLBACK = {
   rates: { public_ac: 1.10, public_dc: 1.40, home_ac: 0.90, home_dc: 1.13, office_ac: 0.57, office_dc: 0.57 },
-  default_source: "public",
+  default_source: "home",
   updated_at: null,
 };
 
