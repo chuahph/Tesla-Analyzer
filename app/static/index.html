@@ -449,15 +449,15 @@
     <hr class="sep" />
 
     <section class="card-grid">
+      <div class="card" id="insights-card" style="display:none">
+        <h2>🔎 Insights</h2>
+        <ul id="insights-body" class="plain-list"></ul>
+      </div>
       <div class="card" id="battery-card" style="display:none">
         <h2>🔋 Battery Health</h2>
         <div id="battery-body"></div>
         <!-- Monthly projected-full-range trend; shown once 2+ months exist. -->
         <canvas id="battTrendChart" class="batt-trend" style="display:none"></canvas>
-      </div>
-      <div class="card" id="insights-card" style="display:none">
-        <h2>🔎 Insights</h2>
-        <ul id="insights-body" class="plain-list"></ul>
       </div>
       <div class="card" id="narrative-card" style="display:none">
         <h2>📝 Your Month, In Words</h2>
@@ -465,6 +465,16 @@
       </div>
       <!-- Trips / routes / charging spots sit right after battery health,
            before the charts; recommendations move to the very bottom. -->
+      <div class="card">
+        <h2>🛣️ Distance by Speed Band
+          <button class="info-btn" data-info="info-speedband">!</button></h2>
+        <div id="info-speedband" class="info-pop hidden">
+          Total <strong>km driven grouped by each trip's average speed</strong> — City (&lt;30),
+          Urban (30–60), Rural (60–90), Highway (90+ km/h). Shows where your mileage happens;
+          highway km cost the most energy per km (aerodynamic drag rises with speed²).
+        </div>
+        <canvas id="speedBandChart"></canvas>
+      </div>
       <div class="card">
         <h2>🔁 Top Routes</h2>
         <ul id="topRoutes" class="plain-list"></ul>
@@ -482,16 +492,6 @@
           <button id="delete-selected" class="btn btn-danger btn-mini hidden">Delete selected</button>
           <button id="cancel-select" class="btn btn-mini hidden">Cancel</button>
         </div>
-      </div>
-      <div class="card">
-        <h2>🛣️ Distance by Speed Band
-          <button class="info-btn" data-info="info-speedband">!</button></h2>
-        <div id="info-speedband" class="info-pop hidden">
-          Total <strong>km driven grouped by each trip's average speed</strong> — City (&lt;30),
-          Urban (30–60), Rural (60–90), Highway (90+ km/h). Shows where your mileage happens;
-          highway km cost the most energy per km (aerodynamic drag rises with speed²).
-        </div>
-        <canvas id="speedBandChart"></canvas>
       </div>
       <div class="card" id="charges-card">
         <h2>📍 Recent Charges
