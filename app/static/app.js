@@ -26,6 +26,46 @@ function barAxisHeadroom(maxVal, ticks = EFF_Y_TICKS, multiplier = 2.2) {
   return step * (ticks - 1) || undefined;
 }
 
+// A fixed multiplier on the bar series' own aggregate max (barAxisHeadroom,
+// above) only protects against the tallest bar overall — it can still let a
+// bar collide with the line at one specific point, if that point's bar
+// happens to be tall while that point's *own* line value happens to be low
+// relative to the rest of the window (reported live: a 6-day window whose
+// very first day was both its largest bar and one of its lower line values —
+// the aggregate-max-based headroom had no way to see that specific pairing).
+// This checks every point's bar against that same point's line value
+// directly, so the guarantee holds for the actual data instead of just the
+// two series' independent extremes.
+function dualAxisPlan(barVals, lineVals, ticks = EFF_Y_TICKS) {
+  const barMax = Math.max(0, ...barVals.filter((v) => v > 0));
+  const lines = lineVals.filter((v) => v != null);
+  if (!(barMax > 0) || !lines.length) {
+    return { barAxisMax: barAxisHeadroom(barMax, ticks), lineAxisMax: undefined };
+  }
+  const lineMax = Math.max(...lines);
+  const lineMin = Math.min(...lines);
+  const lineSpan = Math.max(lineMax - lineMin, lineMax * 0.05, 1);
+  // Headroom above the line's own peak, for its point label to sit in —
+  // basing it on the *span* alone badly undershoots a narrow-range series
+  // (a set of Wh/km values within a few points of each other has a tiny
+  // span but is still nowhere near 0, so it still needs real headroom on
+  // its own terms; reported live, this let the line itself render directly
+  // through its own point labels on an hourly chart whose Wh/km values all
+  // sat within a ~10-point band). Whichever of the two needs is larger.
+  const lineAxisMax = Math.ceil((lineMax + Math.max(lineSpan * 0.12, lineMax * 0.08)) / 10) * 10;
+  const MARGIN = 0.16;   // fraction of chart height kept clear between the two series
+  let neededBarAxisMax = barMax * 1.4;   // sane floor even with a single data point
+  barVals.forEach((b, i) => {
+    const l = lineVals[i];
+    if (!(b > 0) || l == null) return;
+    const lineFrac = l / lineAxisMax;
+    const need = b / Math.max(lineFrac - MARGIN, 0.1);
+    if (need > neededBarAxisMax) neededBarAxisMax = need;
+  });
+  const step = Math.ceil(neededBarAxisMax / (ticks - 1));
+  return { barAxisMax: step * (ticks - 1) || undefined, lineAxisMax };
+}
+
 Chart.defaults.color = TICK;
 Chart.defaults.borderColor = GRID;
 Chart.defaults.font.family = "-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif";
@@ -1061,14 +1101,16 @@ function renderCharts(d) {
     // "2026-W16" -> "W16'26" — short enough for an axis label but keeps the
     // year visible (matters once a window spans a year boundary).
     const wLabels = Object.keys(w).map((k) => k.replace(/^(\d{2})(\d{2})-W(\d+)/, "W$3'$2"));
-    const wDistAxisMax = barAxisHeadroom(Math.max(0, ...Object.values(wd)), EFF_Y_TICKS, 1.7);
+    const wBarVals = Object.keys(w).map(k => wd[k] ?? 0);
+    const wLineVals = Object.values(w);
+    const wPlan = dualAxisPlan(wBarVals, wLineVals);
     makeChart("effTrendChart", {
       data: { labels: wLabels, datasets: [
-        { type: "bar", label: "Distance", data: Object.keys(w).map(k => wd[k] ?? 0),
+        { type: "bar", label: "Distance", data: wBarVals,
           yAxisID: "y", backgroundColor: (c) => vGradient(c.chart, "#22c55e", 1, 0.35),
           hoverBackgroundColor: (c) => vGradient(c.chart, "#22c55e", 1, 0.6),
           borderRadius: 5, borderSkipped: false, maxBarThickness: 44 },
-        { type: "line", label: "Wh/km", data: Object.values(w), yAxisID: "y1",
+        { type: "line", label: "Wh/km", data: wLineVals, yAxisID: "y1",
           borderColor: "#e82127", borderWidth: 2.5,
           backgroundColor: (c) => vGradient(c.chart, "#e82127", 0.24, 0), fill: true, tension: .35,
           // Mark just the latest point so the current week is easy to spot.
@@ -1104,19 +1146,19 @@ function renderCharts(d) {
           // a diagonal one, freeing up the vertical room that used to cost.
           x: { grid: { display: false }, border: { display: false },
             ticks: { maxTicksLimit: 8, font: { size: 8 }, maxRotation: 0, minRotation: 0 } },
-          // Extra headroom on the distance axis (see barAxisHeadroom) keeps
-          // its bars in the chart's lower half so they never cross the
-          // Wh/km line, which — beginAtZero on its own axis — naturally
-          // rides near the top since real efficiency values are nowhere
-          // near 0.
+          // Headroom on the distance axis, and an explicit cap on the Wh/km
+          // one (see dualAxisPlan) so its lowest point never rides low
+          // enough to cross a tall bar — both computed together from the
+          // actual per-point data, not a fixed multiplier on each series'
+          // own aggregate max alone.
           y: { beginAtZero: true, border: { display: false }, grid: { color: GRID },
-            max: wDistAxisMax, ticks: { count: EFF_Y_TICKS, autoSkip: false, color: "#22c55e", font: { size: 9 } } },
+            max: wPlan.barAxisMax, ticks: { count: EFF_Y_TICKS, autoSkip: false, color: "#22c55e", font: { size: 9 } } },
           // A fixed tick count (not just a ceiling), with autoSkip off so a
           // shorter mobile box can't silently thin it back down — always
           // identical to the daily chart below, regardless of how each
           // window's own Wh/km range happens to differ.
           y1: { beginAtZero: true, position: "right", border: { display: false },
-            grid: { display: false },
+            grid: { display: false }, max: wPlan.lineAxisMax,
             ticks: { count: EFF_Y_TICKS, autoSkip: false, color: "#ff9a9e", font: { size: 9 } } },
         } },
     });
@@ -1133,14 +1175,16 @@ function renderCharts(d) {
       const [y, m, day] = k.split("-");
       return `${day}/${m}/${y.slice(2)}`;
     });
-    const dDistAxisMax = barAxisHeadroom(Math.max(0, ...Object.values(ddist)), EFF_Y_TICKS, 1.7);
+    const dBarVals = Object.keys(dd).map(k => ddist[k] ?? 0);
+    const dLineVals = Object.values(dd);
+    const dPlan = dualAxisPlan(dBarVals, dLineVals);
     makeChart("effDailyTrendChart", {
       data: { labels: dLabels, datasets: [
-        { type: "bar", label: "Distance", data: Object.keys(dd).map(k => ddist[k] ?? 0),
+        { type: "bar", label: "Distance", data: dBarVals,
           yAxisID: "y", backgroundColor: (c) => vGradient(c.chart, "#22c55e", 1, 0.35),
           hoverBackgroundColor: (c) => vGradient(c.chart, "#22c55e", 1, 0.6),
           borderRadius: 3, borderSkipped: false, maxBarThickness: 20 },
-        { type: "line", label: "Wh/km", data: Object.values(dd), yAxisID: "y1",
+        { type: "line", label: "Wh/km", data: dLineVals, yAxisID: "y1",
           borderColor: "#e82127", borderWidth: 2.5,
           backgroundColor: (c) => vGradient(c.chart, "#e82127", 0.24, 0), fill: true, tension: .35,
           pointRadius: (c) => c.dataIndex === c.dataset.data.length - 1 ? 4 : 0,
@@ -1171,13 +1215,13 @@ function renderCharts(d) {
           x: { grid: { display: false }, border: { display: false },
             ticks: { maxTicksLimit: 8, font: { size: 8 }, maxRotation: 0, minRotation: 0 } },
           y: { beginAtZero: true, border: { display: false }, grid: { color: GRID },
-            max: dDistAxisMax, ticks: { count: EFF_Y_TICKS, autoSkip: false, color: "#22c55e", font: { size: 9 } } },
+            max: dPlan.barAxisMax, ticks: { count: EFF_Y_TICKS, autoSkip: false, color: "#22c55e", font: { size: 9 } } },
           // Same fixed tick count (and autoSkip off) as the weekly chart
           // above — the row gap follows it exactly rather than each chart
           // auto-picking its own "nice" step from its own (typically
           // wider/noisier) daily range.
           y1: { beginAtZero: true, position: "right", border: { display: false },
-            grid: { display: false },
+            grid: { display: false }, max: dPlan.lineAxisMax,
             ticks: { count: EFF_Y_TICKS, autoSkip: false, color: "#ff9a9e", font: { size: 9 } } },
         } },
     });
@@ -1193,16 +1237,18 @@ function renderCharts(d) {
     // afternoons, cold mornings) run less efficiently, in one chart.
     const th = drv.trips_by_hour;
     const eh = drv.efficiency_by_hour || {};
-    const tripAxisMax = barAxisHeadroom(Math.max(0, ...Object.values(th)));
+    const hBarVals = Object.values(th);
+    const hLineVals = Object.keys(th).map(h => eh[h] ?? null);
+    const hPlan = dualAxisPlan(hBarVals, hLineVals);
     makeChart("tripsHourChart", {
       data: {
         labels: Object.keys(th).map(h => h + "h"),
         datasets: [
-          { type: "bar", label: "Trips", data: Object.values(th), yAxisID: "y",
+          { type: "bar", label: "Trips", data: hBarVals, yAxisID: "y",
             backgroundColor: (c) => vGradient(c.chart, "#f59e0b", 1, 0.35),
             hoverBackgroundColor: (c) => vGradient(c.chart, "#f59e0b", 1, 0.6),
             borderRadius: 5, borderSkipped: false, maxBarThickness: 44 },
-          { type: "line", label: "Wh/km", data: Object.keys(th).map(h => eh[h] ?? null),
+          { type: "line", label: "Wh/km", data: hLineVals,
             yAxisID: "y1", borderColor: "#e82127", borderWidth: 2.5, tension: .35,
             spanGaps: true, pointRadius: 0, pointHitRadius: 12, pointHoverRadius: 5,
             pointBackgroundColor: "#e82127", pointBorderColor: "#171b22", pointBorderWidth: 2 },
@@ -1252,10 +1298,11 @@ function renderCharts(d) {
           // colour matches its own series (amber for Trips, red for Wh/km)
           // so it's obvious at a glance which scale a number belongs to.
           y: { beginAtZero: true, border: { display: false }, grid: { color: GRID },
-            max: tripAxisMax,
+            max: hPlan.barAxisMax,
             ticks: { count: EFF_Y_TICKS, autoSkip: false, precision: 0, color: "#f59e0b", font: { size: 9 } } },
           y1: { beginAtZero: true, position: "right", border: { display: false },
-            grid: { display: false }, ticks: { count: EFF_Y_TICKS, autoSkip: false, color: "#ff9a9e", font: { size: 9 } } },
+            grid: { display: false }, max: hPlan.lineAxisMax,
+            ticks: { count: EFF_Y_TICKS, autoSkip: false, color: "#ff9a9e", font: { size: 9 } } },
         },
       },
     });
