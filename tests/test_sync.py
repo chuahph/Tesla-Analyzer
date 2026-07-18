@@ -1,18 +1,18 @@
 """Tests for the snapshot session state machine (app/sync.py)."""
-from app.sync import process_snapshot, snapshot_from_vehicle_data
+from app.sync import is_driving, process_snapshot, snapshot_from_vehicle_data
 
 T0 = 1_760_000_000.0  # seconds epoch
 
 
 def snap(ts, odo_km, soc, shift="P", speed=0.0, charging=False, kw=0.0,
          fast=False, present=False, locked=False, lat=None, lon=None,
-         range_km=None, energy_added=0.0):
+         range_km=None, energy_added=0.0, car_wash_mode=False):
     return {
         "ts": ts, "odo_km": odo_km, "soc": soc, "shift": shift,
         "speed_kmh": speed, "charging": charging, "charger_kw": kw,
         "fast": fast, "out_temp": 28.0, "user_present": present,
         "locked": locked, "lat": lat, "lon": lon, "range_km": range_km,
-        "energy_added_kwh": energy_added,
+        "energy_added_kwh": energy_added, "car_wash_mode": car_wash_mode,
     }
 
 
@@ -81,6 +81,50 @@ def test_snapshot_parses_sentry_and_climate_as_none_when_unreported():
     })
     assert enabled_but_idle["cabin_overheat_protection"] == "On"
     assert enabled_but_idle["cabin_overheat_protection_actively_cooling"] is False
+
+
+def test_snapshot_parses_car_wash_mode():
+    off = snapshot_from_vehicle_data({
+        "drive_state": {"timestamp": 1_760_000_000, "shift_state": "P"},
+        "charge_state": {"battery_level": 72},
+        "climate_state": {},
+        "vehicle_state": {},
+    })
+    assert off["car_wash_mode"] is False
+
+    on = snapshot_from_vehicle_data({
+        "drive_state": {"timestamp": 1_760_000_000, "shift_state": "N"},
+        "charge_state": {"battery_level": 72},
+        "climate_state": {},
+        "vehicle_state": {"car_wash_mode": True},
+    })
+    assert on["car_wash_mode"] is True
+
+
+def test_is_driving_ignores_shift_and_speed_during_car_wash_mode():
+    """Car Wash Mode shifts to Neutral (and the conveyor can nudge the car a
+    little) purely so it can be moved through the wash — that's never a real
+    drive, however shift/speed reads while it's active."""
+    assert not is_driving(snap(T0, 10_000.0, 80, shift="N", speed=3.0, car_wash_mode=True))
+    assert is_driving(snap(T0, 10_000.0, 80, shift="N", speed=3.0))  # same, mode off: still driving
+
+
+def test_car_wash_mode_after_parking_does_not_reopen_the_trip():
+    """Park, lock, then run Car Wash Mode (shift -> N, a few metres of
+    conveyor creep) — must stay parked, not read as a new drive starting."""
+    s1 = snap(T0, 10_000.0, 80)                                            # parked at home
+    s2 = snap(T0 + 600, 10_010.0, 77, shift="D", speed=60)                 # driving
+    s3 = snap(T0 + 1200, 10_017.5, 73, shift="P", locked=True)             # arrive & lock
+    s4 = snap(T0 + 1500, 10_017.6, 73, shift="N", car_wash_mode=True)      # car wash creep
+
+    _, _, trip, _ = step(None, s1)
+    assert trip is None
+    _, _, trip, _ = step(s1, s2)
+    assert trip is not None
+    d, _, trip, _ = step(s2, s3, trip)
+    assert trip is None and len(d) == 1               # closed on the lock
+    d, _, trip, _ = step(s3, s4, trip)
+    assert trip is None and d == []                    # wash creep opened nothing new
 
 
 def test_charge_from_rejects_soc_recalibration_blip_with_negligible_real_energy():

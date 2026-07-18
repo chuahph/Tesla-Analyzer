@@ -153,6 +153,10 @@ def snapshot_from_vehicle_data(data: dict[str, Any]) -> dict[str, Any]:
         "speed_kmh": float(ds.get("speed") or 0.0) * MILES_TO_KM,
         "user_present": bool(vs.get("is_user_present")),
         "locked": bool(vs.get("locked")),
+        # Car Wash Mode shifts to Neutral so a conveyor/attendant can move the
+        # car, which would otherwise read as "driving" (shift != "P") and
+        # keep a trip open or reopen one right after parking.
+        "car_wash_mode": bool(vs.get("car_wash_mode")),
         "lat": ds.get("latitude"),
         "lon": ds.get("longitude"),
         # Parked-drain context, not used for the drive/charge state machine —
@@ -180,6 +184,11 @@ def snapshot_from_vehicle_data(data: dict[str, Any]) -> dict[str, Any]:
 
 
 def is_driving(s: dict[str, Any]) -> bool:
+    # Car Wash Mode puts the car in Neutral (and it may get pushed a few
+    # metres by the conveyor) without anyone actually driving it — never
+    # treat that as a drive, regardless of shift/speed.
+    if s.get("car_wash_mode"):
+        return False
     return (s.get("shift") or "P") != "P" or (s.get("speed_kmh") or 0.0) > 0
 
 
@@ -998,6 +1007,11 @@ def process_snapshot(
         # _split_gap_events for why the plain whole-gap drive reconstruction
         # below would get the wrong energy here.
         drives.append(split_drive)
+    elif prev and (cur.get("car_wash_mode") or prev.get("car_wash_mode")):
+        # Odometer moved (conveyor/attendant creep) but Car Wash Mode was
+        # involved at either end of the gap — that's not a drive, so don't
+        # reconstruct one from it.
+        pass
     elif prev:
         # A whole drive happened between snapshots (asleep / cron gap).
         d = _drive_from(prev, cur, capacity_kwh, drive_min_km=drive_min_km)
