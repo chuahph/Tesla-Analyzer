@@ -591,8 +591,8 @@ canvas { max-height: 260px; }
 /* Parked/vampire-drain gap right before a trip — a slim aside between two
    trip rows, not a row of its own peer with them. */
 .plain-list li.vampire-note {
-  padding: 2px 0; border-bottom: none; font-size: 11px; color: var(--muted);
-  justify-content: center; font-style: italic;
+  padding: 1px 0; border-bottom: none; font-size: 11px; color: var(--muted);
+  justify-content: center; font-style: italic; line-height: 1.3;
 }
 /* Inferred trip character (highway cruise, stop-go, peak hour, hot …). */
 .trip-cond {
