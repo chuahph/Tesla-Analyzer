@@ -2088,6 +2088,12 @@ async function load() {
     const badge = document.getElementById("mode-badge");
     badge.textContent = mode;
     badge.className = "badge " + mode;
+    // Current odometer, right next to the window/LIVE badge — a quick
+    // "is this actually current" sanity check without opening a card.
+    const odoBadge = document.getElementById("odo-badge");
+    const odo = d.vehicle && d.vehicle.current_odo_km;
+    odoBadge.textContent = odo != null ? `${fmt(odo)} km` : "";
+    odoBadge.classList.toggle("hidden", odo == null);
     if (STATIC_MODE) updateResetButton();
     // (The trip tools' visibility is handled in renderLists, once trips load.)
 

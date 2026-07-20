@@ -297,6 +297,12 @@ select {
 }
 .badge.demo { color: var(--amber); border-color: var(--amber); }
 .badge.live { color: var(--green); border-color: var(--green); }
+/* Odometer sits beside the window select and the live/demo badge — same
+   pill shape, but neutral (it's a fact, not a status) and not all-caps. */
+.badge.odo-badge {
+  color: var(--muted); text-transform: none; letter-spacing: normal;
+  font-variant-numeric: tabular-nums; font-weight: 500;
+}
 
 /* Standardise every top-row control (Sync, Window, badge) to one compact,
    equal height so the row reads as a tidy strip. */

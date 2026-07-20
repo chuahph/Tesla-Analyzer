@@ -2184,6 +2184,13 @@ def summary(
 
     vehicle_out = VehicleOut.model_validate(vehicle).model_dump()
     vehicle_out.update({k: v for k, v in vin_info.items() if v})  # year, plant
+    # Current odometer, for the header strip next to the window/LIVE badge —
+    # the true latest reading (not the battery-health readings above, which
+    # are capped/ordered for the degradation curve, not "most recent").
+    current_odo = session.scalar(
+        select(func.max(BatteryReading.odo_km)).where(BatteryReading.vehicle_id == vehicle.id)
+    )
+    vehicle_out["current_odo_km"] = round(current_odo, 1) if current_odo is not None else None
     # The pack size actually used to turn range/SoC deltas into kWh, and where
     # it came from — surfaced so a wrong figure (which scales every drive's
     # kWh) is visible and diagnosable rather than hidden.
