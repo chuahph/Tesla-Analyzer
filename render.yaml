@@ -19,10 +19,16 @@ services:
       - key: RATED_WH_PER_KM
         value: "150"
       # Persistent storage: paste a PERMANENTLY-FREE Postgres connection string
-      # from Neon (neon.tech → sign up with GitHub → create project → copy the
-      # connection string). Render prompts you for this value when applying the
-      # blueprint. Unlike Render's own free Postgres, Neon's free tier does not
-      # expire after 30 days.
+      # from Supabase (supabase.com → sign up with GitHub → New project → copy
+      # the "Session pooler" connection string, port 5432 — Render is
+      # IPv4-only and Supabase's direct connection is IPv6-only, so the
+      # pooler is the one that actually connects). Render prompts you for
+      # this value when applying the blueprint. Unlike Render's own free
+      # Postgres, Supabase's free tier does not expire after 30 days — it
+      # only pauses after 7 days with zero database activity, which the
+      # sync cron (below) makes a non-issue. If your database password
+      # contains @ : / ? # or %, percent-encode it (@ becomes %40, etc.) —
+      # an unescaped special character there breaks the connection string.
       - key: DATABASE_URL
         sync: false
       # Private dashboard: Render prompts you for this value too — pick any

@@ -207,7 +207,7 @@
 
       <div class="guide-flow">
         Your Tesla → Tesla's API → <strong>your copy of this app</strong> (hosted on Render)
-        → history saved in a database (Neon) → you view it here.
+        → history saved in a database (Supabase) → you view it here.
       </div>
 
       <p class="guide-tip">
@@ -227,7 +227,7 @@
                 is fully independent — it keeps working no matter what happens to the original.</p>
               <ol>
                 <li>You'll need a free <strong>GitHub</strong> account — the same login also
-                  signs you into Render and Neon later. Open <strong>github.com</strong> → Sign up.</li>
+                  signs you into Render and Supabase later. Open <strong>github.com</strong> → Sign up.</li>
                 <li>Open the Tesla Analyzer repository and tap <strong>Fork</strong> (top-right)
                   → <strong>Create fork</strong>. That copies it into <em>your</em> GitHub.</li>
                 <li>Done — you now own a copy at
@@ -239,7 +239,7 @@
                 improved. To pull in the latest version, open your fork on GitHub and tap
                 <strong>Sync fork → Update branch</strong> (one click). Because Render is
                 connected to your fork, it then <strong>redeploys automatically</strong>. Your
-                logged data in Neon is untouched by an update, so it's safe to do anytime.</p>
+                logged data in Supabase is untouched by an update, so it's safe to do anytime.</p>
               <p class="gs-note">🤖 <strong>Prefer fully hands-off updates?</strong> Your fork
                 includes a ready-made <strong>“Sync fork with upstream”</strong> action. Just
                 enable it once: open your fork's <strong>Actions</strong> tab →
@@ -252,16 +252,27 @@
 
         <li>
           <details>
-            <summary><span class="gs-num">2</span> 🗄️ Neon — a free database that never expires</summary>
+            <summary><span class="gs-num">2</span> 🗄️ Supabase — a free database that never expires</summary>
             <div class="gs-body">
               <p><strong>Why:</strong> the free Render server (Step 3) forgets everything each
-                time it sleeps. Neon stores your drives and charges permanently — its free tier
-                doesn't expire after 30 days like most others.</p>
+                time it sleeps. Supabase stores your drives and charges permanently — its free
+                tier doesn't expire after 30 days like most others, and (unlike some
+                alternatives) it doesn't meter compute hours either, so the frequent auto-sync
+                cadence in Step 6 stays free indefinitely. It only pauses a project after 7 days
+                with <em>zero</em> database activity — a running sync cron makes that a non-issue.</p>
               <ol>
-                <li>Open <strong>neon.tech</strong> → <strong>Sign up with GitHub</strong>.</li>
-                <li>Create a new project (any name, pick the region closest to you).</li>
-                <li>Copy the <strong>connection string</strong> — it starts with
-                  <code>postgresql://…</code>. Keep it handy for Step 3.</li>
+                <li>Open <strong>supabase.com</strong> → <strong>Sign up with GitHub</strong>.</li>
+                <li><strong>New project</strong> (any name, pick the region closest to you) →
+                  set a database password and save it somewhere — you'll need it below.</li>
+                <li>Open <strong>Settings → Database → Connection string</strong> and select the
+                  <strong>Session pooler</strong> option (port <code>5432</code>) — <em>not</em>
+                  "Direct connection". Render only supports IPv4, and Supabase's direct
+                  connection is IPv6-only; the Session pooler works over IPv4.</li>
+                <li>Fill in your real password in place of <code>[YOUR-PASSWORD]</code>. If the
+                  password contains <code>@ : / ? #</code> or <code>%</code>, percent-encode just
+                  that character (e.g. <code>@</code> → <code>%40</code>) — an unescaped special
+                  character there breaks the connection string and the app won't start. Keep the
+                  finished string handy for Step 3.</li>
               </ol>
             </div>
           </details>
@@ -283,7 +294,8 @@
                   <code>render.yaml</code> automatically.</li>
                 <li>Render will prompt you to fill a few secrets:
                   <ul>
-                    <li><code>DATABASE_URL</code> — paste your Neon string from Step 2.</li>
+                    <li><code>DATABASE_URL</code> — paste your Supabase Session pooler string
+                      from Step 2.</li>
                     <li><code>APP_PASSCODE</code> — any passcode you like; the app asks for it
                       so only you can open your dashboard.</li>
                     <li><code>SYNC_KEY</code> — any secret word; used for auto-logging (Step 6).</li>

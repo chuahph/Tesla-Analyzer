@@ -272,6 +272,18 @@ Any similar service works the same way — UptimeRobot (as an "HTTP(s)" monitor,
 which incidentally also gets you uptime alerts for free), EasyCron, or your
 own always-on machine's system `cron` calling `curl`.
 
+**A tight cron interval interacts with your database choice.** Every
+`/api/sync` tick touches the database — even a "car's asleep" tick writes a
+status row — so a 1-2 minute cron keeps the DB compute continuously active,
+never idle long enough to suspend. Supabase's free tier doesn't meter compute
+hours (it only pauses a project after 7 days of zero activity, which a cron
+this frequent makes moot), so this cadence is free indefinitely there. Neon's
+free tier *does* meter compute hours with a 5-minute auto-suspend — a cron
+tighter than that keeps it active ~24/7, which burns through Neon's 100
+CU-hour/month cap in roughly half a month regardless of how much the car
+itself sleeps. If you're on Neon, either raise the interval past 5 minutes or
+move to Supabase (see the in-app setup guide's database step).
+
 **How often you call this doesn't force how often the car is read.** The
 endpoint decides that for itself: it never reads a car that's asleep, and
 beyond that it only reads an online-but-idle car about once every
@@ -305,8 +317,8 @@ It will work, just with the delay/reliability caveat above.
 ## Automated backups
 
 `GET /api/backup` builds a full-history export (the same ZIP as **⬇ Export
-CSV**) and POSTs it to a webhook you configure — a safety net for the free-tier
-Neon database, without setting up an SMTP server.
+CSV**) and POSTs it to a webhook you configure — a safety net for your
+free-tier database, without setting up an SMTP server.
 
 1. Set `BACKUP_WEBHOOK_URL` in Render's environment variables to wherever you
    want the ZIP delivered: your own small receiving endpoint, a cloud-storage
