@@ -402,31 +402,37 @@
 
         <li>
           <details>
-            <summary><span class="gs-num">6</span> 🔄 Hands-off logging — recommended</summary>
+            <summary><span class="gs-num">6</span> ⏰ Set up auto-sync (cron) — required</summary>
             <div class="gs-body">
-              <p><strong>Why:</strong> because Render sleeps, a small scheduled “ping” keeps
-                your history filling in even when you're not looking at the app. Pick
-                <strong>one</strong> of these:</p>
-              <p class="gs-note gs-note-info">⏰ <strong>External cron (recommended).</strong>
-                On <strong>cron-job.org</strong> (free), create a job that visits
-                <code>https://ev-drive-analyzer.onrender.com/api/sync?key=YOUR_SYNC_KEY</code>
-                <strong>every 1-2 minutes</strong> (use the <code>SYNC_KEY</code> from Step 3). No
-                repository secrets or GitHub Actions involved.</p>
-              <p class="gs-note">🤖 <strong>Or GitHub Actions.</strong> Your fork includes a
-                <strong>“Sync car from Tesla”</strong> workflow, but its schedule is
-                <strong>disabled by default</strong> — GitHub documents that trigger as
-                best-effort, and delays are long enough to miss a short trip's whole driving
-                window. To use it anyway: uncomment the <code>schedule:</code> block at the top
-                of <code>.github/workflows/sync-car.yml</code>, then add two repository secrets
-                (<strong>Settings → Secrets and variables → Actions</strong>): <code>RENDER_URL</code>
-                = your Render address, and <code>SYNC_KEY</code> = the same value from your Render
-                environment.</p>
+              <p><strong>Why this isn't optional:</strong> the app never polls Tesla on its own —
+                it only checks when something calls <code>/api/sync</code>. Skip this step and
+                your history only fills in on the rare moment you happen to have the dashboard open
+                while something's happening. A scheduled "ping" is what actually makes logging
+                automatic, which is the entire point of self-hosting this.</p>
+              <ol>
+                <li>Open <strong>cron-job.org</strong> (free) → create a free account.</li>
+                <li><strong>Create cronjob</strong> → URL:
+                  <code>https://ev-drive-analyzer.onrender.com/api/sync?key=YOUR_SYNC_KEY</code>
+                  (use the <code>SYNC_KEY</code> from Step 3).</li>
+                <li>Set the schedule to <strong>every 1-2 minutes</strong> → Save. Done — no
+                  repository secrets or GitHub Actions involved.</li>
+              </ol>
               <p class="gs-note">🔋 <strong>Frequent pings are safe.</strong> A built-in sleep
                 window means that once the car has been idle ~15 min, the app stops actually
                 polling it (the pings just keep Render awake), so it <em>won't</em> cause vampire
                 battery drain. The tighter interval simply catches your drives more often while
                 you're actually moving — which gives accurate live speed (incl. max speed) instead
                 of a trip reconstructed after the fact.</p>
+              <p class="gs-note gs-note-warn">🤖 <strong>Rather not use a third-party site?</strong>
+                Your fork includes a backup <strong>"Sync car from Tesla"</strong> GitHub Actions
+                workflow, but its schedule is disabled by default — GitHub documents that trigger
+                as best-effort, with delays long enough to miss a short trip's whole driving
+                window. Only reach for this if you specifically don't want cron-job.org: uncomment
+                the <code>schedule:</code> block at the top of
+                <code>.github/workflows/sync-car.yml</code>, then add two repository secrets
+                (<strong>Settings → Secrets and variables → Actions</strong>):
+                <code>RENDER_URL</code> = your Render address, and <code>SYNC_KEY</code> = the same
+                value from your Render environment.</p>
             </div>
           </details>
         </li>

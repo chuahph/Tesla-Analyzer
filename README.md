@@ -252,7 +252,7 @@ or more late. The result: a real trip logged with the right distance but the
 wrong clock time. A dedicated external cron service is simply more reliable
 than GitHub's for a job that needs to fire close to on-time, every time.
 
-### Set up an external cron (recommended)
+### Set up an external cron (required)
 
 Any service that can hit a URL on a schedule works. [cron-job.org](https://cron-job.org)
 is free and reliable enough for this:
