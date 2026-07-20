@@ -923,6 +923,10 @@ footer { padding: 18px 28px; color: var(--muted); font-size: 12px; border-top: 1
   .controls label { display: none; }   /* the select explains itself */
   .controls #btn-sync { flex: 0 0 auto; }
   .controls #range { flex: 1 1 auto; min-width: 0; }
+  /* Match the quick-nav row below: every .qn-btn there is equal-width
+     (flex: 1 1 0 across the full row) — line these two up with it so the
+     header reads as one aligned grid instead of two unrelated rows. */
+  .controls #odo-badge, .controls #mode-badge { flex: 0 0 auto; min-width: 72px; }
   .bottom-actions { gap: 6px; }
   .bottom-actions .btn { padding: 8px 10px; font-size: 12.5px; }
   .bottom-actions #btn-import, .bottom-actions #btn-link { flex: 1 1 42%; }
