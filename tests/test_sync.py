@@ -1143,6 +1143,25 @@ def test_power_on_backdate_reanchors_odo_and_soc_not_just_timestamp():
     assert trip["soc"] == s1["soc"]
 
 
+def test_power_on_backdate_recovers_odo_even_when_shift_too_short_to_estimate():
+    """A short pre-departure stretch (well under the ~0.5 km the timestamp
+    estimate's own 60s floor requires) must still be recovered onto the
+    trip -- the distance is a measured fact from two real odometer
+    readings, not an estimate, so it doesn't need the same confidence bar
+    the clock guess does. Before this was fixed, this exact case fell
+    through with neither the timestamp nor the odo/SoC corrected."""
+    s1 = snap(T0, 20_000.0, 55.0, locked=True)                     # parked
+    # 40-min blind gap, but only 0.2 km covered by the time this first
+    # driving reading arrives -- pace stays at the 30 km/h floor, so the
+    # implied shift (24s) never clears the 60s "worth backdating" bar.
+    s2 = snap(T0 + 2400, 20_000.2, 54.9, shift="D", speed=15)
+    _, _, trip, _ = step(s1, s2)
+    assert trip is not None
+    assert trip["odo_km"] == s1["odo_km"]        # the 0.2 km recovered, not dropped
+    assert trip["soc"] == s1["soc"]
+    assert trip["ts"] == s2["ts"]                # too little evidence to backdate the clock
+
+
 def test_short_blind_gap_arrival_does_not_inflate_duration():
     """Reported live: a real trip ended, the car parked within about a
     minute, but the next poll only landed 7 minutes later — logged as one
@@ -1247,14 +1266,20 @@ def test_confirmed_park_then_short_gap_does_not_start_new_trip_at_zero_gap():
 
 
 def test_stale_prev_does_not_backdate_open_trip_start():
-    """A drive seen right after an overnight park must anchor its start to *now*,
-    not to last night's stale snapshot (which would add hours of idle time)."""
+    """A drive seen right after an overnight park must anchor its *clock* to
+    now, not to last night's stale snapshot (which would add hours of idle
+    time to the duration) — but the small real distance/energy covered
+    before this first driving reading arrived (a measured odometer delta,
+    not a guess) still belongs to the trip, however short: the 60s "worth
+    it" floor gates the *timestamp* estimate only, not this recovery."""
     prev = snap(T0, 10_000.0, 80, range_km=400.0)               # parked last night
-    # 10 hours later the car is seen driving (barely moved since = it was parked).
+    # 10 hours later the car is seen driving, having covered just 0.3 km --
+    # too little for the timestamp estimate to clear its own 60s floor.
     cur = snap(T0 + 36_000, 10_000.3, 79, shift="D", speed=40, range_km=393.0)
     _, _, trip, _ = step(prev, cur)
     assert trip is not None
-    assert trip["odo_km"] == cur["odo_km"]       # started here, not at prev
+    assert trip["odo_km"] == prev["odo_km"]      # the 0.3 km recovered, not dropped
+    assert trip["soc"] == prev["soc"]
     assert trip["ts"] == cur["ts"]               # start time is now, not 10h ago
 
 

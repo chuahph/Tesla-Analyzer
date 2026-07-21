@@ -932,24 +932,6 @@ def process_snapshot(
             gap_min = (cur["ts"] - prev["ts"]) / 60.0
             moved = cur["odo_km"] - prev["odo_km"]
             implied = moved / (gap_min / 60.0) if gap_min > 0 else 0.0
-            # A confirmed-parked prev from only a short gap ago is this
-            # trip's true odometer/energy baseline even when the timestamp
-            # correction below is too weakly evidenced to run (sub-60s
-            # shift): a parked car cannot move, so whatever the odometer
-            # gained in the gap is the trip's own first stretch — leaving
-            # the anchor at cur silently drops it (reported live, checked
-            # against the car's own trip meter: a 4.1 km drive logged as
-            # 3.6 km, its kWh short by the same stretch — every short trip
-            # whose first driving poll lands mid-departure loses up to a
-            # poll gap's worth of low-speed pull-out this way). Bounded to
-            # STALE_ANCHOR_MIN so a long blind gap (an unobserved errand,
-            # then parked again) can't fold a *different* drive's distance
-            # or hours of standby drain into this one.
-            if (was_parked and not is_driving(prev) and moved >= drive_min_km
-                    and gap_min <= STALE_ANCHOR_MIN):
-                open_trip["odo_km"] = prev["odo_km"]
-                open_trip["soc"] = prev["soc"]
-                open_trip["range_km"] = prev.get("range_km")
             # Same evidence-gated threshold as the arrival-side correction:
             # only when the gap's own average implied speed reads below a
             # normal driving pace (CITY_SPEED_KMH) — at or above it, the
@@ -970,38 +952,51 @@ def process_snapshot(
             if was_parked:
                 min_gap = 0.0
             if gap_min >= min_gap and implied < CITY_SPEED_KMH and moved >= drive_min_km:
+                if was_parked and not is_driving(prev):
+                    # base=cur anchored the trip's own odo/SoC to the *first
+                    # driving* reading, which already reflects the "catch-up"
+                    # distance/energy this block just proved happened before
+                    # cur arrived — left as cur's, that chunk would silently
+                    # vanish from the trip and surface one gap earlier as
+                    # vampire drain instead (reported live: parked-gap kWh
+                    # reading noticeably higher than expected, "should belong
+                    # to trip kWh"). prev genuinely hadn't moved yet (the car
+                    # doesn't move while parked), so its odo/SoC are the
+                    # correct baseline for wherever within [prev, cur]
+                    # departure actually began — same anchor the
+                    # was_parked=False branch already uses by default.
+                    # range_km must move with soc: _energy_kwh derives energy
+                    # from the range delta *first*, so restoring soc alone
+                    # left the energy uncorrected — and worse, handed it a
+                    # mismatched pair (prev's soc against cur's range) to
+                    # project the full pack from.
+                    #
+                    # Unconditional on moved >= drive_min_km alone, not also
+                    # gated on the timestamp estimate below being "worth it"
+                    # (>= 60s) — the movement itself is a measured fact from
+                    # two real odometer readings, not an estimate, so unlike
+                    # the clock guess it doesn't need a confidence floor.
+                    # Previously sharing that 60s gate meant a short
+                    # pre-departure stretch (under ~0.5 km at the pace floor)
+                    # kept falling into the vampire-drain miscount above with
+                    # no recovery at all (reported live, checked against the
+                    # car's own trip meter: a 4.1 km drive logged as 3.6 km,
+                    # its kWh short by the same stretch).
+                    open_trip["odo_km"] = prev["odo_km"]
+                    open_trip["soc"] = prev["soc"]
+                    open_trip["range_km"] = prev.get("range_km")
                 # Same pace model as the arrival-side estimate: ``cur`` is the
                 # first driving reading, so its instantaneous speed is real
                 # evidence of the pace, not just an assumption — prefer it
                 # over the flat city-speed floor when it implies a faster
-                # start (e.g. already on a fast road when first seen).
+                # start (e.g. already on a fast road when first seen). This
+                # part *is* just an estimate, so it keeps its own 60s "worth
+                # it" floor, independent of the odo/SoC recovery above.
                 pace = max((cur.get("speed_kmh") or 0.0) * 0.65, CITY_SPEED_KMH)
                 shift_sec = moved / pace * 3600.0
                 if shift_sec >= 60:
                     est_start = cur["ts"] - shift_sec
                     open_trip["ts"] = min(max(est_start, prev["ts"]), cur["ts"])
-                    if was_parked:
-                        # base=cur anchored the trip's own odo/SoC to the
-                        # *first driving* reading, which already reflects the
-                        # "catch-up" distance/energy this correction just
-                        # proved happened before cur arrived — left as cur's,
-                        # that chunk would silently vanish from the trip and
-                        # surface one gap earlier as vampire drain instead
-                        # (reported live: parked-gap kWh reading noticeably
-                        # higher than expected, "should belong to trip kWh").
-                        # prev genuinely hadn't moved yet (the car doesn't
-                        # move while parked), so its odo/SoC are the correct
-                        # baseline for wherever within [prev, est_start]
-                        # departure actually began — same anchor the
-                        # was_parked=False branch already uses by default.
-                        # range_km must move with soc: _energy_kwh derives
-                        # energy from the range delta *first*, so restoring
-                        # soc alone left the energy uncorrected — and worse,
-                        # handed it a mismatched pair (prev's soc against
-                        # cur's range) to project the full pack from.
-                        open_trip["odo_km"] = prev["odo_km"]
-                        open_trip["soc"] = prev["soc"]
-                        open_trip["range_km"] = prev.get("range_km")
     elif prev and split_drive:
         # A charge and a drive both happened in this gap — see
         # _split_gap_events for why the plain whole-gap drive reconstruction
