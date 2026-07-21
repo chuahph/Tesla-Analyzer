@@ -1375,6 +1375,78 @@ def test_reset_tags_clears_every_trip_tag_and_respects_gate():
             assert client.post("/api/data/reset-tags").json()["reset_tags"] == 0
     finally:
         settings.app_passcode = old
+
+
+def test_auto_tag_matches_office_and_home_places_leaves_others_alone():
+    """Auto-tag fills in Work/Personal by matching each untagged trip's
+    coordinates against the Office/Home Place right now: Office -> work,
+    Home -> personal, neither -> left untagged. An already-tagged trip
+    (manual or from a prior run) is never touched, even if it also matches
+    a Place."""
+    from app.database import SessionLocal
+    from app.models import Drive, Vehicle
+
+    settings = get_settings()
+    old = settings.app_passcode
+    settings.app_passcode = ""
+    ids = {}
+    try:
+        with TestClient(app) as client:  # startup seeds demo data
+            assert client.post("/api/places", json={
+                "name": "Office", "lat": 5.4000, "lon": 100.4000, "radius_km": 0.2,
+            }).status_code == 200
+            assert client.post("/api/places", json={
+                "name": "Home", "lat": 5.3300, "lon": 100.3000, "radius_km": 0.2,
+            }).status_code == 200
+
+            with SessionLocal() as s:
+                vehicle_id = s.query(Vehicle).order_by(Vehicle.id).first().id
+                office_trip = Drive(
+                    vehicle_id=vehicle_id, start_time=datetime.now(), end_time=datetime.now(),
+                    distance_km=5.0, start_coords="5.4001, 100.4001", end_coords="",
+                )
+                home_trip = Drive(
+                    vehicle_id=vehicle_id, start_time=datetime.now(), end_time=datetime.now(),
+                    distance_km=5.0, start_coords="5.3301, 100.3001", end_coords="",
+                )
+                neither_trip = Drive(
+                    vehicle_id=vehicle_id, start_time=datetime.now(), end_time=datetime.now(),
+                    distance_km=5.0, start_coords="5.9000, 100.9000", end_coords="",
+                )
+                already_tagged = Drive(
+                    vehicle_id=vehicle_id, start_time=datetime.now(), end_time=datetime.now(),
+                    distance_km=5.0, start_coords="5.4002, 100.4002", end_coords="",
+                    tag="personal",  # set by hand -- must survive even though it's at Office
+                )
+                s.add_all([office_trip, home_trip, neither_trip, already_tagged])
+                s.commit()
+                ids = {
+                    "office": office_trip.id, "home": home_trip.id,
+                    "neither": neither_trip.id, "tagged": already_tagged.id,
+                }
+
+            resp = client.post("/api/data/auto-tag")
+            assert resp.status_code == 200
+            assert resp.json()["tagged"] == 2   # office_trip + home_trip only
+
+            with SessionLocal() as s:
+                assert s.get(Drive, ids["office"]).tag == "work"
+                assert s.get(Drive, ids["home"]).tag == "personal"
+                assert s.get(Drive, ids["neither"]).tag == ""
+                assert s.get(Drive, ids["tagged"]).tag == "personal"   # untouched
+
+            # Nothing left to fill the second time.
+            assert client.post("/api/data/auto-tag").json()["tagged"] == 0
+    finally:
+        settings.app_passcode = old
+        with SessionLocal() as s:
+            real_ids = [i for i in ids.values() if i is not None]
+            if real_ids:
+                s.query(Drive).filter(Drive.id.in_(real_ids)).delete(synchronize_session=False)
+                s.commit()
+            from app.models import Place
+            s.query(Place).delete()
+            s.commit()
         from app import services
         from app.database import SessionLocal as SL
         with SL() as s:

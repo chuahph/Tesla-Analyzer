@@ -2343,6 +2343,7 @@ function setSelectMode(on) {
   show("select-trips", !on);
   show("reset-locations", !on);
   show("reset-tags", !on);
+  show("auto-tag", !on);
   show("clear-trips", !on);
   show("delete-selected", on);
   show("reset-selected-locations", on);
@@ -2454,6 +2455,26 @@ if (resetTagsBtn) {
     } finally {
       resetTagsBtn.disabled = false;
       resetTagsBtn.textContent = "🏷️ Reset tags";
+    }
+  });
+}
+
+const autoTagBtn = document.getElementById("auto-tag");
+if (autoTagBtn) {
+  autoTagBtn.addEventListener("click", async () => {
+    autoTagBtn.disabled = true;
+    autoTagBtn.textContent = "Tagging…";
+    try {
+      const res = await fetch("/api/data/auto-tag", { method: "POST" });
+      const body = await res.json();
+      if (!res.ok) throw new Error(body.detail || "Could not auto-tag trips");
+      await load();
+      if (!body.tagged) alert("No untagged trips matched your Office/Home Place.");
+    } catch (e) {
+      alert(e.message);
+    } finally {
+      autoTagBtn.disabled = false;
+      autoTagBtn.textContent = "🪄 Auto-tag";
     }
   });
 }
