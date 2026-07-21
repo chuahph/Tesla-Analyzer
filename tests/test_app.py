@@ -831,6 +831,77 @@ def test_place_label_prefers_specific_feature_over_broad_district():
     assert _label_from_geocode({}) == ("", "")
 
 
+def test_google_geocode_label_prefers_poi_over_result_order():
+    """Google doesn't reliably return the POI result first, unlike Nominatim
+    — a point_of_interest/establishment result must be found explicitly
+    rather than trusting results[0]."""
+    from app.api.routes import _label_from_google_geocode
+
+    assert _label_from_google_geocode({
+        "results": [
+            {  # A broader street_address result Google happened to list first.
+                "types": ["street_address"],
+                "address_components": [
+                    {"long_name": "1", "types": ["street_number"]},
+                    {"long_name": "Persiaran Gurney", "types": ["route"]},
+                    {"long_name": "George Town", "types": ["locality"]},
+                ],
+            },
+            {  # The actual POI at this point, listed second.
+                "types": ["point_of_interest", "establishment"],
+                "address_components": [
+                    {"long_name": "Queensbay Mall", "types": ["point_of_interest", "establishment"]},
+                    {"long_name": "Bayan Lepas", "types": ["sublocality"]},
+                    {"long_name": "George Town", "types": ["locality"]},
+                ],
+            },
+        ],
+    }) == ("Queensbay Mall, Bayan Lepas", "Bayan Lepas")
+
+    # No POI result: falls back to street number + route, area from locality.
+    assert _label_from_google_geocode({
+        "results": [{
+            "types": ["street_address"],
+            "address_components": [
+                {"long_name": "12", "types": ["street_number"]},
+                {"long_name": "Lebuh Tunku Kudin", "types": ["route"]},
+                {"long_name": "George Town", "types": ["locality"]},
+            ],
+        }],
+    }) == ("12 Lebuh Tunku Kudin, George Town", "George Town")
+
+    assert _label_from_google_geocode({}) == ("", "")
+    assert _label_from_google_geocode({"results": []}) == ("", "")
+
+
+def test_place_and_area_prefers_google_when_configured_falls_back_on_miss(monkeypatch):
+    """google_maps_api_key set -> Google is tried first; a failed/empty
+    Google lookup still falls back to Nominatim rather than giving up."""
+    from app.api import routes
+
+    settings = get_settings()
+    old = settings.google_maps_api_key
+    settings.google_maps_api_key = "test-key"
+    routes._PLACE_CACHE.clear()
+    try:
+        monkeypatch.setattr(routes, "_google_reverse_geocode", lambda lat, lon, key: ("Queensbay Mall, Bayan Lepas", "Bayan Lepas"))
+        assert routes._place_and_area("5.3300, 100.3000") == ("Queensbay Mall, Bayan Lepas", "Bayan Lepas")
+
+        routes._PLACE_CACHE.clear()
+        monkeypatch.setattr(routes, "_google_reverse_geocode", lambda lat, lon, key: None)
+        monkeypatch.setattr(
+            routes.httpx, "get",
+            lambda *a, **k: type("R", (), {
+                "raise_for_status": lambda self: None,
+                "json": lambda self: {"address": {"road": "Lebuh Tunku Kudin", "city": "George Town"}},
+            })(),
+        )
+        assert routes._place_and_area("5.4100, 100.3200") == ("Lebuh Tunku Kudin, George Town", "George Town")
+    finally:
+        settings.google_maps_api_key = old
+        routes._PLACE_CACHE.clear()
+
+
 def test_place_and_area_passes_through_invalid_coords():
     """No network call for an empty/malformed coordinate string — both label
     and area fall back to the raw input untouched."""

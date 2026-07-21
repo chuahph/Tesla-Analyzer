@@ -423,6 +423,29 @@ up to more events later (car left unlocked, sync gone stale, ...).
 
 ---
 
+## Better location names (Google Maps, optional)
+
+Trip and charge locations are reverse-geocoded automatically via OpenStreetMap's
+Nominatim — free, no API key, no setup. Its POI/business coverage is sparser
+in some regions than Google's, though, so a drive to a specific shop or
+restaurant can come back named after the street instead.
+
+To use Google's Geocoding API instead, set `GOOGLE_MAPS_API_KEY` in Render's
+environment variables:
+
+1. [console.cloud.google.com](https://console.cloud.google.com) → create/select
+   a project → **APIs & Services → Library** → enable **Geocoding API**.
+2. **APIs & Services → Credentials → Create credentials → API key.**
+3. Set `GOOGLE_MAPS_API_KEY` in Render to that key, and redeploy.
+
+Google is tried first once the key is set; Nominatim is still the automatic
+fallback for any lookup that fails (bad key, exhausted quota, no result), so
+this can never block a trip from being logged and named — worst case, it's as
+if the key weren't set. Google's free monthly credit comfortably covers a
+personal account's usage.
+
+---
+
 ## Named places (Home/Office)
 
 Trip locations are reverse-geocoded automatically, but a street address isn't

@@ -271,6 +271,61 @@ def _live_eta(session: Session, snap: dict, live: dict, capacity_kwh: float) -> 
 _PLACE_CACHE: dict[str, tuple[str, str]] = {}
 
 
+def _label_from_google_geocode(data: dict) -> tuple[str, str]:
+    """Turn a Google Geocoding API reverse payload into (label, area), in the
+    same (specific spot, coarser area) shape _label_from_geocode returns for
+    Nominatim, so callers don't need to know which provider answered.
+
+    Google returns several results for the same point at different
+    granularities, not reliably ordered specific-first — a POI/establishment
+    result is searched for explicitly rather than trusting results[0].
+    """
+    results = data.get("results") or []
+    poi = next(
+        (r for r in results
+         if "point_of_interest" in r.get("types", []) or "establishment" in r.get("types", [])),
+        None,
+    )
+    best = poi or (results[0] if results else None)
+    if not best:
+        return "", ""
+    comps = {t: c["long_name"] for c in best.get("address_components", []) for t in c.get("types", [])}
+    route = (
+        f"{comps['street_number']} {comps['route']}" if comps.get("route") and comps.get("street_number")
+        else comps.get("route")
+    )
+    name = (
+        comps.get("point_of_interest") or comps.get("premise") or route
+        or comps.get("neighborhood") or comps.get("sublocality") or comps.get("locality") or ""
+    )
+    area = (
+        comps.get("sublocality") or comps.get("locality")
+        or comps.get("administrative_area_level_2") or comps.get("administrative_area_level_1") or ""
+    )
+    label = f"{name}, {area}" if name and area and name != area else (name or area)
+    return label[:120], area[:120]
+
+
+def _google_reverse_geocode(lat: str, lon: str, api_key: str) -> tuple[str, str] | None:
+    """(label, area) via Google's Geocoding API, or None on any failure/miss
+    — the caller falls back to Nominatim, so a bad key or an exhausted quota
+    degrades gracefully instead of blocking trip naming."""
+    try:
+        resp = httpx.get(
+            "https://maps.googleapis.com/maps/api/geocode/json",
+            params={"latlng": f"{lat},{lon}", "key": api_key},
+            timeout=4.0,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        if data.get("status") != "OK":
+            return None
+        label, area = _label_from_google_geocode(data)
+        return (label, area) if label else None
+    except Exception:  # noqa: BLE001 — never let naming block trip logging
+        return None
+
+
 def _label_from_geocode(data: dict) -> tuple[str, str]:
     """Turn a Nominatim reverse payload into (label, area).
 
@@ -328,11 +383,14 @@ def _geofence_name(coords: str, session: Session | None) -> str | None:
 def _place_and_area(coords: str, session: Session | None = None) -> tuple[str, str]:
     """Best-effort reverse geocode of a 'lat, lon' string to (label, area).
 
-    Uses OpenStreetMap's Nominatim (a couple of lookups per completed trip is
-    well within its usage policy). Any failure falls back to the raw
-    coordinates for both, which stay searchable in a maps app. A coordinate
-    inside a user-defined geofence (see _geofence_name) short-circuits this
-    entirely and uses the user's own name for both label and area.
+    Tries Google's Geocoding API first when GOOGLE_MAPS_API_KEY is set — its
+    POI/business coverage is often noticeably better than OpenStreetMap's in
+    areas Nominatim only has street-level data for. Falls back to Nominatim
+    (no key required) when Google isn't configured or a lookup fails, and
+    falls back further to the raw coordinates if both fail — which stay
+    searchable in a maps app either way. A coordinate inside a user-defined
+    geofence (see _geofence_name) short-circuits this entirely and uses the
+    user's own name for both label and area.
     """
     geofenced = _geofence_name(coords, session)
     if geofenced:
@@ -341,25 +399,30 @@ def _place_and_area(coords: str, session: Session | None = None) -> tuple[str, s
         return coords, coords
     if coords in _PLACE_CACHE:
         return _PLACE_CACHE[coords]
-    try:
-        lat, lon = (p.strip() for p in coords.split(",", 1))
-        resp = httpx.get(
-            "https://nominatim.openstreetmap.org/reverse",
-            # zoom 18 = building/address level (16 stopped at neighbourhood, so
-            # it named a broad district instead of the actual spot);
-            # namedetails surfaces the matched feature's own name.
-            params={
-                "format": "jsonv2", "lat": lat, "lon": lon,
-                "zoom": 18, "addressdetails": 1, "namedetails": 1,
-            },
-            headers={"User-Agent": "tesla-analyzer/0.1"},
-            timeout=4.0,
-        )
-        resp.raise_for_status()
-        label, area = _label_from_geocode(resp.json())
-        result = (label or coords, area or coords)
-    except Exception:  # noqa: BLE001 — never let naming block trip logging
-        result = (coords, coords)
+    lat, lon = (p.strip() for p in coords.split(",", 1))
+    google_key = get_settings().google_maps_api_key
+    google_result = _google_reverse_geocode(lat, lon, google_key) if google_key else None
+    if google_result:
+        result = google_result
+    else:
+        try:
+            resp = httpx.get(
+                "https://nominatim.openstreetmap.org/reverse",
+                # zoom 18 = building/address level (16 stopped at neighbourhood, so
+                # it named a broad district instead of the actual spot);
+                # namedetails surfaces the matched feature's own name.
+                params={
+                    "format": "jsonv2", "lat": lat, "lon": lon,
+                    "zoom": 18, "addressdetails": 1, "namedetails": 1,
+                },
+                headers={"User-Agent": "tesla-analyzer/0.1"},
+                timeout=4.0,
+            )
+            resp.raise_for_status()
+            label, area = _label_from_geocode(resp.json())
+            result = (label or coords, area or coords)
+        except Exception:  # noqa: BLE001 — never let naming block trip logging
+            result = (coords, coords)
     _PLACE_CACHE[coords] = result
     return result
 

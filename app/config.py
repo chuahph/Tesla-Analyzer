@@ -68,6 +68,16 @@ class Settings(BaseSettings):
     # backup_webhook_url: call it on whatever cadence you want the report at
     # (monthly is the intended use, but the endpoint itself is period-agnostic).
     report_webhook_url: str = ""
+    # Optional: reverse-geocode trip/charge locations via Google's Geocoding
+    # API instead of OpenStreetMap's Nominatim. Google's POI/business
+    # coverage is often noticeably better in areas Nominatim only has street
+    # data for, at the cost of needing a Google Cloud API key (free tier
+    # covers a personal account's usage many times over). Empty = keep using
+    # Nominatim, no key required, current behaviour unchanged. When set,
+    # Google is tried first and Nominatim is still the fallback if a lookup
+    # fails, so a quota hiccup or an invalid key never blocks trip logging.
+    google_maps_api_key: str = ""
+
     # Optional generic event webhook: POSTs a small JSON payload
     # ({event, title, body, timestamp}) for charge-complete, low-battery and
     # drive-complete events — for home automation (Home Assistant, IFTTT,
