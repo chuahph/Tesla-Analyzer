@@ -3098,13 +3098,13 @@ if (!STATIC_MODE) {
 // Named places (Home/Office geofences): needs the self-hosted backend to
 // persist against, same as push notifications and the Tesla-account link
 // button, so the whole feature stays hidden in the static/demo build.
-async function savePlace(coords, name) {
+async function savePlace(coords, name, radiusKm) {
   const [lat, lon] = coords.split(",").map((s) => parseFloat(s.trim()));
   if (!isFinite(lat) || !isFinite(lon) || !name || !name.trim()) return false;
   try {
     const resp = await fetch("/api/places", {
       method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ name: name.trim(), lat, lon, radius_km: 0.15 }),
+      body: JSON.stringify({ name: name.trim(), lat, lon, radius_km: radiusKm ?? 0.15 }),
     });
     return resp.ok;
   } catch (e) {
@@ -3143,13 +3143,35 @@ async function renderPlacesList() {
   }
   listEl.innerHTML = places.map((p) =>
     `<li><span>${p.name}<span class="place-meta"> · ${p.radius_km} km radius</span></span>` +
-    `<button class="place-del" data-id="${p.id}" title="Remove this place">✕</button></li>`
+    `<span class="place-actions">` +
+    `<button class="place-edit" data-id="${p.id}" data-name="${p.name}" data-lat="${p.lat}" ` +
+    `data-lon="${p.lon}" data-radius="${p.radius_km}" title="Edit radius">✏️</button>` +
+    `<button class="place-del" data-id="${p.id}" title="Remove this place">✕</button>` +
+    `</span></li>`
   ).join("");
   listEl.querySelectorAll(".place-del").forEach((btn) => {
     btn.addEventListener("click", async () => {
       await fetch(`/api/places/${btn.dataset.id}`, { method: "DELETE" });
       renderPlacesList();
       load();   // trips this place used to relabel go back to their geocoded name
+    });
+  });
+  listEl.querySelectorAll(".place-edit").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      const { name, lat, lon, radius } = btn.dataset;
+      const input = window.prompt(
+        `Radius for "${name}", in km (0.02–5):`, radius,
+      );
+      if (input === null) return;
+      const km = parseFloat(input);
+      if (!isFinite(km) || km <= 0) {
+        alert("Enter a number of km, e.g. 0.15");
+        return;
+      }
+      const ok = await savePlace(`${lat}, ${lon}`, name, km);
+      if (!ok) { alert("Couldn't save — try again."); return; }
+      renderPlacesList();
+      load();   // trips within the new radius pick it up (or drop out of it)
     });
   });
 }

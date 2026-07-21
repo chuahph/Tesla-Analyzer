@@ -1036,9 +1036,12 @@ footer { padding: 18px 28px; color: var(--muted); font-size: 12px; border-top: 1
   font-size: 13.5px;
 }
 .places-list .place-meta { color: var(--muted); font-size: 12px; }
+.places-list .place-actions { display: flex; align-items: center; gap: 10px; flex-shrink: 0; }
+.places-list button.place-edit,
 .places-list button.place-del {
   border: none; background: none; color: var(--muted); cursor: pointer; font-size: 13px;
 }
+.places-list button.place-edit:hover { color: var(--accent, #4da3ff); }
 .places-list button.place-del:hover { color: #ff6b70; }
 .places-empty { color: var(--muted); font-size: 13px; margin: 0 0 12px; }
 
