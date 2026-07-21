@@ -502,6 +502,13 @@ def delete_drives(payload: dict = Body(...), session: Session = Depends(get_sess
     return {"deleted_drives": deleted}
 
 
+@router.post("/data/reset-tags")
+def reset_tags(session: Session = Depends(get_session)):
+    """Clear the work/personal tag on every trip, back to untagged."""
+    reset = services.reset_tags(session)
+    return {"reset_tags": reset}
+
+
 def _relabel_drives(session: Session, ids: list[int] | None) -> dict:
     """Re-geocode trips' start/end locations from their stored raw
     coordinates, discarding whatever's currently shown — a Place name from a

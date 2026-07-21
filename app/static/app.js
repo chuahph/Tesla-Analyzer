@@ -2342,6 +2342,7 @@ function setSelectMode(on) {
   };
   show("select-trips", !on);
   show("reset-locations", !on);
+  show("reset-tags", !on);
   show("clear-trips", !on);
   show("delete-selected", on);
   show("reset-selected-locations", on);
@@ -2432,6 +2433,27 @@ if (resetLocationsBtn) {
     } finally {
       resetLocationsBtn.disabled = false;
       resetLocationsBtn.textContent = "🔄 Reset locations";
+    }
+  });
+}
+
+const resetTagsBtn = document.getElementById("reset-tags");
+if (resetTagsBtn) {
+  resetTagsBtn.addEventListener("click", async () => {
+    if (!confirm("Clear the Work/Personal tag on every trip?\n\nAll trips go back to untagged. " +
+                 "Distance, energy, location and everything else are untouched.")) return;
+    resetTagsBtn.disabled = true;
+    resetTagsBtn.textContent = "Resetting…";
+    try {
+      const res = await fetch("/api/data/reset-tags", { method: "POST" });
+      const body = await res.json();
+      if (!res.ok) throw new Error(body.detail || "Could not reset tags");
+      await load();
+    } catch (e) {
+      alert(e.message);
+    } finally {
+      resetTagsBtn.disabled = false;
+      resetTagsBtn.textContent = "🏷️ Reset tags";
     }
   });
 }

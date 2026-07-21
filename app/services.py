@@ -1,7 +1,7 @@
 """Higher-level actions shared by the API: importing data and linking accounts."""
 from __future__ import annotations
 
-from sqlalchemy import delete
+from sqlalchemy import delete, update
 
 from . import pricing_prefs, state
 from .config import get_settings
@@ -55,6 +55,18 @@ def delete_drives(session, ids: list[int]) -> int:
         return 0
     n = session.query(Drive).filter(Drive.id.in_(ids)).count()
     session.execute(delete(Drive).where(Drive.id.in_(ids)))
+    session.commit()
+    return n
+
+
+def reset_tags(session) -> int:
+    """Clear the work/personal category on every trip, back to untagged.
+
+    Only the tag column is touched — location, distance, energy and
+    everything else about the trip stay exactly as they were.
+    """
+    n = session.query(Drive).filter(Drive.tag != "").count()
+    session.execute(update(Drive).values(tag=""))
     session.commit()
     return n
 

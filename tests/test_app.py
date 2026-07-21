@@ -1336,6 +1336,45 @@ def test_delete_selected_drives_by_id():
             assert client.post("/api/data/delete-drives", json={"ids": []}).json()["deleted_drives"] == 0
     finally:
         settings.app_passcode = old
+
+
+def test_reset_tags_clears_every_trip_tag_and_respects_gate():
+    """Bulk 'reset tags' clears the Work/Personal tag on every trip back to
+    untagged, leaves everything else about each trip untouched, and sits
+    behind the passcode gate like every other data-mutating endpoint."""
+    from app.database import SessionLocal
+    from app.models import Drive
+
+    settings = get_settings()
+    old = settings.app_passcode
+    settings.app_passcode = "secret123"
+    try:
+        with TestClient(app) as client:  # startup seeds demo data
+            with SessionLocal() as s:
+                rows = s.query(Drive).order_by(Drive.id).limit(3).all()
+                ids = [d.id for d in rows]
+                for d in rows:
+                    d.tag = "work"
+                s.commit()
+                orig_distances = {d.id: d.distance_km for d in rows}
+
+            assert client.post("/api/data/reset-tags").status_code == 401
+            client.post("/login", data={"passcode": "secret123"})
+
+            resp = client.post("/api/data/reset-tags")
+            assert resp.status_code == 200
+            assert resp.json()["reset_tags"] == 3
+
+            with SessionLocal() as s:
+                for i in ids:
+                    d = s.get(Drive, i)
+                    assert d.tag == ""                              # cleared
+                    assert d.distance_km == orig_distances[i]       # everything else kept
+
+            # Nothing left to clear the second time.
+            assert client.post("/api/data/reset-tags").json()["reset_tags"] == 0
+    finally:
+        settings.app_passcode = old
         from app import services
         from app.database import SessionLocal as SL
         with SL() as s:
