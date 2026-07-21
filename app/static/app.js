@@ -2462,6 +2462,9 @@ if (resetTagsBtn) {
 const autoTagBtn = document.getElementById("auto-tag");
 if (autoTagBtn) {
   autoTagBtn.addEventListener("click", async () => {
+    if (!confirm("Tag every trip Work/Personal from your Office/Home Place?\n\nThis overwrites " +
+                 "tags you set by hand too — Places become the single source of truth. A trip " +
+                 "matching neither goes back to untagged.")) return;
     autoTagBtn.disabled = true;
     autoTagBtn.textContent = "Tagging…";
     try {
@@ -2469,7 +2472,7 @@ if (autoTagBtn) {
       const body = await res.json();
       if (!res.ok) throw new Error(body.detail || "Could not auto-tag trips");
       await load();
-      if (!body.tagged) alert("No untagged trips matched your Office/Home Place.");
+      if (!body.changed) alert("No trip tags changed — everything already matched your Places.");
     } catch (e) {
       alert(e.message);
     } finally {

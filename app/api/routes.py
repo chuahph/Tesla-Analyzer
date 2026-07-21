@@ -511,29 +511,26 @@ def reset_tags(session: Session = Depends(get_session)):
 
 @router.post("/data/auto-tag")
 def auto_tag(session: Session = Depends(get_session)):
-    """Tag every currently-untagged trip Work/Personal by matching its
-    start/end coordinates against the Office/Home Place right now — the
-    same geofence match every other Place-aware feature uses, so this
-    reflects your latest Place definitions, not whatever a trip's location
-    text happened to say when it was logged. Office wins if a trip touches
-    both (a commute or a client visit is still a work trip); a trip
-    touching neither is left untagged rather than guessed at. Never
-    touches a trip that already has a tag — manual or from a prior run —
-    only fills gaps."""
-    tagged = 0
-    for d in session.scalars(select(Drive).where(Drive.tag == "")).all():
+    """Tag every trip Work/Personal by matching its start/end coordinates
+    against the Office/Home Place right now — the same geofence match every
+    other Place-aware feature uses, so this reflects your latest Place
+    definitions, not whatever a trip's location text happened to say when
+    it was logged. Office wins if a trip touches both (a commute or a
+    client visit is still a work trip); a trip touching neither is set back
+    to untagged. Places are the single source of truth here: this
+    overwrites every trip's tag, including ones set by hand, not just gaps."""
+    changed = 0
+    for d in session.scalars(select(Drive)).all():
         names = {
             (_geofence_name(c, session) or "").strip().lower()
             for c in (d.start_coords, d.end_coords) if c
         }
-        if "office" in names:
-            d.tag = "work"
-            tagged += 1
-        elif "home" in names:
-            d.tag = "personal"
-            tagged += 1
+        new_tag = "work" if "office" in names else "personal" if "home" in names else ""
+        if new_tag != d.tag:
+            d.tag = new_tag
+            changed += 1
     session.commit()
-    return {"tagged": tagged}
+    return {"changed": changed}
 
 
 def _relabel_drives(session: Session, ids: list[int] | None) -> dict:

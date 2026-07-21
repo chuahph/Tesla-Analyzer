@@ -1377,12 +1377,14 @@ def test_reset_tags_clears_every_trip_tag_and_respects_gate():
         settings.app_passcode = old
 
 
-def test_auto_tag_matches_office_and_home_places_leaves_others_alone():
-    """Auto-tag fills in Work/Personal by matching each untagged trip's
+def test_auto_tag_overwrites_every_trip_from_current_places():
+    """Auto-tag sets every trip's Work/Personal tag by matching its
     coordinates against the Office/Home Place right now: Office -> work,
-    Home -> personal, neither -> left untagged. An already-tagged trip
-    (manual or from a prior run) is never touched, even if it also matches
-    a Place."""
+    Home -> personal, neither -> untagged. Places are the single source of
+    truth, so this overwrites a manually-set tag that disagrees (including
+    resetting one to untagged when the trip matches neither place) — but
+    leaves a trip alone (not counted as "changed") when its tag already
+    agrees with the current Place match."""
     from app.database import SessionLocal
     from app.models import Drive, Vehicle
 
@@ -1401,42 +1403,54 @@ def test_auto_tag_matches_office_and_home_places_leaves_others_alone():
 
             with SessionLocal() as s:
                 vehicle_id = s.query(Vehicle).order_by(Vehicle.id).first().id
-                office_trip = Drive(
+                office_untagged = Drive(
                     vehicle_id=vehicle_id, start_time=datetime.now(), end_time=datetime.now(),
                     distance_km=5.0, start_coords="5.4001, 100.4001", end_coords="",
+                )
+                office_already_work = Drive(
+                    vehicle_id=vehicle_id, start_time=datetime.now(), end_time=datetime.now(),
+                    distance_km=5.0, start_coords="5.4002, 100.4002", end_coords="",
+                    tag="work",  # already agrees with the Place -- not a "change"
+                )
+                office_wrongly_personal = Drive(
+                    vehicle_id=vehicle_id, start_time=datetime.now(), end_time=datetime.now(),
+                    distance_km=5.0, start_coords="5.4003, 100.4003", end_coords="",
+                    tag="personal",  # set by hand -- Office wins and overwrites it
                 )
                 home_trip = Drive(
                     vehicle_id=vehicle_id, start_time=datetime.now(), end_time=datetime.now(),
                     distance_km=5.0, start_coords="5.3301, 100.3001", end_coords="",
                 )
-                neither_trip = Drive(
+                neither_but_tagged = Drive(
                     vehicle_id=vehicle_id, start_time=datetime.now(), end_time=datetime.now(),
                     distance_km=5.0, start_coords="5.9000, 100.9000", end_coords="",
+                    tag="work",  # matches no Place -- reset back to untagged
                 )
-                already_tagged = Drive(
-                    vehicle_id=vehicle_id, start_time=datetime.now(), end_time=datetime.now(),
-                    distance_km=5.0, start_coords="5.4002, 100.4002", end_coords="",
-                    tag="personal",  # set by hand -- must survive even though it's at Office
-                )
-                s.add_all([office_trip, home_trip, neither_trip, already_tagged])
+                s.add_all([office_untagged, office_already_work, office_wrongly_personal,
+                          home_trip, neither_but_tagged])
                 s.commit()
                 ids = {
-                    "office": office_trip.id, "home": home_trip.id,
-                    "neither": neither_trip.id, "tagged": already_tagged.id,
+                    "office_untagged": office_untagged.id, "office_already_work": office_already_work.id,
+                    "office_wrongly_personal": office_wrongly_personal.id, "home": home_trip.id,
+                    "neither_but_tagged": neither_but_tagged.id,
                 }
 
             resp = client.post("/api/data/auto-tag")
             assert resp.status_code == 200
-            assert resp.json()["tagged"] == 2   # office_trip + home_trip only
+            # >= 3, not ==: this also sweeps the seeded demo dataset, which
+            # may itself have coordinates/tags that shift too -- the precise
+            # per-trip behaviour below is what actually matters.
+            assert resp.json()["changed"] >= 3   # office_untagged, office_wrongly_personal, neither_but_tagged
 
             with SessionLocal() as s:
-                assert s.get(Drive, ids["office"]).tag == "work"
+                assert s.get(Drive, ids["office_untagged"]).tag == "work"
+                assert s.get(Drive, ids["office_already_work"]).tag == "work"
+                assert s.get(Drive, ids["office_wrongly_personal"]).tag == "work"   # overwritten
                 assert s.get(Drive, ids["home"]).tag == "personal"
-                assert s.get(Drive, ids["neither"]).tag == ""
-                assert s.get(Drive, ids["tagged"]).tag == "personal"   # untouched
+                assert s.get(Drive, ids["neither_but_tagged"]).tag == ""            # reset
 
-            # Nothing left to fill the second time.
-            assert client.post("/api/data/auto-tag").json()["tagged"] == 0
+            # Nothing left to change the second time.
+            assert client.post("/api/data/auto-tag").json()["changed"] == 0
     finally:
         settings.app_passcode = old
         with SessionLocal() as s:
