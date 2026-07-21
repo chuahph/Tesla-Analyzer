@@ -502,6 +502,52 @@ def delete_drives(payload: dict = Body(...), session: Session = Depends(get_sess
     return {"deleted_drives": deleted}
 
 
+def _relabel_drives(session: Session, ids: list[int] | None) -> dict:
+    """Re-geocode trips' start/end locations from their stored raw
+    coordinates, discarding whatever's currently shown — a Place name from a
+    geofence that's since been deleted/moved, or a result cached before a
+    better geocoder (e.g. Google, once GOOGLE_MAPS_API_KEY is set) was
+    configured. Still goes through the normal lookup (geofence match first,
+    then Google-or-Nominatim), so a trip that genuinely belongs to a Place
+    comes right back labeled with it — this refreshes stale labels, it
+    doesn't strip correct ones. ``ids=None`` means every trip.
+
+    Distance, energy, timing and everything else are untouched — only the
+    four location/area columns are rewritten.
+    """
+    query = select(Drive)
+    if ids is not None:
+        query = query.where(Drive.id.in_(ids))
+    relabeled = skipped = 0
+    for d in session.scalars(query).all():
+        if not d.start_coords and not d.end_coords:
+            skipped += 1
+            continue
+        if d.start_coords:
+            _PLACE_CACHE.pop(d.start_coords, None)
+            d.start_location, d.start_area = _place_and_area(d.start_coords, session)
+        if d.end_coords:
+            _PLACE_CACHE.pop(d.end_coords, None)
+            d.end_location, d.end_area = _place_and_area(d.end_coords, session)
+        relabeled += 1
+    session.commit()
+    return {"relabeled": relabeled, "skipped": skipped}
+
+
+@router.post("/data/relabel-all-drives")
+def relabel_all_drives(session: Session = Depends(get_session)):
+    """Re-geocode every trip's location — see _relabel_drives."""
+    return _relabel_drives(session, None)
+
+
+@router.post("/data/relabel-drives")
+def relabel_drives(payload: dict = Body(...), session: Session = Depends(get_session)):
+    """Re-geocode only the selected trips' locations (by id) — see
+    _relabel_drives."""
+    ids = [int(i) for i in (payload.get("ids") or []) if str(i).lstrip("-").isdigit()]
+    return _relabel_drives(session, ids)
+
+
 @router.post("/data/clear-charges")
 def clear_charges(session: Session = Depends(get_session)):
     """Wipe the charging history for a clean start (trips/battery data kept).

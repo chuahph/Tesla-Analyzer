@@ -1574,6 +1574,82 @@ def test_places_crud_and_geofenced_labeling():
         settings.app_passcode = old
 
 
+def test_relabel_selected_drives_refreshes_stale_labels_only(monkeypatch):
+    """Reset locations (selected ids) re-runs the normal lookup from each
+    trip's stored raw coordinates and overwrites the stale label — a trip
+    with no stored coords (logged before that column existed) is left alone
+    since there's nothing to look it up from."""
+    from app.api import routes
+    from app.database import SessionLocal
+    from app.models import Drive, Vehicle
+
+    settings = get_settings()
+    old = settings.app_passcode
+    settings.app_passcode = ""
+    stale_id = no_coords_id = None
+    try:
+        with TestClient(app) as client:  # startup seeds demo data
+            with SessionLocal() as s:
+                vehicle_id = s.query(Vehicle).order_by(Vehicle.id).first().id
+                stale = Drive(
+                    vehicle_id=vehicle_id, start_time=datetime.now(), end_time=datetime.now(),
+                    distance_km=5.0, start_coords="5.9000, 100.9000", end_coords="",
+                    start_location="Stale Old Label", start_area="Stale Old Label",
+                )
+                no_coords = Drive(
+                    vehicle_id=vehicle_id, start_time=datetime.now(), end_time=datetime.now(),
+                    distance_km=3.0, start_coords="", end_coords="",
+                    start_location="Untouchable", start_area="Untouchable",
+                )
+                s.add_all([stale, no_coords])
+                s.commit()
+                stale_id, no_coords_id = stale.id, no_coords.id
+
+            routes._PLACE_CACHE.clear()
+            monkeypatch.setattr(
+                routes.httpx, "get",
+                lambda *a, **k: type("R", (), {
+                    "raise_for_status": lambda self: None,
+                    "json": lambda self: {"address": {"road": "Fresh Road", "city": "Freshville"}},
+                })(),
+            )
+
+            resp = client.post("/api/data/relabel-drives", json={"ids": [stale_id, no_coords_id]})
+            assert resp.status_code == 200
+            assert resp.json() == {"relabeled": 1, "skipped": 1}
+
+            with SessionLocal() as s:
+                assert s.get(Drive, stale_id).start_location == "Fresh Road, Freshville"
+                assert s.get(Drive, no_coords_id).start_location == "Untouchable"  # nothing to look up from
+
+            assert client.post("/api/data/relabel-drives", json={"ids": []}).json() == \
+                {"relabeled": 0, "skipped": 0}
+    finally:
+        settings.app_passcode = old
+        with SessionLocal() as s:
+            ids = [i for i in (stale_id, no_coords_id) if i is not None]
+            if ids:
+                s.query(Drive).filter(Drive.id.in_(ids)).delete(synchronize_session=False)
+                s.commit()
+
+
+def test_relabel_all_drives_endpoint_gated():
+    """Bulk 'reset all' sits behind the passcode gate like every other
+    data-mutating endpoint, and always returns the relabeled/skipped shape."""
+    settings = get_settings()
+    old = settings.app_passcode
+    settings.app_passcode = "secret123"
+    try:
+        with TestClient(app) as client:
+            assert client.post("/api/data/relabel-all-drives").status_code == 401
+            client.post("/login", data={"passcode": "secret123"})
+            resp = client.post("/api/data/relabel-all-drives")
+            assert resp.status_code == 200
+            assert set(resp.json()) == {"relabeled", "skipped"}
+    finally:
+        settings.app_passcode = old
+
+
 def test_manual_charge_logs_a_historical_session_additively():
     """A manually-logged charge is inserted for the active vehicle without
     touching any other data — the safe alternative to /api/import (which

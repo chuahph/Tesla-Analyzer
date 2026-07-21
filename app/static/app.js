@@ -2341,18 +2341,26 @@ function setSelectMode(on) {
     if (el) el.classList.toggle("hidden", !vis);
   };
   show("select-trips", !on);
+  show("reset-locations", !on);
   show("clear-trips", !on);
   show("delete-selected", on);
+  show("reset-selected-locations", on);
   show("cancel-select", on);
   renderLists(lastData || {});
 }
 
 function updateDeleteSelectedLabel() {
   const btn = document.getElementById("delete-selected");
-  if (!btn) return;
+  const resetBtn = document.getElementById("reset-selected-locations");
   const n = document.querySelectorAll(".trip-check:checked").length;
-  btn.textContent = n ? `Delete selected (${n})` : "Delete selected";
-  btn.disabled = !n;
+  if (btn) {
+    btn.textContent = n ? `Delete selected (${n})` : "Delete selected";
+    btn.disabled = !n;
+  }
+  if (resetBtn) {
+    resetBtn.textContent = n ? `Reset locations (${n})` : "Reset locations";
+    resetBtn.disabled = !n;
+  }
 }
 
 document.getElementById("recentTrips")?.addEventListener("change", (e) => {
@@ -2383,6 +2391,50 @@ document.getElementById("delete-selected")?.addEventListener("click", async () =
     btn.disabled = false;
   }
 });
+
+document.getElementById("reset-selected-locations")?.addEventListener("click", async () => {
+  const ids = [...document.querySelectorAll(".trip-check:checked")].map((c) => +c.value);
+  if (!ids.length) return;
+  const btn = document.getElementById("reset-selected-locations");
+  btn.disabled = true; btn.textContent = "Resetting…";
+  try {
+    const res = await fetch("/api/data/relabel-drives", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ids }),
+    });
+    const body = await res.json();
+    if (!res.ok) throw new Error(body.detail || "Could not reset locations");
+    tripSelectMode = false;
+    setSelectMode(false);
+    await load();
+  } catch (e) {
+    alert(e.message);
+    btn.disabled = false;
+    btn.textContent = "Reset locations";
+  }
+});
+
+const resetLocationsBtn = document.getElementById("reset-locations");
+if (resetLocationsBtn) {
+  resetLocationsBtn.addEventListener("click", async () => {
+    if (!confirm("Re-look-up the location name for every trip?\n\nUseful after defining/changing " +
+                 "a Place, or after adding a Google Maps API key — picks up the better name on " +
+                 "trips already logged. Distance, energy and everything else are untouched.")) return;
+    resetLocationsBtn.disabled = true;
+    resetLocationsBtn.textContent = "Resetting…";
+    try {
+      const res = await fetch("/api/data/relabel-all-drives", { method: "POST" });
+      const body = await res.json();
+      if (!res.ok) throw new Error(body.detail || "Could not reset locations");
+      await load();
+    } catch (e) {
+      alert(e.message);
+    } finally {
+      resetLocationsBtn.disabled = false;
+      resetLocationsBtn.textContent = "🔄 Reset locations";
+    }
+  });
+}
 
 const clearTripsBtn = document.getElementById("clear-trips");
 if (clearTripsBtn) {
