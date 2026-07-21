@@ -1703,7 +1703,10 @@ def test_relabel_selected_drives_refreshes_stale_labels_only(monkeypatch):
     """Reset locations (selected ids) re-runs the normal lookup from each
     trip's stored raw coordinates and overwrites the stale label — a trip
     with no stored coords (logged before that column existed) is left alone
-    since there's nothing to look it up from."""
+    since there's nothing to look it up from. Also clears the Work/Personal
+    tag on any trip it actually relabels (a location reset is a clean slate
+    for the trip's place-derived identity), but a skipped trip keeps its tag
+    too, same as it keeps its stale location."""
     from app.api import routes
     from app.database import SessionLocal
     from app.models import Drive, Vehicle
@@ -1720,11 +1723,13 @@ def test_relabel_selected_drives_refreshes_stale_labels_only(monkeypatch):
                     vehicle_id=vehicle_id, start_time=datetime.now(), end_time=datetime.now(),
                     distance_km=5.0, start_coords="5.9000, 100.9000", end_coords="",
                     start_location="Stale Old Label", start_area="Stale Old Label",
+                    tag="work",
                 )
                 no_coords = Drive(
                     vehicle_id=vehicle_id, start_time=datetime.now(), end_time=datetime.now(),
                     distance_km=3.0, start_coords="", end_coords="",
                     start_location="Untouchable", start_area="Untouchable",
+                    tag="personal",
                 )
                 s.add_all([stale, no_coords])
                 s.commit()
@@ -1745,7 +1750,9 @@ def test_relabel_selected_drives_refreshes_stale_labels_only(monkeypatch):
 
             with SessionLocal() as s:
                 assert s.get(Drive, stale_id).start_location == "Fresh Road, Freshville"
+                assert s.get(Drive, stale_id).tag == ""                          # tag cleared too
                 assert s.get(Drive, no_coords_id).start_location == "Untouchable"  # nothing to look up from
+                assert s.get(Drive, no_coords_id).tag == "personal"              # skipped -> tag kept too
 
             assert client.post("/api/data/relabel-drives", json={"ids": []}).json() == \
                 {"relabeled": 0, "skipped": 0}

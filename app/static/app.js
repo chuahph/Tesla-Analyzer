@@ -2397,6 +2397,8 @@ document.getElementById("delete-selected")?.addEventListener("click", async () =
 document.getElementById("reset-selected-locations")?.addEventListener("click", async () => {
   const ids = [...document.querySelectorAll(".trip-check:checked")].map((c) => +c.value);
   if (!ids.length) return;
+  if (!confirm(`Reset the location for ${ids.length} selected trip(s)?\n\nAlso clears each trip's ` +
+               "Work/Personal tag. Distance, energy and everything else are untouched.")) return;
   const btn = document.getElementById("reset-selected-locations");
   btn.disabled = true; btn.textContent = "Resetting…";
   try {
@@ -2421,7 +2423,8 @@ if (resetLocationsBtn) {
   resetLocationsBtn.addEventListener("click", async () => {
     if (!confirm("Re-look-up the location name for every trip?\n\nUseful after defining/changing " +
                  "a Place, or after adding a Google Maps API key — picks up the better name on " +
-                 "trips already logged. Distance, energy and everything else are untouched.")) return;
+                 "trips already logged. Also clears every trip's Work/Personal tag. Distance, " +
+                 "energy and everything else are untouched.")) return;
     resetLocationsBtn.disabled = true;
     resetLocationsBtn.textContent = "Resetting…";
     try {

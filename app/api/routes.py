@@ -543,8 +543,14 @@ def _relabel_drives(session: Session, ids: list[int] | None) -> dict:
     comes right back labeled with it — this refreshes stale labels, it
     doesn't strip correct ones. ``ids=None`` means every trip.
 
-    Distance, energy, timing and everything else are untouched — only the
-    four location/area columns are rewritten.
+    Also clears the trip's Work/Personal tag (manual or from a prior
+    Auto-tag run) — a location reset is meant to be a clean slate for the
+    trip's whole place-derived identity, not just the label text, and an
+    old tag calculated against a location that's about to change is exactly
+    as stale as the location was. Re-tag afterwards with Auto-tag if you
+    want it filled back in from the refreshed location.
+
+    Distance, energy, timing and everything else are untouched.
     """
     query = select(Drive)
     if ids is not None:
@@ -560,6 +566,7 @@ def _relabel_drives(session: Session, ids: list[int] | None) -> dict:
         if d.end_coords:
             _PLACE_CACHE.pop(d.end_coords, None)
             d.end_location, d.end_area = _place_and_area(d.end_coords, session)
+        d.tag = ""
         relabeled += 1
     session.commit()
     return {"relabeled": relabeled, "skipped": skipped}
