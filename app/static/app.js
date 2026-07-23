@@ -2475,7 +2475,12 @@ if (autoTagBtn) {
       const body = await res.json();
       if (!res.ok) throw new Error(body.detail || "Could not auto-tag trips");
       await load();
-      if (!body.changed) alert("No trip tags changed — everything already matched your Places.");
+      if (!body.office_place && !body.home_place) {
+        alert('No Place is named for either — add a Place whose name contains '
+          + '"Office" or "Home" (📍 Places at the bottom), then run Auto-tag again.');
+      } else if (!body.changed) {
+        alert("No trip tags changed — everything already matched your Places.");
+      }
     } catch (e) {
       alert(e.message);
     } finally {
@@ -3141,10 +3146,16 @@ async function renderPlacesList() {
       + 'a trip below, or "Use my location" here.</li>';
     return;
   }
+  // Names are free text from a prompt — escape them both as markup and inside
+  // the data-name attribute. Unescaped, a name like `Ah Ma's "Kopitiam"` would
+  // truncate at the quote, and since saving upserts *by name*, editing that
+  // place's radius would silently create a new wrongly-named place instead.
+  const esc = (s) => String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;").replace(/"/g, "&quot;");
   listEl.innerHTML = places.map((p) =>
-    `<li><span>${p.name}<span class="place-meta"> · ${p.radius_km} km radius</span></span>` +
+    `<li><span>${esc(p.name)}<span class="place-meta"> · ${p.radius_km} km radius</span></span>` +
     `<span class="place-actions">` +
-    `<button class="place-edit" data-id="${p.id}" data-name="${p.name}" data-lat="${p.lat}" ` +
+    `<button class="place-edit" data-id="${p.id}" data-name="${esc(p.name)}" data-lat="${p.lat}" ` +
     `data-lon="${p.lon}" data-radius="${p.radius_km}" title="Edit radius">✏️</button>` +
     `<button class="place-del" data-id="${p.id}" title="Remove this place">✕</button>` +
     `</span></li>`

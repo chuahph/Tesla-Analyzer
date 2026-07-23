@@ -905,14 +905,44 @@ def test_efficiency_analysis(seeded):
     result = efficiency_analysis.analyze(list(drives), rated_wh_per_km=150)
     assert result["available"]
     assert result["worst_efficiency_wh_per_km"] >= result["best_efficiency_wh_per_km"]
-    # Cold weather should be less efficient -> negative slope of Wh/km vs temp.
-    assert result["temp_efficiency_slope_wh_per_c"] < 0
+    # The slope's *sign* is asserted on constructed data below, not here:
+    # generate() anchors its window at datetime.now(), so the seasonal-temp
+    # slice this dataset covers depends on the real calendar date — and the
+    # sample efficiency model penalizes distance from 21°C in both
+    # directions, so a mostly-warm window (tests run in summer) legitimately
+    # flattens or flips the cold-is-worse slope. Only its existence is a
+    # stable property of this dataset.
+    assert isinstance(result["temp_efficiency_slope_wh_per_c"], float)
     # Each temperature bucket carries its trip count and average speed
     # alongside Wh/km, so a thin or slow (traffic-skewed) bucket can be
     # told apart from a genuine temperature effect.
     for bucket in result["efficiency_by_temp"].values():
         assert set(bucket) == {"wh_per_km", "n", "avg_speed_kmh"}
         assert bucket["n"] >= 1
+
+
+def test_temp_efficiency_slope_negative_when_cold_trips_cost_more():
+    """Cold trips burning more Wh/km than warm ones must yield a negative
+    Wh/km-vs-temp slope — asserted on constructed drives so the expected
+    sign is unambiguous (the seeded dataset's sign shifts with the real
+    calendar date; see test_efficiency_analysis)."""
+    from datetime import datetime
+
+    def mk(hour, wh_per_km, temp):
+        return Drive(start_time=datetime(2026, 1, 5, hour, 0),
+                     end_time=datetime(2026, 1, 5, hour, 30),
+                     distance_km=10.0, duration_min=30, avg_speed_kmh=40,
+                     max_speed_kmh=60, start_soc=80, end_soc=75,
+                     energy_used_kwh=wh_per_km * 10.0 / 1000.0,
+                     outside_temp_c=temp)
+    drives = [
+        mk(7, 210.0, 2.0),    # freezing morning, battery heater on
+        mk(9, 190.0, 8.0),
+        mk(12, 165.0, 15.0),
+        mk(15, 150.0, 22.0),  # mild afternoon, rated-ish
+    ]
+    result = efficiency_analysis.analyze(drives, rated_wh_per_km=150)
+    assert result["temp_efficiency_slope_wh_per_c"] < 0
 
 
 def test_efficiency_by_temp_bucket_reports_count_and_avg_speed():

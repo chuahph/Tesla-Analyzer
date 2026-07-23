@@ -1394,8 +1394,11 @@ def test_auto_tag_overwrites_every_trip_from_current_places():
     ids = {}
     try:
         with TestClient(app) as client:  # startup seeds demo data
+            # "My Office", not "Office": the match is by word containment
+            # (any Place whose name contains the word office/home), and this
+            # exercises that; the exact-named "Home" covers the plain case.
             assert client.post("/api/places", json={
-                "name": "Office", "lat": 5.4000, "lon": 100.4000, "radius_km": 0.2,
+                "name": "My Office", "lat": 5.4000, "lon": 100.4000, "radius_km": 0.2,
             }).status_code == 200
             assert client.post("/api/places", json={
                 "name": "Home", "lat": 5.3300, "lon": 100.3000, "radius_km": 0.2,
@@ -1441,6 +1444,10 @@ def test_auto_tag_overwrites_every_trip_from_current_places():
             # may itself have coordinates/tags that shift too -- the precise
             # per-trip behaviour below is what actually matters.
             assert resp.json()["changed"] >= 3   # office_untagged, office_wrongly_personal, neither_but_tagged
+            # Both qualifying Places were found ("My Office" counts via word
+            # containment) -- the UI uses these to explain a 0-changed run.
+            assert resp.json()["office_place"] is True
+            assert resp.json()["home_place"] is True
 
             with SessionLocal() as s:
                 assert s.get(Drive, ids["office_untagged"]).tag == "work"

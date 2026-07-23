@@ -1,6 +1,8 @@
 """REST API endpoints."""
 from __future__ import annotations
 
+import re
+import time
 from datetime import datetime, timedelta
 
 import httpx
@@ -270,6 +272,15 @@ def _live_eta(session: Session, snap: dict, live: dict, capacity_kwh: float) -> 
 
 _PLACE_CACHE: dict[str, tuple[str, str]] = {}
 
+# Nominatim's usage policy caps anonymous use at ~1 request/second; bursting
+# past it earns 429s (or a block), and every failed lookup here degrades a
+# trip's name to raw coordinates. Normal sync only ever does a couple of
+# lookups per trip close, but bulk relabeling can queue dozens back-to-back,
+# so the Nominatim branch of _place_and_area self-paces to this floor.
+# (Google's API has real quotas of its own and doesn't need this.)
+_NOMINATIM_MIN_INTERVAL_SEC = 1.0
+_last_nominatim_at = 0.0
+
 
 def _label_from_google_geocode(data: dict) -> tuple[str, str]:
     """Turn a Google Geocoding API reverse payload into (label, area), in the
@@ -365,15 +376,20 @@ def _label_from_geocode(data: dict) -> tuple[str, str]:
     return label[:120], area[:120]
 
 
-def _geofence_name(coords: str, session: Session | None) -> str | None:
+def _geofence_name(
+    coords: str, session: Session | None, places: list[Place] | None = None,
+) -> str | None:
     """Nearest user-defined Place (e.g. "Home", "Office") whose radius
     contains these coords, if any — checked before any network geocode so a
     user's own name for a place always wins over OSM's, and a well-known
-    driveway/office never needs a lookup at all."""
+    driveway/office never needs a lookup at all.
+
+    ``places`` lets a bulk caller (auto-tag sweeping every trip) load the
+    table once and reuse it, instead of one query per coordinate."""
     if not session or not coords or "," not in coords:
         return None
     best_name, best_km = None, None
-    for p in session.query(Place).all():
+    for p in (places if places is not None else session.query(Place).all()):
         d = haversine_km(coords, f"{p.lat}, {p.lon}")
         if d is not None and d <= p.radius_km and (best_km is None or d < best_km):
             best_name, best_km = p.name, d
@@ -405,6 +421,11 @@ def _place_and_area(coords: str, session: Session | None = None) -> tuple[str, s
     if google_result:
         result = google_result
     else:
+        global _last_nominatim_at
+        wait = _NOMINATIM_MIN_INTERVAL_SEC - (time.monotonic() - _last_nominatim_at)
+        if wait > 0:
+            time.sleep(wait)
+        _last_nominatim_at = time.monotonic()
         try:
             resp = httpx.get(
                 "https://nominatim.openstreetmap.org/reverse",
@@ -515,22 +536,39 @@ def auto_tag(session: Session = Depends(get_session)):
     against the Office/Home Place right now — the same geofence match every
     other Place-aware feature uses, so this reflects your latest Place
     definitions, not whatever a trip's location text happened to say when
-    it was logged. Office wins if a trip touches both (a commute or a
-    client visit is still a work trip); a trip touching neither is set back
-    to untagged. Places are the single source of truth here: this
-    overwrites every trip's tag, including ones set by hand, not just gaps."""
+    it was logged. A Place counts as the office/home if its name contains
+    that word ("Office", "My Office", "office hq" all work — matched on
+    whole words, so "Home" matches but "Hometown Cafe" doesn't). Office wins
+    if a trip touches both (a commute or a client visit is still a work
+    trip); a trip touching neither is set back to untagged. Places are the
+    single source of truth here: this overwrites every trip's tag, including
+    ones set by hand, not just gaps.
+
+    ``office_place``/``home_place`` in the response say whether any Place
+    qualified at all, so the UI can tell "0 changed because everything was
+    already right" apart from "0 changed because no Place is named for
+    either" — the latter used to fail silently.
+    """
+    places = session.query(Place).all()
+    def has_word(word: str, text: str) -> bool:
+        return re.search(rf"\b{word}\b", text.lower()) is not None
+
+    office_place = any(has_word("office", p.name) for p in places)
+    home_place = any(has_word("home", p.name) for p in places)
     changed = 0
     for d in session.scalars(select(Drive)).all():
         names = {
-            (_geofence_name(c, session) or "").strip().lower()
+            (_geofence_name(c, session, places=places) or "")
             for c in (d.start_coords, d.end_coords) if c
         }
-        new_tag = "work" if "office" in names else "personal" if "home" in names else ""
+        is_office = any(has_word("office", n) for n in names)
+        is_home = any(has_word("home", n) for n in names)
+        new_tag = "work" if is_office else "personal" if is_home else ""
         if new_tag != d.tag:
             d.tag = new_tag
             changed += 1
     session.commit()
-    return {"changed": changed}
+    return {"changed": changed, "office_place": office_place, "home_place": home_place}
 
 
 def _relabel_drives(session: Session, ids: list[int] | None) -> dict:
@@ -556,16 +594,27 @@ def _relabel_drives(session: Session, ids: list[int] | None) -> dict:
     if ids is not None:
         query = query.where(Drive.id.in_(ids))
     relabeled = skipped = 0
+    # Evict each distinct coordinate from the cache once per run, not once per
+    # drive — several trips parked at the same spot would otherwise discard
+    # each other's just-refreshed result and re-geocode the same point over
+    # the network N times (needlessly slow, and needless load against
+    # Nominatim's 1 req/sec policy — see _NOMINATIM_MIN_INTERVAL_SEC).
+    refreshed: set[str] = set()
+
+    def _fresh(coords: str) -> tuple[str, str]:
+        if coords not in refreshed:
+            _PLACE_CACHE.pop(coords, None)
+            refreshed.add(coords)
+        return _place_and_area(coords, session)
+
     for d in session.scalars(query).all():
         if not d.start_coords and not d.end_coords:
             skipped += 1
             continue
         if d.start_coords:
-            _PLACE_CACHE.pop(d.start_coords, None)
-            d.start_location, d.start_area = _place_and_area(d.start_coords, session)
+            d.start_location, d.start_area = _fresh(d.start_coords)
         if d.end_coords:
-            _PLACE_CACHE.pop(d.end_coords, None)
-            d.end_location, d.end_area = _place_and_area(d.end_coords, session)
+            d.end_location, d.end_area = _fresh(d.end_coords)
         d.tag = ""
         relabeled += 1
     session.commit()
@@ -2218,10 +2267,20 @@ def summary(
     # analyze() itself uses, just anchored to the more accurate total.
     vd = (driving.get("vampire_drain") or {}) if driving.get("available") else {}
     vampire_kwh = vd.get("kwh", 0.0)
-    trip_kwh = (
-        max(round(round(used_kwh, 1) - vampire_kwh, 1), 0.0) if ground_truth_used_kwh is not None
-        else (round(driving.get("trip_energy_used_kwh") or 0.0, 1) if driving.get("available") else 0.0)
-    )
+    if ground_truth_used_kwh is not None:
+        # Cap the idle share at the (rounded) total before deriving trip by
+        # subtraction: SoC can rebound a little while parked (BMS re-reading
+        # a rested pack), letting measured vampire exceed the window's total
+        # drop — without the cap, trip clamps to 0 and the displayed
+        # "X (trip + idle)" breakdown sums to more than X.
+        used_rounded = round(used_kwh, 1)
+        vampire_kwh = min(round(vampire_kwh, 2), used_rounded)
+        trip_kwh = max(round(used_rounded - vampire_kwh, 1), 0.0)
+    else:
+        trip_kwh = (
+            round(driving.get("trip_energy_used_kwh") or 0.0, 1)
+            if driving.get("available") else 0.0
+        )
     # Driving Cost (drv.total_cost/cost_per_km) is still driving_analysis.
     # analyze()'s own bottom-up total_energy_used_kwh, priced at this same
     # window's flat last-charge rate — so it carries the exact same
