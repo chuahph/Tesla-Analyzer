@@ -265,6 +265,9 @@ def test_push_endpoints_404_when_not_configured():
                 "keys": {"p256dh": "a", "auth": "b"},
             })
             assert resp.status_code == 404
+            # The test-notification endpoint is likewise a 404 when push isn't
+            # configured (nothing to deliver to).
+            assert client.post("/api/push/test").status_code == 404
     finally:
         settings.app_passcode = old_pc
         settings.vapid_private_key_pem, settings.vapid_public_key_pem = old_priv, old_pub

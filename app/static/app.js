@@ -3265,16 +3265,35 @@ async function setupPushButton() {
   btn.classList.remove("hidden");
   const reg = await navigator.serviceWorker.ready;
 
+  const testBtn = document.getElementById("btn-notify-test");
+
   async function refresh() {
     const sub = await reg.pushManager.getSubscription();
     const on = !!sub && Notification.permission === "granted";
     btn.textContent = on ? "🔔 Notifications on" : "🔕 Enable notifications";
     btn.title = on ? "Tap to turn off charge/battery alerts on this device"
                    : "Get alerts here for charge complete and low battery";
+    // "Send test" only makes sense once this device is subscribed.
+    if (testBtn) testBtn.classList.toggle("hidden", !on);
     return sub;
   }
 
   let current = await refresh();
+
+  if (testBtn) testBtn.addEventListener("click", async () => {
+    testBtn.disabled = true;
+    const orig = testBtn.textContent;
+    testBtn.textContent = "Sending…";
+    try {
+      const res = await fetch("/api/push/test", { method: "POST" });
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(body.detail || "Couldn't send the test.");
+      testBtn.textContent = body.sent > 0 ? "✅ Sent — check your notifications" : "No subscribed devices";
+    } catch (e) {
+      testBtn.textContent = "⚠️ " + e.message;
+    }
+    setTimeout(() => { testBtn.textContent = orig; testBtn.disabled = false; }, 3500);
+  });
 
   btn.addEventListener("click", async () => {
     btn.disabled = true;

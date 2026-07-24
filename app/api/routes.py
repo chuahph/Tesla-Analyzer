@@ -2099,6 +2099,22 @@ def push_unsubscribe(payload: dict = Body(...), session: Session = Depends(get_s
     return {"unsubscribed": True}
 
 
+@router.post("/push/test")
+def push_test(session: Session = Depends(get_session)):
+    """Send a test notification to every subscribed device — the "does this
+    actually reach my phone" check. Returns how many devices it was delivered
+    to (0 means push isn't configured or nothing is subscribed yet)."""
+    if not notifications.enabled():
+        raise HTTPException(404, "Push notifications aren't configured on this server.")
+    sent = notifications.notify(
+        session,
+        "Tesla Analyzer",
+        "Test notification — if you can see this, alerts are working. 🎉",
+        "test",
+    )
+    return {"sent": sent}
+
+
 @router.get("/summary")
 def summary(
     days: int = Query(90, ge=1, le=730),
