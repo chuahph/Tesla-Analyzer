@@ -13,7 +13,7 @@ from __future__ import annotations
 import re
 from typing import Any
 
-from . import mean, percentile
+from . import linregress, mean, percentile
 
 MIN_READINGS = 5      # below this the estimate is too noisy to show
 MIN_SOC = 20.0        # low-SoC readings project unreliably
@@ -24,6 +24,19 @@ IMPLAUSIBLE_DEGRADATION_PCT = 20.0  # beyond this, a modern Tesla pack under
 # spec figure itself is wrong than the pack being unrealistically degraded.
 SPEC_OVERRIDE_MIN_READINGS = 30     # readings needed before real data is
 # trusted enough to override a documented spec figure downward.
+
+# Degradation forecast: only projected once there are enough monthly trend
+# points spanning enough time, and only when a real decline is measurable
+# above the month-to-month noise. A lone quarter of near-flat readings can't
+# be linearly extrapolated to "years until 80%" without inventing precision.
+FORECAST_MIN_MONTHS = 4          # trend points needed before forecasting
+FORECAST_MIN_SPAN_YEARS = 0.25   # and they must span at least this long
+FORECAST_NOISE_KM_PER_YEAR = 1.0 # slower loss than this reads as "no decline yet"
+# Capacity-retention milestones to project toward (% of the when-new
+# reference). 80% is the common "health" milestone; 70% is the floor Tesla's
+# battery warranty guarantees over 8 years / 192,000 km on Model 3/Y.
+FORECAST_HEALTH_MILESTONE = 0.80
+FORECAST_WARRANTY_FLOOR = 0.70
 
 # Factory rated range at 100% when new, in km (EPA figures — the same scale
 # the API's battery_range field uses). Each entry needs the model substring,
@@ -136,6 +149,62 @@ def fleet_degradation_pct(odo_km: float) -> float:
     return pts[-1][1]  # unreachable given the bounds above
 
 
+def _month_to_year(key: str) -> float:
+    """'YYYY-MM' -> a fractional year (2024-07 -> 2024.5), so a monthly trend
+    can be regressed on a real time axis rather than an even index (which would
+    distort the slope when a month is missing)."""
+    try:
+        y, m = key.split("-")
+        return int(y) + (int(m) - 1) / 12.0
+    except (ValueError, AttributeError):
+        return 0.0
+
+
+def _forecast(trend: list[dict[str, Any]], reference_km: float,
+              current_km: float) -> dict[str, Any]:
+    """Project the monthly full-range trend forward to the health milestone
+    (80%) and warranty floor (70%). Deliberately conservative: returns
+    available=False (with a plain-language note) until there's enough of a
+    real, measurable decline to extrapolate honestly."""
+    if len(trend) < FORECAST_MIN_MONTHS:
+        return {"available": False,
+                "note": "Not enough history yet to project a trend — a few "
+                        "months of readings are needed first."}
+    xs = [_month_to_year(t["month"]) for t in trend]
+    ys = [t["full_range_km"] for t in trend]
+    span = max(xs) - min(xs)
+    if span < FORECAST_MIN_SPAN_YEARS:
+        return {"available": False,
+                "note": "Readings don't span enough time yet to project a trend."}
+    slope, _ = linregress(xs, ys)  # km per year (negative = losing range)
+    loss_per_year = -slope
+    if loss_per_year < FORECAST_NOISE_KM_PER_YEAR:
+        return {"available": False,
+                "slope_km_per_year": round(slope, 1),
+                "note": "No measurable decline yet — range is holding steady "
+                        "within the month-to-month noise, which is good news."}
+
+    def _years_to(fraction: float) -> float | None:
+        target = reference_km * fraction
+        if current_km <= target:
+            return 0.0  # already at/below it
+        return round((current_km - target) / loss_per_year, 1)
+
+    return {
+        "available": True,
+        "slope_km_per_year": round(slope, 1),
+        "loss_pct_per_year": (round(loss_per_year / reference_km * 100.0, 2)
+                              if reference_km else None),
+        "years_to_health_milestone": _years_to(FORECAST_HEALTH_MILESTONE),
+        "years_to_warranty_floor": _years_to(FORECAST_WARRANTY_FLOOR),
+        "health_milestone_pct": int(FORECAST_HEALTH_MILESTONE * 100),
+        "warranty_floor_pct": int(FORECAST_WARRANTY_FLOOR * 100),
+        "note": "Straight-line projection of the current trend — real "
+                "degradation slows as the pack ages, so treat these as a "
+                "worst-case 'no faster than now' horizon, not a promise.",
+    }
+
+
 def new_range_for(model: str, trim: str, year: int | None = None) -> float | None:
     """Factory new range for this exact variant, if we recognise the badge.
 
@@ -229,6 +298,8 @@ def analyze(
         if len(vals) >= 3
     ]
 
+    forecast = _forecast(trend, reference_km, current_km)
+
     socs = [r["soc"] for r, _ in projections]
     recent_socs = [r["soc"] for r, _ in recent]
 
@@ -246,6 +317,7 @@ def analyze(
         "available": True,
         "n_readings": len(projections),
         "trend": trend,
+        "forecast": forecast,
         "health_pct": round(health, 1),
         "degradation_pct": round(degradation, 1),
         "est_full_range_km": round(current_km, 0),

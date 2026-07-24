@@ -1887,6 +1887,25 @@ function setupRatesModal() {
   });
 }
 
+// Degradation forecast line under the battery health figures. Shows a
+// horizon to the 80%/70% milestones when a real decline is measurable;
+// otherwise a plain reassuring note (holding steady / too early).
+function forecastHtml(f) {
+  if (!f) return "";
+  if (!f.available) {
+    return f.note ? `<div class="bat-line bat-forecast muted">🔮 ${f.note}</div>` : "";
+  }
+  const yr = (y) => y == null ? "—"
+    : y <= 0 ? "already there"
+    : y >= 40 ? "40+ yr"
+    : `~${y} yr`;
+  const rate = f.loss_pct_per_year != null ? ` (~${f.loss_pct_per_year}%/yr)` : "";
+  return `<div class="bat-line bat-forecast">🔮 At the current trend${rate}:
+    <strong>${yr(f.years_to_health_milestone)}</strong> to ${f.health_milestone_pct}% health,
+    <strong>${yr(f.years_to_warranty_floor)}</strong> to the ${f.warranty_floor_pct}% warranty floor.
+    <span class="muted">${f.note}</span></div>`;
+}
+
 function renderBattery(d) {
   const card = document.getElementById("battery-card");
   const body = document.getElementById("battery-body");
@@ -1927,6 +1946,7 @@ function renderBattery(d) {
       vs ${ref} (${b.degradation_pct}% degradation)</div>
     <div class="bat-line">Based on ${b.n_readings} readings · avg SoC ${b.avg_soc}% · lowest seen ${b.min_soc_seen}%</div>
     ${fleet}
+    ${forecastHtml(b.forecast)}
     ${habits}`;
   const btn = document.getElementById("batt-info-btn");
   if (btn) btn.addEventListener("click", () =>

@@ -237,6 +237,9 @@ header {
 .bat-line strong { color: var(--text); }
 .bat-line strong.tone-good { color: var(--green); }
 .bat-line strong.tone-bad { color: var(--amber); }
+.bat-forecast { margin-top: 6px; line-height: 1.5; }
+.bat-forecast .muted { color: var(--muted-2, var(--muted)); font-size: 11px; }
+.bat-forecast.muted { font-style: italic; }
 .bat-note { color: var(--muted); font-size: 12px; line-height: 1.6; margin: 6px 0; }
 
 /* Brand grows to fill the row (min-width:0 lets the VIN subtitle ellipsis

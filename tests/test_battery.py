@@ -1,12 +1,16 @@
 """Tests for the battery health estimator (app/analysis/battery.py)."""
+from datetime import datetime
+
 from app.analysis.battery import analyze, new_range_for
 
 
-def mk(soc, full_range_km, odo_km=None):
+def mk(soc, full_range_km, odo_km=None, ts=None):
     """A reading of a pack whose true full range is ``full_range_km``."""
     r = {"soc": soc, "range_km": full_range_km * soc / 100.0}
     if odo_km is not None:
         r["odo_km"] = odo_km
+    if ts is not None:
+        r["ts"] = ts
     return r
 
 
@@ -279,3 +283,45 @@ def test_vin_decode():
     assert info["plant"] == "Shanghai"
     assert decode("DEMO12345") == {}
     assert decode("") == {}
+
+
+# --- degradation forecast --------------------------------------------------
+
+def test_forecast_projects_declining_trend_to_milestones():
+    """A pack losing range month over month projects a finite horizon to the
+    80% health milestone and 70% warranty floor."""
+    readings = []
+    # 6 months, full range sliding 500 -> ~475 km (a clear ~5% decline).
+    for i in range(6):
+        full = 500 - i * 5.0
+        ts = datetime(2026, 1 + i, 15, 12, 0)
+        readings += [mk(60, full, ts=ts) for _ in range(4)]  # >=3/month to plot
+    r = analyze(readings, new_range_km=500)
+    f = r["forecast"]
+    assert f["available"] is True
+    assert f["slope_km_per_year"] < 0            # losing range
+    assert f["health_milestone_pct"] == 80
+    assert f["warranty_floor_pct"] == 70
+    # Current ~475 km, ref 500: 80% = 400 km is still years out at this rate.
+    assert f["years_to_health_milestone"] > 0
+    assert f["years_to_warranty_floor"] > f["years_to_health_milestone"]
+
+
+def test_forecast_holds_off_on_a_steady_pack():
+    """A pack whose range is flat within noise reports no forecast rather than
+    a spurious 'centuries to 80%' number."""
+    readings = []
+    for i in range(6):
+        ts = datetime(2026, 1 + i, 15, 12, 0)
+        readings += [mk(60, 500, ts=ts) for _ in range(4)]
+    r = analyze(readings, new_range_km=500)
+    f = r["forecast"]
+    assert f["available"] is False
+    assert "no measurable decline" in f["note"].lower()
+
+
+def test_forecast_unavailable_without_enough_months():
+    """Too few monthly trend points -> no forecast, plain note."""
+    readings = [mk(60, 500 - i, ts=datetime(2026, 1, 15)) for i in range(20)]
+    r = analyze(readings, new_range_km=500)
+    assert r["forecast"]["available"] is False
