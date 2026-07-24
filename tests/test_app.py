@@ -76,6 +76,12 @@ def test_sync_key_lets_cron_through_the_gate():
             # 400 here means it passed the gate and reached the endpoint (no
             # BACKUP_WEBHOOK_URL configured in this test).
             assert client.get("/api/backup?key=cron-key-42").status_code == 400
+            # Alerts check is also cron-key callable, via GET or POST; the key
+            # opens the gate and the endpoint returns 200 (nothing to alert on
+            # in the empty test database).
+            assert client.get("/api/alerts/check").status_code == 401
+            assert client.get("/api/alerts/check?key=cron-key-42").status_code == 200
+            assert client.post("/api/alerts/check?key=cron-key-42").status_code == 200
     finally:
         settings.app_passcode, settings.sync_key = old_pc, old_sk
 
