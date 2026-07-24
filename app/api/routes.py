@@ -2000,7 +2000,11 @@ def _standby_longest(session: Session, vehicle: Vehicle, drives, charges,
     }
 
 
-@router.post("/alerts/check")
+# GET *and* POST: the other cron endpoints (/api/sync, /api/reports/monthly)
+# are GET so an external cron — or a browser address bar, for a quick test —
+# can hit them without configuring a request method. Accept both here for the
+# same ergonomics; the de-dup below keeps a stray GET from re-notifying.
+@router.api_route("/alerts/check", methods=["GET", "POST"])
 def alerts_check(days: int = Query(30, ge=7, le=90),
                  session: Session = Depends(get_session)):
     """Evaluate proactive alerts and push any that fire — cron-callable the

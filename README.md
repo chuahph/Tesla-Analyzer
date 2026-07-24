@@ -367,12 +367,13 @@ wants to parse it instead.
 
 ## Proactive alerts
 
-`POST /api/alerts/check` evaluates a handful of conditions and **pushes a
-notification only when one fires** — efficiency slipping vs the previous
-period, the battery projected to lose range faster than typical, a service
-due/overdue, or an unusually large standby drain while parked. It reuses the
-same web-push subscriptions and event webhook as everything else, so no extra
-setup beyond a cron job:
+`/api/alerts/check` (GET or POST) evaluates a handful of conditions and
+**pushes a notification only when one fires** — efficiency slipping vs the
+previous period, the battery projected to lose range faster than typical, a
+service due/overdue, or an unusually large standby drain while parked. It
+reuses the same web-push subscriptions and event webhook as everything else,
+so no extra setup beyond a cron job (same GET-friendly style as the others —
+you can even paste the URL into a browser to test it):
 
 ```
 https://<your-app>.onrender.com/api/alerts/check?key=<SYNC_KEY>
