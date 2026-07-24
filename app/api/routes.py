@@ -11,7 +11,7 @@ from fastapi.responses import RedirectResponse
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from .. import auth, notifications, pricing_prefs, services, state, tariff, vin as vin_mod
+from .. import alerts, auth, notifications, pricing_prefs, services, state, tariff, vin as vin_mod
 from ..analysis import haversine_km
 from ..analysis import narrative as narrative_engine
 from ..analysis import battery as battery_analysis
@@ -1977,6 +1977,85 @@ def monthly_report(days: int = Query(30, ge=1, le=365), session: Session = Depen
         raise HTTPException(502, f"Report webhook delivery failed: {exc}") from exc
 
     return {"sent": True, "webhook_status": resp.status_code, "period_days": days}
+
+
+def _standby_longest(session: Session, vehicle: Vehicle, drives, charges,
+                     capacity_kwh: float, price_fn) -> dict | None:
+    """The single biggest recent parked-drain event, for the standby alert:
+    the charge-free gap that lost the most kWh, with its %/kWh/hours, the
+    likely inducer, and a cost. None when there's no material parked drain."""
+    vd = driving_analysis.vampire_drain(drives, charges, capacity_kwh)
+    gaps = vd.get("gap_list") or []
+    if not gaps:
+        return None
+    top = max(gaps, key=lambda g: g.get("kwh", 0.0))
+    if not top.get("kwh"):
+        return None
+    inducer = _idle_inducer(session, vehicle.id, top["start"], top["end"])
+    rate = price_fn(datetime.fromisoformat(top["end"])) if price_fn else None
+    return {
+        "kwh": top["kwh"], "pct": top.get("pct", 0.0), "hours": top.get("hours", 0.0),
+        "end": top["end"], "inducer": inducer,
+        "cost": round(top["kwh"] * rate, 2) if rate else None,
+    }
+
+
+@router.post("/alerts/check")
+def alerts_check(days: int = Query(30, ge=7, le=90),
+                 session: Session = Depends(get_session)):
+    """Evaluate proactive alerts and push any that fire — cron-callable the
+    same way /api/sync and /api/reports/monthly are (the sync_key query param
+    passes the passcode gate). Meant to run daily. De-duplicates internally,
+    so calling it more often is harmless: a standing condition is re-sent only
+    when it changes or after a cooldown (see alerts.py). ``days`` is the window
+    each trend compares against the equal-length window before it."""
+    now = datetime.now()
+    vehicle = _first_vehicle(session)
+    settings = get_settings()
+    capacity_kwh, _ = _usable_capacity(session, vehicle, settings)
+    price_fn = _last_charge_price_fn(session, vehicle.id, settings)
+
+    cur_since = now - timedelta(days=days)
+    prev_since = cur_since - timedelta(days=days)
+    drives, charges = _window(session, vehicle.id, days)
+    prev_drives, _ = _window(session, vehicle.id, days, since=prev_since, until=cur_since)
+    efficiency = efficiency_analysis.analyze(drives, settings.rated_wh_per_km)
+    prev_efficiency = efficiency_analysis.analyze(prev_drives, settings.rated_wh_per_km)
+
+    readings = session.execute(
+        select(BatteryReading.soc, BatteryReading.range_km,
+               BatteryReading.ts, BatteryReading.odo_km)
+        .where(BatteryReading.vehicle_id == vehicle.id)
+        .order_by(BatteryReading.ts).limit(2000)
+    ).all()
+    vin_info = vin_mod.decode(vehicle.vin)
+    spec_km = settings.battery_new_range_km or battery_analysis.new_range_for(
+        vehicle.model, vehicle.trim, year=vin_info.get("year"))
+    battery = battery_analysis.analyze(
+        [{"soc": s, "range_km": r, "ts": t, "odo_km": o} for s, r, t, o in readings],
+        new_range_km=spec_km)
+
+    records = session.scalars(
+        select(ServiceRecord).where(ServiceRecord.vehicle_id == vehicle.id)).all()
+    current_odo = session.scalar(
+        select(func.max(BatteryReading.odo_km)).where(BatteryReading.vehicle_id == vehicle.id))
+    service_rows = service_analysis.due_status(
+        [{"type": r.type, "date": r.date, "odo_km": r.odo_km} for r in records],
+        current_odo_km=current_odo, now=now)
+
+    candidates = alerts.evaluate(
+        now=now, efficiency=efficiency, prev_efficiency=prev_efficiency,
+        battery=battery, service_rows=service_rows,
+        standby_longest=_standby_longest(session, vehicle, drives, charges,
+                                         capacity_kwh, price_fn),
+        currency=settings.currency,
+    )
+    sent = alerts.dispatch(
+        session, candidates,
+        notify=lambda title, body, tag: notifications.notify(session, title, body, tag),
+        now=now,
+    )
+    return {"fired": [c["key"] for c in candidates], "sent": sent}
 
 
 # --- Web push notifications -------------------------------------------------

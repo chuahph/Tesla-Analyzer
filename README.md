@@ -365,6 +365,25 @@ pointing either straight at this endpoint's URL works with no relay needed
 structured figures (`driving`, `charging`, `efficiency`) for anything that
 wants to parse it instead.
 
+## Proactive alerts
+
+`POST /api/alerts/check` evaluates a handful of conditions and **pushes a
+notification only when one fires** — efficiency slipping vs the previous
+period, the battery projected to lose range faster than typical, a service
+due/overdue, or an unusually large standby drain while parked. It reuses the
+same web-push subscriptions and event webhook as everything else, so no extra
+setup beyond a cron job:
+
+```
+https://<your-app>.onrender.com/api/alerts/check?key=<SYNC_KEY>
+```
+
+Point a **daily** cron at it (same `SYNC_KEY` as the others). It de-duplicates
+internally — a standing condition is re-sent only when it changes meaningfully
+or after a ~7-day cooldown — so running it more often than daily is harmless,
+it just won't nag. With neither VAPID push keys nor `EVENT_WEBHOOK_URL`
+configured it's a safe no-op (nothing to deliver to).
+
 ---
 
 ## Generic event webhook
