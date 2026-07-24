@@ -402,10 +402,9 @@ def test_trip_closes_when_charging_starts_not_merging_across_a_charge():
 
 def test_drive_min_km_is_configurable():
     """A genuinely tiny move (a car nudged while parked) sits below the
-    default 0.1 km floor and is filtered as jitter; a real short move (e.g.
-    charger to parking spot) clears the default floor and logs — but
-    raising drive_min_km must be able to filter it too, for anyone who'd
-    rather not see moves that short at all."""
+    trip floor and is filtered as jitter; a real short move (e.g. charger to
+    parking spot) clears it and logs — but raising drive_min_km must be able
+    to filter it too, for anyone who'd rather not see moves that short at all."""
     from app.sync import _drive_from
 
     jitter_start = snap(T0, 10_000.0, 91, range_km=453.0)
@@ -414,10 +413,27 @@ def test_drive_min_km_is_configurable():
     short_start = snap(T0, 10_000.0, 91, range_km=453.0)
     short_end = snap(T0 + 180, 10_000.4, 91, range_km=452.8)    # 0.4 km, 3 min
 
-    assert _drive_from(jitter_start, jitter_end, 75.0) is None             # default 0.1 km floor filters jitter
+    assert _drive_from(jitter_start, jitter_end, 75.0) is None             # below the trip floor -> filtered
     d = _drive_from(short_start, short_end, 75.0)
-    assert d is not None and d["distance_km"] == 0.4                       # default floor lets a real move through
+    assert d is not None and d["distance_km"] == 0.4                       # a real short move logs
     assert _drive_from(short_start, short_end, 75.0, drive_min_km=0.5) is None  # raised floor filters it again
+
+
+def test_wake_and_lock_nudge_is_not_logged_as_a_trip():
+    """Unlocking/accessing a parked car (phone-as-key wake) can tick the
+    odometer a couple of tenths with no real driving. That must NOT log as a
+    phantom "0 min, Home -> Home" trip — it stays in the parked gap, counted
+    as standby drain, not a drive. Regression for the reported 0.2 km trip."""
+    from app.sync import _drive_from
+
+    # 0.2 km odometer nudge over ~1 min, essentially no SoC change.
+    start = snap(T0, 28_437.0, 66, range_km=300.0)
+    end = snap(T0 + 60, 28_437.2, 66, range_km=300.0)
+    assert _drive_from(start, end, 75.0) is None
+
+    # And through the whole-gap reconstruction path process_snapshot uses.
+    d, _, _, _ = process_snapshot(start, end, None, None, 75.0, 0.90)
+    assert d == []
 
 
 def test_drive_min_km_threaded_through_process_snapshot():

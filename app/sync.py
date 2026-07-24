@@ -20,7 +20,15 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 MILES_TO_KM = 1.60934
-DRIVE_MIN_KM = 0.1   # ignore odometer jitter below this
+DRIVE_MIN_KM = 0.1   # ignore odometer jitter below this (gap-split / movement floor)
+# A completed drive must clear a higher bar than raw jitter before it's recorded
+# as a *trip*: unlocking/accessing a parked car (phone-as-key wake) can nudge the
+# odometer a couple of tenths without any real driving, which would otherwise log
+# a phantom "0 min, 0% battery, Home -> Home" trip. A genuine short move (charger
+# to a parking spot) is ~0.4 km+. Below this floor the drive is dropped and its
+# near-zero SoC change stays in the surrounding parked gap, counted as standby
+# drain — which is what it actually is.
+TRIP_MIN_KM = 0.3
 CHARGE_MIN_PCT = 0.5  # ignore SoC jitter below this
 # Independent absolute-kWh floor alongside CHARGE_MIN_PCT — see _charge_from()
 # for why the %-gain gate alone isn't enough (a BMS SoC recalibration blip,
@@ -417,7 +425,10 @@ def _drive_from(start: dict, cur: dict, capacity_kwh: float, max_speed: float = 
                 idle_min: float = 0.0, idle_tracked: bool = False,
                 drive_min_km: float = DRIVE_MIN_KM):
     distance = cur["odo_km"] - start["odo_km"]
-    if distance < drive_min_km:
+    # A recorded trip must clear the real-trip floor, not just the jitter floor,
+    # so a wake-and-lock odometer nudge never logs as a phantom drive (see
+    # TRIP_MIN_KM). A caller can still raise the bar further via drive_min_km.
+    if distance < max(drive_min_km, TRIP_MIN_KM):
         return None
     dt_min = max((cur["ts"] - start["ts"]) / 60.0, 0.0)
     soc_used = max(start["soc"] - cur["soc"], 0.0)
