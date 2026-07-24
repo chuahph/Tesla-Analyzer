@@ -36,6 +36,12 @@ LOW_SOC_NOTIFIED_KEY = "low_soc_notified"  # "1" once the low-SoC push has fired
 # for the current low-battery episode, per VIN — cleared once SoC recovers
 # above the threshold, so plugging in and charging re-arms it instead of
 # firing once ever.
+# Sentry-drain alert, per VIN: EPISODE holds the JSON {soc} anchor captured
+# when a parked-with-Sentry episode begins; NOTIFIED is "1" once its push has
+# fired. Both cleared when the car drives/charges or Sentry turns off, so each
+# parked episode is judged fresh.
+SENTRY_DRAIN_EPISODE_KEY = "sentry_drain_episode"
+SENTRY_DRAIN_NOTIFIED_KEY = "sentry_drain_notified"
 
 # Charging price preferences (see pricing_prefs.py) — user-editable RM/kWh
 # rates per source × charger type, saved from the dashboard's Rates page

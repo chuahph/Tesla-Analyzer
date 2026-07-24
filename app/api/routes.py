@@ -1159,6 +1159,39 @@ def _process_vehicle(
             elif snap["soc"] > threshold + 5 and already_notified:
                 state.put(session, notified_key, "")
 
+        # Live Sentry-drain alert: Sentry Mode keeps the car online, so this
+        # poll sees it draining in near-real-time (unlike a truly asleep car).
+        # Anchor the SoC when a parked-with-Sentry episode starts, then fire
+        # once it's cost at least sentry_drain_notify_pct points — a prompt
+        # "turn it off" nudge, not a next-day retrospective. The episode resets
+        # whenever the car drives/charges or Sentry goes off (below), so a real
+        # short errand with Sentry on never trips it.
+        sentry_pct = settings.sentry_drain_notify_pct
+        if sentry_pct > 0:
+            ep_key = state.scoped(state.SENTRY_DRAIN_EPISODE_KEY, vin)
+            sentry_notified_key = state.scoped(state.SENTRY_DRAIN_NOTIFIED_KEY, vin)
+            parked_sentry = bool(sentry_now) and not open_trip and not open_charge
+            if parked_sentry:
+                ep_raw = state.get(session, ep_key)
+                if not ep_raw:
+                    state.put(session, ep_key, _json.dumps({"soc": snap["soc"]}))
+                else:
+                    start_soc = _json.loads(ep_raw).get("soc", snap["soc"])
+                    drop = start_soc - snap["soc"]
+                    if drop >= sentry_pct and state.get(session, sentry_notified_key) != "1":
+                        notifications.notify(
+                            session, "Sentry Mode is draining your battery",
+                            f"{vehicle.name} has lost {drop:.0f}% to Sentry Mode since it "
+                            "parked. Turn Sentry off if the car's somewhere safe.",
+                            tag="sentry-drain",
+                        )
+                        state.put(session, sentry_notified_key, "1")
+            elif state.get(session, ep_key) or state.get(session, sentry_notified_key) == "1":
+                # Drove off, started charging, or Sentry switched off — end the
+                # episode so the next parked-with-Sentry stretch is judged fresh.
+                state.put(session, ep_key, "")
+                state.put(session, sentry_notified_key, "")
+
     session.commit()
     state.put(session, sk, _json.dumps(snap))
     state.put(session, tk, _json.dumps(open_trip) if open_trip else "")

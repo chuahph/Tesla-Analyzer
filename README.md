@@ -424,9 +424,17 @@ through the PWA you already installed.
    "Battery low" alert when SoC drops to/below that level — it re-arms once
    the battery recovers above the threshold (+5% hysteresis), so plugging in
    and charging resets it rather than it firing once ever.
-3. Redeploy, open the dashboard, and tap **🔔 Enable notifications** at the
+3. Optionally set `SENTRY_DRAIN_NOTIFY_PCT` (e.g. `3`) for a live "Sentry Mode
+   is draining your battery" alert. Because Sentry keeps the car online, the
+   sync poll sees it draining in near-real-time — so you get a prompt "turn it
+   off if the car's somewhere safe" nudge once Sentry has cost this many
+   percentage points since the car parked, once per parked episode (re-armed
+   when the car drives off or Sentry goes off). Needs a reasonably frequent
+   sync cron to be timely.
+4. Redeploy, open the dashboard, and tap **🔔 Enable notifications** at the
    bottom of the page (only appears once VAPID keys are configured). Your
-   browser will ask for notification permission once.
+   browser will ask for notification permission once. A **✉️ Send test** button
+   next to it fires a test notification so you can confirm delivery.
 
 That's it — every device that taps the button gets notified independently
 (subscriptions aren't tied to a single browser/phone). Tap the button again

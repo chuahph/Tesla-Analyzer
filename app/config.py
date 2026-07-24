@@ -96,6 +96,11 @@ class Settings(BaseSettings):
     vapid_subject_email: str = "admin@example.com"
     # Notify when SoC drops to/below this on a synced reading. 0 = disabled.
     low_soc_notify_pct: float = 0.0
+    # Notify when Sentry Mode has drained at least this much (percentage points)
+    # since the car parked — a live heads-up while it's happening, since Sentry
+    # keeps the car online and therefore visible to the sync poll. Fires once
+    # per parked episode. 0 = disabled.
+    sentry_drain_notify_pct: float = 0.0
 
     # Analysis parameters
     energy_price_per_kwh: float = 0.90

@@ -1095,7 +1095,7 @@ def test_charge_cost_uses_time_of_use_pricing_at_write_time():
         energy_price_peak_kwh=1.20,
         energy_price_offpeak_kwh=0.45, tariff_peak_start_hour=8,
         tariff_peak_end_hour=22, tariff_weekend_offpeak=True,
-        battery_capacity_kwh=0.0, battery_new_range_km=0.0, low_soc_notify_pct=0.0,
+        battery_capacity_kwh=0.0, battery_new_range_km=0.0, low_soc_notify_pct=0.0, sentry_drain_notify_pct=0.0,
         drive_min_km=0.5,
     )
 
@@ -1160,7 +1160,7 @@ def test_charge_cost_uses_ac_dc_rate_at_write_time():
         # ToU also configured, to prove AC/DC wins over it too.
         energy_price_peak_kwh=1.20, energy_price_offpeak_kwh=0.45,
         tariff_peak_start_hour=8, tariff_peak_end_hour=22, tariff_weekend_offpeak=True,
-        battery_capacity_kwh=0.0, battery_new_range_km=0.0, low_soc_notify_pct=0.0,
+        battery_capacity_kwh=0.0, battery_new_range_km=0.0, low_soc_notify_pct=0.0, sentry_drain_notify_pct=0.0,
         drive_min_km=0.5,
     )
 
@@ -1233,7 +1233,7 @@ def test_drive_complete_fires_event_webhook_but_not_push(monkeypatch):
         energy_price_peak_kwh=0.0,
         energy_price_offpeak_kwh=0.0, tariff_peak_start_hour=8,
         tariff_peak_end_hour=22, tariff_weekend_offpeak=True,
-        battery_capacity_kwh=0.0, battery_new_range_km=0.0, low_soc_notify_pct=0.0,
+        battery_capacity_kwh=0.0, battery_new_range_km=0.0, low_soc_notify_pct=0.0, sentry_drain_notify_pct=0.0,
         drive_min_km=0.5,
     )
 
@@ -1291,6 +1291,74 @@ def test_drive_complete_fires_event_webhook_but_not_push(monkeypatch):
             if leftover:
                 s.query(_Drive).filter(_Drive.vehicle_id == leftover.id).delete()
                 s.delete(leftover)
+                s.commit()
+
+
+def test_sentry_drain_alert_fires_once_per_parked_episode(monkeypatch):
+    """While parked with Sentry on, the live drain alert fires once the drop
+    since parking crosses the threshold — then stays quiet for that episode,
+    and re-arms after the car drives off."""
+    from types import SimpleNamespace
+
+    from app.api.routes import _process_vehicle
+    from app.database import SessionLocal
+    from app.models import BatteryReading, Vehicle
+
+    settings = SimpleNamespace(
+        energy_price_per_kwh=0.90, energy_price_ac_kwh=0.0, energy_price_dc_kwh=0.0,
+        energy_price_peak_kwh=0.0, energy_price_offpeak_kwh=0.0, tariff_peak_start_hour=8,
+        tariff_peak_end_hour=22, tariff_weekend_offpeak=True,
+        battery_capacity_kwh=0.0, battery_new_range_km=0.0, low_soc_notify_pct=0.0,
+        sentry_drain_notify_pct=2.0, drive_min_km=0.5,
+    )
+
+    def vdata(ts, odo_mi, soc, shift, sentry, speed=0):
+        return {
+            "vin": "TESTVIN-SENTRY", "display_name": "Test", "vehicle_config": {},
+            "vehicle_state": {"odometer": odo_mi, "is_user_present": shift != "P",
+                              "locked": shift == "P", "sentry_mode": sentry},
+            "drive_state": {"timestamp": ts * 1000, "shift_state": shift, "speed": speed,
+                            "latitude": None, "longitude": None},
+            "charge_state": {"battery_level": soc, "battery_range": 200.0,
+                             "charging_state": "Disconnected", "charger_power": 0.0,
+                             "charge_energy_added": 0.0},
+            "climate_state": {"outside_temp": 25.0},
+        }
+
+    pushes = []
+    monkeypatch.setattr("app.api.routes.notifications.notify",
+                        lambda session, title, body, tag=None: pushes.append((title, tag)))
+
+    t = 1_760_500_000
+    try:
+        with SessionLocal() as s:
+            s.add(Vehicle(vin="TESTVIN-SENTRY", name="Test", model="Model 3"))
+            s.commit()
+
+            def tick(dt, soc, shift, sentry):
+                _process_vehicle(s, vdata(t + dt, 2000.0, soc, shift, sentry),
+                                 {"vin": "TESTVIN-SENTRY"}, settings)
+                s.commit()
+
+            tick(0, 80, "P", True)      # parked, Sentry on -> anchor at 80%
+            tick(600, 79, "P", True)    # -1% -> under threshold, quiet
+            tick(1200, 77, "P", True)   # -3% -> fires once
+            tick(1800, 76, "P", True)   # already fired this episode -> quiet
+            sentry_pushes = [p for p in pushes if p[1] == "sentry-drain"]
+            assert len(sentry_pushes) == 1
+
+            tick(2400, 76, "D", True, )  # drove off -> episode resets
+            tick(3000, 76, "P", True)    # new park -> new anchor at 76%
+            tick(3600, 73, "P", True)    # -3% again -> fires for the new episode
+            assert len([p for p in pushes if p[1] == "sentry-drain"]) == 2
+    finally:
+        with SessionLocal() as s:
+            from app.models import Drive as _Drive
+            v = s.query(Vehicle).filter(Vehicle.vin == "TESTVIN-SENTRY").first()
+            if v:
+                s.query(_Drive).filter(_Drive.vehicle_id == v.id).delete()
+                s.query(BatteryReading).filter(BatteryReading.vehicle_id == v.id).delete()
+                s.delete(v)
                 s.commit()
 
 
