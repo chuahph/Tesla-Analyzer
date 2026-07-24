@@ -632,8 +632,14 @@
   }
 
   // --- recommendations (mirror app/analysis/recommendations.py) ---
-  function rec(category, priority, title, detail, saving) {
-    return { category, priority, title, detail, estimated_saving: saving || null };
+  function rec(category, priority, title, detail, saving, opts) {
+    opts = opts || {};
+    return {
+      category, priority, title, detail, estimated_saving: saving || null,
+      saving_kwh: opts.kwh != null ? round(opts.kwh, 1) : null,
+      saving_cost: opts.cost != null ? round(opts.cost, 2) : null,
+      bucket: opts.bucket || null,
+    };
   }
   function buildRecommendations(driving, charging, efficiency, price, currency, battery) {
     const recs = [];
@@ -656,14 +662,16 @@
         const s = beh[`${key}_share_pct`] || 0, p = beh[`${key}_penalty_wh`] || 0,
               k = beh[`${key}_saving_kwh`] || 0;
         if (s >= 10 && p >= 8 && k >= 0.5) {
-          recs.push(rec("Driving behaviour", pri, title, detail(s, p), cost(k)));
+          recs.push(rec("Driving behaviour", pri, title, detail(s, p), cost(k),
+            { kwh: k, cost: k * price, bucket: "driving" }));
         }
       }
       if ((beh.potential_saving_kwh || 0) >= 1 && (beh.score ?? 100) < 90) {
         recs.push(rec("Driving behaviour", "low",
           `Driving like your own best quartile would save ${beh.potential_saving_kwh.toFixed(1)} kWh`,
           `Your most efficient quartile of drives averages ${Math.round(beh.best_quartile_wh_per_km)} Wh/km — a benchmark you already achieve regularly. Matching it across all driving is the single biggest efficiency lever in your data.`,
-          `${currency} ${(beh.potential_saving_kwh * price).toFixed(2)} in this window`));
+          `${currency} ${(beh.potential_saving_kwh * price).toFixed(2)} in this window`,
+          { kwh: beh.potential_saving_kwh, cost: beh.potential_saving_kwh * price, bucket: "driving_lever" }));
       }
     }
     if (battery && battery.available) {
@@ -684,7 +692,8 @@
         const extra = efficiency.total_energy_kwh * (vs / (100 + vs));
         recs.push(rec("Efficiency", "high", `Driving ${vs.toFixed(0)}% above rated consumption`,
           "Your average Wh/km is well above the EPA/rated figure. The gap is usually a mix of high cruising speed, hard acceleration, climate use and cold weather. Smoother acceleration and using scheduled pre-conditioning while plugged in recovers most of this.",
-          `~${extra.toFixed(0)} kWh / ${currency} ${(extra * price).toFixed(0)} over the analysed period`));
+          `~${extra.toFixed(0)} kWh / ${currency} ${(extra * price).toFixed(0)} over the analysed period`,
+          { kwh: extra, cost: extra * price, bucket: "driving" }));
       }
       const slope = driving.speed_efficiency_slope_wh_per_kmh || 0;
       if (slope > 0.6) {
@@ -712,9 +721,11 @@
         // (cheaper) AC sessions understates DC's real premium over home
         // charging, sometimes by a lot.
         const dcRate = safeDiv(charging.dc_cost, charging.dc_energy_kwh);
+        const dcSaving = Math.max(dcRate - price, 0) * charging.dc_energy_kwh;
         recs.push(rec("Battery health", "medium", `${dcShare.toFixed(0)}% of energy comes from DC fast charging`,
           "Heavy reliance on Superchargers/DC adds heat and stress to the pack and is more expensive per kWh than home AC. Shifting routine charging to overnight AC at home extends battery life and lowers cost.",
-          `Up to ${currency} ${(Math.max(dcRate - price, 0) * charging.dc_energy_kwh).toFixed(0)} saved by moving DC energy to home AC`));
+          `Up to ${currency} ${dcSaving.toFixed(0)} saved by moving DC energy to home AC`,
+          { kwh: charging.dc_energy_kwh, cost: dcSaving, bucket: "charging" }));
       }
       const byHour = charging.charges_by_hour;
       let peak = 0; Object.keys(byHour).forEach((h) => { if (+h >= 7 && +h <= 21) peak += byHour[h]; });
@@ -733,8 +744,69 @@
         "No major inefficiencies detected in the analysed period. Keep charging mostly to 80–90% on AC and maintain your current driving style.", null));
     }
     const order = { high: 0, medium: 1, low: 2 };
-    recs.sort((a, b) => order[a.priority] - order[b.priority]);
+    // Priority tier first, then real money within a tier (mirror recommendations.py).
+    recs.sort((a, b) => order[a.priority] - order[b.priority]
+      || (b.saving_cost || 0) - (a.saving_cost || 0));
     return recs;
+  }
+
+  // --- assessment (mirror app/analysis/recommendations.py assess) ---
+  function buildAssessment(driving, charging, efficiency, battery, price, currency, recs) {
+    const driveLever = (recs.find(r => r.bucket === "driving_lever" && r.saving_cost) || {}).saving_cost || 0;
+    const driveLeverKwh = (recs.find(r => r.bucket === "driving_lever" && r.saving_kwh) || {}).saving_kwh || 0;
+    const chargeCost = recs.filter(r => r.bucket === "charging").reduce((a, r) => a + (r.saving_cost || 0), 0);
+    const chargeKwh = recs.filter(r => r.bucket === "charging").reduce((a, r) => a + (r.saving_kwh || 0), 0);
+    const totalCost = round(driveLever + chargeCost, 2);
+    const totalKwh = round(driveLeverKwh + chargeKwh, 1);
+
+    const score = (driving || {}).eco_score ?? null;
+    const grade = (driving || {}).eco_grade ?? null;
+
+    // Strengths.
+    const strengths = [];
+    if (score != null && score >= 85) strengths.push({ title: "Efficient driving",
+      detail: `Eco-score ${score}/100 (grade ${grade}) — consistently at or below rated consumption.` });
+    const beh = (driving || {}).behaviour || {};
+    if (beh.available && (beh.score || 0) >= 95) strengths.push({ title: "Consistent driving style",
+      detail: "Your day-to-day driving already tracks your own best quartile closely — little variance to recover." });
+    if (battery && battery.available && (battery.degradation_pct ?? 100) < 4) strengths.push({ title: "Battery health strong",
+      detail: `Only ${Math.round(battery.degradation_pct)}% projected degradation — better than typical for the mileage.` });
+    if (charging.available) {
+      if ((charging.dc_energy_share_pct ?? 100) < 10) strengths.push({ title: "Mostly home/AC charging",
+        detail: "Little DC fast-charging — gentler on the pack and cheaper per kWh." });
+      if ((charging.full_charge_share_pct ?? 100) < 5) strengths.push({ title: "Rarely charges to 100%",
+        detail: "Keeping the daily ceiling below full is exactly what preserves long-term capacity." });
+    }
+    if (efficiency.available && (efficiency.vs_rated_pct ?? 100) <= 0) strengths.push({ title: "Beating rated efficiency",
+      detail: "Your average Wh/km is at or under the EPA/rated figure for this car." });
+
+    // Confidence.
+    const n = (driving || {}).total_drives || 0, dist = (driving || {}).total_distance_km || 0;
+    const confidence = (n >= 20 && dist >= 200) ? "high" : (n >= 5 ? "medium" : "low");
+
+    // Verdict.
+    let verdict;
+    if (score == null) {
+      verdict = "Not enough driving logged yet to grade this window.";
+    } else {
+      const head = grade ? `Grade ${grade}` : `Eco-score ${score}/100`;
+      if (totalCost > 0) {
+        const lever = chargeCost > driveLever ? " mostly from smarter charging" : " mostly from driving style";
+        verdict = `${head} — about ${currency} ${totalCost.toFixed(2)} recoverable this window,${lever}.`;
+      } else if (strengths.length) {
+        verdict = `${head} — no material savings on the table; solid habits.`;
+      } else {
+        verdict = `${head} — nothing obvious to improve in this window.`;
+      }
+      if (confidence === "low") verdict += " (Thin data — treat as indicative.)";
+    }
+
+    return {
+      score, grade, verdict, confidence,
+      addressable_saving: { kwh: totalKwh, cost: totalCost, currency },
+      strengths, trend: null,  // static mode has no comparable previous window
+      recommendations: recs,
+    };
   }
 
   // --- assemble the same payload the dashboard consumes ---
@@ -837,6 +909,7 @@
       dataset.battery_readings || [],
       newRangeFor(v.model, v.trim, vinYear(v.vin)));
     const recommendations = buildRecommendations(driving, charging, efficiency, price, currency, battery);
+    const assessment = buildAssessment(driving, charging, efficiency, battery, price, currency, recommendations);
 
     // "Current" SoC proxy — static mode has no live telemetry/periodic
     // readings stream (unlike the server, which reads the latest
@@ -926,7 +999,7 @@
       currency,
       last_charge: lastCharge,
       battery_balance: batteryBalance,
-      driving, charging, efficiency, battery, recommendations,
+      driving, charging, efficiency, battery, recommendations, assessment,
     };
   }
 

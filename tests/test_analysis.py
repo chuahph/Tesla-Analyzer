@@ -1054,7 +1054,8 @@ def test_smart_charging_advisor_sizes_saving_from_peak_hour_energy():
     # 10 kWh * (1.20 - 0.45) = RM 7.50.
     assert "7.50" in advisor["estimated_saving"]
     # Purely a recommendation dict — no side effects, no vehicle-facing keys.
-    assert set(advisor) == {"category", "priority", "title", "detail", "estimated_saving"}
+    assert set(advisor) == {"category", "priority", "title", "detail",
+                            "estimated_saving", "saving_kwh", "saving_cost", "bucket"}
 
     # No peak-hour energy at all -> no advisor recommendation fires.
     charging_no_peak = {**charging, "energy_by_hour": {str(h): 0.0 for h in range(24)}}
@@ -1110,3 +1111,85 @@ def test_recommendations_empty_data():
     )
     assert len(recs) == 1
     assert recs[0]["category"] == "Overall"
+
+
+# --- assessment ------------------------------------------------------------
+
+def test_assessment_total_does_not_double_count_driving_tips():
+    """The headline addressable saving must be the best-quartile driving lever
+    PLUS independent charging savings — never the sum of every overlapping
+    driving tip (speeding + stop-go + vs-rated + best-quartile), which would
+    wildly overstate it."""
+    driving = {
+        "available": True, "eco_score": 72, "eco_grade": "C",
+        "total_drives": 40, "total_distance_km": 500.0,
+        "speed_efficiency_slope_wh_per_kmh": 0.0,
+        "behaviour": {
+            "available": True, "score": 70, "potential_saving_kwh": 10.0,
+            "best_quartile_wh_per_km": 150.0,
+            # Two overlapping factor tips fire, each with its own kWh.
+            "speeding_share_pct": 30, "speeding_penalty_wh": 20, "speeding_saving_kwh": 6.0,
+            "stopgo_share_pct": 25, "stopgo_penalty_wh": 15, "stopgo_saving_kwh": 4.0,
+        },
+    }
+    # vs-rated also fires (another overlapping view of the same driving money).
+    efficiency = {"available": True, "vs_rated_pct": 20.0,
+                  "total_energy_kwh": 120.0, "temp_efficiency_slope_wh_per_c": 0.0}
+    # One independent charging saving: 30 kWh DC @ 0.60 vs 0.20 home = 12.00.
+    charging = {
+        "available": True, "full_charge_share_pct": 0.0, "dc_energy_share_pct": 30.0,
+        "total_sessions": 5, "charges_by_hour": {}, "dc_cost": 18.0,
+        "dc_energy_kwh": 30.0, "ac_energy_kwh": 70.0,
+    }
+    a = recommendations_engine.assess(
+        driving, charging, efficiency, energy_price=0.20, currency="RM",
+    )
+    # driving lever = 10 kWh * 0.20 = 2.00; charging = 12.00; total = 14.00.
+    # NOT 2 + 12 + (6*.2) + (4*.2) + vs_rated_extra*.2 (~20) = far higher.
+    assert a["addressable_saving"]["cost"] == 14.0
+    assert a["addressable_saving"]["kwh"] == 40.0  # 10 driving + 30 charging
+    assert a["grade"] == "C"
+    assert a["score"] == 72
+    assert "RM 14.00" in a["verdict"]
+
+
+def test_assessment_reports_strengths_and_grade_when_all_good():
+    """A clean account with a high eco-score, low degradation and disciplined
+    charging surfaces strengths and no addressable saving."""
+    driving = {
+        "available": True, "eco_score": 92, "eco_grade": "A",
+        "total_drives": 50, "total_distance_km": 800.0,
+        "behaviour": {"available": True, "score": 97, "potential_saving_kwh": 0.2},
+    }
+    efficiency = {"available": True, "vs_rated_pct": -3.0, "total_energy_kwh": 100.0}
+    charging = {"available": True, "full_charge_share_pct": 0.0,
+                "dc_energy_share_pct": 2.0, "total_sessions": 10, "charges_by_hour": {}}
+    battery = {"available": True, "degradation_pct": 2.0}
+    a = recommendations_engine.assess(
+        driving, charging, efficiency, battery, energy_price=0.30, currency="USD",
+    )
+    assert a["addressable_saving"]["cost"] == 0.0
+    titles = {s["title"] for s in a["strengths"]}
+    assert "Efficient driving" in titles
+    assert "Battery health strong" in titles
+    assert a["grade"] == "A"
+    assert a["confidence"] == "high"
+
+
+def test_assessment_trend_direction_and_confidence():
+    """Trend compares this window's efficiency to the previous one (lower
+    Wh/km = better), and thin windows are flagged low-confidence."""
+    driving = {"available": True, "eco_score": 80, "eco_grade": "B",
+               "total_drives": 3, "total_distance_km": 40.0, "cost_per_km": 0.05}
+    efficiency = {"available": True, "vs_rated_pct": 5.0,
+                  "avg_efficiency_wh_per_km": 160.0, "total_energy_kwh": 50.0}
+    prev = {"driving": {"available": True, "cost_per_km": 0.06},
+            "efficiency": {"available": True, "avg_efficiency_wh_per_km": 180.0}}
+    a = recommendations_engine.assess(
+        driving, {"available": False}, efficiency,
+        energy_price=0.30, currency="USD", prev=prev,
+    )
+    # 160 vs 180 -> ~11% lower -> better.
+    assert a["trend"]["wh_per_km"]["dir"] == "better"
+    assert a["confidence"] == "low"
+    assert "indicative" in a["verdict"]

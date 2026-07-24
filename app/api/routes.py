@@ -2201,6 +2201,7 @@ def summary(
     # days-based window (not "since last charge"/"current drive", which have
     # no natural "period before" to compare against).
     narrative_lines = None
+    prev_driving = prev_efficiency = None  # also feeds the assessment trend below
     if since is None and days >= 14:
         cur_since = now - timedelta(days=days)
         prev_since = cur_since - timedelta(days=days)
@@ -2378,7 +2379,7 @@ def summary(
             "peak_start_hour": settings.tariff_peak_start_hour,
             "peak_end_hour": settings.tariff_peak_end_hour,
         }
-    recs = recommendations_engine.build(
+    assessment = recommendations_engine.assess(
         driving,
         charging,
         efficiency,
@@ -2386,7 +2387,13 @@ def summary(
         energy_price=settings.energy_price_per_kwh,
         currency=settings.currency,
         tou=tou,
+        prev=({"driving": prev_driving, "efficiency": prev_efficiency}
+              if prev_driving is not None else None),
     )
+    # Keep the flat list under its original key for any consumer that still
+    # reads it (older cached frontends, external scripts); the assessment
+    # carries the same list plus the scorecard.
+    recs = assessment["recommendations"]
 
     vehicle_out = VehicleOut.model_validate(vehicle).model_dump()
     vehicle_out.update({k: v for k, v in vin_info.items() if v})  # year, plant
@@ -2435,4 +2442,5 @@ def summary(
         "week_compare": week_compare,
         "narrative": narrative_lines,
         "recommendations": recs,
+        "assessment": assessment,
     }

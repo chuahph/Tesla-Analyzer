@@ -2031,6 +2031,68 @@ function renderRecommendations(recs) {
   document.getElementById("recommendations").innerHTML = html;
 }
 
+// The scorecard that leads the tips section: overall grade + verdict, the
+// money genuinely recoverable this window, a strengths strip, and the
+// vs-last-period trend. Absent (older payloads / not enough data) -> hides
+// itself and the flat list below still renders on its own.
+function renderAssessment(a, currency) {
+  const el = document.getElementById("assessment-scorecard");
+  if (!el) return;
+  if (!a) { el.innerHTML = ""; return; }
+  const cur = a.addressable_saving?.currency || currency || "";
+
+  const gradeTone = a.score == null ? "na"
+    : a.score >= 85 ? "good" : a.score >= 70 ? "ok" : "bad";
+  const gradeBadge = a.grade != null
+    ? `<div class="asmt-grade tone-${gradeTone}"><span class="g">${a.grade}</span>`
+      + `<span class="s">${a.score}/100</span></div>`
+    : "";
+
+  const save = a.addressable_saving || {};
+  const savingBlock = save.cost > 0
+    ? `<div class="asmt-saving"><span class="amt">${cur} ${save.cost.toFixed(2)}</span>`
+      + `<span class="lbl">recoverable this window${save.kwh
+          ? ` · ~${save.kwh.toFixed(1)} kWh` : ""}</span></div>`
+    : "";
+
+  const confBadge = a.confidence && a.confidence !== "high"
+    ? `<span class="asmt-conf ${a.confidence}" title="Based on how much driving is in `
+      + `this window — treat figures as ${a.confidence === "low" ? "indicative"
+          : "provisional"}.">${a.confidence} confidence</span>`
+    : "";
+
+  const arrow = { better: "↓", worse: "↑", flat: "→" };
+  const trendChip = (label, t, unit) => {
+    if (!t) return "";
+    const cls = t.dir === "better" ? "good" : t.dir === "worse" ? "bad" : "flat";
+    const sign = t.delta_pct > 0 ? "+" : "";
+    return `<span class="asmt-trend ${cls}" title="${label}: ${t.now}${unit} now vs `
+      + `${t.prev}${unit} the period before">${arrow[t.dir]} ${label} `
+      + `${sign}${t.delta_pct}%</span>`;
+  };
+  const trend = a.trend
+    ? `<div class="asmt-trends">${trendChip("Wh/km", a.trend.wh_per_km, "")}`
+      + `${trendChip(`${cur}/km`, a.trend.cost_per_km, "")}</div>`
+    : "";
+
+  const strengths = (a.strengths || []).length
+    ? `<div class="asmt-strengths"><h4>✔ What you're doing well</h4><ul>`
+      + a.strengths.map(s => `<li><strong>${s.title}</strong> — ${s.detail}</li>`).join("")
+      + `</ul></div>`
+    : "";
+
+  el.innerHTML = `
+    <div class="asmt-head">
+      ${gradeBadge}
+      <div class="asmt-verdict">
+        <p>${a.verdict}${confBadge ? " " + confBadge : ""}</p>
+        ${trend}
+      </div>
+      ${savingBlock}
+    </div>
+    ${strengths}`;
+}
+
 // Static/PWA mode computes everything in-browser with no backend (TA.buildSummary);
 // the self-hosted app uses the REST API. window.TA_STATIC is set by the static
 // index.html (window.SUMMARY_URL kept for backward compatibility).
@@ -2162,6 +2224,7 @@ async function load() {
     renderLists(d);
     renderInsights(d);
     renderNarrative(d);
+    renderAssessment(d.assessment, d.currency);
     renderRecommendations(d.recommendations);
     renderQuickNav();
 
