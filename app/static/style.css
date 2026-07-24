@@ -659,7 +659,25 @@ canvas { max-height: 260px; }
 }
 .default-star-btn.selected { color: var(--accent); }
 
-#recommendations { display: flex; flex-direction: column; gap: 12px; }
+#recommendations { display: flex; flex-direction: column; gap: 18px; }
+.rec-group { display: flex; flex-direction: column; gap: 10px; }
+.rec-group > h4 {
+  margin: 0; font-size: 12px; font-weight: 700; color: var(--muted);
+  text-transform: uppercase; letter-spacing: .6px;
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  padding-bottom: 6px; border-bottom: 1px solid var(--border);
+}
+.rec-group .rec-group-ico { font-size: 14px; }
+.rec-group .rec-count {
+  font-weight: 600; color: var(--muted); text-transform: none; letter-spacing: 0;
+  font-size: 11px; background: var(--panel-2); border: 1px solid var(--border);
+  padding: 1px 7px; border-radius: 999px;
+}
+.rec-group .rec-group-save {
+  margin-left: auto; text-transform: none; letter-spacing: 0;
+  font-size: 11.5px; font-weight: 700; color: var(--green);
+}
+.rec-group-body { display: flex; flex-direction: column; gap: 10px; }
 .rec {
   display: flex; gap: 14px; align-items: flex-start;
   background: linear-gradient(180deg, #20262f, var(--panel-2));

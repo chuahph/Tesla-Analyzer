@@ -2017,8 +2017,34 @@ function battInfoHtml(d) {
     .map((r) => (r.startsWith("<div") ? r : `<div>${r}</div>`)).join("");
 }
 
-function renderRecommendations(recs) {
-  const html = recs.map(r => `
+// Fold the flat recommendation list into a few themed groups, each with a
+// one-line summary, so the section reads as a short assessment rather than a
+// pile of loosely-related cards. Every rec's category maps to exactly one
+// group; the group's recoverable figure reuses the same non-double-counted
+// buckets the scorecard total does (driving lever + charging), so the two
+// group figures add up to the headline number.
+const REC_GROUPS = [
+  {
+    key: "driving",
+    title: "Driving & efficiency",
+    icon: "🚗",
+    cats: new Set(["Driving behaviour", "Driving", "Efficiency", "Usage"]),
+    // The single non-overlapping driving figure (see recommendations.py).
+    saving: (rs) => (rs.find((r) => r.bucket === "driving_lever" && r.saving_cost) || {}).saving_cost || 0,
+  },
+  {
+    key: "charging",
+    title: "Charging & battery",
+    icon: "🔋",
+    cats: new Set(["Battery health", "Cost"]),
+    // Charging savings are independent -> safe to add.
+    saving: (rs) => rs.filter((r) => r.bucket === "charging").reduce((a, r) => a + (r.saving_cost || 0), 0),
+  },
+  { key: "other", title: "Other", icon: "•", cats: null, saving: () => 0 },
+];
+
+function renderRecommendations(recs, currency) {
+  const card = (r) => `
     <div class="rec ${r.priority}">
       <span class="pri">${r.priority}</span>
       <div class="body">
@@ -2027,7 +2053,30 @@ function renderRecommendations(recs) {
         <p>${r.detail}</p>
         ${r.estimated_saving ? `<div class="saving">⤳ ${r.estimated_saving}</div>` : ""}
       </div>
-    </div>`).join("");
+    </div>`;
+
+  const cur = currency || (lastData && lastData.currency) || "";
+  const groupFor = (r) =>
+    REC_GROUPS.find((g) => g.cats && g.cats.has(r.category)) ||
+    REC_GROUPS[REC_GROUPS.length - 1];
+
+  const html = REC_GROUPS.map((g) => {
+    const rs = recs.filter((r) => groupFor(r) === g);
+    if (!rs.length) return "";
+    // A lone "everything looks efficient" fallback needs no group chrome.
+    if (recs.length === 1 && rs[0].category === "Overall") return card(rs[0]);
+    const save = g.saving(rs);
+    const summary = save > 0
+      ? `<span class="rec-group-save">~${cur} ${save.toFixed(2)} recoverable</span>`
+      : "";
+    return `
+      <div class="rec-group">
+        <h4><span class="rec-group-ico">${g.icon}</span>${g.title}
+          <span class="rec-count">${rs.length} tip${rs.length > 1 ? "s" : ""}</span>
+          ${summary}</h4>
+        <div class="rec-group-body">${rs.map(card).join("")}</div>
+      </div>`;
+  }).join("");
   document.getElementById("recommendations").innerHTML = html;
 }
 
@@ -2225,7 +2274,7 @@ async function load() {
     renderInsights(d);
     renderNarrative(d);
     renderAssessment(d.assessment, d.currency);
-    renderRecommendations(d.recommendations);
+    renderRecommendations(d.recommendations, d.currency);
     renderQuickNav();
 
     const now = new Date();
