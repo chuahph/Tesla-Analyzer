@@ -2036,7 +2036,7 @@ const REC_GROUPS = [
     key: "charging",
     title: "Charging & battery",
     icon: "🔋",
-    cats: new Set(["Battery health", "Cost"]),
+    cats: new Set(["Battery health", "Cost", "Standby"]),
     // Charging savings are independent -> safe to add.
     saving: (rs) => rs.filter((r) => r.bucket === "charging").reduce((a, r) => a + (r.saving_cost || 0), 0),
   },

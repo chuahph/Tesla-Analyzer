@@ -44,12 +44,17 @@ def build(
     energy_price: float,
     currency: str,
     tou: dict[str, Any] | None = None,
+    standby_inducer: str | None = None,
 ) -> list[dict[str, Any]]:
     """``tou``, when a real time-of-use tariff is configured: {peak_price,
     offpeak_price, peak_start_hour, peak_end_hour} — sizes the smart
     charging advisor's saving from the account's own peak-hour energy
     instead of a generic heuristic. None (the default) keeps the old
-    session-count-based hint for accounts on a flat rate."""
+    session-count-based hint for accounts on a flat rate.
+
+    ``standby_inducer``: what was likely running during the biggest parked
+    gap (e.g. "Sentry Mode (maybe)"), from routes._idle_inducer — named in
+    the standby-drain tip when known."""
     recs: list[dict[str, Any]] = []
 
     # --- Battery degradation --------------------------------------------------
@@ -83,59 +88,71 @@ def build(
             )
 
     # --- Personal driving behaviour (measured from this driver's own data) ---
+    # One consolidated card rather than a separate one per factor: speeding,
+    # stop-go, short trips, peak hour and hot weather are overlapping
+    # contributors to the same "above your own best" inefficiency, so listing
+    # them as five near-duplicate tips read as noise. They fold into a single
+    # "driving style" card whose contributors are named inline and whose
+    # recoverable figure is the (non-double-counted) best-quartile lever.
     beh = (driving or {}).get("behaviour") or {}
     if beh.get("available"):
-        def _cost(kwh: float) -> str:
-            return f"~{kwh:.1f} kWh / {currency} {kwh * energy_price:.2f} in this window"
-
-        factors = [
-            ("speeding", "medium", "Fast highway driving is costing you range",
-             "In {share}% of your kilometres you exceeded 110 km/h, and those "
-             "drives averaged +{pen} Wh/km versus your calmer ones. Easing the "
-             "cruise speed by ~10 km/h recovers most of it."),
-            ("stopgo", "medium", "Stop-and-go driving pattern detected",
-             "{share}% of your kilometres show a stop-go signature (low average "
-             "but high peak speed), costing +{pen} Wh/km. Smoother acceleration "
-             "and letting regen do the braking (one-pedal style) narrows this."),
-            ("short_trip", "low", "Short cold-start trips are inefficient",
-             "Trips under 3 km make up {share}% of your kilometres at +{pen} "
-             "Wh/km — the battery and cabin never reach efficient temperature. "
-             "Chaining errands into one round trip helps."),
-            ("peak_hour", "low", "Peak-hour congestion is measurable in your data",
-             "Driving at 7–8 or 17–19 h costs you +{pen} Wh/km over {share}% of "
-             "your kilometres. Shifting departures even 30 minutes can help."),
-            ("hot_weather", "low", "Hot-weather driving penalty",
-             "Drives at 33°C+ cost +{pen} Wh/km ({share}% of km) — mostly A/C "
-             "load. Pre-cool the cabin while still plugged in and park in shade "
-             "where possible."),
+        # (key, short phrase used inline in the consolidated detail)
+        factor_labels = [
+            ("speeding", "fast highway driving (over 110 km/h)"),
+            ("stopgo", "stop-and-go traffic"),
+            ("short_trip", "short cold-start trips (under 3 km)"),
+            ("peak_hour", "peak-hour congestion"),
+            ("hot_weather", "hot-weather A/C load (33°C+)"),
         ]
-        for key, pri, title, detail in factors:
+        fired = []
+        for key, label in factor_labels:
             share = beh.get(f"{key}_share_pct", 0)
             pen = beh.get(f"{key}_penalty_wh", 0)
             kwh = beh.get(f"{key}_saving_kwh", 0)
             if share >= 10 and pen >= 8 and kwh >= 0.5:
-                # bucket="driving": these are overlapping components of the
-                # same driving inefficiency the best-quartile lever below
-                # already captures whole — kept as detail, never added into
-                # the header total on top of it (see assess()).
-                recs.append(_rec(
-                    "Driving behaviour", pri, title,
-                    detail.format(share=share, pen=pen), _cost(kwh),
-                    kwh=kwh, cost=kwh * energy_price, bucket="driving",
-                ))
+                fired.append((label, share, pen, kwh))
 
-        if beh.get("potential_saving_kwh", 0) >= 1 and beh.get("score", 100) < 90:
-            pk = beh["potential_saving_kwh"]
+        pk = beh.get("potential_saving_kwh", 0)
+        best_q = beh.get("best_quartile_wh_per_km")
+        lever_ok = pk >= 1 and beh.get("score", 100) < 90
+
+        if fired or lever_ok:
+            contributors = "; ".join(
+                f"{label} (+{pen} Wh/km over {share}% of km)"
+                for label, share, pen, _ in fired
+            )
+            if fired:
+                detail = (
+                    "Your everyday driving runs above your own efficient baseline. "
+                    f"The measurable contributors this window: {contributors}. "
+                )
+            else:
+                detail = "Your everyday driving runs a little above your own best quartile. "
+            if lever_ok:
+                detail += (
+                    f"Matching your most efficient quartile ({best_q:.0f} Wh/km) — a "
+                    f"level you already hit regularly — would recover about {pk:.1f} kWh: "
+                    "smoother acceleration, easing motorway cruise speed, and letting "
+                    "regen do the braking are the levers."
+                )
+                saving = f"{currency} {pk * energy_price:.2f} in this window"
+                kwh_val, cost_val, bucket = pk, pk * energy_price, "driving_lever"
+            else:
+                # Factors fired but the overall best-quartile gap is small
+                # (score >= 90): size the recoverable from the single biggest
+                # contributor rather than summing the overlapping factors, so
+                # the figure is honest and never inflates. bucket="driving"
+                # keeps it out of the headline total (only the lever counts).
+                detail += "Smoother, steadier driving trims most of it."
+                top_kwh = max(k for _, _, _, k in fired)
+                saving = f"~{top_kwh:.1f} kWh / {currency} {top_kwh * energy_price:.2f} " \
+                         "from the biggest single contributor"
+                kwh_val, cost_val, bucket = top_kwh, top_kwh * energy_price, "driving"
             recs.append(_rec(
-                "Driving behaviour", "low",
-                f"Driving like your own best quartile would save "
-                f"{pk:.1f} kWh",
-                f"Your most efficient quartile of drives averages "
-                f"{beh['best_quartile_wh_per_km']:.0f} Wh/km — a benchmark you "
-                "already achieve regularly. Matching it across all driving is the "
-                "single biggest efficiency lever in your data.",
-                f"{currency} {pk * energy_price:.2f} in this window",
-                kwh=pk, cost=pk * energy_price, bucket="driving_lever",
+                "Driving behaviour",
+                "medium" if fired else "low",
+                "Driving style is adding avoidable consumption",
+                detail, saving, kwh=kwh_val, cost=cost_val, bucket=bucket,
             ))
 
     # --- Efficiency vs rated -------------------------------------------------
@@ -284,6 +301,37 @@ def build(
                     )
                 )
 
+    # --- Standby / vampire drain (energy lost while parked) ------------------
+    # The parked-drain equivalent of Tesla's own Energy > Park screen, from
+    # the vampire_drain measurement already on the driving dict. Sized in
+    # kWh/cost, but deliberately NOT added to the assessment's headline
+    # "recoverable" total (see assess): only the Sentry/climate share is
+    # actually avoidable — baseline self-discharge isn't — so claiming the
+    # whole figure as recoverable would overstate it.
+    vd = (driving or {}).get("vampire_drain") or {}
+    vk = vd.get("kwh", 0.0)
+    vh = vd.get("hours", 0.0)
+    vg = vd.get("gaps", 0)
+    if vk >= 0.5 and vg >= 1:
+        cost = vk * energy_price
+        cause = ""
+        if standby_inducer:
+            # _idle_inducer already hedges with "(maybe)"; fold it in plainly.
+            cause = f" {standby_inducer} was the likely main draw."
+        recs.append(_rec(
+            "Standby",
+            "medium" if cost >= 5 else "low",
+            f"~{vk:.1f} kWh drained while parked (standby)",
+            f"About {vk:.1f} kWh / {currency} {cost:.2f} was lost to standby drain "
+            f"across {vg} parked gap{'s' if vg > 1 else ''} ({vh:.0f} h total) with no "
+            f"charging in between.{cause} Much of it is avoidable — turn off Sentry Mode "
+            "when parked somewhere safe, and switch off cabin-overheat cooling or "
+            "preconditioning when you don't need them. Some baseline self-discharge is "
+            "normal and can't be removed.",
+            f"Up to {currency} {cost:.2f} if the avoidable (Sentry/climate) share is cut",
+            kwh=vk, cost=cost, bucket="standby",
+        ))
+
     # --- Usage patterns ------------------------------------------------------
     if driving.get("available"):
         avg_trip = driving.get("avg_trip_distance_km", 99)
@@ -421,6 +469,7 @@ def assess(
     currency: str,
     tou: dict[str, Any] | None = None,
     prev: dict[str, Any] | None = None,
+    standby_inducer: str | None = None,
 ) -> dict[str, Any]:
     """The graded scorecard the dashboard leads with: an overall grade and
     one-line verdict, the total money genuinely recoverable this window (from
@@ -432,7 +481,8 @@ def assess(
     window before this one, used only for the trend line.
     """
     recs = build(driving, charging, efficiency, battery,
-                 energy_price=energy_price, currency=currency, tou=tou)
+                 energy_price=energy_price, currency=currency, tou=tou,
+                 standby_inducer=standby_inducer)
 
     # Total addressable saving, WITHOUT double-counting. The driving tips
     # (speeding/stop-go/vs-rated/…) are all views of the same inefficiency,
@@ -444,10 +494,14 @@ def assess(
     charging_saving = sum(
         r["saving_cost"] or 0.0 for r in recs if r["bucket"] == "charging")
     total_cost = round(driving_lever + charging_saving, 2)
+    # kWh mirrors the same cost-bearing contributions, so the "~N kWh / RM X"
+    # pairing stays consistent — a charging tip that moves energy but saves
+    # nothing at the current rates adds no cost and no kWh here.
     total_kwh = round(
         (next((r["saving_kwh"] for r in recs
                if r["bucket"] == "driving_lever" and r["saving_kwh"]), 0.0)
-         + sum(r["saving_kwh"] or 0.0 for r in recs if r["bucket"] == "charging")),
+         + sum(r["saving_kwh"] or 0.0 for r in recs
+               if r["bucket"] == "charging" and (r["saving_cost"] or 0.0) > 0)),
         1,
     )
 

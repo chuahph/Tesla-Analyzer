@@ -2389,6 +2389,10 @@ def summary(
         tou=tou,
         prev=({"driving": prev_driving, "efficiency": prev_efficiency}
               if prev_driving is not None else None),
+        # What likely drew power during the biggest parked gap (Sentry/climate),
+        # so the standby-drain tip can name it — same figure the Battery
+        # Balance card's vampire_longest_inducer uses.
+        standby_inducer=longest_inducer,
     )
     # Keep the flat list under its original key for any consumer that still
     # reads it (older cached frontends, external scripts); the assessment

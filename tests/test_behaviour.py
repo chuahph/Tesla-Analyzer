@@ -41,10 +41,15 @@ def test_behaviour_recommendation_generated():
         driving, {"available": False}, {"available": False},
         energy_price=0.90, currency="RM",
     )
-    titles = [r["title"] for r in recs]
-    assert any("Fast highway driving" in t for t in titles)
-    speeding = next(r for r in recs if "Fast highway driving" in r["title"])
-    assert "RM" in speeding["estimated_saving"]
+    # The per-factor tips fold into one consolidated "driving style" card:
+    # the specific contributor (fast highway driving) is named in the detail,
+    # and the card carries an RM saving from the best-quartile lever.
+    style = next(r for r in recs if r["category"] == "Driving behaviour")
+    assert style["title"] == "Driving style is adding avoidable consumption"
+    assert "fast highway driving" in style["detail"].lower()
+    assert "RM" in style["estimated_saving"]
+    # Consolidated: exactly one driving-behaviour card, not one per factor.
+    assert sum(1 for r in recs if r["category"] == "Driving behaviour") == 1
 
 
 def test_behaviour_unavailable_with_few_drives():

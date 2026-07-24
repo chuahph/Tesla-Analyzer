@@ -643,35 +643,45 @@
   }
   function buildRecommendations(driving, charging, efficiency, price, currency, battery) {
     const recs = [];
+    // One consolidated "driving style" card (mirror recommendations.py) —
+    // the per-factor tips overlap, so they fold into a single card whose
+    // recoverable figure is the non-double-counted best-quartile lever.
     const beh = (driving || {}).behaviour || {};
     if (beh.available) {
-      const cost = (kwh) => `~${kwh.toFixed(1)} kWh / ${currency} ${(kwh * price).toFixed(2)} in this window`;
-      const factors = [
-        ["speeding", "medium", "Fast highway driving is costing you range",
-         (s, p) => `In ${s}% of your kilometres you exceeded 110 km/h, and those drives averaged +${p} Wh/km versus your calmer ones. Easing the cruise speed by ~10 km/h recovers most of it.`],
-        ["stopgo", "medium", "Stop-and-go driving pattern detected",
-         (s, p) => `${s}% of your kilometres show a stop-go signature (low average but high peak speed), costing +${p} Wh/km. Smoother acceleration and letting regen do the braking (one-pedal style) narrows this.`],
-        ["short_trip", "low", "Short cold-start trips are inefficient",
-         (s, p) => `Trips under 3 km make up ${s}% of your kilometres at +${p} Wh/km — the battery and cabin never reach efficient temperature. Chaining errands into one round trip helps.`],
-        ["peak_hour", "low", "Peak-hour congestion is measurable in your data",
-         (s, p) => `Driving at 7–8 or 17–19 h costs you +${p} Wh/km over ${s}% of your kilometres. Shifting departures even 30 minutes can help.`],
-        ["hot_weather", "low", "Hot-weather driving penalty",
-         (s, p) => `Drives at 33°C+ cost +${p} Wh/km (${s}% of km) — mostly A/C load. Pre-cool the cabin while still plugged in and park in shade where possible.`],
+      const factorLabels = [
+        ["speeding", "fast highway driving (over 110 km/h)"],
+        ["stopgo", "stop-and-go traffic"],
+        ["short_trip", "short cold-start trips (under 3 km)"],
+        ["peak_hour", "peak-hour congestion"],
+        ["hot_weather", "hot-weather A/C load (33°C+)"],
       ];
-      for (const [key, pri, title, detail] of factors) {
+      const fired = [];
+      for (const [key, label] of factorLabels) {
         const s = beh[`${key}_share_pct`] || 0, p = beh[`${key}_penalty_wh`] || 0,
               k = beh[`${key}_saving_kwh`] || 0;
-        if (s >= 10 && p >= 8 && k >= 0.5) {
-          recs.push(rec("Driving behaviour", pri, title, detail(s, p), cost(k),
-            { kwh: k, cost: k * price, bucket: "driving" }));
-        }
+        if (s >= 10 && p >= 8 && k >= 0.5) fired.push({ label, s, p, k });
       }
-      if ((beh.potential_saving_kwh || 0) >= 1 && (beh.score ?? 100) < 90) {
-        recs.push(rec("Driving behaviour", "low",
-          `Driving like your own best quartile would save ${beh.potential_saving_kwh.toFixed(1)} kWh`,
-          `Your most efficient quartile of drives averages ${Math.round(beh.best_quartile_wh_per_km)} Wh/km — a benchmark you already achieve regularly. Matching it across all driving is the single biggest efficiency lever in your data.`,
-          `${currency} ${(beh.potential_saving_kwh * price).toFixed(2)} in this window`,
-          { kwh: beh.potential_saving_kwh, cost: beh.potential_saving_kwh * price, bucket: "driving_lever" }));
+      const pk = beh.potential_saving_kwh || 0, bestQ = beh.best_quartile_wh_per_km;
+      const leverOk = pk >= 1 && (beh.score ?? 100) < 90;
+      if (fired.length || leverOk) {
+        const contributors = fired.map((f) => `${f.label} (+${f.p} Wh/km over ${f.s}% of km)`).join("; ");
+        let detail = fired.length
+          ? `Your everyday driving runs above your own efficient baseline. The measurable contributors this window: ${contributors}. `
+          : "Your everyday driving runs a little above your own best quartile. ";
+        let saving, opts;
+        if (leverOk) {
+          detail += `Matching your most efficient quartile (${Math.round(bestQ)} Wh/km) — a level you already hit regularly — would recover about ${pk.toFixed(1)} kWh: smoother acceleration, easing motorway cruise speed, and letting regen do the braking are the levers.`;
+          saving = `${currency} ${(pk * price).toFixed(2)} in this window`;
+          opts = { kwh: pk, cost: pk * price, bucket: "driving_lever" };
+        } else {
+          // Size from the single biggest contributor, not the sum (no double-count).
+          detail += "Smoother, steadier driving trims most of it.";
+          const biggest = fired.reduce((m, f) => Math.max(m, f.k), 0);
+          saving = `~${biggest.toFixed(1)} kWh / ${currency} ${(biggest * price).toFixed(2)} from the biggest single contributor`;
+          opts = { kwh: biggest, cost: biggest * price, bucket: "driving" };
+        }
+        recs.push(rec("Driving behaviour", fired.length ? "medium" : "low",
+          "Driving style is adding avoidable consumption", detail, saving, opts));
       }
     }
     if (battery && battery.available) {
@@ -735,6 +745,18 @@
           "10–40% off the electricity portion of your charging bill"));
       }
     }
+    // Standby / vampire drain (mirror recommendations.py). Static mode has
+    // no per-gap inducer lookup, so the cause clause is omitted here.
+    const vd = (driving || {}).vampire_drain || {};
+    const vk = vd.kwh || 0, vh = vd.hours || 0, vg = vd.gaps || 0;
+    if (vk >= 0.5 && vg >= 1) {
+      const vcost = vk * price;
+      recs.push(rec("Standby", vcost >= 5 ? "medium" : "low",
+        `~${vk.toFixed(1)} kWh drained while parked (standby)`,
+        `About ${vk.toFixed(1)} kWh / ${currency} ${vcost.toFixed(2)} was lost to standby drain across ${vg} parked gap${vg > 1 ? "s" : ""} (${vh.toFixed(0)} h total) with no charging in between. Much of it is avoidable — turn off Sentry Mode when parked somewhere safe, and switch off cabin-overheat cooling or preconditioning when you don't need them. Some baseline self-discharge is normal and can't be removed.`,
+        `Up to ${currency} ${vcost.toFixed(2)} if the avoidable (Sentry/climate) share is cut`,
+        { kwh: vk, cost: vcost, bucket: "standby" }));
+    }
     if (driving.available && driving.avg_trip_distance_km < 6) {
       recs.push(rec("Usage", "low", "Many very short trips",
         "Short hops never let the battery and cabin reach efficient operating temperature, so the Wh/km on these is high. Combining errands into a single round-trip improves overall efficiency.", null));
@@ -755,7 +777,8 @@
     const driveLever = (recs.find(r => r.bucket === "driving_lever" && r.saving_cost) || {}).saving_cost || 0;
     const driveLeverKwh = (recs.find(r => r.bucket === "driving_lever" && r.saving_kwh) || {}).saving_kwh || 0;
     const chargeCost = recs.filter(r => r.bucket === "charging").reduce((a, r) => a + (r.saving_cost || 0), 0);
-    const chargeKwh = recs.filter(r => r.bucket === "charging").reduce((a, r) => a + (r.saving_kwh || 0), 0);
+    // kWh only from charging tips that actually save money, so it pairs with cost.
+    const chargeKwh = recs.filter(r => r.bucket === "charging" && (r.saving_cost || 0) > 0).reduce((a, r) => a + (r.saving_kwh || 0), 0);
     const totalCost = round(driveLever + chargeCost, 2);
     const totalKwh = round(driveLeverKwh + chargeKwh, 1);
 

@@ -1176,6 +1176,44 @@ def test_assessment_reports_strengths_and_grade_when_all_good():
     assert a["confidence"] == "high"
 
 
+def test_standby_drain_tip_from_vampire_data_not_in_headline_total():
+    """A material parked/standby drain surfaces its own tip (with the inducer
+    named when known), but is deliberately kept OUT of the headline
+    'recoverable' total — only the Sentry/climate share is avoidable, so
+    claiming the whole figure would overstate it."""
+    driving = {
+        "available": True, "eco_score": 80, "eco_grade": "B",
+        "total_drives": 30, "total_distance_km": 400.0,
+        "vampire_drain": {"kwh": 4.0, "hours": 60.0, "gaps": 5},
+    }
+    recs = recommendations_engine.build(
+        driving, {"available": False}, {"available": False},
+        energy_price=0.90, currency="RM",
+        standby_inducer="Sentry Mode (maybe)",
+    )
+    tip = next(r for r in recs if r["category"] == "Standby")
+    assert "4.0 kWh" in tip["title"]
+    assert "Sentry Mode" in tip["detail"]
+    assert tip["saving_cost"] == round(4.0 * 0.90, 2)  # 3.60
+    assert tip["bucket"] == "standby"
+
+    a = recommendations_engine.assess(
+        driving, {"available": False}, {"available": False},
+        energy_price=0.90, currency="RM", standby_inducer="Sentry Mode (maybe)",
+    )
+    # standby is shown as a tip but excluded from the recoverable total.
+    assert a["addressable_saving"]["cost"] == 0.0
+    assert any(r["category"] == "Standby" for r in a["recommendations"])
+
+    # Negligible drain -> no tip.
+    quiet = {**driving, "vampire_drain": {"kwh": 0.1, "hours": 12.0, "gaps": 2}}
+    recs2 = recommendations_engine.build(
+        quiet, {"available": False}, {"available": False},
+        energy_price=0.90, currency="RM",
+    )
+    assert not any(r["category"] == "Standby" for r in recs2)
+
+
 def test_assessment_trend_direction_and_confidence():
     """Trend compares this window's efficiency to the previous one (lower
     Wh/km = better), and thin windows are flagged low-confidence."""
