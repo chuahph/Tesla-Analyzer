@@ -481,46 +481,6 @@
         <!-- Monthly projected-full-range trend; shown once 2+ months exist. -->
         <canvas id="battTrendChart" class="batt-trend" style="display:none"></canvas>
       </div>
-      <!-- Pre-trip range planner: will I make it, and on what SoC? Uses this
-           car's own recent Wh/km, not Tesla's generic rated estimate. -->
-      <div class="card" id="planner-card" style="display:none">
-        <h2>🧭 Trip Planner
-          <button class="info-btn" data-info="info-planner">!</button></h2>
-        <div id="info-planner" class="info-pop hidden">
-          Estimates whether a planned drive fits your remaining charge, using your
-          <strong>own recent Wh/km</strong> (not the car's optimistic rated figure) and
-          your pack's usable capacity. Pick a condition to load the batteries the way
-          highway speed or A/C actually would. Advisory only — leave a buffer.
-        </div>
-        <div class="planner">
-          <div class="planner-dest">
-            <label>Destination (optional)
-              <span class="planner-dest-row">
-                <input id="plan-dest" type="text" placeholder="e.g. KLCC, or an address">
-                <button id="plan-dest-go" class="btn btn-mini" type="button">📍 Distance</button>
-              </span>
-            </label>
-            <div id="plan-dest-note" class="plan-dest-note"></div>
-          </div>
-          <div class="planner-inputs">
-            <label>Distance
-              <span class="planner-field"><input id="plan-km" type="number" min="0" step="1" inputmode="decimal" placeholder="e.g. 80"> km</span>
-            </label>
-            <label>Start SoC
-              <span class="planner-field"><input id="plan-soc" type="number" min="0" max="100" step="1" inputmode="decimal"> %</span>
-            </label>
-            <label>Conditions
-              <select id="plan-cond">
-                <option value="1.0">Normal (your average)</option>
-                <option value="1.15">Highway / brisk (+15%)</option>
-                <option value="1.25">Cold or heavy A/C (+25%)</option>
-                <option value="0.9">Gentle / city (−10%)</option>
-              </select>
-            </label>
-          </div>
-          <div id="plan-result" class="planner-result"></div>
-        </div>
-      </div>
       <div class="card" id="narrative-card" style="display:none">
         <h2>📝 Your Month, In Words</h2>
         <p id="narrative-body" class="narrative-body"></p>
@@ -638,6 +598,46 @@
           topping to 100% before long trips extends pack life.
         </div>
         <canvas id="socTargetChart"></canvas>
+      </div>
+      <!-- Pre-trip range planner: will I make it, and on what SoC? Uses this
+           car's own recent Wh/km, not Tesla's generic rated estimate. -->
+      <div class="card" id="planner-card" style="display:none">
+        <h2>🧭 Trip Planner
+          <button class="info-btn" data-info="info-planner">!</button></h2>
+        <div id="info-planner" class="info-pop hidden">
+          Estimates whether a planned drive fits your remaining charge, using your
+          <strong>own recent Wh/km</strong> (not the car's optimistic rated figure) and
+          your pack's usable capacity. Pick a condition to load the batteries the way
+          highway speed or A/C actually would. Advisory only — leave a buffer.
+        </div>
+        <div class="planner">
+          <div class="planner-dest">
+            <label>Destination (optional)
+              <span class="planner-dest-row">
+                <input id="plan-dest" type="text" placeholder="e.g. KLCC, or an address">
+                <button id="plan-dest-go" class="btn btn-mini" type="button">📍 Distance</button>
+              </span>
+            </label>
+            <div id="plan-dest-note" class="plan-dest-note"></div>
+          </div>
+          <div class="planner-inputs">
+            <label>Distance
+              <span class="planner-field"><input id="plan-km" type="number" min="0" step="1" inputmode="decimal" placeholder="e.g. 80"> km</span>
+            </label>
+            <label>Start SoC
+              <span class="planner-field"><input id="plan-soc" type="number" min="0" max="100" step="1" inputmode="decimal"> %</span>
+            </label>
+            <label>Conditions
+              <select id="plan-cond">
+                <option value="1.0">Normal (your average)</option>
+                <option value="1.15">Highway / brisk (+15%)</option>
+                <option value="1.25">Cold or heavy A/C (+25%)</option>
+                <option value="0.9">Gentle / city (−10%)</option>
+              </select>
+            </label>
+          </div>
+          <div id="plan-result" class="planner-result"></div>
+        </div>
       </div>
       <div class="card full" id="recommendations-card">
         <h2>💡 Assessment &amp; recommendations</h2>
