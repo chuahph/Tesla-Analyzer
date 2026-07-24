@@ -1906,6 +1906,82 @@ function forecastHtml(f) {
     <span class="muted">${f.note}</span></div>`;
 }
 
+// Pre-trip range planner. Pure client-side what-if using this car's own
+// recent Wh/km, usable pack capacity and current SoC (all already in the
+// payload). Kept in module scope so the input handlers can recompute.
+let plannerCtx = null;
+
+function computePlan() {
+  const out = document.getElementById("plan-result");
+  if (!out || !plannerCtx) return;
+  const { whPerKm, capacityKwh, currency, costPerKwh } = plannerCtx;
+  const km = parseFloat(document.getElementById("plan-km").value);
+  const soc = parseFloat(document.getElementById("plan-soc").value);
+  const cond = parseFloat(document.getElementById("plan-cond").value) || 1.0;
+  if (!isFinite(km) || km <= 0 || !isFinite(soc)) {
+    out.innerHTML = `<div class="plan-hint">Enter a distance and starting charge to plan a drive.</div>`;
+    return;
+  }
+  const effWh = whPerKm * cond;
+  const energyNeeded = km * effWh / 1000;                 // kWh
+  const socNeeded = capacityKwh > 0 ? energyNeeded / capacityKwh * 100 : 0;
+  const arrival = soc - socNeeded;
+  // Usable range from the entered SoC at this efficiency.
+  const rangeAvail = effWh > 0 ? (soc / 100 * capacityKwh) / effWh * 1000 : 0;
+  const cost = costPerKwh ? energyNeeded * costPerKwh : null;
+
+  // A 10-point arrival buffer is the "comfortable" line; below 0 you don't
+  // make it at all.
+  const cls = arrival < 0 ? "bad" : arrival < 10 ? "warn" : "good";
+  const verdict = arrival < 0
+    ? `Won't make it — about <strong>${fmt(km - rangeAvail, 0)} km short</strong>. Charge first.`
+    : arrival < 10
+    ? `Tight — you'd arrive on about <strong>${fmt(arrival, 0)}%</strong>. Leave a bigger buffer if you can.`
+    : `You'd arrive with about <strong>${fmt(arrival, 0)}%</strong> to spare.`;
+
+  out.innerHTML = `
+    <div class="plan-verdict ${cls}">${verdict}</div>
+    <div class="plan-grid">
+      <div><span class="k">Needs</span><span class="v">${fmt(socNeeded, 0)}%${cost != null ? ` · ${currency} ${fmt(cost, 2)}` : ""}</span></div>
+      <div><span class="k">Energy</span><span class="v">${fmt(energyNeeded, 1)} kWh</span></div>
+      <div><span class="k">At</span><span class="v">${fmt(effWh, 0)} Wh/km</span></div>
+      <div><span class="k">Range now</span><span class="v">~${fmt(rangeAvail, 0)} km</span></div>
+    </div>`;
+}
+
+function renderPlanner(d) {
+  const card = document.getElementById("planner-card");
+  if (!card) return;
+  const eff = d.efficiency || {};
+  const whPerKm = eff.avg_efficiency_wh_per_km || eff.rated_wh_per_km || 0;
+  const capacityKwh = (d.vehicle && d.vehicle.usable_capacity_kwh) || 0;
+  // Can't plan without a personal efficiency basis and a pack size.
+  if (!whPerKm || !capacityKwh) { card.style.display = "none"; return; }
+  card.style.display = "";
+  const bal = d.battery_balance || {};
+  const lastCharge = d.last_charge || {};
+  const costPerKwh = lastCharge.rate_per_kwh
+    || (bal.charged_kwh && lastCharge.cost ? lastCharge.cost / lastCharge.charged_kwh : null);
+  plannerCtx = { whPerKm, capacityKwh, currency: d.currency || "", costPerKwh };
+
+  const socInput = document.getElementById("plan-soc");
+  // Prefill start SoC with the current reading when known, but only if the
+  // user hasn't already typed their own — recompute-on-reload shouldn't
+  // clobber an in-progress what-if.
+  if (socInput && !socInput.value && bal.current_soc_pct != null) {
+    socInput.value = Math.round(bal.current_soc_pct);
+  }
+  computePlan();
+}
+
+// Wire the inputs once; computePlan reads live values each time.
+document.addEventListener("input", (e) => {
+  if (e.target && ["plan-km", "plan-soc", "plan-cond"].includes(e.target.id)) computePlan();
+});
+document.addEventListener("change", (e) => {
+  if (e.target && e.target.id === "plan-cond") computePlan();
+});
+
 function renderBattery(d) {
   const card = document.getElementById("battery-card");
   const body = document.getElementById("battery-body");
@@ -2293,6 +2369,7 @@ async function load() {
     renderLists(d);
     renderInsights(d);
     renderNarrative(d);
+    renderPlanner(d);
     renderAssessment(d.assessment, d.currency);
     renderRecommendations(d.recommendations, d.currency);
     renderQuickNav();

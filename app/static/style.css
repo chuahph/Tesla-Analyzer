@@ -240,6 +240,36 @@ header {
 .bat-forecast { margin-top: 6px; line-height: 1.5; }
 .bat-forecast .muted { color: var(--muted-2, var(--muted)); font-size: 11px; }
 .bat-forecast.muted { font-style: italic; }
+
+/* Trip planner */
+.planner-inputs { display: flex; flex-wrap: wrap; gap: 12px; margin-bottom: 12px; }
+.planner-inputs label {
+  display: flex; flex-direction: column; gap: 4px;
+  font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: .4px;
+}
+.planner-field { display: inline-flex; align-items: baseline; gap: 4px; color: var(--text);
+  font-size: 13px; text-transform: none; letter-spacing: 0; }
+.planner-inputs input, .planner-inputs select {
+  background: var(--panel-2); border: 1px solid var(--border); color: var(--text);
+  border-radius: 8px; padding: 7px 9px; font-size: 14px; font-family: inherit;
+}
+.planner-inputs input { width: 78px; }
+.planner-inputs select { min-width: 150px; }
+.planner-inputs input:focus, .planner-inputs select:focus {
+  outline: none; border-color: var(--accent-2);
+}
+.planner-result { border-top: 1px solid var(--border); padding-top: 12px; }
+.plan-hint { color: var(--muted); font-size: 12.5px; }
+.plan-verdict { font-size: 14px; line-height: 1.5; margin-bottom: 10px; }
+.plan-verdict.good { color: var(--green); }
+.plan-verdict.warn { color: var(--amber); }
+.plan-verdict.bad  { color: #ff6b70; }
+.plan-verdict strong { color: var(--text); }
+.plan-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(110px, 1fr)); gap: 1px;
+  background: var(--border); border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
+.plan-grid > div { background: var(--panel); padding: 8px 10px; display: flex; flex-direction: column; gap: 2px; }
+.plan-grid .k { font-size: 10px; color: var(--muted-2, var(--muted)); text-transform: uppercase; letter-spacing: .5px; }
+.plan-grid .v { font-size: 13.5px; font-weight: 600; font-variant-numeric: tabular-nums; }
 .bat-note { color: var(--muted); font-size: 12px; line-height: 1.6; margin: 6px 0; }
 
 /* Brand grows to fill the row (min-width:0 lets the VIN subtitle ellipsis
