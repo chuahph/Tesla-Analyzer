@@ -1362,6 +1362,50 @@ def test_sentry_drain_alert_fires_once_per_parked_episode(monkeypatch):
                 s.commit()
 
 
+def test_plan_route_resolves_destination_to_distance(monkeypatch):
+    """The trip-planner route lookup geocodes a typed destination and returns
+    the distance from the car's last parked spot, without any live network —
+    the geocode/distance helpers are stubbed here."""
+    from app.database import SessionLocal
+    from app.models import Drive, Vehicle
+
+    monkeypatch.setattr("app.api.routes._forward_geocode",
+                        lambda q: (5.42, 100.33, f"Resolved: {q}"))
+    monkeypatch.setattr("app.api.routes._driving_distance_km",
+                        lambda origin, dest: (12.3, "driving"))
+
+    settings = get_settings()
+    old = settings.app_passcode
+    settings.app_passcode = ""
+    drive_id = None
+    try:
+        with TestClient(app) as client:
+            with SessionLocal() as s:
+                v = s.query(Vehicle).order_by(Vehicle.id).first()
+                d = Drive(vehicle_id=v.id, start_time=datetime.now(), end_time=datetime.now(),
+                          distance_km=5.0, end_coords="5.40, 100.30", end_location="Office")
+                s.add(d); s.commit(); drive_id = d.id
+
+            resp = client.get("/api/plan/route?to=KLCC")
+            assert resp.status_code == 200
+            body = resp.json()
+            assert body["km"] == 12.3
+            assert body["method"] == "driving"
+            assert body["origin_label"] == "Office"       # from the last drive
+            assert body["dest_label"] == "Resolved: KLCC"
+
+            # A destination that geocodes to nothing -> 404.
+            monkeypatch.setattr("app.api.routes._forward_geocode", lambda q: None)
+            assert client.get("/api/plan/route?to=zzz").status_code == 404
+    finally:
+        settings.app_passcode = old
+        if drive_id is not None:
+            with SessionLocal() as s:
+                d = s.get(Drive, drive_id)
+                if d:
+                    s.delete(d); s.commit()
+
+
 def test_clear_drives_keeps_charges_and_respects_gate():
     settings = get_settings()
     old = settings.app_passcode

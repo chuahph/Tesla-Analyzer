@@ -1982,6 +1982,39 @@ document.addEventListener("change", (e) => {
   if (e.target && e.target.id === "plan-cond") computePlan();
 });
 
+// Destination lookup: geocode a typed place and fill the distance field from
+// the driving distance (or a straight-line estimate) between the car's last
+// parked spot and there.
+async function lookupPlanDest() {
+  const input = document.getElementById("plan-dest");
+  const note = document.getElementById("plan-dest-note");
+  const go = document.getElementById("plan-dest-go");
+  const q = (input.value || "").trim();
+  if (!q) { note.textContent = ""; return; }
+  go.disabled = true; note.className = "plan-dest-note"; note.textContent = "Looking up…";
+  try {
+    const res = await fetch(`/api/plan/route?to=${encodeURIComponent(q)}`);
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(body.detail || "Couldn't look that up.");
+    const kmField = document.getElementById("plan-km");
+    kmField.value = body.km;
+    computePlan();
+    const est = body.method === "driving" ? "driving distance" : "straight-line estimate";
+    note.textContent = `${body.origin_label} → ${body.dest_label}: ${body.km} km (${est})`;
+  } catch (e) {
+    note.className = "plan-dest-note err";
+    note.textContent = "⚠️ " + e.message;
+  } finally {
+    go.disabled = false;
+  }
+}
+document.addEventListener("click", (e) => {
+  if (e.target && e.target.closest && e.target.closest("#plan-dest-go")) lookupPlanDest();
+});
+document.addEventListener("keydown", (e) => {
+  if (e.target && e.target.id === "plan-dest" && e.key === "Enter") { e.preventDefault(); lookupPlanDest(); }
+});
+
 function renderBattery(d) {
   const card = document.getElementById("battery-card");
   const body = document.getElementById("battery-body");

@@ -242,6 +242,17 @@ header {
 .bat-forecast.muted { font-style: italic; }
 
 /* Trip planner */
+.planner-dest { margin-bottom: 12px; }
+.planner-dest > label { display: flex; flex-direction: column; gap: 4px;
+  font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: .4px; }
+.planner-dest-row { display: flex; gap: 8px; }
+.planner-dest-row input {
+  flex: 1 1 auto; min-width: 0; background: var(--panel-2); border: 1px solid var(--border);
+  color: var(--text); border-radius: 8px; padding: 8px 10px; font-size: 14px; font-family: inherit;
+}
+.planner-dest-row input:focus { outline: none; border-color: var(--accent-2); }
+.plan-dest-note { font-size: 12px; color: var(--muted); margin-top: 6px; min-height: 1em; }
+.plan-dest-note.err { color: #ff6b70; }
 .planner-inputs { display: flex; flex-wrap: wrap; gap: 12px; margin-bottom: 12px; }
 .planner-inputs label {
   display: flex; flex-direction: column; gap: 4px;

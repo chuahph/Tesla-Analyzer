@@ -454,6 +454,74 @@ def _place(coords: str, session: Session | None = None) -> str:
     return _place_and_area(coords, session)[0]
 
 
+def _forward_geocode(query: str) -> tuple[float, float, str] | None:
+    """Resolve a typed place/address to (lat, lon, label). Google's Geocoding
+    API first when a key is set (better POI coverage), else Nominatim search —
+    same free/paid split as reverse geocoding. None on any miss/failure."""
+    query = (query or "").strip()
+    if not query:
+        return None
+    key = get_settings().google_maps_api_key
+    if key:
+        try:
+            resp = httpx.get(
+                "https://maps.googleapis.com/maps/api/geocode/json",
+                params={"address": query, "key": key}, timeout=5.0)
+            resp.raise_for_status()
+            data = resp.json()
+            if data.get("status") == "OK" and data.get("results"):
+                r = data["results"][0]
+                loc = r["geometry"]["location"]
+                return float(loc["lat"]), float(loc["lng"]), r.get("formatted_address", query)
+        except Exception:  # noqa: BLE001 — fall through to Nominatim
+            pass
+    try:
+        resp = httpx.get(
+            "https://nominatim.openstreetmap.org/search",
+            params={"q": query, "format": "jsonv2", "limit": 1, "addressdetails": 0},
+            headers={"User-Agent": "tesla-analyzer/0.1"}, timeout=5.0)
+        resp.raise_for_status()
+        hits = resp.json()
+        if hits:
+            h = hits[0]
+            return float(h["lat"]), float(h["lon"]), h.get("display_name", query)[:120]
+    except Exception:  # noqa: BLE001
+        pass
+    return None
+
+
+# Straight-line distances undercount real roads; this is a rough motorway/
+# arterial-network multiplier for the fallback when no routing API answers.
+_ROAD_WINDING_FACTOR = 1.3
+
+
+def _driving_distance_km(origin: str, dest: str) -> tuple[float, str] | None:
+    """(km, method) between two 'lat, lon' strings. Google Directions gives the
+    real driving distance when a key is set; otherwise a straight-line estimate
+    scaled by a road-winding factor. ``method`` is "driving" or "straight-line"
+    so the UI can be honest about which it showed. None if even the straight
+    line can't be computed."""
+    key = get_settings().google_maps_api_key
+    if key:
+        try:
+            o = origin.replace(" ", "")
+            d = dest.replace(" ", "")
+            resp = httpx.get(
+                "https://maps.googleapis.com/maps/api/directions/json",
+                params={"origin": o, "destination": d, "key": key}, timeout=6.0)
+            resp.raise_for_status()
+            data = resp.json()
+            if data.get("status") == "OK" and data.get("routes"):
+                meters = data["routes"][0]["legs"][0]["distance"]["value"]
+                return round(meters / 1000.0, 1), "driving"
+        except Exception:  # noqa: BLE001 — fall through to straight-line
+            pass
+    straight = haversine_km(origin, dest)
+    if straight is None:
+        return None
+    return round(straight * _ROAD_WINDING_FACTOR, 1), "straight-line"
+
+
 def _build_info() -> dict:
     """Deployed version: git SHA (from the host's env) + image build time in MYT."""
     import os
@@ -2093,6 +2161,51 @@ def alerts_check(days: int = Query(30, ge=7, le=90),
         now=now,
     )
     return {"fired": [c["key"] for c in candidates], "sent": sent}
+
+
+@router.get("/plan/route")
+def plan_route(to: str = Query(..., min_length=1),
+               session: Session = Depends(get_session)):
+    """Resolve a typed destination to a driving distance for the Trip Planner.
+
+    Origin is where the car is now — its last parked location (the most recent
+    trip's end point) — falling back to a Place named "Home" if there are no
+    trips yet. Destination is geocoded (Google when a key is set, else OSM);
+    distance is Google Directions driving distance when available, else a
+    straight-line estimate scaled for real roads. ``method`` says which, so the
+    planner can label a rough estimate honestly."""
+    dest = _forward_geocode(to)
+    if not dest:
+        raise HTTPException(404, f"Couldn't find a place matching “{to}”.")
+    dest_lat, dest_lon, dest_label = dest
+    dest_coords = f"{dest_lat}, {dest_lon}"
+
+    vehicle = _first_vehicle(session)
+    last_drive = session.scalars(
+        select(Drive).where(Drive.vehicle_id == vehicle.id, Drive.end_coords != "")
+        .order_by(Drive.start_time.desc()).limit(1)
+    ).first()
+    origin_coords = last_drive.end_coords if last_drive else None
+    origin_label = (last_drive.end_location or "last parked location") if last_drive else None
+    if not origin_coords:
+        home = session.scalars(
+            select(Place).where(func.lower(Place.name) == "home")).first()
+        if home:
+            origin_coords, origin_label = f"{home.lat}, {home.lon}", "Home"
+    if not origin_coords:
+        raise HTTPException(
+            409, "No known starting point yet — log a trip or add a Home place first, "
+                 "or just type the distance in the planner.")
+
+    result = _driving_distance_km(origin_coords, dest_coords)
+    if result is None:
+        raise HTTPException(502, "Couldn't work out the distance to there.")
+    km, method = result
+    return {
+        "km": km, "method": method,
+        "origin_label": origin_label, "dest_label": dest_label,
+        "dest_coords": dest_coords,
+    }
 
 
 # --- Web push notifications -------------------------------------------------

@@ -493,6 +493,15 @@
           highway speed or A/C actually would. Advisory only — leave a buffer.
         </div>
         <div class="planner">
+          <div class="planner-dest">
+            <label>Destination (optional)
+              <span class="planner-dest-row">
+                <input id="plan-dest" type="text" placeholder="e.g. KLCC, or an address">
+                <button id="plan-dest-go" class="btn btn-mini" type="button">📍 Distance</button>
+              </span>
+            </label>
+            <div id="plan-dest-note" class="plan-dest-note"></div>
+          </div>
           <div class="planner-inputs">
             <label>Distance
               <span class="planner-field"><input id="plan-km" type="number" min="0" step="1" inputmode="decimal" placeholder="e.g. 80"> km</span>
