@@ -162,21 +162,26 @@ def _window(
     return list(drives), list(charges)
 
 
-def _last_charge_price_fn(session: Session, vehicle_id: int, settings):
-    """A flat ``datetime -> RM/kWh`` price function using the vehicle's most
-    recent charge's own actual rate (cost ÷ energy_added_kwh) — what was
-    really paid for the electricity now in the pack, which is what's
-    actually powering every trip until the next charge, rather than a
-    configured tariff assumption. Falls back to that tariff (flat/ToU) only
-    when there's no charge on record yet to price from."""
-    last_charge = session.scalar(
-        select(Charge).where(Charge.vehicle_id == vehicle_id)
-        .order_by(Charge.end_time.desc())
-    )
-    if last_charge and last_charge.energy_added_kwh:
-        rate = last_charge.cost / last_charge.energy_added_kwh
-        return lambda _dt: rate
-    return tariff.price_fn_from_settings(settings)
+def _trip_cost_map(session: Session, vehicle_id: int) -> dict[int, float | None]:
+    """Every trip's cost, priced against the charge-layer history that
+    actually supplied its energy (see driving_analysis.layered_trip_costs)
+    rather than one flat "latest charge" rate applied to everything. Needs
+    the vehicle's FULL history, not just whatever window is being displayed
+    — an old trip's correct layer can depend on a charge from well before
+    the window starts. A manual per-trip override (Drive.cost_override, set
+    via /api/data/set-drive-cost for a trip the charge history can't reach)
+    always wins over the computed figure."""
+    drives_all = session.scalars(
+        select(Drive).where(Drive.vehicle_id == vehicle_id).order_by(Drive.start_time)
+    ).all()
+    charges_all = session.scalars(
+        select(Charge).where(Charge.vehicle_id == vehicle_id).order_by(Charge.start_time)
+    ).all()
+    costs = driving_analysis.layered_trip_costs(drives_all, charges_all)
+    for d in drives_all:
+        if d.cost_override is not None:
+            costs[d.id] = d.cost_override
+    return costs
 
 
 def _idle_inducer(session: Session, vehicle_id: int, start_iso: str, end_iso: str) -> str | None:
@@ -731,6 +736,30 @@ def tag_drive(payload: dict = Body(...), session: Session = Depends(get_session)
     if not services.tag_drive(session, drive_id, tag):
         raise HTTPException(404, "Trip not found.")
     return {"id": drive_id, "tag": tag}
+
+
+@router.post("/data/set-drive-cost")
+def set_drive_cost(payload: dict = Body(...), session: Session = Depends(get_session)):
+    """Manually price a trip the charge-layer cost model couldn't reach —
+    every charge in the vehicle's history was already fully consumed by
+    earlier trips with no new charge since (see
+    driving_analysis.layered_trip_costs). Pass cost=None (or omit it) to
+    clear a previously-set override and let it price automatically again."""
+    drive_id = payload.get("id")
+    if not isinstance(drive_id, int):
+        raise HTTPException(400, "Missing or invalid 'id'.")
+    cost = payload.get("cost")
+    if cost is not None:
+        try:
+            cost = float(cost)
+        except (TypeError, ValueError):
+            raise HTTPException(400, "Invalid 'cost'.")
+        if cost < 0:
+            raise HTTPException(400, "'cost' must be >= 0.")
+    drive = services.set_drive_cost(session, drive_id, cost)
+    if drive is None:
+        raise HTTPException(404, "Trip not found.")
+    return {"id": drive_id, "cost_override": drive.cost_override}
 
 
 @router.post("/data/edit-drive")
@@ -1629,7 +1658,8 @@ def compare_vehicles(days: int = Query(30, ge=1, le=730), session: Session = Dep
         drives, charges = _window(session, vehicle.id, days)
         driving = driving_analysis.analyze(
             drives, settings.rated_wh_per_km, capacity_kwh,
-            _last_charge_price_fn(session, vehicle.id, settings), charges=charges)
+            tariff.price_fn_from_settings(settings), charges=charges,
+            trip_costs=_trip_cost_map(session, vehicle.id))
         charging = charging_analysis.analyze(charges, drives)
         readings = session.execute(
             select(BatteryReading.soc, BatteryReading.range_km,
@@ -2226,8 +2256,11 @@ def _monthly_report_payload(session: Session, vehicle: Vehicle, settings, days: 
     there while still carrying the structured figures for anything else."""
     capacity_kwh, _ = _usable_capacity(session, vehicle, settings)
     drives, charges = _window(session, vehicle.id, days)
-    price_fn = _last_charge_price_fn(session, vehicle.id, settings)
-    driving = driving_analysis.analyze(drives, settings.rated_wh_per_km, capacity_kwh, price_fn, charges=charges)
+    price_fn = tariff.price_fn_from_settings(settings)
+    trip_costs = _trip_cost_map(session, vehicle.id)
+    driving = driving_analysis.analyze(
+        drives, settings.rated_wh_per_km, capacity_kwh, price_fn, charges=charges,
+        trip_costs=trip_costs)
     charging = charging_analysis.analyze(charges, drives)
     efficiency = efficiency_analysis.analyze(drives, settings.rated_wh_per_km)
     cur = settings.currency
@@ -2264,7 +2297,8 @@ def _monthly_report_payload(session: Session, vehicle: Vehicle, settings, days: 
     prev_since = since - timedelta(days=days)
     prev_drives, prev_charges = _window(session, vehicle.id, days, since=prev_since, until=since)
     prev_driving = driving_analysis.analyze(
-        prev_drives, settings.rated_wh_per_km, capacity_kwh, price_fn, charges=prev_charges)
+        prev_drives, settings.rated_wh_per_km, capacity_kwh, price_fn, charges=prev_charges,
+        trip_costs=trip_costs)
     prev_charging = charging_analysis.analyze(prev_charges, prev_drives)
     prev_efficiency = efficiency_analysis.analyze(prev_drives, settings.rated_wh_per_km)
     narrative_lines = narrative_engine.build(
@@ -2348,7 +2382,7 @@ def alerts_check(days: int = Query(30, ge=7, le=90),
     vehicle = _first_vehicle(session)
     settings = get_settings()
     capacity_kwh, _ = _usable_capacity(session, vehicle, settings)
-    price_fn = _last_charge_price_fn(session, vehicle.id, settings)
+    price_fn = tariff.price_fn_from_settings(settings)
 
     cur_since = now - timedelta(days=days)
     prev_since = cur_since - timedelta(days=days)
@@ -2619,16 +2653,17 @@ def summary(
         (last_charge.end_time, last_charge.end_soc)
         if since_charge and last_charge is not None else None
     )
-    # Price driving energy at what was actually paid for the electricity
-    # now in the pack (last_charge is already fetched above), not a
-    # configured tariff assumption — see _last_charge_price_fn().
+    # Price every trip against the charge-layer history that actually
+    # supplied its energy (see driving_analysis.layered_trip_costs), not a
+    # flat "whatever the latest charge cost" assumption — the flat/ToU
+    # tariff below only prices vampire drain and any trip the charge-layer
+    # stack can't reach.
     price_fn = tariff.price_fn_from_settings(settings)
-    if last_charge is not None and last_charge.energy_added_kwh:
-        rate = last_charge.cost / last_charge.energy_added_kwh
-        price_fn = lambda _dt, _rate=rate: _rate  # noqa: E731
+    trip_costs = _trip_cost_map(session, vehicle.id)
     driving = driving_analysis.analyze(
         drives, settings.rated_wh_per_km, capacity_kwh, price_fn,
         charges=charges, vampire_anchor=vampire_anchor,
+        trip_costs=trip_costs,
         # Every window (including since-charge) caps recent_trips at 5 by
         # default — a since-charge cycle can still run past 5 drives, and
         # the "Show more" button (trips_limit) is how a caller sees the
@@ -2683,7 +2718,7 @@ def summary(
         prev_drives, prev_charges = _window(session, vehicle.id, days, since=prev_since, until=cur_since)
         prev_driving = driving_analysis.analyze(
             prev_drives, settings.rated_wh_per_km, capacity_kwh, price_fn,
-            charges=prev_charges)
+            charges=prev_charges, trip_costs=trip_costs)
         prev_charging = charging_analysis.analyze(prev_charges, prev_drives)
         prev_efficiency = efficiency_analysis.analyze(prev_drives, settings.rated_wh_per_km)
         narrative_lines = narrative_engine.build(
@@ -2758,15 +2793,17 @@ def summary(
             if driving.get("available") else 0.0
         )
     # Driving Cost (drv.total_cost/cost_per_km) is still driving_analysis.
-    # analyze()'s own bottom-up total_energy_used_kwh, priced at this same
-    # window's flat last-charge rate — so it carries the exact same
-    # one-directional bias described above and can silently disagree with
-    # both Battery Used and Charging Cost (e.g. a Driving Cost RM/km that
-    # implies more energy was used than the last charge even added). Since
-    # since-charge windows always price at a single flat rate (see
-    # _last_charge_price_fn), that rate is exactly last_charge.cost /
-    # last_charge.energy_added_kwh — re-anchor to the ground-truth total at
-    # that same rate so all three cost/energy figures reconcile.
+    # analyze()'s own bottom-up total_energy_used_kwh, which can disagree
+    # with the ground-truth Battery Used above by the same one-directional
+    # bias described there (e.g. a Driving Cost RM/km that implies more
+    # energy was used than the last charge even added). The per-trip figures
+    # in Recent Trips already use the true charge-layer rate for each trip
+    # (see driving_analysis.layered_trip_costs, cascading to an older charge
+    # if this one's kWh was exceeded), but for this since-charge *aggregate*
+    # specifically — where every trip in the window is by definition powered
+    # from this one charge onward — re-anchor to the ground-truth total at
+    # this charge's own rate, so Battery Used, Driving Cost and Charging
+    # Cost all reconcile exactly rather than drifting apart by that bias.
     if (ground_truth_used_kwh is not None and driving.get("total_distance_km")
             and last_charge.energy_added_kwh):
         rate = last_charge.cost / last_charge.energy_added_kwh

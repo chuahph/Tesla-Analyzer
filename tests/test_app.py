@@ -1687,6 +1687,44 @@ def test_tag_drive_endpoint():
         settings.app_passcode = old
 
 
+def test_set_drive_cost_endpoint():
+    from app.database import SessionLocal
+    from app.models import Drive
+
+    settings = get_settings()
+    old = settings.app_passcode
+    settings.app_passcode = ""
+    try:
+        with TestClient(app) as client:  # startup seeds demo data
+            with SessionLocal() as s:
+                drive_id = s.query(Drive).order_by(Drive.id).first().id
+                assert s.get(Drive, drive_id).cost_override is None
+
+            resp = client.post("/api/data/set-drive-cost", json={"id": drive_id, "cost": 4.5})
+            assert resp.status_code == 200
+            assert resp.json() == {"id": drive_id, "cost_override": 4.5}
+            with SessionLocal() as s:
+                assert s.get(Drive, drive_id).cost_override == 4.5
+
+            # Clearing (cost omitted/null) reverts to automatic pricing.
+            client.post("/api/data/set-drive-cost", json={"id": drive_id, "cost": None})
+            with SessionLocal() as s:
+                assert s.get(Drive, drive_id).cost_override is None
+
+            # Validation: negative and non-numeric costs are rejected.
+            assert client.post(
+                "/api/data/set-drive-cost", json={"id": drive_id, "cost": -1}).status_code == 400
+            assert client.post(
+                "/api/data/set-drive-cost", json={"id": drive_id, "cost": "abc"}).status_code == 400
+            # Unknown id -> 404, not a silent no-op.
+            assert client.post(
+                "/api/data/set-drive-cost", json={"id": 9_999_999, "cost": 1.0}).status_code == 404
+            # Missing id -> 400.
+            assert client.post("/api/data/set-drive-cost", json={"cost": 1.0}).status_code == 400
+    finally:
+        settings.app_passcode = old
+
+
 def test_edit_drive_endpoint():
     """Manually correcting a trip's start/end time (a no-signal park/departure
     the sync-time estimate still got wrong) must recompute duration/avg speed

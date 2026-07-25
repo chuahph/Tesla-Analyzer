@@ -87,6 +87,14 @@ class Drive(Base):
     # expense-claim/cost-splitting purposes. "" = untagged.
     tag: Mapped[str] = mapped_column(String(20), default="")
 
+    # Manually-entered cost, used only when the charge-layer cost model
+    # (driving_analysis.layered_trip_costs) can't price this trip — every
+    # charge session in the vehicle's history has already been fully
+    # consumed by earlier trips with no new charge since. None means "price
+    # it automatically"; set via /api/data/set-drive-cost, always wins over
+    # the computed figure when present.
+    cost_override: Mapped[float | None] = mapped_column(Float, nullable=True)
+
     vehicle: Mapped["Vehicle"] = relationship(back_populates="drives")
 
     @property

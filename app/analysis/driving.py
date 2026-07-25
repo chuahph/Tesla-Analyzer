@@ -308,11 +308,64 @@ def _insights(drives: list[Drive]) -> list[str]:
     return out[:3]
 
 
+def layered_trip_costs(
+    drives: list[Drive], charges: list[Charge],
+) -> dict[int, float | None]:
+    """Price each trip against the charge session that actually put that
+    energy in the pack, instead of one flat rate applied to everything.
+
+    Each completed charge pushes a layer — its own rate (cost ÷ kWh added)
+    and its own kWh — onto a stack. Trips drain the most-recently-pushed
+    layer first; once it's fully used up, consumption falls back to the
+    layer beneath (an older charge), and so on, cascading further back for
+    as long as there's no new charge. Completing a new charge always resets
+    consumption to a fresh top layer, even if older layers still have kWh
+    left in them. A trip that outruns every layer in the vehicle's whole
+    charge history (should only happen right at the very start of its
+    tracked history, or if a charge record was deleted) maps to ``None``
+    rather than guessing a rate.
+
+    ``drives``/``charges`` must be the vehicle's FULL history in
+    chronological order, not just whatever window is being displayed — an
+    old trip's correct layer can depend on a charge from well before the
+    window starts. Trips with no valid energy reading, or no real id, are
+    left out of both the allocation and the returned mapping.
+    """
+    events: list[tuple[datetime, int, Any]] = []
+    for c in charges:
+        if c.energy_added_kwh and c.cost is not None:
+            events.append((c.end_time, 0, c))  # charges settle before same-time drives
+    for d in drives:
+        if has_valid_energy(d) and getattr(d, "id", None) is not None:
+            events.append((d.start_time, 1, d))
+    events.sort(key=lambda e: (e[0], e[1]))
+
+    stack: list[list[float]] = []  # [rate, remaining_kwh] — top of stack = most recent charge
+    costs: dict[int, float | None] = {}
+    for _, kind, obj in events:
+        if kind == 0:
+            stack.append([obj.cost / obj.energy_added_kwh, obj.energy_added_kwh])
+            continue
+        need = obj.energy_used_kwh
+        cost = 0.0
+        while need > 1e-9 and stack:
+            rate, remaining = stack[-1]
+            take = min(remaining, need)
+            cost += take * rate
+            need -= take
+            stack[-1][1] -= take
+            if stack[-1][1] <= 1e-9:
+                stack.pop()
+        costs[obj.id] = round(cost, 2) if need <= 1e-9 else None
+    return costs
+
+
 def analyze(drives: list[Drive], rated_wh_per_km: float = 150.0,
             capacity_kwh: float = 75.0, energy_price: float = 0.0,
             charges: list[Charge] | None = None,
             vampire_anchor: tuple[datetime, float] | None = None,
-            recent_trips_limit: int | None = 5) -> dict[str, Any]:
+            recent_trips_limit: int | None = 5,
+            trip_costs: dict[int, float | None] | None = None) -> dict[str, Any]:
     """``energy_price`` is either a flat RM/kWh float, or a
     ``datetime -> RM/kWh`` callable (time-of-use pricing — see app.tariff) for
     per-trip rates by when each drive happened. ``charges`` (optional) is this
@@ -325,7 +378,11 @@ def analyze(drives: list[Drive], rated_wh_per_km: float = 150.0,
     caps how many of the most recent drives get a full ``recent_trips``
     entry — 5 by default for any window, ``None`` to list every drive (the
     caller's own "show more" affordance raises this rather than the window
-    itself deciding whether to cap)."""
+    itself deciding whether to cap). ``trip_costs`` (optional), from
+    layered_trip_costs() over the vehicle's FULL history, prices every trip
+    and the window total/cost-per-km/by-tag breakdown; ``energy_price``
+    still prices vampire drain (never tied to one trip) and is the fallback
+    when trip_costs is omitted."""
     if not drives:
         return {"available": False}
     price_at = energy_price if callable(energy_price) else (lambda _dt: energy_price)
@@ -479,16 +536,32 @@ def analyze(drives: list[Drive], rated_wh_per_km: float = 150.0,
         else price_at(drives[-1].start_time)
     )
 
+    # A trip's cost: its own charge-layer figure when trip_costs was given
+    # (None if the layer stack ran dry — see layered_trip_costs), else the
+    # flat/ToU rate at its own start_time.
+    def _trip_cost(d: Drive) -> float | None:
+        if trip_costs is not None:
+            return trip_costs.get(getattr(d, "id", None))
+        return (
+            round(d.energy_used_kwh * price_at(d.start_time), 2)
+            if has_valid_energy(d) and price_at(d.start_time) else None
+        )
+
     # Per-tag totals (distance/energy/cost), keyed by whatever's in Drive.tag
     # ("" groups every untagged trip together) — the expense-claim view: how
-    # much of this window's driving/cost was "work" vs "personal" etc.
+    # much of this window's driving/cost was "work" vs "personal" etc. A trip
+    # with no known cost (layer stack ran dry, not yet manually priced)
+    # simply doesn't add to its tag's total rather than blanking the whole
+    # tag — same "show what's known" stance as the per-trip figure.
     by_tag: dict[str, dict[str, float]] = defaultdict(lambda: {"distance_km": 0.0, "energy_kwh": 0.0, "cost": 0.0})
     for d in drives:
         row = by_tag[getattr(d, "tag", "") or ""]
         row["distance_km"] += d.distance_km
         if has_valid_energy(d):
             row["energy_kwh"] += d.energy_used_kwh
-            row["cost"] += d.energy_used_kwh * price_at(d.start_time)
+            c = _trip_cost(d)
+            if c is not None:
+                row["cost"] += c
     tag_totals = {
         (tag or "untagged"): {
             "distance_km": round(v["distance_km"], 1),
@@ -497,6 +570,28 @@ def analyze(drives: list[Drive], rated_wh_per_km: float = 150.0,
         }
         for tag, v in by_tag.items()
     }
+
+    # Window total: sum of every trip's own known cost (charge-layer or
+    # manual override) plus vampire drain (never tied to one trip, so it
+    # stays priced at the blended/flat rate above) — trips with no known
+    # cost simply don't contribute, so the total quietly reflects only what
+    # can actually be priced rather than guessing. None only when nothing in
+    # the window could be priced at all.
+    if trip_costs is not None:
+        known_trip_cost = sum(c for d in eff_drives if (c := _trip_cost(d)) is not None)
+        vampire_cost = vampire_kwh * window_price if window_price else 0.0
+        priceable = known_trip_cost > 0 or vampire_cost > 0
+        total_cost_out = round(known_trip_cost + vampire_cost, 2) if priceable else None
+        cost_per_km_out = (
+            round((known_trip_cost + vampire_cost) / total_distance, 3)
+            if priceable and total_distance else None
+        )
+    else:
+        total_cost_out = round(total_energy_used * window_price, 2) if window_price else None
+        cost_per_km_out = (
+            round(total_energy_used * window_price / total_distance, 3)
+            if window_price and total_distance else None
+        )
 
     return {
         "available": True,
@@ -530,11 +625,8 @@ def analyze(drives: list[Drive], rated_wh_per_km: float = 150.0,
         # driver actually paid. Vampire/idle-between-trips energy (the gap
         # between total_energy_used and the driving-only sum) isn't tied to a
         # specific timestamp, so it's priced at that same blended rate.
-        "total_cost": round(total_energy_used * window_price, 2) if window_price else None,
-        "cost_per_km": (
-            round(total_energy_used * window_price / total_distance, 3)
-            if window_price and total_distance else None
-        ),
+        "total_cost": total_cost_out,
+        "cost_per_km": cost_per_km_out,
         "insights": _insights(drives),
         # Only surfaced if at least one trip in the window is tagged, so an
         # account nobody ever tags doesn't grow an "untagged: everything" card.
@@ -598,11 +690,16 @@ def analyze(drives: list[Drive], rated_wh_per_km: float = 150.0,
                     (round(d.energy_used_kwh, 2) if has_valid_energy(d) else None)
                 ),
                 "eco_score": eco_score(driving_wh_val, rated_wh_per_km) if has_valid_energy(d) and driving_wh_val else None,
-                # What this trip's energy cost — at its own start time's rate
-                # under time-of-use pricing, else the flat tariff.
-                "cost": (
-                    round(d.energy_used_kwh * price_at(d.start_time), 2)
-                    if has_valid_energy(d) and price_at(d.start_time) else None
+                # What this trip's energy cost — its own charge-layer figure
+                # (or a manual override) when trip_costs was given, else the
+                # flat/ToU tariff at its own start_time. None when the charge
+                # history can't price it yet (see layered_trip_costs) and no
+                # override has been set — the UI offers a manual entry then.
+                "cost": _trip_cost(d) if has_valid_energy(d) else None,
+                "cost_source": (
+                    ("manual" if getattr(d, "cost_override", None) is not None else "auto")
+                    if trip_costs is not None and has_valid_energy(d) and _trip_cost(d) is not None
+                    else None
                 ),
                 "conditions": _trip_conditions(d),
                 # "measured" (real tracked idle) / "estimated" (heuristic

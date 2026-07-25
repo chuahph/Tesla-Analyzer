@@ -648,6 +648,87 @@ def test_driving_cost_accepts_time_of_use_price_function():
     assert 0.45 < r3["total_cost"] / r3["total_energy_used_kwh"] < 1.20
 
 
+def test_layered_trip_costs_cascades_through_older_charges():
+    """Each completed charge is a stack layer (its own rate + kWh) that
+    trips drain most-recently-first; once a layer is exhausted, trips fall
+    back to the layer beneath, and a new charge always resets consumption
+    to a fresh top layer even if older ones still have kWh left."""
+    from datetime import datetime
+
+    from app.analysis.driving import layered_trip_costs
+    from app.models import Charge, Drive
+
+    def charge(id_, end, kwh, cost):
+        return Charge(id=id_, start_time=end, end_time=end,
+                      energy_added_kwh=kwh, cost=cost)
+
+    def trip(id_, start, kwh):
+        return Drive(
+            id=id_, start_time=start, end_time=start,
+            distance_km=10.0, duration_min=15.0, avg_speed_kmh=40.0, max_speed_kmh=60.0,
+            start_soc=80, end_soc=70, energy_used_kwh=kwh, outside_temp_c=28.0,
+        )
+
+    # Charge A: 2 kWh at RM1.00/kWh. Charge B (older, still has room): 10 kWh
+    # at RM0.50/kWh — never touched until A runs dry.
+    charge_a = charge(1, datetime(2026, 7, 1, 8, 0), 2.0, 2.00)
+    charge_b_older = charge(2, datetime(2026, 6, 25, 8, 0), 10.0, 5.00)
+
+    # Trip 1 (1 kWh) fits entirely inside A's layer -> RM1.00.
+    t1 = trip(1, datetime(2026, 7, 1, 9, 0), 1.0)
+    # Trip 2 (2 kWh) exhausts A's remaining 1 kWh (RM1.00) then spills 1 kWh
+    # into the older B layer at RM0.50 -> RM1.50 total.
+    t2 = trip(2, datetime(2026, 7, 1, 10, 0), 2.0)
+
+    costs = layered_trip_costs([t1, t2], [charge_a, charge_b_older])
+    assert costs[1] == 1.00
+    assert costs[2] == 1.50
+
+    # A brand-new charge (C) resets consumption to itself, even though B
+    # still has 9 kWh left untouched underneath.
+    charge_c = charge(3, datetime(2026, 7, 1, 11, 0), 3.0, 4.50)  # RM1.50/kWh
+    t3 = trip(3, datetime(2026, 7, 1, 12, 0), 1.0)
+    costs2 = layered_trip_costs([t1, t2, t3], [charge_a, charge_b_older, charge_c])
+    assert costs2[3] == 1.50  # priced off C (RM1.50/kWh), not B's RM0.50/kWh
+
+    # A trip that outruns every layer in the whole charge history (no
+    # charge on record at all) prices as unknown, not a guess.
+    lone_trip = trip(4, datetime(2026, 7, 1, 8, 0), 1.0)
+    assert layered_trip_costs([lone_trip], []) == {4: None}
+
+
+def test_layered_trip_costs_wired_into_analyze():
+    """analyze()'s per-trip cost, total_cost/cost_per_km and by_tag all use
+    the layered figure when trip_costs is supplied, and a trip the stack
+    can't reach shows an unknown (None) cost rather than a guessed one."""
+    from datetime import datetime
+
+    from app.analysis import driving as driving_analysis
+    from app.models import Drive
+
+    priced_trip = Drive(
+        id=1, start_time=datetime(2026, 7, 1, 9, 0), end_time=datetime(2026, 7, 1, 9, 20),
+        distance_km=10.0, duration_min=20.0, avg_speed_kmh=30.0, max_speed_kmh=60.0,
+        start_soc=80, end_soc=78, energy_used_kwh=1.0, outside_temp_c=28.0,
+    )
+    unpriced_trip = Drive(
+        id=2, start_time=datetime(2026, 7, 1, 10, 0), end_time=datetime(2026, 7, 1, 10, 20),
+        distance_km=10.0, duration_min=20.0, avg_speed_kmh=30.0, max_speed_kmh=60.0,
+        start_soc=78, end_soc=76, energy_used_kwh=1.0, outside_temp_c=28.0,
+    )
+    trip_costs = {1: 1.50, 2: None}
+    r = driving_analysis.analyze(
+        [priced_trip, unpriced_trip], 150.0, 75.0, energy_price=0.0,
+        trip_costs=trip_costs)
+    rows = {row["id"]: row for row in r["recent_trips"]}
+    assert rows[1]["cost"] == 1.50
+    assert rows[1]["cost_source"] == "auto"
+    assert rows[2]["cost"] is None
+    # Total reflects only what's known — the unpriced trip contributes 0,
+    # not a hard block on the whole window's total.
+    assert r["total_cost"] == 1.50
+
+
 def test_insights_report_material_patterns_only():
     """Peak-hour drives consistently 25% worse than off-peak (3+ each side)
     produce an insight; too few drives or immaterial differences stay silent."""

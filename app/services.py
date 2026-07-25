@@ -111,6 +111,19 @@ def tag_drive(session, drive_id: int, tag: str) -> bool:
     return True
 
 
+def set_drive_cost(session, drive_id: int, cost: float | None) -> Drive | None:
+    """Manually price a trip the charge-layer cost model couldn't reach
+    (see driving_analysis.layered_trip_costs) — pass cost=None to clear a
+    previously-set override and let it price automatically again. Returns
+    None if the trip doesn't exist."""
+    drive = session.get(Drive, drive_id)
+    if drive is None:
+        return None
+    drive.cost_override = cost
+    session.commit()
+    return drive
+
+
 def edit_drive(session, drive_id: int, start_time, end_time) -> Drive | None:
     """Manually correct a trip's logged start and/or end time (a no-signal
     park/departure the sync-time estimate still got wrong). Pass None for

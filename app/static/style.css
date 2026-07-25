@@ -1211,6 +1211,15 @@ footer { padding: 18px 28px; color: var(--muted); font-size: 12px; border-top: 1
 }
 .trip-edit:hover { opacity: 1; }
 
+/* Manual trip-cost entry: a "+ cost" chip when the charge-layer history
+   can't price a trip, or a small ✎ next to an already-manual figure. */
+.trip-cost-edit {
+  border: 1px solid var(--border); background: var(--panel-2); color: var(--muted);
+  border-radius: 999px; cursor: pointer; font-size: 11px;
+  padding: 1px 8px; vertical-align: middle; margin-left: 2px;
+}
+.trip-cost-edit:hover { border-color: var(--muted); color: var(--text); }
+
 /* Places (geofence) manager modal list. */
 .places-list { list-style: none; margin: 0 0 12px; padding: 0; }
 .places-list li {

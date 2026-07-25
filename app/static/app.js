@@ -589,6 +589,46 @@ function wireTagChips(root) {
   });
 }
 
+// "+ cost" (blank) or ✎ (manual override already set) on a Recent Trips row
+// prompts for a value and persists it as that trip's cost_override — for a
+// trip the charge-layer history can't price (see
+// driving_analysis.layered_trip_costs). Blank input clears an existing
+// override back to automatic.
+function wireTripCostButtons(root) {
+  root.querySelectorAll(".trip-cost-edit[data-trip-id]").forEach((btn) => {
+    btn.addEventListener("click", async (e) => {
+      e.stopPropagation();
+      const id = +btn.dataset.tripId;
+      const current = btn.dataset.cost || "";
+      const raw = window.prompt(
+        current
+          ? `Correct this trip's cost (${lastData.currency}), or clear it to price automatically again:`
+          : `No charge history covers this trip — enter its cost (${lastData.currency}):`,
+        current
+      );
+      if (raw === null) return;   // cancelled
+      const trimmed = raw.trim();
+      let cost = null;
+      if (trimmed !== "") {
+        cost = parseFloat(trimmed);
+        if (!Number.isFinite(cost) || cost < 0) {
+          alert("Enter a valid non-negative number, or leave it blank to clear.");
+          return;
+        }
+      }
+      btn.disabled = true;
+      try {
+        const resp = await fetch("/api/data/set-drive-cost", {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ id, cost }),
+        });
+        if (resp.ok) { load(); return; }  // full refresh: layered pricing may shift other trips too
+      } catch (err) { /* leave the button as-is on failure */ }
+      btn.disabled = false;
+    });
+  });
+}
+
 // ✎ on a Recent Trips row opens the "Fix trip time" modal, pre-filled from
 // that trip's own currently-logged start/end.
 function wireTripEditButtons(root) {
@@ -1404,7 +1444,22 @@ function renderLists(d) {
       const kwh = t.energy_kwh != null ? ` · ${t.energy_kwh} kWh` : "";
       const whkm = t.wh_per_km != null ? ` · ${t.wh_per_km} Wh/km${drv}` : "";
       const soc = t.soc_used_pct != null ? ` · ${fmt(t.soc_used_pct, 1)}% battery` : "";
-      const cost = t.cost != null ? ` · ${d.currency} ${fmt(t.cost, 2)}` : "";
+      // Cost blank means the charge-layer history couldn't price this trip
+      // (every charge on record was already used up by earlier trips with
+      // no new charge since — see driving_analysis.layered_trip_costs).
+      // Self-hosted only (needs a real trip id to persist an override
+      // against): offer a manual entry instead of just showing nothing.
+      // A manually-priced trip keeps a tap-to-edit ✎ so it can be corrected
+      // or cleared back to automatic.
+      const canEditCost = t.id != null && !tripSelectMode && !STATIC_MODE;
+      const cost = t.cost != null
+        ? ` · ${d.currency} ${fmt(t.cost, 2)}` +
+          (t.cost_source === "manual" && canEditCost
+            ? `<button class="trip-cost-edit" data-trip-id="${t.id}" data-cost="${t.cost}" title="Tap to correct or clear this manually-entered cost">✎</button>`
+            : "")
+        : canEditCost
+        ? ` · <button class="trip-cost-edit" data-trip-id="${t.id}" data-cost="" title="No charge history covers this trip yet — tap to enter its cost">+ cost</button>`
+        : "";
       // Live directions link when the trip's raw endpoints were stored.
       const mapLink = t.map_url
         ? ` <a class="trip-map" href="${t.map_url}" target="_blank" rel="noopener" title="Open route in Google Maps">🗺</a>`
@@ -1474,6 +1529,7 @@ function renderLists(d) {
   wireTagChips(list);
   wirePlacePins(list);
   wireTripEditButtons(list);
+  wireTripCostButtons(list);
   // "Show more": every window (including since-charge) caps recent_trips
   // at 5 by default now — "current drive" is the only exception, always
   // just the one trip (see driving_analysis.analyze()'s recent_trips_limit),
