@@ -436,6 +436,25 @@ def test_wake_and_lock_nudge_is_not_logged_as_a_trip():
     assert d == []
 
 
+def test_short_real_trip_rounding_to_0_3km_is_not_discarded():
+    """A genuine short trip (charger bay to parking spot) that Tesla's own
+    screen displays as "0.3 km" must log, even when the true odometer delta
+    underneath that rounded figure is a hair below 0.3 — the floor test must
+    compare against the same rounded distance shown in the result, not the
+    raw float. Regression for a real 0.3/0.1kWh/1min trip the analyzer
+    dropped entirely (Tesla's own "Since Charge" panel confirmed it)."""
+    from app.sync import _drive_from
+
+    start = snap(T0, 28_466.0, 81, range_km=453.0)
+    end = snap(T0 + 60, 28_466.298, 81, range_km=452.9)  # rounds to 0.3 km, true value < 0.3
+    d = _drive_from(start, end, 75.0)
+    assert d is not None
+    assert d["distance_km"] == 0.3
+
+    d, _, _, _ = process_snapshot(start, end, None, None, 75.0, 0.90)
+    assert len(d) == 1 and d[0]["distance_km"] == 0.3
+
+
 def test_drive_min_km_threaded_through_process_snapshot():
     """The configurable floor must reach the whole-gap trip reconstruction
     that process_snapshot uses, not just _drive_from in isolation."""

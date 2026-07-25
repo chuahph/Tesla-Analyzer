@@ -428,7 +428,12 @@ def _drive_from(start: dict, cur: dict, capacity_kwh: float, max_speed: float = 
     # A recorded trip must clear the real-trip floor, not just the jitter floor,
     # so a wake-and-lock odometer nudge never logs as a phantom drive (see
     # TRIP_MIN_KM). A caller can still raise the bar further via drive_min_km.
-    if distance < max(drive_min_km, TRIP_MIN_KM):
+    # Floor-test the *rounded* distance (same 1-decimal precision Tesla's own
+    # screen shows), not the raw float — a genuine trip the car itself
+    # displays as "0.3 km" can have a true odometer delta anywhere from 0.25
+    # to 0.35, and comparing that raw value against a 0.3 floor discards real
+    # short trips (e.g. charger bay to parking spot) about half the time.
+    if round(distance, 1) < max(drive_min_km, TRIP_MIN_KM):
         return None
     dt_min = max((cur["ts"] - start["ts"]) / 60.0, 0.0)
     soc_used = max(start["soc"] - cur["soc"], 0.0)
