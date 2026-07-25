@@ -480,11 +480,25 @@ main { padding: 24px 28px 60px; max-width: 1280px; margin: 0 auto; }
   box-shadow: var(--elev-1);
   transition: transform .16s ease, border-color .16s ease, box-shadow .16s ease;
 }
-.qn-btn .qn-ico { font-size: 15px; line-height: 1; }
+/* Emoji glyphs differ a lot in intrinsic width, height and baseline (a wide
+   map vs a thin pin vs a boxy arrow), so left to themselves they sit at
+   visibly different scales and heights across the row. Pinning each to an
+   identical square box, centred both ways with a neutral line-height, makes
+   the icons line up as a row even though the artwork inside still varies. */
+.qn-btn .qn-ico {
+  display: flex; align-items: center; justify-content: center;
+  width: 18px; height: 18px; flex: 0 0 18px;
+  font-size: 15px; line-height: 1;
+  /* Emoji ignore text colour; this just keeps any fallback glyph on-theme. */
+  font-variant-emoji: emoji;
+}
 .qn-btn .qn-label {
   font-size: 9.5px; font-weight: 600; color: var(--muted);
   letter-spacing: .1px; white-space: nowrap;
-  max-width: 100%; overflow: hidden; text-overflow: ellipsis;
+  /* Long labels ("Efficiency", "Charging") otherwise run edge to edge in a
+     narrow button; the inset keeps a consistent breathing gap on every tile. */
+  max-width: calc(100% - 4px); overflow: hidden; text-overflow: ellipsis;
+  text-align: center;
 }
 @media (hover: hover) {
   .qn-btn:hover { transform: translateY(-1px); border-color: var(--border-lift); box-shadow: var(--elev-2); }
@@ -1072,9 +1086,12 @@ footer { padding: 18px 28px; color: var(--muted); font-size: 12px; border-top: 1
   .bottom-actions #btn-export, .bottom-actions #btn-guide { flex: 1 1 42%; }
   main { padding: 12px 12px 40px; }
   .quick-nav { gap: 4px; }
-  .qn-btn { min-height: 44px; padding: 5px 1px; gap: 1px; }
-  .qn-btn .qn-ico { font-size: 13px; }
-  .qn-btn .qn-label { font-size: 8px; }
+  .qn-btn { min-height: 44px; padding: 5px 1px; gap: 2px; }
+  /* Keep the square icon box (just smaller) so the row stays aligned on
+     narrow screens too — shrinking only the font would let each glyph drift
+     back to its own intrinsic size. */
+  .qn-btn .qn-ico { width: 16px; height: 16px; flex-basis: 16px; font-size: 13.5px; }
+  .qn-btn .qn-label { font-size: 8px; letter-spacing: 0; }
   .card { scroll-margin-top: 122px; }
   .card-grid { grid-template-columns: 1fr; gap: 10px; margin-bottom: 12px; }
   .kpi-grid { grid-template-columns: repeat(2, 1fr); gap: 8px; margin-bottom: 12px; }
