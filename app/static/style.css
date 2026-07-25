@@ -193,10 +193,16 @@ header {
   animation: riseIn .45s cubic-bezier(.22, .61, .36, 1) both;
 }
 .score-behaviour { margin-top: 8px; padding-top: 6px; border-top: 1px solid var(--border); }
-.score-banner.tone-green  { border-left-color: var(--green);    box-shadow: var(--elev-1), inset 7px 0 26px -12px var(--green); }
-.score-banner.tone-blue   { border-left-color: var(--accent-2); box-shadow: var(--elev-1), inset 7px 0 26px -12px var(--accent-2); }
-.score-banner.tone-amber  { border-left-color: var(--amber);    box-shadow: var(--elev-1), inset 7px 0 26px -12px var(--amber); }
-.score-banner.tone-red    { border-left-color: var(--accent);   box-shadow: var(--elev-1), inset 7px 0 26px -12px var(--accent); }
+/* Same faint whole-surface tone wash as the KPI tiles, so the hero banner
+   and the row under it read as one colour system. */
+.score-banner.tone-green  { border-left-color: var(--green);    box-shadow: var(--elev-1), inset 7px 0 26px -12px var(--green);
+                            background: linear-gradient(115deg, rgba(34,197,94,.10), rgba(34,197,94,.02) 48%, transparent 72%), linear-gradient(180deg, #1c222c, var(--panel)); }
+.score-banner.tone-blue   { border-left-color: var(--accent-2); box-shadow: var(--elev-1), inset 7px 0 26px -12px var(--accent-2);
+                            background: linear-gradient(115deg, rgba(59,130,246,.10), rgba(59,130,246,.02) 48%, transparent 72%), linear-gradient(180deg, #1c222c, var(--panel)); }
+.score-banner.tone-amber  { border-left-color: var(--amber);    box-shadow: var(--elev-1), inset 7px 0 26px -12px var(--amber);
+                            background: linear-gradient(115deg, rgba(245,158,11,.10), rgba(245,158,11,.02) 48%, transparent 72%), linear-gradient(180deg, #1c222c, var(--panel)); }
+.score-banner.tone-red    { border-left-color: var(--accent);   box-shadow: var(--elev-1), inset 7px 0 26px -12px var(--accent);
+                            background: linear-gradient(115deg, rgba(232,33,39,.10), rgba(232,33,39,.02) 48%, transparent 72%), linear-gradient(180deg, #1c222c, var(--panel)); }
 .score-ring {
   font-size: 36px; font-weight: 800; line-height: 1;
   flex: 0 0 auto; font-variant-numeric: tabular-nums;
@@ -531,12 +537,22 @@ main { padding: 24px 28px 60px; max-width: 1280px; margin: 0 auto; }
    value (efficiency vs rated, battery balance). A wider rail and the inset
    glow give the tones far more visible separation than a thin line alone. */
 .kpi[class*="tone-"] { border-left-width: 5px; border-left-style: solid; }
-.kpi.tone-blue   { border-left-color: var(--accent-2); box-shadow: var(--elev-1), inset 6px 0 20px -10px var(--accent-2); }
-.kpi.tone-green  { border-left-color: var(--green);    box-shadow: var(--elev-1), inset 6px 0 20px -10px var(--green); }
-.kpi.tone-amber  { border-left-color: var(--amber);    box-shadow: var(--elev-1), inset 6px 0 20px -10px var(--amber); }
-.kpi.tone-violet { border-left-color: var(--violet);   box-shadow: var(--elev-1), inset 6px 0 20px -10px var(--violet); }
-.kpi.tone-teal   { border-left-color: var(--teal);     box-shadow: var(--elev-1), inset 6px 0 20px -10px var(--teal); }
-.kpi.tone-red    { border-left-color: var(--accent);   box-shadow: var(--elev-1), inset 6px 0 20px -10px var(--accent); }
+/* Each tone also washes faintly across the whole tile surface (a diagonal
+   tint fading out by mid-tile), so the colour reads as the card's identity
+   rather than only a stripe on its edge — still faint enough that the value
+   text keeps full contrast. */
+.kpi.tone-blue   { border-left-color: var(--accent-2); box-shadow: var(--elev-1), inset 6px 0 20px -10px var(--accent-2);
+                   background: linear-gradient(115deg, rgba(59,130,246,.12), rgba(59,130,246,.03) 46%, transparent 70%), linear-gradient(180deg, #1c222c, var(--panel)); }
+.kpi.tone-green  { border-left-color: var(--green);    box-shadow: var(--elev-1), inset 6px 0 20px -10px var(--green);
+                   background: linear-gradient(115deg, rgba(34,197,94,.12), rgba(34,197,94,.03) 46%, transparent 70%), linear-gradient(180deg, #1c222c, var(--panel)); }
+.kpi.tone-amber  { border-left-color: var(--amber);    box-shadow: var(--elev-1), inset 6px 0 20px -10px var(--amber);
+                   background: linear-gradient(115deg, rgba(245,158,11,.12), rgba(245,158,11,.03) 46%, transparent 70%), linear-gradient(180deg, #1c222c, var(--panel)); }
+.kpi.tone-violet { border-left-color: var(--violet);   box-shadow: var(--elev-1), inset 6px 0 20px -10px var(--violet);
+                   background: linear-gradient(115deg, rgba(167,139,250,.12), rgba(167,139,250,.03) 46%, transparent 70%), linear-gradient(180deg, #1c222c, var(--panel)); }
+.kpi.tone-teal   { border-left-color: var(--teal);     box-shadow: var(--elev-1), inset 6px 0 20px -10px var(--teal);
+                   background: linear-gradient(115deg, rgba(45,212,191,.12), rgba(45,212,191,.03) 46%, transparent 70%), linear-gradient(180deg, #1c222c, var(--panel)); }
+.kpi.tone-red    { border-left-color: var(--accent);   box-shadow: var(--elev-1), inset 6px 0 20px -10px var(--accent);
+                   background: linear-gradient(115deg, rgba(232,33,39,.12), rgba(232,33,39,.03) 46%, transparent 70%), linear-gradient(180deg, #1c222c, var(--panel)); }
 /* Subtle lift so the KPI row feels as interactive as the cards below it. */
 @media (hover: hover) {
   .kpi:hover { transform: translateY(-1px); border-color: var(--border-lift); }
@@ -548,7 +564,7 @@ main { padding: 24px 28px 60px; max-width: 1280px; margin: 0 auto; }
 }
 .kpi-empty { grid-column: 1 / -1; }
 .kpi-empty .sub { margin-top: 6px; line-height: 1.5; }
-.kpi .value { font-size: 21px; font-weight: 700; margin-top: 1px; font-variant-numeric: tabular-nums; line-height: 1.05; }
+.kpi .value { font-size: 22px; font-weight: 800; margin-top: 1px; font-variant-numeric: tabular-nums; line-height: 1.05; letter-spacing: -.2px; }
 .kpi .sub { color: var(--muted); font-size: 10px; margin-top: 1px; line-height: 1.1; }
 .kpi-empty { min-height: 0; }
 .kpi-info { grid-column: 1 / -1; }
@@ -599,10 +615,19 @@ main { padding: 24px 28px 60px; max-width: 1280px; margin: 0 auto; }
   }
 }
 .card.full { grid-column: 1 / -1; }
-/* A hairline under each title separates it from the content below. */
+/* A hairline under each title separates it from the content below; a short
+   red-to-blue gradient tick overlays its left end so every section header
+   carries the app's signature accent without shouting. */
 .card h2 {
+  position: relative;
   margin: 0 0 14px; font-size: 15px; font-weight: 600;
   padding-bottom: 10px; border-bottom: 1px solid var(--border);
+}
+.card h2::after {
+  content: ""; position: absolute; left: 0; bottom: -1px;
+  width: 46px; height: 2px; border-radius: 2px;
+  background: linear-gradient(90deg, var(--accent), var(--accent-2));
+  opacity: .8;
 }
 .card h2 .info-btn { width: 18px; height: 18px; font-size: 11px; vertical-align: 1px; }
 /* This title is the longest in the app — shrink it (and forbid wrapping,
