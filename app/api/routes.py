@@ -1297,19 +1297,29 @@ def sync_now(wake: bool = Query(False), session: Session = Depends(get_session))
         refresh = state.get(session, state.REFRESH_KEY)
         if not refresh or not auth.oauth_configured():
             raise HTTPException(401, "Token expired — sign in with Tesla again.")
-        tokens = auth.refresh_tokens(refresh)
+        try:
+            tokens = auth.refresh_tokens(refresh)
+        except httpx.HTTPStatusError as exc:
+            # The refresh token itself was rejected (expired/revoked) — surface
+            # a clean re-auth prompt instead of an unhandled 400/401 from Tesla.
+            raise HTTPException(401, "Token expired — sign in with Tesla again.") from exc
         state.put(session, state.TOKEN_KEY, tokens["access_token"])
         if tokens.get("refresh_token"):
             state.put(session, state.REFRESH_KEY, tokens["refresh_token"])
         return tokens["access_token"]
 
-    # List every car on the account (with a single token-refresh retry).
+    # List every car on the account (with a single token-refresh retry). Tesla
+    # returns 401 for an expired access token, but sometimes 403 instead —
+    # both are treated as "try refreshing" rather than a hard failure.
     try:
         vehicles = make_client(token).list_vehicles()
     except httpx.HTTPStatusError as exc:
-        if exc.response.status_code == 401:
+        if exc.response.status_code in (401, 403):
             token = refresh_or_401()
-            vehicles = make_client(token).list_vehicles()
+            try:
+                vehicles = make_client(token).list_vehicles()
+            except httpx.HTTPStatusError as exc2:
+                raise HTTPException(exc2.response.status_code, f"Tesla error: {exc2}") from exc2
         else:
             raise HTTPException(exc.response.status_code, f"Tesla error: {exc}") from exc
     except httpx.RequestError as exc:
@@ -1481,7 +1491,7 @@ def sync_now(wake: bool = Query(False), session: Session = Depends(get_session))
             data = client.vehicle_data(vid)
         except httpx.HTTPStatusError as exc:
             code = exc.response.status_code
-            if code == 401:
+            if code in (401, 403):
                 token = refresh_or_401()
                 client = make_client(token)
                 try:

@@ -185,6 +185,64 @@ def test_sync_returns_clean_503_on_network_error(monkeypatch):
         _reset_to_demo()
 
 
+def test_sync_refreshes_token_on_403(monkeypatch):
+    """Tesla sometimes reports an expired/revoked access token as 403 rather
+    than 401 (seen live on /api/1/vehicles) — the refresh retry must catch
+    that case too, not just a literal 401."""
+    import httpx
+
+    from app import auth, services, state
+
+    settings = get_settings()
+    old_passcode = settings.app_passcode
+    old_client_id = settings.tesla_client_id
+    old_client_secret = settings.tesla_client_secret
+    settings.app_passcode = ""
+    # oauth_configured() requires both to be set.
+    settings.tesla_client_id = "test-client-id"
+    settings.tesla_client_secret = "test-client-secret"
+
+    def _forbidden():
+        req = httpx.Request("GET", "https://fleet-api.example/api/1/vehicles")
+        resp = httpx.Response(403, request=req)
+        raise httpx.HTTPStatusError("403 Forbidden", request=req, response=resp)
+
+    class _StaleThenFresh(_FakeClient):
+        # "asleep" so the per-vehicle sync loop skips vehicle_data() entirely —
+        # this test only cares about the list_vehicles()/refresh handshake.
+        CARS = [{"vin": "VINAAAAAAAAAAAAAA", "display_name": "Model 3", "state": "asleep"}]
+
+        def __init__(self, access_token=None, **_):
+            self.access_token = access_token
+
+        def list_vehicles(self):
+            if self.access_token == "stale":
+                _forbidden()
+            return list(self.CARS)
+
+    monkeypatch.setattr("app.tesla_client.TeslaClient", _FakeClient)
+    try:
+        with SessionLocal() as s:
+            services.link_with_token(s, "stale")
+            state.put(s, state.REFRESH_KEY, "refresh-me")
+
+        monkeypatch.setattr("app.tesla_client.TeslaClient", _StaleThenFresh)
+        monkeypatch.setattr(
+            auth, "refresh_tokens",
+            lambda refresh_token: {"access_token": "fresh", "refresh_token": "refresh-me"},
+        )
+        with TestClient(app) as client:
+            resp = client.post("/api/sync")
+            assert resp.status_code == 200
+        with SessionLocal() as s:
+            assert state.get(s, state.TOKEN_KEY) == "fresh"
+    finally:
+        settings.app_passcode = old_passcode
+        settings.tesla_client_id = old_client_id
+        settings.tesla_client_secret = old_client_secret
+        _reset_to_demo()
+
+
 class _SyncClient:
     """A parked, online car for driving /api/sync — configurable odometer."""
     VIN = "VINAAAAAAAAAAAAAA"
