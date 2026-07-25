@@ -43,6 +43,11 @@ LOW_SOC_NOTIFIED_KEY = "low_soc_notified"  # "1" once the low-SoC push has fired
 SENTRY_DRAIN_EPISODE_KEY = "sentry_drain_episode"
 SENTRY_DRAIN_NOTIFIED_KEY = "sentry_drain_notified"
 
+# Parked-intrusion alert, per VIN: "1" once the push has fired for the current
+# opening, cleared as soon as everything is shut again (or the car is driven),
+# so each separate opening alerts once rather than every sync tick.
+INTRUSION_NOTIFIED_KEY = "intrusion_notified"
+
 # Charging price preferences (see pricing_prefs.py) — user-editable RM/kWh
 # rates per source × charger type, saved from the dashboard's Rates page
 # without touching .env or restarting.

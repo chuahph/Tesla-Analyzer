@@ -83,6 +83,40 @@ def test_snapshot_parses_sentry_and_climate_as_none_when_unreported():
     assert enabled_but_idle["cabin_overheat_protection_actively_cooling"] is False
 
 
+def test_snapshot_parses_door_and_window_openings():
+    """doors_open/windows_open summarise Tesla's per-door and per-window ints
+    (0 = shut) for the parked-intrusion alert, and stay None when the payload
+    omits them entirely so "unknown" is distinguishable from "all shut"."""
+    def snap_vs(vs):
+        return snapshot_from_vehicle_data({
+            "drive_state": {"timestamp": 1_760_000_000, "shift_state": "P"},
+            "charge_state": {"battery_level": 72},
+            "climate_state": {},
+            "vehicle_state": vs,
+        })
+
+    unreported = snap_vs({})
+    assert unreported["doors_open"] is None
+    assert unreported["windows_open"] is None
+
+    all_shut = snap_vs({"df": 0, "dr": 0, "pf": 0, "pr": 0, "ft": 0, "rt": 0,
+                        "fd_window": 0, "fp_window": 0, "rd_window": 0, "rp_window": 0})
+    assert all_shut["doors_open"] is False
+    assert all_shut["windows_open"] is False
+
+    # Any single opening flips its own summary, and only its own.
+    rear_door = snap_vs({"df": 0, "dr": 1, "pf": 0, "pr": 0, "fd_window": 0})
+    assert rear_door["doors_open"] is True
+    assert rear_door["windows_open"] is False
+
+    trunk = snap_vs({"df": 0, "rt": 1})
+    assert trunk["doors_open"] is True
+
+    window = snap_vs({"df": 0, "rp_window": 1})
+    assert window["doors_open"] is False
+    assert window["windows_open"] is True
+
+
 def test_snapshot_parses_car_wash_mode():
     off = snapshot_from_vehicle_data({
         "drive_state": {"timestamp": 1_760_000_000, "shift_state": "P"},

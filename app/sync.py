@@ -132,6 +132,20 @@ def _dt(ts: float) -> datetime:
     return datetime.fromtimestamp(ts, MYT).replace(tzinfo=None)
 
 
+# Door/trunk and window openings Tesla reports on vehicle_state. Each is an
+# int where 0 means shut, so any truthy value is "open".
+_DOOR_FIELDS = ("df", "dr", "pf", "pr", "ft", "rt")
+_WINDOW_FIELDS = ("fd_window", "fp_window", "rd_window", "rp_window")
+
+
+def _any_open(vs: dict[str, Any], fields: tuple[str, ...]) -> bool | None:
+    """Whether any of ``fields`` reads as open. None (not False) when the car
+    reported none of them at all — "unknown" has to stay distinguishable from
+    a confirmed all-shut, same rule as sentry_mode/climate_on below."""
+    seen = [vs[f] for f in fields if f in vs and vs[f] is not None]
+    return any(bool(v) for v in seen) if seen else None
+
+
 def snapshot_from_vehicle_data(data: dict[str, Any]) -> dict[str, Any]:
     """Flatten a Tesla vehicle_data payload into the fields the sync needs."""
     ds = data.get("drive_state") or {}
@@ -173,6 +187,12 @@ def snapshot_from_vehicle_data(data: dict[str, Any]) -> dict[str, Any]:
         # slept. None (not False) when Tesla didn't report the field at all,
         # kept distinct from a confirmed off.
         "sentry_mode": vs.get("sentry_mode") if "sentry_mode" in vs else None,
+        # Physical-entry signals for the parked-intrusion alert (see
+        # /api/sync). Unlike Sentry's own alarm state — which Tesla doesn't
+        # publish at all — an opened door persists until someone shuts it,
+        # so a 1-2 min poll catches it reliably rather than by luck.
+        "doors_open": _any_open(vs, _DOOR_FIELDS),
+        "windows_open": _any_open(vs, _WINDOW_FIELDS),
         "climate_on": cl.get("is_climate_on") if "is_climate_on" in cl else None,
         # Tesla reports this as a tri-state string ("Off"/"On"/"FanOnly"), not
         # a bool — but it's the *setting* (whether COP is allowed to run at

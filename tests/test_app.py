@@ -1096,6 +1096,7 @@ def test_charge_cost_uses_time_of_use_pricing_at_write_time():
         energy_price_offpeak_kwh=0.45, tariff_peak_start_hour=8,
         tariff_peak_end_hour=22, tariff_weekend_offpeak=True,
         battery_capacity_kwh=0.0, battery_new_range_km=0.0, low_soc_notify_pct=0.0, sentry_drain_notify_pct=0.0,
+        intrusion_notify=False,
         drive_min_km=0.5,
     )
 
@@ -1161,6 +1162,7 @@ def test_charge_cost_uses_ac_dc_rate_at_write_time():
         energy_price_peak_kwh=1.20, energy_price_offpeak_kwh=0.45,
         tariff_peak_start_hour=8, tariff_peak_end_hour=22, tariff_weekend_offpeak=True,
         battery_capacity_kwh=0.0, battery_new_range_km=0.0, low_soc_notify_pct=0.0, sentry_drain_notify_pct=0.0,
+        intrusion_notify=False,
         drive_min_km=0.5,
     )
 
@@ -1234,6 +1236,7 @@ def test_drive_complete_fires_event_webhook_but_not_push(monkeypatch):
         energy_price_offpeak_kwh=0.0, tariff_peak_start_hour=8,
         tariff_peak_end_hour=22, tariff_weekend_offpeak=True,
         battery_capacity_kwh=0.0, battery_new_range_km=0.0, low_soc_notify_pct=0.0, sentry_drain_notify_pct=0.0,
+        intrusion_notify=False,
         drive_min_km=0.5,
     )
 
@@ -1309,7 +1312,7 @@ def test_sentry_drain_alert_fires_once_per_parked_episode(monkeypatch):
         energy_price_peak_kwh=0.0, energy_price_offpeak_kwh=0.0, tariff_peak_start_hour=8,
         tariff_peak_end_hour=22, tariff_weekend_offpeak=True,
         battery_capacity_kwh=0.0, battery_new_range_km=0.0, low_soc_notify_pct=0.0,
-        sentry_drain_notify_pct=2.0, drive_min_km=0.5,
+        sentry_drain_notify_pct=2.0, intrusion_notify=False, drive_min_km=0.5,
     )
 
     def vdata(ts, odo_mi, soc, shift, sentry, speed=0):
@@ -1355,6 +1358,86 @@ def test_sentry_drain_alert_fires_once_per_parked_episode(monkeypatch):
         with SessionLocal() as s:
             from app.models import Drive as _Drive
             v = s.query(Vehicle).filter(Vehicle.vin == "TESTVIN-SENTRY").first()
+            if v:
+                s.query(_Drive).filter(_Drive.vehicle_id == v.id).delete()
+                s.query(BatteryReading).filter(BatteryReading.vehicle_id == v.id).delete()
+                s.delete(v)
+                s.commit()
+
+
+def test_intrusion_alert_fires_once_per_opening(monkeypatch):
+    """A door opening while the car sits parked with Sentry armed and nobody
+    aboard fires once, stays quiet while it's still open, and re-arms once
+    everything is shut again. An opening with someone aboard (or with Sentry
+    off) is ordinary use and must stay silent."""
+    from types import SimpleNamespace
+
+    from app.api.routes import _process_vehicle
+    from app.database import SessionLocal
+    from app.models import BatteryReading, Vehicle
+
+    settings = SimpleNamespace(
+        energy_price_per_kwh=0.90, energy_price_ac_kwh=0.0, energy_price_dc_kwh=0.0,
+        energy_price_peak_kwh=0.0, energy_price_offpeak_kwh=0.0, tariff_peak_start_hour=8,
+        tariff_peak_end_hour=22, tariff_weekend_offpeak=True,
+        battery_capacity_kwh=0.0, battery_new_range_km=0.0, low_soc_notify_pct=0.0,
+        sentry_drain_notify_pct=0.0, intrusion_notify=True, drive_min_km=0.5,
+    )
+
+    def vdata(ts, sentry, door_open, user_present=False):
+        return {
+            "vin": "TESTVIN-INTRUDE", "display_name": "Test", "vehicle_config": {},
+            "vehicle_state": {"odometer": 2000.0, "is_user_present": user_present,
+                              "locked": True, "sentry_mode": sentry,
+                              "df": 1 if door_open else 0, "dr": 0, "pf": 0, "pr": 0,
+                              "ft": 0, "rt": 0},
+            "drive_state": {"timestamp": ts * 1000, "shift_state": "P", "speed": 0,
+                            "latitude": None, "longitude": None},
+            "charge_state": {"battery_level": 80, "battery_range": 200.0,
+                             "charging_state": "Disconnected", "charger_power": 0.0,
+                             "charge_energy_added": 0.0},
+            "climate_state": {"outside_temp": 25.0},
+        }
+
+    pushes = []
+    monkeypatch.setattr("app.api.routes.notifications.notify",
+                        lambda session, title, body, tag=None: pushes.append((title, tag)))
+
+    def fired():
+        return len([p for p in pushes if p[1] == "intrusion"])
+
+    t = 1_760_600_000
+    try:
+        with SessionLocal() as s:
+            s.add(Vehicle(vin="TESTVIN-INTRUDE", name="Test", model="Model 3"))
+            s.commit()
+
+            def tick(dt, sentry, door_open, user_present=False):
+                _process_vehicle(s, vdata(t + dt, sentry, door_open, user_present),
+                                 {"vin": "TESTVIN-INTRUDE"}, settings)
+                s.commit()
+
+            tick(0, True, False)          # parked, armed, all shut -> quiet
+            assert fired() == 0
+            tick(60, True, True)          # door opens -> fires once
+            assert fired() == 1
+            tick(120, True, True)         # still open -> no repeat
+            assert fired() == 1
+            tick(180, True, False)        # shut again -> re-arms
+            tick(240, True, True)         # a separate opening -> fires again
+            assert fired() == 2
+
+            # Owner aboard, or Sentry off: ordinary use, no alert.
+            tick(300, True, False)
+            tick(360, True, True, True)   # door open but someone is aboard
+            assert fired() == 2
+            tick(420, False, False)
+            tick(480, False, True)        # door open with Sentry off
+            assert fired() == 2
+    finally:
+        with SessionLocal() as s:
+            from app.models import Drive as _Drive
+            v = s.query(Vehicle).filter(Vehicle.vin == "TESTVIN-INTRUDE").first()
             if v:
                 s.query(_Drive).filter(_Drive.vehicle_id == v.id).delete()
                 s.query(BatteryReading).filter(BatteryReading.vehicle_id == v.id).delete()

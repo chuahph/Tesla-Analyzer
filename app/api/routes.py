@@ -1289,6 +1289,40 @@ def _process_vehicle(
                 state.put(session, ep_key, "")
                 state.put(session, sentry_notified_key, "")
 
+        # Parked-intrusion alert: a door, trunk or window opening while the car
+        # sits with Sentry armed and nobody aboard. Unlike Sentry's own alarm
+        # state — which Tesla's API doesn't expose at all — an opening persists
+        # until someone shuts it, so this poll cadence catches it reliably
+        # instead of having to land inside a ~1 min alarm window.
+        #
+        # Deliberately entry-only. There is no accelerometer, tilt or impact
+        # field on vehicle_data, so a Sentry trigger from someone touching or
+        # leaning on the car cannot be seen here at all; Tesla's own app stays
+        # the only alert for those. Named for what it actually detects rather
+        # than borrowing "Sentry alert", which would overstate it.
+        if settings.intrusion_notify:
+            intrusion_key = state.scoped(state.INTRUSION_NOTIFIED_KEY, vin)
+            armed = (
+                bool(sentry_now) and not open_trip and not open_charge
+                and not snap["user_present"]
+            )
+            opened_doors = bool(snap.get("doors_open"))
+            opened_windows = bool(snap.get("windows_open"))
+            breached = armed and (opened_doors or opened_windows)
+            if breached and state.get(session, intrusion_key) != "1":
+                what = "A door or trunk" if opened_doors else "A window"
+                notifications.notify(
+                    session, "Car opened while parked",
+                    f"{what} was opened on {vehicle.name} while it sat parked "
+                    "with Sentry Mode on and nobody aboard.",
+                    tag="intrusion",
+                )
+                state.put(session, intrusion_key, "1")
+            elif not breached and state.get(session, intrusion_key) == "1":
+                # Everything shut again (or the car was driven/occupied) — arm
+                # the alert for the next separate opening.
+                state.put(session, intrusion_key, "")
+
     session.commit()
     state.put(session, sk, _json.dumps(snap))
     state.put(session, tk, _json.dumps(open_trip) if open_trip else "")
