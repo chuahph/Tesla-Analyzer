@@ -256,12 +256,21 @@ def _parse_json(text: str) -> tuple[list[dict], list[dict]]:
 
 
 def _is_junk(path: str) -> bool:
-    """Skip macOS bundle metadata, AppleDouble files and hidden entries."""
+    """Skip macOS bundle metadata, AppleDouble files and hidden entries — plus
+    our own export's ``analysis/`` folder.
+
+    That folder holds the derived dashboard sheets (recent-trips, top-routes,
+    summary KPIs, ...) that /api/export/csv ships alongside the raw
+    drives.csv/charges.csv. They're for reading in a spreadsheet, not for
+    re-importing: recent-trips.csv in particular restates the same drives, so
+    importing it too would double every trip.
+    """
     parts = path.replace("\\", "/").split("/")
     base = parts[-1]
     return (
         path.startswith("__MACOSX")
         or "__MACOSX" in parts
+        or "analysis" in parts[:-1]
         or base.startswith("._")
         or base.startswith(".")
         or base in {"Thumbs.db", "desktop.ini"}

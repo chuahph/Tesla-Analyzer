@@ -481,7 +481,7 @@
         <h2>🔎 Insights</h2>
         <ul id="insights-body" class="plain-list"></ul>
       </div>
-      <div class="card" id="battery-card" style="display:none">
+      <div class="card" id="battery-card" style="display:none" data-export="battery">
         <h2>🔋 Battery Health</h2>
         <div id="battery-body"></div>
         <!-- Monthly projected-full-range trend; shown once 2+ months exist. -->
@@ -493,7 +493,7 @@
       </div>
       <!-- Trips / routes / charging spots sit right after battery health,
            before the charts; recommendations move to the very bottom. -->
-      <div class="card">
+      <div class="card" data-export="speed">
         <h2>🛣️ Distance by Speed Band
           <button class="info-btn" data-info="info-speedband">!</button></h2>
         <div id="info-speedband" class="info-pop hidden">
@@ -503,11 +503,11 @@
         </div>
         <canvas id="speedBandChart"></canvas>
       </div>
-      <div class="card">
+      <div class="card" data-export="routes">
         <h2>🔁 Top Routes</h2>
         <ul id="topRoutes" class="plain-list"></ul>
       </div>
-      <div class="card" id="trips-card">
+      <div class="card" id="trips-card" data-export="trips">
         <h2>🧭 Recent Trips</h2>
         <!-- Work/personal totals for the window; hidden until something's tagged. -->
         <div id="tag-summary" class="tag-summary" style="display:none"></div>
@@ -528,7 +528,7 @@
           <button id="cancel-select" class="btn btn-mini hidden">Cancel</button>
         </div>
       </div>
-      <div class="card" id="charges-card">
+      <div class="card" id="charges-card" data-export="charges">
         <h2>📍 Recent Charges
           <button id="btn-default-source" class="default-source-btn hidden" title="Default source for new charges — tap to change">🌐</button>
         </h2>
@@ -541,7 +541,7 @@
           <button id="cancel-select-charges" class="btn btn-mini hidden">Cancel</button>
         </div>
       </div>
-      <div class="card" id="efficiency-card">
+      <div class="card" id="efficiency-card" data-export="efficiency">
         <h2>🌡️ Efficiency vs Temperature
           <button class="info-btn" data-info="info-efftemp">!</button></h2>
         <div id="info-efftemp" class="info-pop hidden">
@@ -555,7 +555,7 @@
         </div>
         <canvas id="effTempChart"></canvas>
       </div>
-      <div class="card">
+      <div class="card" data-export="eff-trend">
         <h2>📈 Weekly Efficiency Trend
           <button class="info-btn" data-info="info-efftrend">!</button></h2>
         <div id="info-efftrend" class="info-pop hidden">
@@ -574,7 +574,7 @@
         </div>
         <canvas id="effDailyTrendChart"></canvas>
       </div>
-      <div class="card">
+      <div class="card" data-export="hours">
         <h2>🕒 Trips by Hour of Day
           <button class="info-btn" data-info="info-tripshour">!</button></h2>
         <div id="info-tripshour" class="info-pop hidden">
@@ -585,7 +585,7 @@
         </div>
         <canvas id="tripsHourChart"></canvas>
       </div>
-      <div class="card" id="charging-card">
+      <div class="card" id="charging-card" data-export="charging">
         <h2>⚡ Charging: AC vs DC Energy
           <button class="info-btn" data-info="info-acdc">!</button></h2>
         <div id="info-acdc" class="info-pop hidden">
@@ -595,7 +595,7 @@
         </div>
         <canvas id="acdcChart"></canvas>
       </div>
-      <div class="card">
+      <div class="card" data-export="soc-target">
         <h2>🎯 Charge Target (End SoC)
           <button class="info-btn" data-info="info-soctarget">!</button></h2>
         <div id="info-soctarget" class="info-pop hidden">
@@ -645,7 +645,7 @@
           <div id="plan-result" class="planner-result"></div>
         </div>
       </div>
-      <div class="card full" id="recommendations-card">
+      <div class="card full" id="recommendations-card" data-export="tips">
         <h2>💡 Assessment &amp; recommendations</h2>
         <div id="assessment-scorecard"></div>
         <div id="recommendations"></div>
@@ -654,7 +654,8 @@
 
     <!-- Per-car export lives with the car; account actions are on the main page. -->
     <section class="bottom-actions">
-      <button id="btn-export" class="btn" title="Download this car's data as CSV">⬇ Export CSV</button>
+      <button id="btn-export" class="btn"
+              title="Download the whole dashboard as a ZIP of CSVs — raw trips &amp; charges plus every analysis section. Use the ⤓ icon on a card title for just that section.">⬇ Export all data</button>
       <button id="btn-report" class="btn" title="Print or save a summary report (PDF via the print dialog)">📄 Report</button>
       <button id="btn-notify" class="btn hidden">🔔 Notifications</button>
       <button id="btn-notify-test" class="btn hidden" title="Send a test notification to this device">✉️ Send test</button>

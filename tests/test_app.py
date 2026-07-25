@@ -2287,6 +2287,47 @@ def test_export_csv_round_trips_through_importer():
         assert "since-charge" in respsc.headers["content-disposition"]
 
 
+def test_export_zip_ships_analysis_sheets_without_breaking_reimport():
+    """The full export carries every dashboard section as its own sheet under
+    analysis/, while drives.csv/charges.csv stay the re-importable pair — the
+    derived sheets must not be parsed back in (recent-trips.csv restates the
+    same drives, so importing it too would double every trip)."""
+    import zipfile
+    from io import BytesIO
+
+    from app.api.routes import EXPORT_SECTIONS
+    from app.importer import parse_upload
+
+    with TestClient(app) as client:  # startup seeds demo data
+        resp = client.get("/api/export/csv?days=30")
+        assert resp.status_code == 200
+        names = set(zipfile.ZipFile(BytesIO(resp.content)).namelist())
+        assert {"drives.csv", "charges.csv"} <= names
+        # Every section ships, namespaced so it can't collide with the raw pair.
+        for _key, (stem, _label) in EXPORT_SECTIONS.items():
+            assert f"analysis/{stem}.csv" in names
+        # Re-import still sees only the raw rows, not the derived sheets.
+        drives, charges = parse_upload("export.zip", resp.content)
+        summary = client.get("/api/summary?days=30").json()
+        assert len(drives) == summary["driving"]["total_drives"]
+
+
+def test_export_section_returns_one_csv_for_a_known_section():
+    with TestClient(app) as client:
+        resp = client.get("/api/export/section?name=trips&days=30")
+        assert resp.status_code == 200
+        assert resp.headers["content-type"].startswith("text/csv")
+        assert "recent-trips-30d.csv" in resp.headers["content-disposition"]
+        assert resp.text.splitlines()[0].startswith("start_time,end_time,route")
+
+        # Window params flow through to the filename.
+        assert "since-charge" in client.get(
+            "/api/export/section?name=kpis&since_charge=1"
+        ).headers["content-disposition"]
+        # Unknown sections are a clean 404, not a stack trace.
+        assert client.get("/api/export/section?name=nope").status_code == 404
+
+
 def test_no_passcode_means_open():
     settings = get_settings()
     old = settings.app_passcode

@@ -654,6 +654,26 @@ main { padding: 24px 28px 60px; max-width: 1280px; margin: 0 auto; }
   opacity: .8;
 }
 .card h2 .info-btn { width: 18px; height: 18px; font-size: 11px; vertical-align: 1px; }
+/* Per-section CSV download, pinned to the right end of a card's title row
+   (injected by app.js for any .card[data-export]). Quiet until hovered so it
+   never competes with the heading itself. */
+.card h2 .sec-export {
+  float: right; display: inline-flex; align-items: center; justify-content: center;
+  width: 22px; height: 22px; margin-left: 8px;
+  background: none; border: 1px solid transparent; border-radius: 7px;
+  color: var(--muted); cursor: pointer; padding: 0;
+  transition: color .15s ease, border-color .15s ease, background .15s ease;
+}
+.card h2 .sec-export svg {
+  width: 14px; height: 14px; fill: none; stroke: currentColor;
+  stroke-width: 2; stroke-linecap: round; stroke-linejoin: round;
+}
+@media (hover: hover) {
+  .card h2 .sec-export:hover {
+    color: var(--teal); border-color: var(--border-lift); background: var(--panel-2);
+  }
+}
+.card h2 .sec-export:active { transform: scale(.94); }
 /* This title is the longest in the app — shrink it (and forbid wrapping,
    with an ellipsis as a last resort on very narrow screens) so it always
    reads as one line instead of an oddly wrapped heading. */

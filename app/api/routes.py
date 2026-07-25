@@ -1858,21 +1858,37 @@ def export_data(
     }
 
 
-def _build_export_zip(drives: list[Drive], charges: list[Charge]) -> bytes:
+def _csv_text(headers, rows) -> str:
+    """One CSV sheet as text — shared by the ZIP export and the per-section
+    downloads so both quote/escape identically."""
+    import csv
+    import io
+
+    buf = io.StringIO()
+    w = csv.writer(buf)
+    w.writerow(headers)
+    w.writerows(rows)
+    return buf.getvalue()
+
+
+def _build_export_zip(drives: list[Drive], charges: list[Charge],
+                      extras: dict[str, str] | None = None) -> bytes:
     """The drives.csv + charges.csv ZIP bytes, shared by the download
     endpoint and the backup webhook so both produce an identically
-    re-importable archive."""
-    import csv
+    re-importable archive.
+
+    ``extras`` adds further ``{filename: csv_text}`` sheets alongside those
+    two — the dashboard's full export uses it to ship the analysis sections
+    (battery readings, per-section breakdowns, ...) in the same archive,
+    while the backup webhook keeps to the lean re-importable pair. Callers
+    put those under ``analysis/``, which the importer skips (see
+    importer._is_junk) so re-importing this ZIP restores the raw rows without
+    the derived sheets double-counting them.
+    """
     import io
     import zipfile
 
-    def sheet(headers, rows):
-        buf = io.StringIO()
-        w = csv.writer(buf)
-        w.writerow(headers)
-        w.writerows(rows)
-        return buf.getvalue()
-
+    sheet = _csv_text
     ts = lambda t: t.isoformat(sep=" ", timespec="minutes")  # noqa: E731
     drives_csv = sheet(
         ["start_time", "end_time", "distance_km", "duration_min", "start_soc",
@@ -1896,7 +1912,158 @@ def _build_export_zip(drives: list[Drive], charges: list[Charge]) -> bytes:
     with zipfile.ZipFile(zbuf, "w", zipfile.ZIP_DEFLATED) as z:
         z.writestr("drives.csv", drives_csv)
         z.writestr("charges.csv", charges_csv)
+        for fname, text in (extras or {}).items():
+            z.writestr(fname, text)
     return zbuf.getvalue()
+
+
+# Every exportable dashboard section: key -> (filename stem, human label).
+# The per-section download buttons and the full export's extra sheets both
+# read from this one table, so a section can never appear in one and not the
+# other.
+EXPORT_SECTIONS: dict[str, tuple[str, str]] = {
+    # Stems must not collide with the raw drives.csv / charges.csv sheets the
+    # ZIP always carries — these are the analysed views, not the raw tables.
+    "kpis": ("summary-kpis", "Summary KPIs"),
+    "trips": ("recent-trips", "Recent trips"),
+    "charges": ("recent-charges", "Recent charges"),
+    "routes": ("top-routes", "Top routes"),
+    "speed": ("distance-by-speed", "Distance by speed band"),
+    "hours": ("trips-by-hour", "Trips by hour"),
+    "efficiency": ("efficiency-by-temp", "Efficiency vs temperature"),
+    "eff-trend": ("efficiency-trend", "Efficiency trend"),
+    "charging": ("charging-ac-dc", "Charging AC vs DC"),
+    "soc-target": ("charge-targets", "Charge target (end SoC)"),
+    "battery": ("battery-health", "Battery health"),
+    "tips": ("recommendations", "Assessment & recommendations"),
+}
+
+
+def _section_csv(name: str, data: dict) -> str | None:
+    """One dashboard section rendered as CSV, built from the same ``/api/summary``
+    payload the dashboard draws from — so an export always matches exactly what
+    was on screen for that window. None for an unknown section."""
+    drv = data.get("driving") or {}
+    chg = data.get("charging") or {}
+    eff = data.get("efficiency") or {}
+    bat = data.get("battery") or {}
+    cur = data.get("currency") or ""
+
+    if name == "kpis":
+        rows = [
+            ["Window", data.get("window_label") or f"{data.get('window_days')} days"],
+            ["Distance (km)", drv.get("total_distance_km")],
+            ["Drives", drv.get("total_drives")],
+            ["Avg efficiency (Wh/km)", eff.get("avg_efficiency_wh_per_km")],
+            ["Energy used (kWh)", drv.get("total_energy_used_kwh")],
+            ["Avg speed (km/h)", drv.get("avg_speed_kmh")],
+            [f"Driving cost ({cur})", drv.get("total_cost")],
+            [f"Cost per km ({cur})", drv.get("cost_per_km")],
+            ["Eco score", drv.get("eco_score")],
+            ["Eco grade", drv.get("eco_grade")],
+            ["Energy charged (kWh)", chg.get("total_energy_kwh")],
+            [f"Charging cost ({cur})", chg.get("total_cost")],
+            ["Battery health (%)", bat.get("health_pct")],
+            ["Degradation (%)", bat.get("degradation_pct")],
+        ]
+        return _csv_text(["metric", "value"], [r for r in rows if r[1] is not None])
+
+    if name == "trips":
+        trips = drv.get("recent_trips") or []
+        return _csv_text(
+            ["start_time", "end_time", "route", "distance_km", "duration_min",
+             "avg_speed_kmh", "max_speed_kmh", "energy_kwh", "wh_per_km",
+             "soc_used_pct", "cost", "tag", "conditions", "eco_score"],
+            [[t.get("start_time"), t.get("end_time"), t.get("route"),
+              t.get("distance_km"), t.get("duration_min"), t.get("avg_speed_kmh"),
+              t.get("max_speed_kmh"), t.get("energy_kwh"), t.get("wh_per_km"),
+              t.get("soc_used_pct"), t.get("cost"), t.get("tag"),
+              t.get("conditions"), t.get("eco_score")] for t in trips])
+
+    if name == "charges":
+        rows = chg.get("recent_charges") or []
+        return _csv_text(
+            ["start_time", "end_time", "location", "charge_type", "energy_added_kwh",
+             "duration_min", "start_soc", "end_soc", "max_power_kw", "cost",
+             "rate_per_kwh"],
+            [[c.get("start_time"), c.get("end_time"), c.get("location"),
+              c.get("charge_type"), c.get("energy_added_kwh"), c.get("duration_min"),
+              c.get("start_soc"), c.get("end_soc"), c.get("max_power_kw"),
+              c.get("cost"), c.get("rate_per_kwh")] for c in rows])
+
+    if name == "routes":
+        return _csv_text(["route", "trips"],
+                         [[r[0], r[1]] for r in (drv.get("top_routes") or [])])
+
+    if name == "speed":
+        band = drv.get("distance_by_speed_band") or {}
+        return _csv_text(["speed_band_kmh", "distance_km"], list(band.items()))
+
+    if name == "hours":
+        return _csv_text(["hour", "trips"],
+                         list((drv.get("trips_by_hour") or {}).items()))
+
+    if name == "efficiency":
+        by_temp = eff.get("efficiency_by_temp") or {}
+        return _csv_text(
+            ["temp_band_c", "wh_per_km", "trips", "avg_speed_kmh"],
+            [[k, v.get("wh_per_km"), v.get("n"), v.get("avg_speed_kmh")]
+             for k, v in by_temp.items()])
+
+    if name == "eff-trend":
+        weekly = eff.get("weekly_efficiency") or {}
+        daily = eff.get("daily_efficiency") or {}
+        rows = [["weekly", k, v] for k, v in weekly.items()]
+        rows += [["daily", k, v] for k, v in daily.items()]
+        return _csv_text(["series", "period", "wh_per_km"], rows)
+
+    if name == "charging":
+        rows = [
+            ["AC energy (kWh)", chg.get("ac_energy_kwh")],
+            ["DC energy (kWh)", chg.get("dc_energy_kwh")],
+            ["DC share (%)", chg.get("dc_energy_share_pct")],
+            [f"AC cost ({cur})", chg.get("ac_cost")],
+            [f"DC cost ({cur})", chg.get("dc_cost")],
+            ["Sessions", chg.get("total_sessions")],
+            [f"Avg cost per kWh ({cur})", chg.get("avg_cost_per_kwh")],
+        ]
+        rows = [r for r in rows if r[1] is not None]
+        rows += [[f"Charges started at {h}:00", n]
+                 for h, n in (chg.get("charges_by_hour") or {}).items() if n]
+        return _csv_text(["metric", "value"], rows)
+
+    if name == "soc-target":
+        return _csv_text(["end_soc_pct", "charges"],
+                         list((chg.get("end_soc_targets") or {}).items()))
+
+    if name == "battery":
+        rows = [
+            ["Health (%)", bat.get("health_pct")],
+            ["Degradation (%)", bat.get("degradation_pct")],
+            ["Estimated full range (km)", bat.get("est_full_range_km")],
+            ["Reference (km)", bat.get("reference_km")],
+            ["Reference basis", bat.get("reference")],
+            ["Readings", bat.get("n_readings")],
+            ["Odometer (km)", bat.get("current_odo_km")],
+            ["Fleet degradation (%)", bat.get("fleet_degradation_pct")],
+            ["vs fleet (pt)", bat.get("vs_fleet_pct")],
+        ]
+        rows = [r for r in rows if r[1] is not None]
+        rows += [[f"Trend {p.get('month')} (km)", p.get("full_range_km")]
+                 for p in (bat.get("trend") or [])]
+        return _csv_text(["metric", "value"], rows)
+
+    if name == "tips":
+        recs = (data.get("assessment") or {}).get("recommendations") \
+            or data.get("recommendations") or []
+        return _csv_text(
+            ["priority", "category", "title", "detail", "estimated_saving",
+             "saving_kwh", "saving_cost"],
+            [[r.get("priority"), r.get("category"), r.get("title"), r.get("detail"),
+              r.get("estimated_saving"), r.get("saving_kwh"), r.get("saving_cost")]
+             for r in recs])
+
+    return None
 
 
 @router.get("/export/csv")
@@ -1906,9 +2073,13 @@ def export_csv(
     current_drive: bool = Query(False),
     session: Session = Depends(get_session),
 ):
-    """Download drives & charges as a ZIP of CSVs (re-importable).
+    """Download the whole dashboard as a ZIP of CSVs.
 
-    Defaults to everything; pass ``days``, ``since_charge`` or
+    drives.csv + charges.csv are the raw, re-importable pair; alongside them
+    every analysis section the dashboard shows (KPIs, top routes, speed bands,
+    efficiency, charging, battery health, recommendations, ...) is written as
+    its own sheet, so the archive is a complete extract rather than just the
+    two raw tables. Defaults to everything; pass ``days``, ``since_charge`` or
     ``current_drive`` to export only the currently viewed window.
     """
     import json as _json
@@ -1942,12 +2113,61 @@ def export_csv(
         label = f"{days}d"
     drives, charges = _window(session, vehicle.id, days, since=since)
 
-    zip_bytes = _build_export_zip(drives, charges)
+    # Every analysis section as its own sheet, from the same payload the
+    # dashboard renders — so the archive matches what was on screen.
+    extras: dict[str, str] = {}
+    try:
+        data = summary(days=days, since_charge=since_charge,
+                       current_drive=current_drive, trips_limit=500, session=session)
+        for key, (stem, _label) in EXPORT_SECTIONS.items():
+            text = _section_csv(key, data)
+            if text:
+                # Under analysis/ so the importer ignores them on re-import.
+                extras[f"analysis/{stem}.csv"] = text
+    except Exception:  # noqa: BLE001 — a section failing must never block the
+        # raw drives/charges export, which is the part people re-import.
+        extras = {}
+
+    zip_bytes = _build_export_zip(drives, charges, extras)
     name = f"tesla-analyzer-{vehicle.vin[-6:]}-{label}.zip"
     return Response(
         zip_bytes,
         media_type="application/zip",
         headers={"Content-Disposition": f'attachment; filename="{name}"'},
+    )
+
+
+@router.get("/export/section")
+def export_section(
+    name: str = Query(..., min_length=1),
+    days: int = Query(90, ge=1, le=730),
+    since_charge: bool = Query(False),
+    current_drive: bool = Query(False),
+    session: Session = Depends(get_session),
+):
+    """One dashboard section as a single CSV — the per-card download buttons.
+
+    Uses the same window parameters as /api/summary so a section exports
+    exactly the rows currently on screen.
+    """
+    from fastapi.responses import Response
+
+    if name not in EXPORT_SECTIONS:
+        raise HTTPException(404, f"Unknown export section “{name}”.")
+    data = summary(days=days, since_charge=since_charge,
+                   current_drive=current_drive, trips_limit=500, session=session)
+    text = _section_csv(name, data)
+    if text is None:
+        raise HTTPException(404, f"Unknown export section “{name}”.")
+    stem = EXPORT_SECTIONS[name][0]
+    vehicle = _first_vehicle(session)
+    window = ("current-drive" if current_drive else
+              "since-charge" if since_charge else f"{days}d")
+    filename = f"tesla-analyzer-{vehicle.vin[-6:]}-{stem}-{window}.csv"
+    return Response(
+        text,
+        media_type="text/csv",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
 
 

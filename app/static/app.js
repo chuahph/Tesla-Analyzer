@@ -3140,6 +3140,35 @@ async function exportCsv() {
 const exportBtn = document.getElementById("btn-export");
 if (exportBtn) exportBtn.addEventListener("click", exportCsv);
 
+// Per-card CSV download. Each exportable card carries data-export="<section>"
+// (see index.html); one button is injected into its <h2> here rather than
+// repeating markup twelve times. Server-side only — static mode has no
+// per-section endpoint, and the whole-dataset ZIP button still works there.
+function wireSectionExports() {
+  if (STATIC_MODE) return;
+  document.querySelectorAll(".card[data-export]").forEach((card) => {
+    const h2 = card.querySelector("h2");
+    if (!h2 || h2.querySelector(".sec-export")) return;
+    const btn = document.createElement("button");
+    btn.className = "sec-export";
+    btn.type = "button";
+    btn.title = "Download this section as CSV";
+    btn.setAttribute("aria-label", "Download this section as CSV");
+    btn.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true">'
+      + '<path d="M12 3v12M7.5 10.5 12 15l4.5-4.5"/><path d="M4 20h16"/></svg>';
+    btn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      const raw = document.getElementById("range").value;
+      const q = raw === "drive" ? "current_drive=1"
+        : raw === "charge" ? "since_charge=1" : `days=${raw}`;
+      window.location.href =
+        `/api/export/section?name=${encodeURIComponent(card.dataset.export)}&${q}`;
+    });
+    h2.appendChild(btn);
+  });
+}
+wireSectionExports();
+
 // Printable summary report: build a clean report DOM from the data already
 // on screen, then hand it to the browser's print flow (Save as PDF on
 // phones). Print CSS shows only the report while printing.
