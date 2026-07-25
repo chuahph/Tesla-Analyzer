@@ -1365,6 +1365,77 @@ def test_sentry_drain_alert_fires_once_per_parked_episode(monkeypatch):
                 s.commit()
 
 
+def test_display_state_flicker_forces_a_battery_reading(monkeypatch):
+    """A center_display_state / dashcam_state change must write its own
+    BatteryReading row even with SoC unmoved. If a Sentry trigger is visible
+    through either field at all it's a brief flicker between two identical
+    SoC readings, so keying the write on SoC alone would drop the one sample
+    the whole probe exists to capture."""
+    from types import SimpleNamespace
+
+    from app.api.routes import _process_vehicle
+    from app.database import SessionLocal
+    from app.models import BatteryReading, Vehicle
+
+    settings = SimpleNamespace(
+        energy_price_per_kwh=0.90, energy_price_ac_kwh=0.0, energy_price_dc_kwh=0.0,
+        energy_price_peak_kwh=0.0, energy_price_offpeak_kwh=0.0, tariff_peak_start_hour=8,
+        tariff_peak_end_hour=22, tariff_weekend_offpeak=True,
+        battery_capacity_kwh=0.0, battery_new_range_km=0.0, low_soc_notify_pct=0.0,
+        sentry_drain_notify_pct=0.0, intrusion_notify=False, drive_min_km=0.5,
+    )
+
+    def vdata(ts, display):
+        return {
+            "vin": "TESTVIN-DISPLAY", "display_name": "Test", "vehicle_config": {},
+            "vehicle_state": {"odometer": 2000.0, "is_user_present": False,
+                              "locked": True, "sentry_mode": True,
+                              "dashcam_state": "Recording",
+                              "center_display_state": display},
+            "drive_state": {"timestamp": ts * 1000, "shift_state": "P", "speed": 0,
+                            "latitude": None, "longitude": None},
+            "charge_state": {"battery_level": 80, "battery_range": 200.0,
+                             "charging_state": "Disconnected", "charger_power": 0.0,
+                             "charge_energy_added": 0.0},
+            "climate_state": {"outside_temp": 25.0},
+        }
+
+    t = 1_760_700_000
+    try:
+        with SessionLocal() as s:
+            v = Vehicle(vin="TESTVIN-DISPLAY", name="Test", model="Model 3")
+            s.add(v)
+            s.commit()
+            vid = v.id
+
+            def tick(dt, display):
+                _process_vehicle(s, vdata(t + dt, display),
+                                 {"vin": "TESTVIN-DISPLAY"}, settings)
+                s.commit()
+
+            def rows():
+                return s.query(BatteryReading).filter(
+                    BatteryReading.vehicle_id == vid).order_by(BatteryReading.ts).all()
+
+            tick(0, 4)      # first reading
+            tick(60, 4)     # unchanged, SoC unmoved -> no new row
+            before = len(rows())
+            tick(120, 2)    # display woke (SoC identical) -> must still log
+            after = rows()
+            assert len(after) == before + 1
+            assert after[-1].center_display_state == 2
+            assert after[-1].dashcam_state == "Recording"
+    finally:
+        with SessionLocal() as s:
+            from app.models import Drive as _Drive
+            v = s.query(Vehicle).filter(Vehicle.vin == "TESTVIN-DISPLAY").first()
+            if v:
+                s.query(_Drive).filter(_Drive.vehicle_id == v.id).delete()
+                s.query(BatteryReading).filter(BatteryReading.vehicle_id == v.id).delete()
+                s.delete(v)
+                s.commit()
+
+
 def test_intrusion_alert_fires_once_per_opening(monkeypatch):
     """A door opening while the car sits parked with Sentry armed and nobody
     aboard fires once, stays quiet while it's still open, and re-arms once

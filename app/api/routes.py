@@ -1217,14 +1217,22 @@ def _process_vehicle(
         climate_now = snap.get("climate_on")
         cop_now = snap.get("cabin_overheat_protection")
         cop_cooling_now = snap.get("cabin_overheat_protection_actively_cooling")
+        dashcam_now = snap.get("dashcam_state")
+        display_now = snap.get("center_display_state")
         # Also write a row on a Sentry/climate/COP change even with SoC
         # unmoved — the whole point is catching the state right as the car
         # parks (before it sleeps and this polling stops seeing it), and SoC
-        # usually hasn't dropped a full point yet by then.
+        # usually hasn't dropped a full point yet by then. dashcam/display are
+        # in this list for the same reason and more so: if a Sentry trigger is
+        # visible through either, it's a brief flicker that SoC won't have
+        # moved for at all, so keying the write on SoC alone would miss the
+        # one sample that mattered.
         state_changed = last_reading is not None and (
             last_reading.sentry_mode != sentry_now or last_reading.climate_on != climate_now
             or last_reading.cabin_overheat_protection != cop_now
             or last_reading.cabin_overheat_protection_actively_cooling != cop_cooling_now
+            or last_reading.dashcam_state != dashcam_now
+            or last_reading.center_display_state != display_now
         )
         if last_reading is None or abs(last_reading.soc - snap["soc"]) >= 1.0 or state_changed:
             session.add(BatteryReading(
@@ -1237,6 +1245,8 @@ def _process_vehicle(
                 climate_on=climate_now,
                 cabin_overheat_protection=cop_now,
                 cabin_overheat_protection_actively_cooling=cop_cooling_now,
+                dashcam_state=dashcam_now,
+                center_display_state=display_now,
             ))
         # Low-battery alert: fires once per low episode (a state.py flag,
         # cleared once SoC recovers past the threshold + a small hysteresis

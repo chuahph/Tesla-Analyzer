@@ -84,6 +84,8 @@ def init_db() -> None:
     _ensure_column("battery_readings", "climate_on", "BOOLEAN", "NULL")
     _ensure_column("battery_readings", "cabin_overheat_protection", "VARCHAR(10)", "NULL")
     _ensure_column("battery_readings", "cabin_overheat_protection_actively_cooling", "BOOLEAN", "NULL")
+    _ensure_column("battery_readings", "dashcam_state", "VARCHAR(16)", "NULL")
+    _ensure_column("battery_readings", "center_display_state", "INTEGER", "NULL")
 
 
 def get_session() -> Iterator[Session]:

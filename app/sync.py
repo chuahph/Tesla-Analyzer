@@ -193,6 +193,13 @@ def snapshot_from_vehicle_data(data: dict[str, Any]) -> dict[str, Any]:
         # so a 1-2 min poll catches it reliably rather than by luck.
         "doors_open": _any_open(vs, _DOOR_FIELDS),
         "windows_open": _any_open(vs, _WINDOW_FIELDS),
+        # Logged only, nothing reads these yet — they exist to find out
+        # empirically whether a Sentry trigger is visible in the API at all
+        # (see BatteryReading's own note). Free to collect: same payload.
+        "dashcam_state": vs.get("dashcam_state") if "dashcam_state" in vs else None,
+        "center_display_state": (
+            vs.get("center_display_state") if "center_display_state" in vs else None
+        ),
         "climate_on": cl.get("is_climate_on") if "is_climate_on" in cl else None,
         # Tesla reports this as a tri-state string ("Off"/"On"/"FanOnly"), not
         # a bool — but it's the *setting* (whether COP is allowed to run at

@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from sqlalchemy import Boolean, DateTime, Float, ForeignKey, String
+from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Integer, String
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from .database import Base
@@ -138,6 +138,16 @@ class BatteryReading(Base):
     # alongside cabin_overheat_protection above — this is the one that means
     # COP is really drawing power, not just enabled as a setting.
     cabin_overheat_protection_actively_cooling: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    # Recorded purely to find out, empirically, whether Tesla leaks a Sentry
+    # *trigger* through either field — the API has no documented alarm-state
+    # or accelerometer signal, so nothing here is relied on yet. The theory
+    # worth testing: an escalating Sentry event wakes the centre screen
+    # (center_display_state) and writes a clip (dashcam_state). Both arrive in
+    # the vehicle_state payload the sync already fetches, so logging them
+    # costs no extra API calls. Check them against a known Sentry event before
+    # building anything on top. None when unreported, as above.
+    dashcam_state: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    center_display_state: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
 
 class Charge(Base):

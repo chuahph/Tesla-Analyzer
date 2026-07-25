@@ -117,6 +117,29 @@ def test_snapshot_parses_door_and_window_openings():
     assert window["windows_open"] is True
 
 
+def test_snapshot_parses_dashcam_and_display_state():
+    """Both are logged-only probes (see BatteryReading) for whether a Sentry
+    trigger shows up in the API at all — captured when reported, None when
+    not, so a later look-back can tell "unknown" from a real value."""
+    absent = snapshot_from_vehicle_data({
+        "drive_state": {"timestamp": 1_760_000_000, "shift_state": "P"},
+        "charge_state": {"battery_level": 72},
+        "climate_state": {},
+        "vehicle_state": {},
+    })
+    assert absent["dashcam_state"] is None
+    assert absent["center_display_state"] is None
+
+    present = snapshot_from_vehicle_data({
+        "drive_state": {"timestamp": 1_760_000_000, "shift_state": "P"},
+        "charge_state": {"battery_level": 72},
+        "climate_state": {},
+        "vehicle_state": {"dashcam_state": "Recording", "center_display_state": 4},
+    })
+    assert present["dashcam_state"] == "Recording"
+    assert present["center_display_state"] == 4
+
+
 def test_snapshot_parses_car_wash_mode():
     off = snapshot_from_vehicle_data({
         "drive_state": {"timestamp": 1_760_000_000, "shift_state": "P"},
