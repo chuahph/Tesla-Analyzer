@@ -512,6 +512,47 @@ def test_short_real_trip_rounding_to_0_3km_is_not_discarded():
     assert len(d) == 1 and d[0]["distance_km"] == 0.3
 
 
+def test_tail_trim_seconds_are_recorded_on_the_drive():
+    """When the pace-based correction back-dates a trip's stop, the seconds it
+    trimmed must be recorded on the drive. That correction takes distance and
+    energy down with the timestamp, so a trip reading short against the car's
+    own screen needs to be answerable after the fact instead of unknowable."""
+    s1 = snap(T0, 10_000.0, 80, shift="P", speed=0.0, range_km=400.0)
+    s2 = snap(T0 + 300, 10_010.0, 79, shift="D", speed=50.0, range_km=395.0)
+    # 10-min gap covering only 2 km (12 km/h implied — well under a driving
+    # pace), then found parked and locked: the correction should decide the
+    # car actually stopped early in that gap.
+    s3 = snap(T0 + 900, 10_012.0, 78, shift="P", speed=0.0, locked=True, range_km=394.0)
+
+    _, _, trip, _ = step(s1, s2)
+    assert trip is not None
+    drives, _, trip, _ = step(s2, s3, trip)
+
+    assert trip is None and len(drives) == 1
+    trimmed = drives[0]["tail_trim_sec"]
+    assert trimmed is not None and trimmed >= 60
+    # The recorded trim must match the gap actually removed from the tail:
+    # the trip ends that many seconds before the reading that closed it.
+    from app.sync import _dt
+    gap_removed = (_dt(T0 + 900) - drives[0]["end_time"]).total_seconds()
+    assert abs(gap_removed - trimmed) < 1.0
+
+
+def test_no_trim_records_zero_not_none():
+    """A trip closed by a path that evaluated the correction but didn't apply
+    it records 0.0 — "considered and didn't fire" has to stay distinguishable
+    from "never evaluated" (None), or the field can't be trusted as evidence."""
+    s1 = snap(T0, 10_000.0, 80, shift="P", speed=0.0, range_km=400.0)
+    s2 = snap(T0 + 60, 10_002.0, 79, shift="D", speed=50.0, range_km=398.0)
+    # Closing reading arrives promptly, so there is no tail to trim.
+    s3 = snap(T0 + 120, 10_003.0, 79, shift="P", speed=0.0, locked=True, range_km=397.5)
+
+    _, _, trip, _ = step(s1, s2)
+    drives, _, trip, _ = step(s2, s3, trip)
+    assert len(drives) == 1
+    assert drives[0]["tail_trim_sec"] == 0.0
+
+
 def test_drive_min_km_threaded_through_process_snapshot():
     """The configurable floor must reach the whole-gap trip reconstruction
     that process_snapshot uses, not just _drive_from in isolation."""

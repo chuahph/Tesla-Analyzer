@@ -495,6 +495,11 @@ def _drive_from(start: dict, cur: dict, capacity_kwh: float, max_speed: float = 
         # zero" without checking idle_tracked first.
         "idle_min": round(min(idle_min, dt_min), 1) if dt_min else 0.0,
         "idle_tracked": idle_tracked,
+        # Seconds this trip's stop time was back-dated by the pace-based
+        # correction, when the closing path evaluated one (see
+        # Drive.tail_trim_sec). None from paths that never trim, so "not
+        # applicable" stays distinct from a confirmed no-trim 0.0.
+        "tail_trim_sec": cur.get("trim_sec"),
     }
 
 
@@ -905,6 +910,11 @@ def process_snapshot(
                 # recording the stop just seconds after the last live
                 # reading instead of when the car actually parked.
                 min_gap = IDLE_STREAK_MIN if open_trip.get("max_speed", 0.0) > 0 else PARK_END_MIN
+                # Default 0.0, not None: reaching here means a trim was
+                # genuinely considered, so "it didn't fire" is a real finding
+                # worth distinguishing from "never evaluated" (see
+                # Drive.tail_trim_sec).
+                stop["trim_sec"] = 0.0
                 if prev and gap_min >= min_gap and implied < CITY_SPEED_KMH and moved >= drive_min_km:
                     pace = max((prev.get("speed_kmh") or 0.0) * 0.65, CITY_SPEED_KMH)
                     est_stop = min(cur["ts"], prev["ts"] + moved / pace * 3600.0)
@@ -915,6 +925,7 @@ def process_snapshot(
                     # pace, which would otherwise block exactly the case this
                     # exists to fix).
                     if cur["ts"] - est_stop >= 60:
+                        stop["trim_sec"] = round(cur["ts"] - est_stop, 1)
                         stop["ts"] = est_stop
                 open_trip["stop_at"] = stop
             stop_at = open_trip["stop_at"]

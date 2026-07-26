@@ -87,6 +87,18 @@ class Drive(Base):
     # expense-claim/cost-splitting purposes. "" = untagged.
     tag: Mapped[str] = mapped_column(String(20), default="")
 
+    # Seconds the trip's stop time was back-dated by sync.py's pace-based
+    # correction, which assumes a low-implied-speed polling gap means the car
+    # parked early in it. That correction measures distance AND energy only up
+    # to the earlier point, so when it misfires — a slow crawl into a car park
+    # looks much like "parked early, then lost signal" — it silently moves a
+    # slice of real driving into the following parked gap as standby drain.
+    # Recorded so a trip can be asked whether it happened: 0.0 means the
+    # correction did not fire, None means the trip predates this field (or was
+    # built by a path that never trims). Logging only — nothing reads it to
+    # change behaviour, and the trim itself is unchanged.
+    tail_trim_sec: Mapped[float | None] = mapped_column(Float, nullable=True)
+
     # Manually-entered cost, used only when the charge-layer cost model
     # (driving_analysis.layered_trip_costs) can't price this trip — every
     # charge session in the vehicle's history has already been fully
