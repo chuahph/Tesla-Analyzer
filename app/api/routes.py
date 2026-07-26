@@ -277,6 +277,17 @@ def _live_eta(session: Session, snap: dict, live: dict, capacity_kwh: float) -> 
 
 _PLACE_CACHE: dict[str, tuple[str, str]] = {}
 
+# How close two coordinates must be to count as the same physical spot for
+# naming. A parked car's reported position drifts a few metres between polls,
+# so the coords a trip *arrives* at and the ones the next trip *departs* from
+# are rarely byte-identical — and an exact-match-only cache then does a second
+# lookup that can legitimately return a different nearby business, leaving one
+# stop labelled two different ways across consecutive trips (reported:
+# "McDonald's Drive Thru" on arrival, a neighbouring company's name on
+# departure 13 min later). 60 m is wide enough to absorb that drift and a
+# typical car park, narrow enough not to merge genuinely adjacent shopfronts.
+_SAME_PLACE_M = 60.0
+
 # Nominatim's usage policy caps anonymous use at ~1 request/second; bursting
 # past it earns 429s (or a block), and every failed lookup here degrades a
 # trip's name to raw coordinates. Normal sync only ever does a couple of
@@ -401,6 +412,19 @@ def _geofence_name(
     return best_name
 
 
+def _cached_place_near(coords: str) -> tuple[str, str] | None:
+    """An already-resolved label for a coordinate within _SAME_PLACE_M of
+    ``coords``, or None. Picks the closest match rather than the first, so a
+    dense cache can't attach a slightly-further neighbour's name."""
+    best: tuple[str, str] | None = None
+    best_km = _SAME_PLACE_M / 1000.0
+    for known, result in _PLACE_CACHE.items():
+        km = haversine_km(coords, known)
+        if km is not None and km <= best_km:
+            best, best_km = result, km
+    return best
+
+
 def _place_and_area(coords: str, session: Session | None = None) -> tuple[str, str]:
     """Best-effort reverse geocode of a 'lat, lon' string to (label, area).
 
@@ -420,6 +444,14 @@ def _place_and_area(coords: str, session: Session | None = None) -> tuple[str, s
         return coords, coords
     if coords in _PLACE_CACHE:
         return _PLACE_CACHE[coords]
+    # Not an exact hit, but the same spot to within GPS drift? Reuse that
+    # name rather than looking it up again — keeps one physical stop labelled
+    # consistently across the trip that ends there and the one that starts
+    # there (see _SAME_PLACE_M), and saves a paid geocode call besides.
+    nearby = _cached_place_near(coords)
+    if nearby:
+        _PLACE_CACHE[coords] = nearby
+        return nearby
     lat, lon = (p.strip() for p in coords.split(",", 1))
     google_key = get_settings().google_maps_api_key
     google_result = _google_reverse_geocode(lat, lon, google_key) if google_key else None

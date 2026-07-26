@@ -911,6 +911,46 @@ def test_place_and_area_prefers_google_when_configured_falls_back_on_miss(monkey
         routes._PLACE_CACHE.clear()
 
 
+def test_place_and_area_reuses_a_nearby_cached_name(monkeypatch):
+    """A parked car's reported position drifts a few metres between polls, so
+    the coords a trip arrives at and the ones the next trip departs from are
+    rarely identical. Those must resolve to the SAME name — looking the second
+    one up again can return a different nearby business, which is what left one
+    McDonald's stop labelled two ways across consecutive trips."""
+    from app.api import routes
+
+    settings = get_settings()
+    old = settings.google_maps_api_key
+    settings.google_maps_api_key = "test-key"
+    routes._PLACE_CACHE.clear()
+    calls = []
+
+    def fake_geocode(lat, lon, key):
+        calls.append((lat, lon))
+        # Whatever the geocoder would say the *second* time is deliberately
+        # different — the point is that it never gets asked.
+        return (f"Business #{len(calls)}", f"Area #{len(calls)}")
+
+    try:
+        monkeypatch.setattr(routes, "_google_reverse_geocode", fake_geocode)
+        arrival = routes._place_and_area("5.38120, 100.30210")
+        assert arrival == ("Business #1", "Area #1")
+
+        # ~15 m away: same spot, so the cached name is reused and no second
+        # lookup happens.
+        departure = routes._place_and_area("5.38133, 100.30212")
+        assert departure == arrival
+        assert len(calls) == 1
+
+        # ~1 km away is a genuinely different place — it must still look up.
+        other = routes._place_and_area("5.39100, 100.30210")
+        assert other == ("Business #2", "Area #2")
+        assert len(calls) == 2
+    finally:
+        settings.google_maps_api_key = old
+        routes._PLACE_CACHE.clear()
+
+
 def test_place_and_area_passes_through_invalid_coords():
     """No network call for an empty/malformed coordinate string — both label
     and area fall back to the raw input untouched."""
