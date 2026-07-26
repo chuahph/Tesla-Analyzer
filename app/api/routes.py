@@ -2007,12 +2007,19 @@ def _build_export_zip(drives: list[Drive], charges: list[Charge],
     sheet = _csv_text
     ts = lambda t: t.isoformat(sep=" ", timespec="minutes")  # noqa: E731
     drives_csv = sheet(
+        # start/end_coords are the raw fixes each trip's boundary was actually
+        # recorded at, kept alongside the resolved names — without them an
+        # export can't answer "did this trip really start where it says", which
+        # is the only way to tell a wrong *label* from a genuinely misplaced
+        # split point between two consecutive trips.
         ["start_time", "end_time", "distance_km", "duration_min", "start_soc",
          "end_soc", "energy_used_kwh", "avg_speed_kmh", "max_speed_kmh",
-         "outside_temp_c", "start_location", "end_location"],
+         "outside_temp_c", "start_location", "end_location",
+         "start_coords", "end_coords"],
         [[ts(d.start_time), ts(d.end_time), d.distance_km, d.duration_min,
           d.start_soc, d.end_soc, d.energy_used_kwh, d.avg_speed_kmh,
-          d.max_speed_kmh, d.outside_temp_c, d.start_location, d.end_location]
+          d.max_speed_kmh, d.outside_temp_c, d.start_location, d.end_location,
+          d.start_coords, d.end_coords]
          for d in drives],
     )
     charges_csv = sheet(
