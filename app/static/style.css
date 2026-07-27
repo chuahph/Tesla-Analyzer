@@ -297,6 +297,9 @@ header {
 /* Which efficiency figure the estimate used — entered, departure-hour, or
    overall average. Never leave the number unexplained. */
 .plan-basis { font-size: 11.5px; color: var(--muted); margin-top: 8px; }
+/* An estimate averaged over routes that aren't this one — flagged so it reads
+   as a rough guide rather than a measurement of the planned drive. */
+.plan-basis.approx { color: var(--amber); }
 .bat-note { color: var(--muted); font-size: 12px; line-height: 1.6; margin: 6px 0; }
 
 /* Brand grows to fill the row (min-width:0 lets the VIN subtitle ellipsis

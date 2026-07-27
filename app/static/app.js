@@ -2023,27 +2023,42 @@ function computePlan() {
     out.innerHTML = `<div class="plan-hint">Enter a distance and starting charge to plan a drive.</div>`;
     return;
   }
-  // Precedence: an explicit Wh/km wins outright (you know something the
-  // history doesn't); else Google's traffic prediction for THIS route priced
-  // through your own speed/efficiency slope; else your own average for the
-  // departure hour; else your overall average.
+  // Exactly ONE basis is ever used — they are alternatives, never combined,
+  // because each already contains what the others would add:
   //
-  // Traffic and departure-hour are alternatives, never stacked: your
-  // efficiency_by_hour already contains typical traffic for that hour (those
-  // trips were driven in it), so multiplying the two would count the same jam
-  // twice. The traffic branch therefore adjusts off the OVERALL average, and
-  // uses Google only for the predicted speed — the Wh/km consequence of that
-  // speed comes from your own measured slope.
+  //   entered Wh/km  you stated the figure outright
+  //   traffic speed  your measured Wh/km for the speed Google predicts on
+  //                  THIS route at this hour
+  //   departure hour your measured Wh/km at that time of day, which already
+  //                  contains that hour's typical traffic (those trips were
+  //                  driven in it) — so stacking it on the traffic basis
+  //                  would count the same jam twice
+  //   overall        your lifetime average
+  //
+  // And the Conditions multiplier only ever modifies an *estimated average*.
+  // It is a speed-character adjustment, so applying it to an entered figure
+  // or to a speed-measured band would re-state something already in the
+  // number. Rule: conditions adjusts a rough base, never an explicit or
+  // speed-specific one.
   const byHour = departureWhPerKm(depart, km);
   const traffic = (plannerTraffic && plannerTraffic.depart === depart
     && Math.abs(plannerTraffic.km - km) < 0.6) ? plannerTraffic : null;
+  // A traffic figure fetched for a different departure/route must not price
+  // this one — but say so, or the estimate silently drops back to an average
+  // and looks the same as one that never had traffic at all.
+  const staleTraffic = !!plannerTraffic && !traffic;
   const bandWh = traffic ? speedBandWhPerKm(traffic.kmh) : null;
   let baseWh = whPerKm;
-  let basis = "your average";
+  // "approx" marks a basis averaged over routes that aren't this one — the
+  // figure is a reasonable guess, not a measurement of this drive.
+  let basis = "your overall average across all routes";
+  let approx = true;
   let condApplies = true;
   if (isFinite(manualWh) && manualWh > 0) {
     baseWh = manualWh;
-    basis = "your entered Wh/km";
+    basis = "the Wh/km you entered";
+    approx = false;
+    condApplies = false;   // you gave the number; don't silently scale it
   } else if (bandWh) {
     // Deliberately a measured lookup, not a slope projection: speed vs Wh/km
     // is U-shaped, so extrapolating a straight line down to a crawl predicts
@@ -2055,10 +2070,11 @@ function computePlan() {
     // here rather than silently multiplied; the Wh/km field is the escape
     // hatch for something genuinely extra like a heat wave.
     condApplies = false;
+    approx = false;   // speed-specific to this route, not a route average
     basis = `traffic ~${Math.round(traffic.kmh)} km/h at ${depart} — your measured ${bandWh.band} figure`;
   } else if (byHour) {
     baseWh = byHour.whPerKm;
-    basis = `your own ${depart} driving (${byHour.hours} h of history)`;
+    basis = `your ${depart} driving (${byHour.hours} h of history, your usual routes)`;
   }
   const effWh = baseWh * (condApplies ? cond : 1.0);
   // Grey the selector out when it isn't being applied, so a stale "+15%" on
@@ -2093,9 +2109,12 @@ function computePlan() {
       <div><span class="k">At</span><span class="v">${fmt(effWh, 0)} Wh/km</span></div>
       <div><span class="k">Range now</span><span class="v">~${fmt(rangeAvail, 0)} km</span></div>
     </div>
-    <div class="plan-basis">Based on ${basis}${condApplies && cond !== 1.0 ? ` × conditions` : ""}.${
+    <div class="plan-basis${approx ? " approx" : ""}">Based on ${basis}${
+      condApplies && cond !== 1.0 ? ` × conditions` : ""}.${
       !condApplies && cond !== 1.0
-        ? ` Conditions not applied — that speed is already measured in.` : ""}</div>`;
+        ? ` Conditions not applied — already in that figure.` : ""}${
+      approx ? ` Averaged over other routes, so treat it as a rough guide.` : ""}${
+      staleTraffic ? ` Departure changed — look the destination up again for traffic.` : ""}</div>`;
 }
 
 function renderPlanner(d) {
