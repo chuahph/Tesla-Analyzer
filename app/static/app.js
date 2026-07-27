@@ -2040,6 +2040,7 @@ function computePlan() {
   const bandWh = traffic ? speedBandWhPerKm(traffic.kmh) : null;
   let baseWh = whPerKm;
   let basis = "your average";
+  let condApplies = true;
   if (isFinite(manualWh) && manualWh > 0) {
     baseWh = manualWh;
     basis = "your entered Wh/km";
@@ -2048,12 +2049,26 @@ function computePlan() {
     // is U-shaped, so extrapolating a straight line down to a crawl predicts
     // *less* consumption when a jam actually costs more.
     baseWh = bandWh.whPerKm;
+    // The Conditions options are speed-character adjustments ("Highway /
+    // brisk", "Gentle / city") — exactly what this band already measures, so
+    // applying them on top would count the same effect twice. Suppressed
+    // here rather than silently multiplied; the Wh/km field is the escape
+    // hatch for something genuinely extra like a heat wave.
+    condApplies = false;
     basis = `traffic ~${Math.round(traffic.kmh)} km/h at ${depart} — your measured ${bandWh.band} figure`;
   } else if (byHour) {
     baseWh = byHour.whPerKm;
     basis = `your own ${depart} driving (${byHour.hours} h of history)`;
   }
-  const effWh = baseWh * cond;
+  const effWh = baseWh * (condApplies ? cond : 1.0);
+  // Grey the selector out when it isn't being applied, so a stale "+15%" on
+  // screen can't be read as part of the figure.
+  const condEl = document.getElementById("plan-cond");
+  if (condEl) {
+    condEl.disabled = !condApplies;
+    condEl.title = condApplies ? ""
+      : "Not applied — the traffic-speed basis already measures this.";
+  }
   const energyNeeded = km * effWh / 1000;                 // kWh
   const socNeeded = capacityKwh > 0 ? energyNeeded / capacityKwh * 100 : 0;
   const arrival = soc - socNeeded;
@@ -2078,7 +2093,9 @@ function computePlan() {
       <div><span class="k">At</span><span class="v">${fmt(effWh, 0)} Wh/km</span></div>
       <div><span class="k">Range now</span><span class="v">~${fmt(rangeAvail, 0)} km</span></div>
     </div>
-    <div class="plan-basis">Based on ${basis}${cond !== 1.0 ? ` × conditions` : ""}.</div>`;
+    <div class="plan-basis">Based on ${basis}${condApplies && cond !== 1.0 ? ` × conditions` : ""}.${
+      !condApplies && cond !== 1.0
+        ? ` Conditions not applied — that speed is already measured in.` : ""}</div>`;
 }
 
 function renderPlanner(d) {

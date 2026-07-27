@@ -278,6 +278,10 @@ header {
 .planner-inputs input:focus, .planner-inputs select:focus {
   outline: none; border-color: var(--accent-2);
 }
+/* Conditions is greyed out whenever a traffic-speed basis is in use — that
+   basis already measures the speed character, so a visible "+15%" that isn't
+   being applied would misrepresent the figure. */
+.planner-inputs select:disabled { opacity: .45; cursor: not-allowed; }
 .planner-result { border-top: 1px solid var(--border); padding-top: 12px; }
 .plan-hint { color: var(--muted); font-size: 12.5px; }
 .plan-verdict { font-size: 14px; line-height: 1.5; margin-bottom: 10px; }
