@@ -538,6 +538,27 @@ def test_tail_trim_seconds_are_recorded_on_the_drive():
     assert abs(gap_removed - trimmed) < 1.0
 
 
+def test_departure_during_a_blackout_keeps_its_distance_in_the_trip():
+    """A car that sets off during an unpolled gap is anchored at the first
+    *driving* reading, which would leave the pre-departure stretch stranded in
+    the parked gap as standby drain. The odo/SoC recovery pulls it back onto
+    the trip using prev's own real reading — no projection, totals conserved.
+
+    Guard check behind this: was_parked can only be true when the gap's implied
+    speed is under PARK_SPEED_KMH (15), while the recovery needs it under
+    CITY_SPEED_KMH (30) — so the guard can never block a case the stale anchor
+    itself created."""
+    s1 = snap(T0, 1000.0, 80, range_km=400.0)
+    # 20-min blackout; the car departs partway and covers 3 km before it's seen.
+    s2 = snap(T0 + 1200, 1003.0, 79, shift="D", speed=45.0, range_km=396.0)
+    s3 = snap(T0 + 1800, 1010.0, 78, shift="P", speed=0.0, locked=True, range_km=392.0)
+
+    _, _, trip, _ = step(s1, s2)
+    assert trip["odo_km"] == 1000.0          # recovered to prev, not left at 1003
+    drives, _, _, _ = step(s2, s3, trip)
+    assert drives[0]["distance_km"] == 10.0  # full s1->s3 delta, nothing stranded
+
+
 def test_tail_trim_changes_duration_only_never_distance_or_energy():
     """The stop-time correction rewrites the recorded timestamp and nothing
     else — the stop snapshot keeps the real reading's odometer and range, so
