@@ -615,6 +615,44 @@ def test_by_tag_totals_and_per_trip_tag():
     assert r2["by_tag"] is None
 
 
+def test_efficiency_by_speed_band_captures_the_u_shape():
+    """Measured Wh/km per speed regime. This exists because consumption vs
+    speed is U-shaped — a stop-go crawl and a highway run both cost more per km
+    than a moderate cruise — so the linear speed_efficiency_slope inverts when
+    extrapolated down to a jam, predicting *less* consumption than average.
+    Anything asking "what does this driver use at N km/h" must read the
+    measured band, and this pins that the bands really do show the U."""
+    from datetime import datetime
+
+    from app.analysis import driving as driving_analysis
+    from app.models import Drive
+
+    def trip(day, speed, whkm, km=10.0):
+        return Drive(
+            start_time=datetime(2026, 7, day, 9, 0), end_time=datetime(2026, 7, day, 10, 0),
+            distance_km=km, duration_min=km / speed * 60, avg_speed_kmh=speed,
+            max_speed_kmh=speed * 1.5, start_soc=80, end_soc=70,
+            energy_used_kwh=km * whkm / 1000.0, outside_temp_c=28.0,
+        )
+
+    drives = [
+        trip(1, 20, 210), trip(2, 22, 195),      # City: crawling, expensive
+        trip(3, 45, 140), trip(4, 50, 135),      # Urban: the sweet spot
+        trip(5, 100, 190), trip(6, 110, 200),    # Highway: aero drag, expensive
+    ]
+    bands = driving_analysis.analyze(drives, 150.0, 75.0)["efficiency_by_speed_band"]
+
+    assert bands["City (<30)"] > bands["Urban (30-60)"]
+    assert bands["Highway (90+)"] > bands["Urban (30-60)"]
+    # The crawl really is dearer than the overall average — the thing a linear
+    # extrapolation gets backwards.
+    overall = driving_analysis.analyze(drives, 150.0, 75.0)["avg_efficiency_wh_per_km"]
+    assert bands["City (<30)"] > overall
+
+    # A regime with no trips is absent rather than guessed at.
+    assert "Rural (60-90)" not in bands
+
+
 def test_driving_cost_accepts_time_of_use_price_function():
     """When energy_price is a callable (TOU pricing), each trip is priced at
     its own start_time's rate, and the window total blends those rates by

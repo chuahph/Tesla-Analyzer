@@ -1565,8 +1565,15 @@ def test_plan_route_resolves_destination_to_distance(monkeypatch):
 
     monkeypatch.setattr("app.api.routes._forward_geocode",
                         lambda q: (5.42, 100.33, f"Resolved: {q}"))
-    monkeypatch.setattr("app.api.routes._driving_distance_km",
-                        lambda origin, dest: (12.3, "driving"))
+    seen = {}
+
+    def fake_distance(origin, dest, depart_epoch=None):
+        seen["depart_epoch"] = depart_epoch
+        # Only quote a traffic speed when a departure was actually asked for,
+        # mirroring Google (duration_in_traffic needs a future departure_time).
+        return (12.3, "driving", 28.0 if depart_epoch else None)
+
+    monkeypatch.setattr("app.api.routes._driving_distance_km", fake_distance)
 
     settings = get_settings()
     old = settings.app_passcode
@@ -1587,6 +1594,23 @@ def test_plan_route_resolves_destination_to_distance(monkeypatch):
             assert body["method"] == "driving"
             assert body["origin_label"] == "Office"       # from the last drive
             assert body["dest_label"] == "Resolved: KLCC"
+            # No departure asked for -> no traffic call, no traffic figure.
+            assert seen["depart_epoch"] is None
+            assert body["traffic_kmh"] is None
+
+            # With a departure, Google is asked for its traffic prediction and
+            # the predicted speed comes back for the planner to price.
+            resp = client.get("/api/plan/route?to=KLCC&depart=17:30")
+            assert resp.status_code == 200
+            assert resp.json()["traffic_kmh"] == 28.0
+            # An HH:MM already past today must resolve to the future, since
+            # Google rejects a departure_time in the past.
+            assert seen["depart_epoch"] > datetime.now().timestamp()
+
+            # A malformed time is ignored rather than failing the lookup.
+            resp = client.get("/api/plan/route?to=KLCC&depart=nonsense")
+            assert resp.status_code == 200
+            assert seen["depart_epoch"] is None
 
             # A destination that geocodes to nothing -> 404.
             monkeypatch.setattr("app.api.routes._forward_geocode", lambda q: None)

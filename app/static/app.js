@@ -1966,6 +1966,10 @@ function forecastHtml(f) {
 // recent Wh/km, usable pack capacity and current SoC (all already in the
 // payload). Kept in module scope so the input handlers can recompute.
 let plannerCtx = null;
+// Google's traffic prediction from the last destination lookup, keyed to the
+// route+departure it was fetched for so a later edit of either discards it
+// rather than pricing a different trip off a stale figure.
+let plannerTraffic = null;
 
 // Your own measured Wh/km averaged over the hours a drive leaving at
 // `departHHMM` would actually span — so a 5pm departure is priced from what
@@ -1992,6 +1996,20 @@ function departureWhPerKm(departHHMM, km) {
   return { whPerKm: mean, hours: samples.length };
 }
 
+// Your own measured Wh/km for the speed regime a predicted traffic speed
+// falls into. A lookup rather than a projection on purpose — consumption vs
+// speed is U-shaped (stop-go and highway both cost more than a moderate
+// cruise), so a linear slope extrapolated to a crawl points the wrong way.
+// Null when that band has no energy-bearing trips to learn from.
+function speedBandWhPerKm(kmh) {
+  const bands = (plannerCtx && plannerCtx.efficiencyBySpeedBand) || {};
+  const band = kmh < 30 ? "City (<30)"
+    : kmh < 60 ? "Urban (30-60)"
+    : kmh < 90 ? "Rural (60-90)" : "Highway (90+)";
+  const v = bands[band];
+  return v != null && isFinite(v) && v > 0 ? { whPerKm: v, band } : null;
+}
+
 function computePlan() {
   const out = document.getElementById("plan-result");
   if (!out || !plannerCtx) return;
@@ -2006,13 +2024,31 @@ function computePlan() {
     return;
   }
   // Precedence: an explicit Wh/km wins outright (you know something the
-  // history doesn't), else the departure-hour average, else your overall one.
+  // history doesn't); else Google's traffic prediction for THIS route priced
+  // through your own speed/efficiency slope; else your own average for the
+  // departure hour; else your overall average.
+  //
+  // Traffic and departure-hour are alternatives, never stacked: your
+  // efficiency_by_hour already contains typical traffic for that hour (those
+  // trips were driven in it), so multiplying the two would count the same jam
+  // twice. The traffic branch therefore adjusts off the OVERALL average, and
+  // uses Google only for the predicted speed — the Wh/km consequence of that
+  // speed comes from your own measured slope.
   const byHour = departureWhPerKm(depart, km);
+  const traffic = (plannerTraffic && plannerTraffic.depart === depart
+    && Math.abs(plannerTraffic.km - km) < 0.6) ? plannerTraffic : null;
+  const bandWh = traffic ? speedBandWhPerKm(traffic.kmh) : null;
   let baseWh = whPerKm;
   let basis = "your average";
   if (isFinite(manualWh) && manualWh > 0) {
     baseWh = manualWh;
     basis = "your entered Wh/km";
+  } else if (bandWh) {
+    // Deliberately a measured lookup, not a slope projection: speed vs Wh/km
+    // is U-shaped, so extrapolating a straight line down to a crawl predicts
+    // *less* consumption when a jam actually costs more.
+    baseWh = bandWh.whPerKm;
+    basis = `traffic ~${Math.round(traffic.kmh)} km/h at ${depart} — your measured ${bandWh.band} figure`;
   } else if (byHour) {
     baseWh = byHour.whPerKm;
     basis = `your own ${depart} driving (${byHour.hours} h of history)`;
@@ -2064,6 +2100,11 @@ function renderPlanner(d) {
     whPerKm, capacityKwh, currency: d.currency || "", costPerKwh,
     efficiencyByHour: (d.driving && d.driving.efficiency_by_hour) || {},
     avgSpeedKmh: (d.driving && d.driving.avg_speed_kmh) || 0,
+    // Measured Wh/km per speed regime — what a predicted traffic speed is
+    // priced against. NB deliberately not speed_efficiency_slope_wh_per_kmh:
+    // that linear fit inverts when extrapolated to a crawl (see
+    // speedBandWhPerKm).
+    efficiencyBySpeedBand: (d.driving && d.driving.efficiency_by_speed_band) || {},
   };
 
   const socInput = document.getElementById("plan-soc");
@@ -2095,14 +2136,26 @@ async function lookupPlanDest() {
   if (!q) { note.textContent = ""; return; }
   go.disabled = true; note.className = "plan-dest-note"; note.textContent = "Looking up…";
   try {
-    const res = await fetch(`/api/plan/route?to=${encodeURIComponent(q)}`);
+    // Pass the departure so Google can price traffic for this route at that
+    // time — the one thing our own history can't know, since it averages over
+    // every route driven at a given hour.
+    const depart = document.getElementById("plan-depart")?.value || "";
+    const res = await fetch(
+      `/api/plan/route?to=${encodeURIComponent(q)}` +
+      (depart ? `&depart=${encodeURIComponent(depart)}` : ""));
     const body = await res.json().catch(() => ({}));
     if (!res.ok) throw new Error(body.detail || "Couldn't look that up.");
     const kmField = document.getElementById("plan-km");
     kmField.value = body.km;
+    // Keyed to this route+departure: a later edit of either invalidates it.
+    plannerTraffic = body.traffic_kmh
+      ? { kmh: body.traffic_kmh, depart, km: body.km } : null;
     computePlan();
     const est = body.method === "driving" ? "driving distance" : "straight-line estimate";
-    note.textContent = `${body.origin_label} → ${body.dest_label}: ${body.km} km (${est})`;
+    const traffic = plannerTraffic
+      ? ` · traffic ~${Math.round(plannerTraffic.kmh)} km/h at ${depart}` : "";
+    note.textContent =
+      `${body.origin_label} → ${body.dest_label}: ${body.km} km (${est})${traffic}`;
   } catch (e) {
     note.className = "plan-dest-note err";
     note.textContent = "⚠️ " + e.message;

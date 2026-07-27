@@ -460,10 +460,28 @@ def analyze(drives: list[Drive], rated_wh_per_km: float = 150.0,
         g["before_drive_id"]: g for g in vampire["gap_list"] if g["before_drive_id"] is not None
     }
 
-    # Distribution of distance driven across speed regimes.
+    # Distribution of distance driven across speed regimes, and the measured
+    # Wh/km within each. The efficiency split exists because the relationship
+    # between average speed and consumption is U-shaped — stop-go crawling
+    # burns more per km (acceleration losses, climate spread over little
+    # distance), a moderate cruise is the sweet spot, and highway speed costs
+    # again on aero drag. A single linear slope fitted across that curve
+    # points the WRONG WAY when extrapolated to a crawl, so anything wanting
+    # "what does this driver use at N km/h" must read the measured band here
+    # rather than projecting from speed_efficiency_slope_wh_per_kmh.
     by_speed: dict[str, float] = defaultdict(float)
+    band_energy: dict[str, float] = defaultdict(float)
+    band_distance: dict[str, float] = defaultdict(float)
     for d in drives:
         by_speed[_speed_bucket(d.avg_speed_kmh)] += d.distance_km
+        if has_valid_energy(d):
+            band = _speed_bucket(d.avg_speed_kmh)
+            band_energy[band] += d.energy_used_kwh
+            band_distance[band] += d.distance_km
+    efficiency_by_speed_band = {
+        band: round(band_energy[band] * 1000.0 / km, 1)
+        for band, km in band_distance.items() if km > 0 and band_energy[band] > 0
+    }
 
     # Trips per hour-of-day and per weekday for usage patterns.
     by_hour = Counter(d.start_time.hour for d in drives)
@@ -635,6 +653,11 @@ def analyze(drives: list[Drive], rated_wh_per_km: float = 150.0,
         "max_speed_kmh": round(max((d.max_speed_kmh for d in drives), default=0.0), 1),
         "longest_trip_km": round(max(distances), 1),
         "distance_by_speed_band": {k: round(v, 1) for k, v in sorted(by_speed.items())},
+        # Measured Wh/km per speed regime — the empirical answer to "what does
+        # this driver actually use at N km/h", safe where extrapolating the
+        # linear slope is not (see the U-shape note above). Bands with no
+        # energy-bearing trips are simply absent.
+        "efficiency_by_speed_band": dict(sorted(efficiency_by_speed_band.items())),
         "trips_by_hour": {str(h): by_hour.get(h, 0) for h in range(24)},
         "efficiency_by_hour": efficiency_by_hour,
         "trips_by_weekday": {weekdays[i]: by_weekday.get(i, 0) for i in range(7)},

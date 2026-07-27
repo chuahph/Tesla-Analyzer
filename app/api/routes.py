@@ -532,31 +532,54 @@ def _forward_geocode(query: str) -> tuple[float, float, str] | None:
 _ROAD_WINDING_FACTOR = 1.3
 
 
-def _driving_distance_km(origin: str, dest: str) -> tuple[float, str] | None:
-    """(km, method) between two 'lat, lon' strings. Google Directions gives the
-    real driving distance when a key is set; otherwise a straight-line estimate
-    scaled by a road-winding factor. ``method`` is "driving" or "straight-line"
-    so the UI can be honest about which it showed. None if even the straight
-    line can't be computed."""
+def _driving_distance_km(
+    origin: str, dest: str, depart_epoch: int | None = None,
+) -> tuple[float, str, float | None] | None:
+    """(km, method, traffic_kmh) between two 'lat, lon' strings. Google
+    Directions gives the real driving distance when a key is set; otherwise a
+    straight-line estimate scaled by a road-winding factor. ``method`` is
+    "driving" or "straight-line" so the UI can be honest about which it showed.
+    None if even the straight line can't be computed.
+
+    ``depart_epoch`` (unix seconds, must be in the future) additionally asks
+    Google for ``duration_in_traffic`` — its prediction for that departure —
+    and returns the average speed that implies for this route. That's the one
+    thing the car's own history genuinely cannot know: history averages across
+    every route driven at a given hour, and says nothing about whether *this*
+    road is jammed at *that* time. Speed is returned rather than a Wh/km
+    figure on purpose — converting speed to consumption is done from the
+    driver's own measured speed/efficiency slope, not a Google assumption.
+    traffic_kmh is None whenever the prediction isn't available.
+    """
     key = get_settings().google_maps_api_key
     if key:
         try:
             o = origin.replace(" ", "")
             d = dest.replace(" ", "")
+            params = {"origin": o, "destination": d, "key": key}
+            if depart_epoch:
+                params["departure_time"] = str(int(depart_epoch))
+                params["traffic_model"] = "best_guess"
             resp = httpx.get(
                 "https://maps.googleapis.com/maps/api/directions/json",
-                params={"origin": o, "destination": d, "key": key}, timeout=6.0)
+                params=params, timeout=6.0)
             resp.raise_for_status()
             data = resp.json()
             if data.get("status") == "OK" and data.get("routes"):
-                meters = data["routes"][0]["legs"][0]["distance"]["value"]
-                return round(meters / 1000.0, 1), "driving"
+                leg = data["routes"][0]["legs"][0]
+                meters = leg["distance"]["value"]
+                secs = (leg.get("duration_in_traffic") or {}).get("value")
+                traffic_kmh = (
+                    round(meters / 1000.0 / (secs / 3600.0), 1)
+                    if secs and secs > 0 else None
+                )
+                return round(meters / 1000.0, 1), "driving", traffic_kmh
         except Exception:  # noqa: BLE001 — fall through to straight-line
             pass
     straight = haversine_km(origin, dest)
     if straight is None:
         return None
-    return round(straight * _ROAD_WINDING_FACTOR, 1), "straight-line"
+    return round(straight * _ROAD_WINDING_FACTOR, 1), "straight-line", None
 
 
 def _build_info() -> dict:
@@ -2512,6 +2535,7 @@ def alerts_check(days: int = Query(30, ge=7, le=90),
 
 @router.get("/plan/route")
 def plan_route(to: str = Query(..., min_length=1),
+               depart: str = Query("", description="HH:MM local; next occurrence is used"),
                session: Session = Depends(get_session)):
     """Resolve a typed destination to a driving distance for the Trip Planner.
 
@@ -2544,14 +2568,35 @@ def plan_route(to: str = Query(..., min_length=1),
             409, "No known starting point yet — log a trip or add a Home place first, "
                  "or just type the distance in the planner.")
 
-    result = _driving_distance_km(origin_coords, dest_coords)
+    # A departure time asks Google for its traffic prediction. Google's own
+    # clock is UTC-based epoch seconds and it rejects a departure in the past,
+    # so an HH:MM that's already gone today is read as tomorrow.
+    depart_epoch = None
+    hhmm = (depart or "").strip()
+    if hhmm:
+        try:
+            hh, mm = (int(p) for p in hhmm.split(":", 1))
+            now = datetime.now()
+            when = now.replace(hour=hh, minute=mm, second=0, microsecond=0)
+            if when <= now:
+                when += timedelta(days=1)
+            depart_epoch = int(when.timestamp())
+        except (ValueError, TypeError):
+            depart_epoch = None
+
+    result = _driving_distance_km(origin_coords, dest_coords, depart_epoch)
     if result is None:
         raise HTTPException(502, "Couldn't work out the distance to there.")
-    km, method = result
+    km, method, traffic_kmh = result
     return {
         "km": km, "method": method,
         "origin_label": origin_label, "dest_label": dest_label,
         "dest_coords": dest_coords,
+        # Google's predicted average speed for this route at this departure —
+        # the planner converts it to Wh/km through the driver's OWN measured
+        # speed/efficiency slope. None when no departure was given, no key is
+        # set, or Google returned no traffic estimate.
+        "traffic_kmh": traffic_kmh,
     }
 
 
