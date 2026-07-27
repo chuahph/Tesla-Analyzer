@@ -1224,6 +1224,10 @@ footer { padding: 18px 28px; color: var(--muted); font-size: 12px; border-top: 1
 }
 .trip-edit:hover { opacity: 1; }
 
+/* The per-layer breakdown shown when a trip's energy spanned two charges —
+   quieter than the cost itself, since it explains rather than reports. */
+.cost-split { color: var(--muted-2, var(--muted)); font-size: .92em; }
+
 /* Manual trip-cost entry: a "+ cost" chip when the charge-layer history
    can't price a trip, or a small ✎ next to an already-manual figure. */
 .trip-cost-edit {

@@ -719,23 +719,72 @@ def test_layered_trip_costs_cascades_through_older_charges():
     t2 = trip(2, datetime(2026, 7, 1, 10, 0), 2.0)
 
     costs = layered_trip_costs([t1, t2], [charge_a, charge_b_older])
-    assert costs[1] == 1.00
-    assert costs[2] == 1.50
+    assert costs[1]["cost"] == 1.00
+    assert costs[2]["cost"] == 1.50
+
+    # Trip 1 sat entirely inside A, so it reports a single layer...
+    assert [(p["kwh"], p["rate"], p["charge_id"]) for p in costs[1]["parts"]] == [(1.0, 1.0, 1)]
+    # ...while trip 2 straddles the boundary and must report BOTH, so a
+    # blended figure is auditable rather than unexplained.
+    assert [(p["kwh"], p["rate"], p["charge_id"]) for p in costs[2]["parts"]] == [
+        (1.0, 1.0, 1), (1.0, 0.5, 2),
+    ]
 
     # A brand-new charge (C) resets consumption to itself, even though B
     # still has 9 kWh left untouched underneath.
     charge_c = charge(3, datetime(2026, 7, 1, 11, 0), 3.0, 4.50)  # RM1.50/kWh
     t3 = trip(3, datetime(2026, 7, 1, 12, 0), 1.0)
     costs2 = layered_trip_costs([t1, t2, t3], [charge_a, charge_b_older, charge_c])
-    assert costs2[3] == 1.50  # priced off C (RM1.50/kWh), not B's RM0.50/kWh
+    assert costs2[3]["cost"] == 1.50  # priced off C (RM1.50/kWh), not B's RM0.50/kWh
+    assert [p["charge_id"] for p in costs2[3]["parts"]] == [3]
 
     # A trip that outruns every layer in the whole charge history (no
-    # charge on record at all) prices as unknown, not a guess.
+    # charge on record at all) prices as unknown, not a guess — and reports
+    # no parts, since there's nothing to attribute it to.
     lone_trip = trip(4, datetime(2026, 7, 1, 8, 0), 1.0)
-    assert layered_trip_costs([lone_trip], []) == {4: None}
+    assert layered_trip_costs([lone_trip], []) == {4: {"cost": None, "parts": []}}
 
 
-def test_layered_trip_costs_wired_into_analyze():
+def test_free_charge_running_out_mid_trip_splits_the_cost():
+    """The real case this model exists for: a free session tops the stack, so
+    trips cost nothing until its kWh runs out — and the trip that spans the
+    boundary is billed partly free, partly at the older charge's real rate.
+    That blended figure is the observable proof the cascade works; a binary
+    flip from free to full price could be explained by other things."""
+    from datetime import datetime
+
+    from app.analysis.driving import layered_trip_costs
+    from app.models import Charge, Drive
+
+    def charge(id_, end, kwh, cost):
+        return Charge(id=id_, start_time=end, end_time=end,
+                      energy_added_kwh=kwh, cost=cost)
+
+    def trip(id_, start, kwh):
+        return Drive(
+            id=id_, start_time=start, end_time=start,
+            distance_km=10.0, duration_min=15.0, avg_speed_kmh=40.0, max_speed_kmh=60.0,
+            start_soc=80, end_soc=70, energy_used_kwh=kwh, outside_temp_c=28.0,
+        )
+
+    paid = charge(1, datetime(2026, 7, 20, 8, 0), 30.0, 33.90)  # RM1.13/kWh
+    free = charge(2, datetime(2026, 7, 26, 8, 0), 2.0, 0.0)     # FOC, 2 kWh
+
+    inside = trip(1, datetime(2026, 7, 26, 9, 0), 1.2)    # wholly free
+    straddle = trip(2, datetime(2026, 7, 26, 10, 0), 2.0)  # 0.8 free + 1.2 paid
+    after = trip(3, datetime(2026, 7, 26, 11, 0), 1.0)     # wholly paid
+
+    costs = layered_trip_costs([inside, straddle, after], [paid, free])
+
+    assert costs[1]["cost"] == 0.0
+    assert [p["rate"] for p in costs[1]["parts"]] == [0.0]
+
+    # 0.8 x 0 + 1.2 x 1.13 = 1.356 -> 1.36, and both layers are itemised.
+    assert costs[2]["cost"] == 1.36
+    assert [(p["kwh"], p["rate"]) for p in costs[2]["parts"]] == [(0.8, 0.0), (1.2, 1.13)]
+
+    assert costs[3]["cost"] == 1.13
+    assert [p["charge_id"] for p in costs[3]["parts"]] == [1]
     """analyze()'s per-trip cost, total_cost/cost_per_km and by_tag all use
     the layered figure when trip_costs is supplied, and a trip the stack
     can't reach shows an unknown (None) cost rather than a guessed one."""
@@ -754,14 +803,20 @@ def test_layered_trip_costs_wired_into_analyze():
         distance_km=10.0, duration_min=20.0, avg_speed_kmh=30.0, max_speed_kmh=60.0,
         start_soc=78, end_soc=76, energy_used_kwh=1.0, outside_temp_c=28.0,
     )
-    trip_costs = {1: 1.50, 2: None}
+    trip_costs = {
+        1: {"cost": 1.50, "parts": [{"kwh": 1.0, "rate": 1.5, "charge_id": 7}]},
+        2: {"cost": None, "parts": []},
+    }
     r = driving_analysis.analyze(
         [priced_trip, unpriced_trip], 150.0, 75.0, energy_price=0.0,
         trip_costs=trip_costs)
     rows = {row["id"]: row for row in r["recent_trips"]}
     assert rows[1]["cost"] == 1.50
     assert rows[1]["cost_source"] == "auto"
+    # The layer breakdown is surfaced so a blended figure stays checkable.
+    assert rows[1]["cost_parts"] == [{"kwh": 1.0, "rate": 1.5, "charge_id": 7}]
     assert rows[2]["cost"] is None
+    assert rows[2]["cost_parts"] is None
     # Total reflects only what's known — the unpriced trip contributes 0,
     # not a hard block on the whole window's total.
     assert r["total_cost"] == 1.50

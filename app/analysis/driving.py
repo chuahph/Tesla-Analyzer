@@ -310,7 +310,7 @@ def _insights(drives: list[Drive]) -> list[str]:
 
 def layered_trip_costs(
     drives: list[Drive], charges: list[Charge],
-) -> dict[int, float | None]:
+) -> dict[int, dict[str, Any]]:
     """Price each trip against the charge session that actually put that
     energy in the pack, instead of one flat rate applied to everything.
 
@@ -320,10 +320,16 @@ def layered_trip_costs(
     layer beneath (an older charge), and so on, cascading further back for
     as long as there's no new charge. Completing a new charge always resets
     consumption to a fresh top layer, even if older layers still have kWh
-    left in them. A trip that outruns every layer in the vehicle's whole
-    charge history (should only happen right at the very start of its
-    tracked history, or if a charge record was deleted) maps to ``None``
-    rather than guessing a rate.
+    left in them.
+
+    Returns ``{drive_id: {"cost": float|None, "parts": [...]}}``, where each
+    part is ``{kwh, rate, charge_id}`` for one layer the trip drew from — so a
+    trip straddling a boundary is auditable as "X kWh at one rate plus Y at
+    another" instead of a single blended figure that can't be checked. A trip
+    that outruns every layer in the vehicle's whole charge history (should only
+    happen right at the very start of its tracked history, or if a charge
+    record was deleted) gets ``cost: None`` and no parts, rather than a guessed
+    rate.
 
     ``drives``/``charges`` must be the vehicle's FULL history in
     chronological order, not just whatever window is being displayed — an
@@ -340,23 +346,35 @@ def layered_trip_costs(
             events.append((d.start_time, 1, d))
     events.sort(key=lambda e: (e[0], e[1]))
 
-    stack: list[list[float]] = []  # [rate, remaining_kwh] — top of stack = most recent charge
-    costs: dict[int, float | None] = {}
+    # [rate, remaining_kwh, charge_id] — top of stack = most recent charge
+    stack: list[list[Any]] = []
+    costs: dict[int, dict[str, Any]] = {}
     for _, kind, obj in events:
         if kind == 0:
-            stack.append([obj.cost / obj.energy_added_kwh, obj.energy_added_kwh])
+            stack.append([obj.cost / obj.energy_added_kwh, obj.energy_added_kwh, obj.id])
             continue
         need = obj.energy_used_kwh
         cost = 0.0
+        parts: list[dict[str, Any]] = []
         while need > 1e-9 and stack:
-            rate, remaining = stack[-1]
+            rate, remaining, charge_id = stack[-1]
             take = min(remaining, need)
             cost += take * rate
+            # One entry per layer drawn from, so a trip that straddles a
+            # boundary is auditable as "X kWh at one rate + Y at another"
+            # rather than a single blended number nobody can check.
+            parts.append({
+                "kwh": round(take, 3), "rate": round(rate, 4), "charge_id": charge_id,
+            })
             need -= take
             stack[-1][1] -= take
             if stack[-1][1] <= 1e-9:
                 stack.pop()
-        costs[obj.id] = round(cost, 2) if need <= 1e-9 else None
+        priced = need <= 1e-9
+        costs[obj.id] = {
+            "cost": round(cost, 2) if priced else None,
+            "parts": parts if priced else [],
+        }
     return costs
 
 
@@ -365,7 +383,7 @@ def analyze(drives: list[Drive], rated_wh_per_km: float = 150.0,
             charges: list[Charge] | None = None,
             vampire_anchor: tuple[datetime, float] | None = None,
             recent_trips_limit: int | None = 5,
-            trip_costs: dict[int, float | None] | None = None) -> dict[str, Any]:
+            trip_costs: dict[int, dict[str, Any]] | None = None) -> dict[str, Any]:
     """``energy_price`` is either a flat RM/kWh float, or a
     ``datetime -> RM/kWh`` callable (time-of-use pricing — see app.tariff) for
     per-trip rates by when each drive happened. ``charges`` (optional) is this
@@ -559,11 +577,19 @@ def analyze(drives: list[Drive], rated_wh_per_km: float = 150.0,
     # flat/ToU rate at its own start_time.
     def _trip_cost(d: Drive) -> float | None:
         if trip_costs is not None:
-            return trip_costs.get(getattr(d, "id", None))
+            entry = trip_costs.get(getattr(d, "id", None))
+            return entry.get("cost") if entry else None
         return (
             round(d.energy_used_kwh * price_at(d.start_time), 2)
             if has_valid_energy(d) and price_at(d.start_time) else None
         )
+
+    def _trip_cost_parts(d: Drive) -> list[dict[str, Any]] | None:
+        """Which charge layer(s) paid for this trip — see layered_trip_costs."""
+        if trip_costs is None:
+            return None
+        entry = trip_costs.get(getattr(d, "id", None))
+        return (entry.get("parts") or None) if entry else None
 
     # Per-tag totals (distance/energy/cost), keyed by whatever's in Drive.tag
     # ("" groups every untagged trip together) — the expense-claim view: how
@@ -719,6 +745,10 @@ def analyze(drives: list[Drive], rated_wh_per_km: float = 150.0,
                 # history can't price it yet (see layered_trip_costs) and no
                 # override has been set — the UI offers a manual entry then.
                 "cost": _trip_cost(d) if has_valid_energy(d) else None,
+                # Which charge(s) actually paid for this trip: one entry per
+                # layer drawn from, so a trip spanning the end of a free
+                # charge shows the split rather than one blended figure.
+                "cost_parts": _trip_cost_parts(d) if has_valid_energy(d) else None,
                 "cost_source": (
                     ("manual" if getattr(d, "cost_override", None) is not None else "auto")
                     if trip_costs is not None and has_valid_energy(d) and _trip_cost(d) is not None

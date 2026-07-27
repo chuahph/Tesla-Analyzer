@@ -162,7 +162,7 @@ def _window(
     return list(drives), list(charges)
 
 
-def _trip_cost_map(session: Session, vehicle_id: int) -> dict[int, float | None]:
+def _trip_cost_map(session: Session, vehicle_id: int) -> dict[int, dict]:
     """Every trip's cost, priced against the charge-layer history that
     actually supplied its energy (see driving_analysis.layered_trip_costs)
     rather than one flat "latest charge" rate applied to everything. Needs
@@ -180,7 +180,10 @@ def _trip_cost_map(session: Session, vehicle_id: int) -> dict[int, float | None]
     costs = driving_analysis.layered_trip_costs(drives_all, charges_all)
     for d in drives_all:
         if d.cost_override is not None:
-            costs[d.id] = d.cost_override
+            # A manual figure replaces the layer breakdown rather than sitting
+            # beside it — the parts describe how the computed cost was reached,
+            # and they no longer explain a number the user typed.
+            costs[d.id] = {"cost": d.cost_override, "parts": []}
     return costs
 
 

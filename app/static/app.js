@@ -1456,8 +1456,18 @@ function renderLists(d) {
       // supplied this trip's energy. Say "Free" the way the charge list
       // already does, so it can't be misread as an unpriced trip.
       const costFigure = t.cost === 0 ? "Free" : `${d.currency} ${fmt(t.cost, 2)}`;
+      // A trip spanning the end of one charge draws from two layers, so its
+      // cost is a blend of two rates. Spell that out when it happens — a
+      // single number nobody can reconcile against either charge is exactly
+      // what makes a cost figure untrustworthy.
+      const parts = t.cost_parts || [];
+      const costSplit = parts.length > 1
+        ? ` <span class="cost-split" title="This trip spanned the end of one charge, so its energy was priced across both">(${
+            parts.map((p) => `${fmt(p.kwh, 2)} kWh ${
+              p.rate === 0 ? "free" : "@ " + d.currency + " " + fmt(p.rate, 2)}`).join(" + ")})</span>`
+        : "";
       const cost = t.cost != null
-        ? ` · ${costFigure}` +
+        ? ` · ${costFigure}${costSplit}` +
           (t.cost_source === "manual" && canEditCost
             ? `<button class="trip-cost-edit" data-trip-id="${t.id}" data-cost="${t.cost}" title="Tap to correct or clear this manually-entered cost">✎</button>`
             : "")
