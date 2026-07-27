@@ -89,10 +89,11 @@ class Drive(Base):
 
     # Seconds the trip's stop time was back-dated by sync.py's pace-based
     # correction, which assumes a low-implied-speed polling gap means the car
-    # parked early in it. That correction measures distance AND energy only up
-    # to the earlier point, so when it misfires — a slow crawl into a car park
-    # looks much like "parked early, then lost signal" — it silently moves a
-    # slice of real driving into the following parked gap as standby drain.
+    # parked early in it. NB the correction rewrites the recorded timestamp
+    # ONLY — the stop snapshot keeps the real reading's odo_km/soc/range_km, so
+    # distance and energy stay the full measured deltas and just duration (and
+    # therefore avg_speed) changes. A trim can't shrink a trip's kWh; if one
+    # reads short on energy, look at the start anchor instead.
     # Recorded so a trip can be asked whether it happened: 0.0 means the
     # correction did not fire, None means the trip predates this field (or was
     # built by a path that never trims). Logging only — nothing reads it to

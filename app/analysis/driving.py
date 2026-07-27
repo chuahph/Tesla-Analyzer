@@ -713,9 +713,11 @@ def analyze(drives: list[Drive], rated_wh_per_km: float = 150.0,
                 # User-assigned category ("work"/"personal"/...); "" = untagged.
                 "tag": getattr(d, "tag", "") or "",
                 # Seconds this trip's stop time was back-dated (see
-                # Drive.tail_trim_sec) — surfaced so a trip that reads short on
-                # distance/energy against the car's own screen can be checked
-                # for a clipped tail instead of the answer being unknowable.
+                # Drive.tail_trim_sec) — surfaced so a trip whose duration
+                # reads short against the car's own screen can be checked for a
+                # clipped tail instead of the answer being unknowable. Affects
+                # duration/avg_speed only: distance and energy are measured
+                # from the real reading regardless of the recorded timestamp.
                 # None on trips logged before this was recorded.
                 "tail_trim_sec": getattr(d, "tail_trim_sec", None),
                 "route": f"{d.start_location} → {d.end_location}"

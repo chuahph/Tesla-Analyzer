@@ -538,6 +538,28 @@ def test_tail_trim_seconds_are_recorded_on_the_drive():
     assert abs(gap_removed - trimmed) < 1.0
 
 
+def test_tail_trim_changes_duration_only_never_distance_or_energy():
+    """The stop-time correction rewrites the recorded timestamp and nothing
+    else — the stop snapshot keeps the real reading's odometer and range, so
+    distance and energy stay the full measured deltas. Locking this down
+    because the opposite was briefly believed: a trim cannot shrink a trip's
+    kWh, so a trip reading short on energy is never explained by one."""
+    s1 = snap(T0, 10_000.0, 80, shift="P", speed=0.0, range_km=400.0)
+    s2 = snap(T0 + 300, 10_010.0, 79, shift="D", speed=50.0, range_km=395.0)
+    s3 = snap(T0 + 900, 10_012.0, 78, shift="P", speed=0.0, locked=True, range_km=394.0)
+
+    _, _, trip, _ = step(s1, s2)
+    drives, _, _, _ = step(s2, s3, trip)
+    d = drives[0]
+
+    assert d["tail_trim_sec"] >= 60                      # a trim really happened
+    assert d["distance_km"] == 12.0                      # full s1->s3 odometer delta
+    assert d["duration_min"] < 15.0                      # but the clock was cut
+    # Energy matches what the untrimmed endpoints imply, not a shortened tail.
+    from app.sync import _energy_kwh
+    assert d["energy_used_kwh"] == round(_energy_kwh(s1, s3, 60.0), 2)
+
+
 def test_no_trim_records_zero_not_none():
     """A trip closed by a path that evaluated the correction but didn't apply
     it records 0.0 — "considered and didn't fire" has to stay distinguishable
