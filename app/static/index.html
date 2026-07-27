@@ -641,6 +641,18 @@
                 <option value="0.9">Gentle / city (−10%)</option>
               </select>
             </label>
+            <!-- Leave blank to use your own measured average (or the
+                 departure-hour average below). Set it when you know something
+                 the history doesn't — a loaded car, a route that's all hills. -->
+            <label>Wh/km
+              <span class="planner-field"><input id="plan-wh" type="number" min="1" step="1" inputmode="decimal" placeholder="auto"></span>
+            </label>
+            <!-- Departure time picks your own measured efficiency for the
+                 hours the drive would span, so peak-hour traffic is priced
+                 from real history rather than a guess. -->
+            <label>Leaving
+              <span class="planner-field"><input id="plan-depart" type="time"></span>
+            </label>
           </div>
           <div id="plan-result" class="planner-result"></div>
         </div>

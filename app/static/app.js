@@ -1967,6 +1967,31 @@ function forecastHtml(f) {
 // payload). Kept in module scope so the input handlers can recompute.
 let plannerCtx = null;
 
+// Your own measured Wh/km averaged over the hours a drive leaving at
+// `departHHMM` would actually span — so a 5pm departure is priced from what
+// peak-hour traffic really costs you, not a generic multiplier. Duration is
+// estimated from your own average speed. Returns null when the departure is
+// blank or none of the spanned hours have enough history to be meaningful.
+function departureWhPerKm(departHHMM, km) {
+  const ctx = plannerCtx || {};
+  const byHour = ctx.efficiencyByHour || {};
+  if (!departHHMM || !km) return null;
+  const [h, m] = departHHMM.split(":").map(Number);
+  if (!isFinite(h)) return null;
+  const speed = ctx.avgSpeedKmh > 5 ? ctx.avgSpeedKmh : 40;
+  const hours = Math.max(km / speed, 0.01);
+  const start = h + (isFinite(m) ? m / 60 : 0);
+  const samples = [];
+  // Sample each clock hour the drive touches, wrapping past midnight.
+  for (let t = Math.floor(start); t <= Math.floor(start + hours); t++) {
+    const v = byHour[String(((t % 24) + 24) % 24)];
+    if (v != null && isFinite(v) && v > 0) samples.push(v);
+  }
+  if (!samples.length) return null;
+  const mean = samples.reduce((a, b) => a + b, 0) / samples.length;
+  return { whPerKm: mean, hours: samples.length };
+}
+
 function computePlan() {
   const out = document.getElementById("plan-result");
   if (!out || !plannerCtx) return;
@@ -1974,11 +1999,25 @@ function computePlan() {
   const km = parseFloat(document.getElementById("plan-km").value);
   const soc = parseFloat(document.getElementById("plan-soc").value);
   const cond = parseFloat(document.getElementById("plan-cond").value) || 1.0;
+  const manualWh = parseFloat(document.getElementById("plan-wh")?.value);
+  const depart = document.getElementById("plan-depart")?.value || "";
   if (!isFinite(km) || km <= 0 || !isFinite(soc)) {
     out.innerHTML = `<div class="plan-hint">Enter a distance and starting charge to plan a drive.</div>`;
     return;
   }
-  const effWh = whPerKm * cond;
+  // Precedence: an explicit Wh/km wins outright (you know something the
+  // history doesn't), else the departure-hour average, else your overall one.
+  const byHour = departureWhPerKm(depart, km);
+  let baseWh = whPerKm;
+  let basis = "your average";
+  if (isFinite(manualWh) && manualWh > 0) {
+    baseWh = manualWh;
+    basis = "your entered Wh/km";
+  } else if (byHour) {
+    baseWh = byHour.whPerKm;
+    basis = `your own ${depart} driving (${byHour.hours} h of history)`;
+  }
+  const effWh = baseWh * cond;
   const energyNeeded = km * effWh / 1000;                 // kWh
   const socNeeded = capacityKwh > 0 ? energyNeeded / capacityKwh * 100 : 0;
   const arrival = soc - socNeeded;
@@ -2002,7 +2041,8 @@ function computePlan() {
       <div><span class="k">Energy</span><span class="v">${fmt(energyNeeded, 1)} kWh</span></div>
       <div><span class="k">At</span><span class="v">${fmt(effWh, 0)} Wh/km</span></div>
       <div><span class="k">Range now</span><span class="v">~${fmt(rangeAvail, 0)} km</span></div>
-    </div>`;
+    </div>
+    <div class="plan-basis">Based on ${basis}${cond !== 1.0 ? ` × conditions` : ""}.</div>`;
 }
 
 function renderPlanner(d) {
@@ -2018,7 +2058,13 @@ function renderPlanner(d) {
   const lastCharge = d.last_charge || {};
   const costPerKwh = lastCharge.rate_per_kwh
     || (bal.charged_kwh && lastCharge.cost ? lastCharge.cost / lastCharge.charged_kwh : null);
-  plannerCtx = { whPerKm, capacityKwh, currency: d.currency || "", costPerKwh };
+  // efficiency_by_hour / avg speed feed the departure-time projection — your
+  // own measured Wh/km per hour of day, rather than a generic traffic model.
+  plannerCtx = {
+    whPerKm, capacityKwh, currency: d.currency || "", costPerKwh,
+    efficiencyByHour: (d.driving && d.driving.efficiency_by_hour) || {},
+    avgSpeedKmh: (d.driving && d.driving.avg_speed_kmh) || 0,
+  };
 
   const socInput = document.getElementById("plan-soc");
   // Prefill start SoC with the current reading when known, but only if the
@@ -2032,10 +2078,10 @@ function renderPlanner(d) {
 
 // Wire the inputs once; computePlan reads live values each time.
 document.addEventListener("input", (e) => {
-  if (e.target && ["plan-km", "plan-soc", "plan-cond"].includes(e.target.id)) computePlan();
+  if (e.target && ["plan-km", "plan-soc", "plan-cond", "plan-wh", "plan-depart"].includes(e.target.id)) computePlan();
 });
 document.addEventListener("change", (e) => {
-  if (e.target && e.target.id === "plan-cond") computePlan();
+  if (e.target && ["plan-cond", "plan-depart"].includes(e.target.id)) computePlan();
 });
 
 // Destination lookup: geocode a typed place and fill the distance field from
