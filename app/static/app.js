@@ -1452,8 +1452,12 @@ function renderLists(d) {
       // A manually-priced trip keeps a tap-to-edit ✎ so it can be corrected
       // or cleared back to automatic.
       const canEditCost = t.id != null && !tripSelectMode && !STATIC_MODE;
+      // Zero is a real answer, not a missing one — it means a free charge
+      // supplied this trip's energy. Say "Free" the way the charge list
+      // already does, so it can't be misread as an unpriced trip.
+      const costFigure = t.cost === 0 ? "Free" : `${d.currency} ${fmt(t.cost, 2)}`;
       const cost = t.cost != null
-        ? ` · ${d.currency} ${fmt(t.cost, 2)}` +
+        ? ` · ${costFigure}` +
           (t.cost_source === "manual" && canEditCost
             ? `<button class="trip-cost-edit" data-trip-id="${t.id}" data-cost="${t.cost}" title="Tap to correct or clear this manually-entered cost">✎</button>`
             : "")
