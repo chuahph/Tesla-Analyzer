@@ -27,10 +27,17 @@ class Settings(BaseSettings):
     # activity signal that resets the car's own sleep timer. Lower = more
     # up-to-date data and fewer session-reconstruction gaps, at the cost of
     # more Tesla API calls and a mildly harder time falling asleep on its
-    # own. 1.0 matches the cadence this project's own setup guide
-    # recommends for the external cron, so a real read happens on (close
-    # to) every tick by default.
-    sync_poll_interval_min: float = 1.0
+    # own.
+    #
+    # 2.0 rather than 1.0 because Tesla's Fleet API is billed per data call
+    # and 1-minute idle polling burned a full month's free credit in 22 days
+    # (4,872 calls). This setting is safe to raise: it gates ONLY the
+    # online-but-idle case. An open trip or charge bypasses it entirely (see
+    # /api/sync), so a car mid-drive is still read on every cron tick and
+    # trip-boundary accuracy is unaffected — the savings come from a parked
+    # car that Sentry Mode is keeping awake, which is where the waste was.
+    # The cost is up to ~2 min latency on the parked-car alerts.
+    sync_poll_interval_min: float = 2.0
     # Minimum odometer movement (km) treated as a real trip rather than
     # jitter — a car nudged while parked, GPS drift, a multi-point turn.
     # Lower it to catch genuinely short moves (e.g. a charger-to-parking-spot

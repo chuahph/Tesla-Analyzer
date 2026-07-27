@@ -287,10 +287,12 @@ move to Supabase (see the in-app setup guide's database step).
 **How often you call this doesn't force how often the car is read.** The
 endpoint decides that for itself: it never reads a car that's asleep, and
 beyond that it only reads an online-but-idle car about once every
-`SYNC_POLL_INTERVAL_MIN` (1 minute by default — matching the cadence this
-guide recommends for the cron itself, so a real read happens on close to
-every tick) — escalating tighter only while a trip is genuinely in progress
-or the car just woke up on its own. Calling `/api/sync` more often than that
+`SYNC_POLL_INTERVAL_MIN` (2 minutes by default) — escalating to every tick
+only while a trip or charge is genuinely in progress, or the car just woke up
+on its own. That exemption is why the default was raised from 1 to 2: Tesla's
+Fleet API bills per data call, and 1-minute idle polling can spend a month's
+free credit in about three weeks, while the throttle never applies to a car
+that's actually driving, so trip accuracy doesn't depend on it. Calling `/api/sync` more often than that
 just drives the decision more often; it never reads more often than the
 setting allows. Raise `SYNC_POLL_INTERVAL_MIN` (e.g. to 5) if you'd rather
 trade off some timeliness for fewer Tesla API calls and a car that falls

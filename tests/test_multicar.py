@@ -640,13 +640,15 @@ def test_drive_min_km_defaults_to_0_1_km():
     assert Settings().drive_min_km == 0.1
 
 
-def test_sync_poll_interval_defaults_to_one_minute():
-    """The whole point of this project's cron guidance ('every 1 minute')
-    is that a real read happens on close to every tick by default — so the
-    default must actually be 1, not the old 5-minute value."""
+def test_sync_poll_interval_defaults_to_two_minutes():
+    """Tesla's Fleet API bills per data call, and 1-minute idle polling spent a
+    whole month's free credit in 22 days. 2.0 halves the idle cost. Safe to
+    raise because it gates only the online-but-idle case — an open trip or
+    charge bypasses it (see test_trip_in_progress_bypasses_the_poll_throttle),
+    so trip-boundary accuracy doesn't depend on this number."""
     from app.config import Settings
 
-    assert Settings().sync_poll_interval_min == 1.0
+    assert Settings().sync_poll_interval_min == 2.0
 
 
 def test_ac_dc_charge_price_defaults():
@@ -657,11 +659,11 @@ def test_ac_dc_charge_price_defaults():
     assert s.energy_price_dc_kwh == 1.40   # typical Malaysian public DC rate
 
 
-def test_online_idle_car_read_again_after_just_over_a_minute(monkeypatch):
-    """With the default 1-minute interval, a car last read 70s ago (just
-    past the new threshold, well short of the old 5-minute one) must be
-    read again — proving the default actually changed, not just that some
-    interval is enforced."""
+def test_idle_car_polling_actually_respects_the_two_minute_interval(monkeypatch):
+    """Both sides of the threshold, because only the pair proves the default is
+    enforced: a read 70s ago must be SKIPPED (it wouldn't have been under the
+    old 1-minute default, so this is what the billing saving actually rests
+    on), and one 130s ago must go through."""
     import time as _time
 
     from app import services, state
@@ -669,19 +671,25 @@ def test_online_idle_car_read_again_after_just_over_a_minute(monkeypatch):
     settings = get_settings()
     old = settings.app_passcode
     settings.app_passcode = ""
-    _CountingParkedClient.calls = 0
+    vin = "VINAAAAAAAAAAAAAA"
     try:
         monkeypatch.setattr("app.tesla_client.TeslaClient", _FakeClient)
-        vin = "VINAAAAAAAAAAAAAA"
         with SessionLocal() as s:
             services.link_with_token(s, "tok")
-            state.put(s, state.scoped(state.LAST_POLL_KEY, vin), str(_time.time() - 70))
 
         monkeypatch.setattr("app.tesla_client.TeslaClient", _CountingParkedClient)
-        with TestClient(app) as client:
-            resp = client.post("/api/sync")
-            assert resp.status_code == 200
-        assert _CountingParkedClient.calls == 1
+
+        def poll_after(seconds_ago):
+            with SessionLocal() as s:
+                state.put(s, state.scoped(state.LAST_POLL_KEY, vin),
+                          str(_time.time() - seconds_ago))
+            _CountingParkedClient.calls = 0
+            with TestClient(app) as client:
+                assert client.post("/api/sync").status_code == 200
+            return _CountingParkedClient.calls
+
+        assert poll_after(70) == 0     # inside the interval — no Tesla call, no charge
+        assert poll_after(130) == 1    # past it — read as normal
     finally:
         settings.app_passcode = old
         _reset_to_demo()
