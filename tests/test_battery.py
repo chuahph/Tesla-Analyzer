@@ -1,7 +1,19 @@
 """Tests for the battery health estimator (app/analysis/battery.py)."""
+import pytest
 from datetime import datetime
 
 from app.analysis.battery import analyze, new_range_for
+
+
+@pytest.fixture(autouse=True)
+def _db_ready():
+    """Most tests here are pure functions, but a couple reach the database —
+    and without this they pass only when an earlier test file happened to
+    build the schema first, failing whenever this file runs alone."""
+    from app.database import init_db
+
+    init_db()
+    yield
 
 
 def mk(soc, full_range_km, odo_km=None, ts=None):

@@ -1370,8 +1370,15 @@ def _process_vehicle(
         # than borrowing "Sentry alert", which would overstate it.
         if settings.intrusion_notify:
             intrusion_key = state.scoped(state.INTRUSION_NOTIFIED_KEY, vin)
+            # Armed by Sentry OR simply by being locked — it's the locked
+            # state that makes an opening anomalous, not Sentry, and requiring
+            # Sentry meant a car parked locked without it was silently
+            # unwatched. Widening costs nothing: both flags are already in the
+            # payload, and the trip/charge/occupant guards still keep ordinary
+            # use quiet.
             armed = (
-                bool(sentry_now) and not open_trip and not open_charge
+                (bool(sentry_now) or bool(snap.get("locked")))
+                and not open_trip and not open_charge
                 and not snap["user_present"]
             )
             opened_doors = bool(snap.get("doors_open"))
@@ -1382,7 +1389,8 @@ def _process_vehicle(
                 notifications.notify(
                     session, "Car opened while parked",
                     f"{what} was opened on {vehicle.name} while it sat parked "
-                    "with Sentry Mode on and nobody aboard.",
+                    f"{'with Sentry Mode on' if sentry_now else 'and locked'} "
+                    "with nobody aboard.",
                     tag="intrusion",
                 )
                 state.put(session, intrusion_key, "1")

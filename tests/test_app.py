@@ -1,4 +1,5 @@
 """App-level tests: passcode gate boundaries and the Tesla partner key path."""
+import pytest
 from datetime import datetime, timedelta
 
 from fastapi.testclient import TestClient
@@ -7,6 +8,19 @@ from app.config import get_settings
 from app.main import app
 
 PEM_PATH = "/.well-known/appspecific/com.tesla.3p.public-key.pem"
+
+
+@pytest.fixture(autouse=True)
+def _db_ready():
+    """Create the schema before every test. Tests that drive the app through
+    TestClient get this from its startup hook, but the ones that reach for
+    SessionLocal directly (the alert tests) don't — so without this they pass
+    only when some earlier test in the file happened to build the tables, and
+    fail when run alone or first. Mirrors test_multicar.py."""
+    from app.database import init_db
+
+    init_db()
+    yield
 
 
 def test_open_paths_with_passcode_set():
@@ -1495,11 +1509,11 @@ def test_intrusion_alert_fires_once_per_opening(monkeypatch):
         sentry_drain_notify_pct=0.0, intrusion_notify=True, drive_min_km=0.5,
     )
 
-    def vdata(ts, sentry, door_open, user_present=False):
+    def vdata(ts, sentry, door_open, user_present=False, locked=True):
         return {
             "vin": "TESTVIN-INTRUDE", "display_name": "Test", "vehicle_config": {},
             "vehicle_state": {"odometer": 2000.0, "is_user_present": user_present,
-                              "locked": True, "sentry_mode": sentry,
+                              "locked": locked, "sentry_mode": sentry,
                               "df": 1 if door_open else 0, "dr": 0, "pf": 0, "pr": 0,
                               "ft": 0, "rt": 0},
             "drive_state": {"timestamp": ts * 1000, "shift_state": "P", "speed": 0,
@@ -1523,8 +1537,8 @@ def test_intrusion_alert_fires_once_per_opening(monkeypatch):
             s.add(Vehicle(vin="TESTVIN-INTRUDE", name="Test", model="Model 3"))
             s.commit()
 
-            def tick(dt, sentry, door_open, user_present=False):
-                _process_vehicle(s, vdata(t + dt, sentry, door_open, user_present),
+            def tick(dt, sentry, door_open, user_present=False, locked=True):
+                _process_vehicle(s, vdata(t + dt, sentry, door_open, user_present, locked),
                                  {"vin": "TESTVIN-INTRUDE"}, settings)
                 s.commit()
 
@@ -1538,13 +1552,22 @@ def test_intrusion_alert_fires_once_per_opening(monkeypatch):
             tick(240, True, True)         # a separate opening -> fires again
             assert fired() == 2
 
-            # Owner aboard, or Sentry off: ordinary use, no alert.
+            # Someone aboard is ordinary use, whatever else is true.
             tick(300, True, False)
             tick(360, True, True, True)   # door open but someone is aboard
             assert fired() == 2
+
+            # Sentry off but still LOCKED must now arm — it's being locked that
+            # makes an opening anomalous, not Sentry, and requiring Sentry left
+            # a car parked locked without it silently unwatched.
             tick(420, False, False)
-            tick(480, False, True)        # door open with Sentry off
-            assert fired() == 2
+            tick(480, False, True)
+            assert fired() == 3
+
+            # Neither Sentry nor locked: the car was left open on purpose.
+            tick(540, False, False, locked=False)
+            tick(600, False, True, locked=False)
+            assert fired() == 3
     finally:
         with SessionLocal() as s:
             from app.models import Drive as _Drive
