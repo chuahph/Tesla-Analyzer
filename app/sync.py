@@ -500,6 +500,10 @@ def _drive_from(start: dict, cur: dict, capacity_kwh: float, max_speed: float = 
         # Drive.tail_trim_sec). None from paths that never trim, so "not
         # applicable" stays distinct from a confirmed no-trim 0.0.
         "tail_trim_sec": cur.get("trim_sec"),
+        # Odometer distance that happened before this trip's start anchor and
+        # so isn't in its distance (see Drive.start_lost_km). Read from the
+        # open trip, which is the `start` argument here.
+        "start_lost_km": start.get("start_lost_km"),
     }
 
 
@@ -968,6 +972,18 @@ def process_snapshot(
             was_parked = implied_kmh < PARK_SPEED_KMH
         base = cur if was_parked else (prev or cur)
         open_trip = _open_trip_at(base, cur, prev)
+        # Odometer movement that happened BEFORE this trip's anchor and is
+        # therefore not counted in its distance — the symmetric counterpart to
+        # tail_trim_sec at the other end. Zero when anchored at prev (nothing
+        # can precede it) or once the recovery below pulls the movement back
+        # in. A nonzero value is precisely the amount the trip reads short by,
+        # which is otherwise impossible to see after the fact: the odometer is
+        # continuous, so the distance doesn't go anywhere visible, it simply
+        # belongs to no trip.
+        open_trip["start_lost_km"] = (
+            round(max(cur["odo_km"] - prev["odo_km"], 0.0), 3)
+            if (prev and was_parked) else 0.0
+        )
         # Symmetric to the arrival case: if the first *driving* reading only came
         # through after an unpolled gap (poor signal at power-on), the last
         # parked reading is well before the car actually set off, so counting
@@ -1039,6 +1055,7 @@ def process_snapshot(
                     open_trip["odo_km"] = prev["odo_km"]
                     open_trip["soc"] = prev["soc"]
                     open_trip["range_km"] = prev.get("range_km")
+                    open_trip["start_lost_km"] = 0.0  # pulled back in, nothing lost
                 # Same pace model as the arrival-side estimate: ``cur`` is the
                 # first driving reading, so its instantaneous speed is real
                 # evidence of the pace, not just an assumption — prefer it

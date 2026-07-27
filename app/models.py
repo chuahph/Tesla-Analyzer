@@ -100,6 +100,16 @@ class Drive(Base):
     # change behaviour, and the trim itself is unchanged.
     tail_trim_sec: Mapped[float | None] = mapped_column(Float, nullable=True)
 
+    # Odometer distance driven before this trip's start anchor, and therefore
+    # missing from its distance_km. The counterpart to tail_trim_sec at the
+    # other end, and the harder of the two to see: the odometer is continuous,
+    # so lost distance doesn't show up anywhere as an anomaly — it simply
+    # belongs to no trip, and the trip quietly reads short against the car's
+    # own meter. 0.0 means the anchor sat at the previous reading (nothing can
+    # precede it) or the departure recovery pulled the movement back in; None
+    # means the trip predates this field.
+    start_lost_km: Mapped[float | None] = mapped_column(Float, nullable=True)
+
     # Manually-entered cost, used only when the charge-layer cost model
     # (driving_analysis.layered_trip_costs) can't price this trip — every
     # charge session in the vehicle's history has already been fully

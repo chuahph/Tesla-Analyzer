@@ -559,6 +559,51 @@ def test_departure_during_a_blackout_keeps_its_distance_in_the_trip():
     assert drives[0]["distance_km"] == 10.0  # full s1->s3 delta, nothing stranded
 
 
+def test_start_lost_km_records_distance_dropped_before_the_anchor():
+    """The counterpart to tail_trim_sec, and the harder end to see: distance
+    driven before a trip's start anchor is simply absent from it, and because
+    the odometer is continuous nothing anywhere looks wrong — the trip just
+    reads short against the car's own meter.
+
+    0.0 must mean "nothing lost", including the case where the departure
+    recovery pulled a blackout departure back in, so a nonzero value is
+    unambiguous evidence rather than something needing interpretation."""
+    # Blackout departure: 3 km driven before the first driving reading, which
+    # the recovery restores — so nothing is lost and it must say so.
+    s1 = snap(T0, 1000.0, 80, range_km=400.0)
+    s2 = snap(T0 + 1200, 1003.0, 79, shift="D", speed=45.0, range_km=396.0)
+    s3 = snap(T0 + 1800, 1010.0, 78, shift="P", speed=0.0, locked=True, range_km=392.0)
+
+    _, _, trip, _ = step(s1, s2)
+    drives, _, _, _ = step(s2, s3, trip)
+    assert drives[0]["distance_km"] == 10.0        # full delta, recovery worked
+    assert drives[0]["start_lost_km"] == 0.0       # and it reports nothing lost
+
+    # Ordinary case: anchored at the previous reading, nothing can precede it.
+    p1 = snap(T0, 2000.0, 80, range_km=400.0)
+    p2 = snap(T0 + 60, 2000.5, 80, shift="D", speed=30.0, range_km=399.8)
+    p3 = snap(T0 + 600, 2005.0, 79, shift="P", speed=0.0, locked=True, range_km=398.0)
+    _, _, trip2, _ = step(p1, p2)
+    drives2, _, _, _ = step(p2, p3, trip2)
+    assert drives2[0]["start_lost_km"] == 0.0
+
+    # And the case this field exists to expose: the departure recovery is
+    # skipped when the previous reading itself read as driving (a trip closed
+    # on sleep, then a long low-movement gap, then driving again), so the
+    # anchor sits past real movement and the trip genuinely reads short.
+    # Asserting the loss rather than a fixed distance — the point is that it
+    # is now *visible*, not that this path is currently correct.
+    q1 = snap(T0, 1000.0, 80, shift="D", speed=30.0, range_km=400.0)
+    q2 = snap(T0 + 1200, 1001.0, 79, shift="D", speed=40.0, range_km=396.0)
+    q3 = snap(T0 + 1800, 1006.0, 78, shift="P", speed=0.0, locked=True, range_km=393.0)
+    _, _, trip3, _ = step(q1, q2)
+    drives3, _, _, _ = step(q2, q3, trip3)
+    assert drives3[0]["start_lost_km"] == 1.0
+    # 1 km short of the true q1->q3 odometer delta, and the field says so.
+    assert drives3[0]["distance_km"] == 5.0
+    assert drives3[0]["distance_km"] + drives3[0]["start_lost_km"] == 6.0
+
+
 def test_tail_trim_changes_duration_only_never_distance_or_energy():
     """The stop-time correction rewrites the recorded timestamp and nothing
     else — the stop snapshot keeps the real reading's odometer and range, so

@@ -773,6 +773,10 @@ def analyze(drives: list[Drive], rated_wh_per_km: float = 150.0,
                 # from the real reading regardless of the recorded timestamp.
                 # None on trips logged before this was recorded.
                 "tail_trim_sec": getattr(d, "tail_trim_sec", None),
+                # Distance driven before this trip's start anchor, missing from
+                # distance_km (see Drive.start_lost_km) — the other end of the
+                # same question tail_trim_sec answers.
+                "start_lost_km": getattr(d, "start_lost_km", None),
                 "route": f"{d.start_location} → {d.end_location}"
                 if d.start_location and d.end_location else "",
                 # Raw endpoints, so the UI can offer "name this place" (a
