@@ -504,6 +504,9 @@ def _drive_from(start: dict, cur: dict, capacity_kwh: float, max_speed: float = 
         # so isn't in its distance (see Drive.start_lost_km). Read from the
         # open trip, which is the `start` argument here.
         "start_lost_km": start.get("start_lost_km"),
+        # And the same at the closing end (see Drive.end_lost_km) — read from
+        # the close point, which is the `cur` argument.
+        "end_lost_km": cur.get("end_lost_km"),
     }
 
 
@@ -791,7 +794,7 @@ def _split_gap_events(prev: dict, cur: dict, capacity_kwh: float, price_per_kwh:
          # 0.0, not an unknown. Leaving it unset would make this path's rows
          # indistinguishable from pre-instrumentation ones.
          "start_lost_km": 0.0},
-        cur, capacity_kwh, drive_min_km=drive_min_km,
+        {**cur, "end_lost_km": 0.0}, capacity_kwh, drive_min_km=drive_min_km,
     )
     return charge, drive
 
@@ -853,7 +856,23 @@ def process_snapshot(
             # Blind gap with little movement: the car parked and slept (unpolled),
             # then a new drive began. Close the first drive at the last seen point
             # and start a fresh one — two drives across a nap aren't one trip.
-            d = _drive_from(open_trip, prev, capacity_kwh, open_trip.get("max_speed", 0.0),
+            #
+            # Whatever the odometer moved across the gap belongs to neither
+            # drive: this one ends at prev, the next opens at cur. Unlike the
+            # parked close below there's no extending forward, because the gap
+            # is blind as to where the old drive stopped and the new one
+            # started. Record the amount rather than guessing at the split
+            # (see Drive.end_lost_km) — reported live as a trip reading ~0.3 km
+            # short of the car's own display after parking in a car park.
+            # trim_sec is a real 0.0 here for the same reason it is below: this
+            # path closes at a known reading, so nothing was trimmed off the
+            # tail, as distinct from a path that never considered one.
+            close_at = {
+                **prev,
+                "trim_sec": 0.0,
+                "end_lost_km": round(max(cur["odo_km"] - prev["odo_km"], 0.0), 3),
+            }
+            d = _drive_from(open_trip, close_at, capacity_kwh, open_trip.get("max_speed", 0.0),
                             _confirmed_idle_min(open_trip, prev["ts"]), idle_tracked=True,
                             drive_min_km=drive_min_km)
             if d:
@@ -924,6 +943,10 @@ def process_snapshot(
                 # worth distinguishing from "never evaluated" (see
                 # Drive.tail_trim_sec).
                 stop["trim_sec"] = 0.0
+                # This close point tracks the odometer forward for as long as
+                # it keeps climbing, so by the time the trip ends nothing is
+                # left beyond it — a measured 0.0, not an assumption.
+                stop["end_lost_km"] = 0.0
                 if prev and gap_min >= min_gap and implied < CITY_SPEED_KMH and moved >= drive_min_km:
                     pace = max((prev.get("speed_kmh") or 0.0) * 0.65, CITY_SPEED_KMH)
                     est_stop = min(cur["ts"], prev["ts"] + moved / pace * 3600.0)
@@ -1089,7 +1112,8 @@ def process_snapshot(
         # the span covers everything between the two readings: start_lost_km is
         # a confirmed 0.0 here. Set it on a copy rather than mutating prev,
         # which the caller still holds.
-        d = _drive_from({**prev, "start_lost_km": 0.0}, cur, capacity_kwh,
+        d = _drive_from({**prev, "start_lost_km": 0.0},
+                        {**cur, "end_lost_km": 0.0}, capacity_kwh,
                         drive_min_km=drive_min_km)
         if d:
             # If prev was stale (car parked overnight, then a short morning

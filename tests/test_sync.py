@@ -632,6 +632,47 @@ def test_start_lost_km_is_never_null_on_a_reconstructed_drive():
     assert drives2[0]["start_lost_km"] == 0.0
 
 
+def test_end_lost_km_records_distance_dropped_after_the_closing_anchor():
+    """The blind-gap close ends a trip at the last seen reading and opens the
+    next at the current one, so odometer movement across the gap belongs to
+    neither. That is invisible in the data — the trip just reads short against
+    the car's own display while its energy looks right, because the same
+    truncation drops proportionally less energy than distance when the tail is
+    slow parking creep. Recording it makes the loss answerable.
+
+    Nothing is reassigned: distance_km stays exactly what the anchors measured.
+    """
+    # Drive, then a long quiet gap with a little creep, then driving again.
+    d1 = snap(T0, 3000.0, 80, shift="D", speed=40.0, range_km=400.0)
+    d2 = snap(T0 + 600, 3010.0, 78, shift="D", speed=35.0, range_km=392.0)
+    # 25 min later (> PARK_GAP_MIN) only 0.3 km moved -> ~0.7 km/h implied,
+    # well under PARK_SPEED_KMH, so this reads as "parked and slept".
+    d3 = snap(T0 + 2100, 3010.3, 77, shift="D", speed=20.0, range_km=389.0)
+
+    _, _, trip, _ = step(d1, d2)
+    drives, _, _, _ = step(d2, d3, trip)
+    assert drives, "the first drive should close across the gap"
+    assert drives[0]["distance_km"] == 10.0        # anchors unchanged
+    assert drives[0]["end_lost_km"] == 0.3         # and the drop is recorded
+    # A real 0.0 rather than null: this path closes at a known reading, so
+    # nothing was trimmed off the tail — distinct from never having considered.
+    assert drives[0]["tail_trim_sec"] == 0.0
+
+    # The ordinary parked close tracks the odometer forward, so it loses
+    # nothing and must say so rather than leaving the question open.
+    p1 = snap(T0, 4000.0, 80, shift="D", speed=40.0, range_km=400.0)
+    p2 = snap(T0 + 600, 4008.0, 78, shift="D", speed=30.0, range_km=394.0)
+    # Locked in P is a definitive end-of-drive, so this closes the trip here.
+    p3 = snap(T0 + 1500, 4008.4, 78, shift="P", speed=0.0, locked=True, range_km=393.6)
+    _, _, trip2, _ = step(p1, p2)
+    drives2, _, _, _ = step(p2, p3, trip2)
+    assert drives2, "the parked close should end the trip"
+    assert drives2[0]["end_lost_km"] == 0.0
+    # The close point tracked the odometer to the latest reading, so the trip
+    # keeps the final 0.4 km of parking creep rather than dropping it.
+    assert drives2[0]["distance_km"] == 8.4
+
+
 def test_tail_trim_changes_duration_only_never_distance_or_energy():
     """The stop-time correction rewrites the recorded timestamp and nothing
     else — the stop snapshot keeps the real reading's odometer and range, so
