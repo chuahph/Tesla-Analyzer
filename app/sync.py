@@ -785,7 +785,12 @@ def _split_gap_events(prev: dict, cur: dict, capacity_kwh: float, price_per_kwh:
     )
     drive = _drive_from(
         {"ts": split_ts, "odo_km": prev["odo_km"], "soc": split_soc,
-         "lat": prev.get("lat"), "lon": prev.get("lon")},
+         "lat": prev.get("lat"), "lon": prev.get("lon"),
+         # Anchored to prev's odometer, so the reconstructed distance spans the
+         # whole gap and nothing can have been dropped ahead of it — a confirmed
+         # 0.0, not an unknown. Leaving it unset would make this path's rows
+         # indistinguishable from pre-instrumentation ones.
+         "start_lost_km": 0.0},
         cur, capacity_kwh, drive_min_km=drive_min_km,
     )
     return charge, drive
@@ -1080,7 +1085,12 @@ def process_snapshot(
         pass
     elif prev:
         # A whole drive happened between snapshots (asleep / cron gap).
-        d = _drive_from(prev, cur, capacity_kwh, drive_min_km=drive_min_km)
+        # prev is the start anchor and the distance is cur.odo - prev.odo, so
+        # the span covers everything between the two readings: start_lost_km is
+        # a confirmed 0.0 here. Set it on a copy rather than mutating prev,
+        # which the caller still holds.
+        d = _drive_from({**prev, "start_lost_km": 0.0}, cur, capacity_kwh,
+                        drive_min_km=drive_min_km)
         if d:
             # If prev was stale (car parked overnight, then a short morning
             # drive), the reconstructed span/energy cover the idle period too —

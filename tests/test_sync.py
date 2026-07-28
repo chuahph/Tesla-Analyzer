@@ -604,6 +604,34 @@ def test_start_lost_km_records_distance_dropped_before_the_anchor():
     assert drives3[0]["distance_km"] + drives3[0]["start_lost_km"] == 6.0
 
 
+def test_start_lost_km_is_never_null_on_a_reconstructed_drive():
+    """A null start_lost_km must mean one thing only: the row predates the
+    instrumentation. The gap-reconstruction paths build their own start dict
+    rather than carrying an open trip's, so without an explicit 0.0 they'd
+    emit null forever and be indistinguishable from an old row — exactly the
+    ambiguity that made a real audit read (trip 294) inconclusive.
+
+    Both paths anchor on the previous reading's odometer and span the whole
+    gap, so nothing can precede the anchor: 0.0 is measured, not assumed."""
+    # A whole drive inside one poll gap (car asleep / cron gap).
+    g1 = snap(T0, 5000.0, 80, shift="P", speed=0.0, locked=True, range_km=400.0)
+    g2 = snap(T0 + 5400, 5030.0, 74, shift="P", speed=0.0, locked=True, range_km=370.0)
+    drives, _, _, _ = step(g1, g2)
+    assert drives, "a drive should be reconstructed across the gap"
+    assert drives[0]["distance_km"] == 30.0          # the full odometer delta
+    assert drives[0]["start_lost_km"] == 0.0         # and nothing precedes it
+
+    # Charge-then-drive split inside a single gap: same guarantee on the drive
+    # half, which is anchored to the pre-charge odometer.
+    c1 = snap(T0, 6000.0, 40, shift="P", speed=0.0, locked=True,
+              range_km=200.0, charging="Charging", kw=7.0)
+    c2 = snap(T0 + 7200, 6020.0, 70, shift="P", speed=0.0, locked=True,
+              range_km=330.0, energy_added=25.0)
+    drives2, charges2, _, _ = step(c1, c2)
+    assert charges2 and drives2, "the gap should split into a charge and a drive"
+    assert drives2[0]["start_lost_km"] == 0.0
+
+
 def test_tail_trim_changes_duration_only_never_distance_or_energy():
     """The stop-time correction rewrites the recorded timestamp and nothing
     else — the stop snapshot keeps the real reading's odometer and range, so
