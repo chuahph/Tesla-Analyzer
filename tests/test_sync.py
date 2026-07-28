@@ -1,6 +1,6 @@
 """Tests for the snapshot session state machine (app/sync.py)."""
-from app.sync import (_energy_kwh, is_driving, process_snapshot,
-                      snapshot_from_vehicle_data)
+from app.sync import (_energy_kwh, close_trip_on_sleep, is_driving,
+                      process_snapshot, snapshot_from_vehicle_data)
 
 T0 = 1_760_000_000.0  # seconds epoch
 
@@ -691,6 +691,27 @@ def test_blind_gap_close_folds_parking_creep_into_the_trip_that_ended():
     # The close point tracked the odometer to the latest reading, so the trip
     # keeps the final 0.4 km of parking creep rather than dropping it.
     assert drives2[0]["distance_km"] == 8.4
+
+
+def test_close_trip_on_sleep_records_end_lost_km_as_zero():
+    """A trip closed on confirmed sleep has no further tail to have lost
+    distance in — sleep is only reachable once the car has genuinely stopped
+    moving — so end_lost_km must read a real 0.0 rather than the null a raw
+    snapshot would otherwise leave, which is indistinguishable from a row that
+    predates the field. tail_trim_sec stays null: this path runs no pace-based
+    stop estimate, so it genuinely never evaluates one, which is exactly what
+    null means for that field."""
+    open_trip = {
+        "ts": T0, "odo_km": 8000.0, "soc": 80, "range_km": 400.0,
+        "max_speed": 50.0, "idle_min": 0.0, "still_run": 0.0, "still_since": None,
+    }
+    last_snapshot = snap(T0 + 600, 8006.0, 78, shift="P", speed=0.0,
+                         locked=True, range_km=394.0)
+    d = close_trip_on_sleep(open_trip, last_snapshot, 60.0)
+    assert d is not None
+    assert d["distance_km"] == 6.0
+    assert d["end_lost_km"] == 0.0
+    assert d["tail_trim_sec"] is None
 
 
 def test_tail_trim_changes_duration_only_never_distance_or_energy():

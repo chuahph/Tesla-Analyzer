@@ -533,7 +533,14 @@ def close_trip_on_sleep(open_trip: dict, last_snapshot: dict, capacity_kwh: floa
     this specific transition.
     """
     idle_min = _confirmed_idle_min(open_trip, last_snapshot["ts"])
-    return _drive_from(open_trip, last_snapshot, capacity_kwh, open_trip.get("max_speed", 0.0),
+    # last_snapshot is the true end: sleep is only reachable once the car has
+    # actually stopped moving, so there is no further tail beyond this reading
+    # to have lost distance in. A real 0.0, not the null a raw snapshot would
+    # otherwise leave (see Drive.end_lost_km). tail_trim_sec stays unset here —
+    # this path runs no pace-based stop estimate, so it genuinely never
+    # evaluates one, which is exactly what null means for that field.
+    return _drive_from(open_trip, {**last_snapshot, "end_lost_km": 0.0}, capacity_kwh,
+                       open_trip.get("max_speed", 0.0),
                        idle_min, idle_tracked=True, drive_min_km=drive_min_km)
 
 
