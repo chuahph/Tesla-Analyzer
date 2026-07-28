@@ -48,6 +48,13 @@ PARK_SPEED_KMH = 15.0
 # parked/asleep, not driving), a new drive must NOT be anchored to it — otherwise
 # the overnight idle time and its vampire drain get counted into the trip.
 STALE_ANCHOR_MIN = 15.0
+# Most odometer movement that a blind gap's tail is allowed to fold back into
+# the trip that just ended. PARK_SPEED_KMH bounds the gap's *rate*, not its
+# total: a long enough gap can stay under it and still cover real distance,
+# which would be an unobserved drive rather than the last few metres of pulling
+# into a parking spot. Beyond this the movement is left out and recorded
+# (Drive.end_lost_km) rather than attributed on a guess.
+GAP_CREEP_MAX_KM = 1.0
 MYT = timezone(timedelta(hours=8))  # Malaysia has no DST
 
 
@@ -857,20 +864,33 @@ def process_snapshot(
             # then a new drive began. Close the first drive at the last seen point
             # and start a fresh one — two drives across a nap aren't one trip.
             #
-            # Whatever the odometer moved across the gap belongs to neither
-            # drive: this one ends at prev, the next opens at cur. Unlike the
-            # parked close below there's no extending forward, because the gap
-            # is blind as to where the old drive stopped and the new one
-            # started. Record the amount rather than guessing at the split
-            # (see Drive.end_lost_km) — reported live as a trip reading ~0.3 km
-            # short of the car's own display after parking in a car park.
-            # trim_sec is a real 0.0 here for the same reason it is below: this
-            # path closes at a known reading, so nothing was trimmed off the
-            # tail, as distinct from a path that never considered one.
+            # The odometer movement across the gap is the tail of the drive
+            # that just ended — the last metres of pulling into a spot — so
+            # extend this trip to cover it, the same way the parked close below
+            # keeps tracking the odometer forward. Left out it would belong to
+            # no trip at all, since the next one opens at cur (reported live:
+            # a trip reading 0.3 km short of the car's own display after
+            # parking in a car park, with its energy intact — the signature of
+            # a clipped tail rather than a clipped start).
+            #
+            # ONLY the odometer is extended. The timestamp and SoC/range stay
+            # at prev, because the gap is overwhelmingly parked time: taking
+            # cur's would add the whole nap to the duration and its standby
+            # drain to the energy, and the gap has no upper bound, so that
+            # drain can dwarf the ~0.06 kWh the creep itself used. Omitting the
+            # creep's own small energy is the bounded error of the two, and the
+            # deliberate cost of keeping the nap out.
+            #
+            # trim_sec is a real 0.0 for the same reason it is below: this path
+            # closes at a known reading, so nothing was trimmed off the tail,
+            # as distinct from a path that never considered one.
+            creep_km = round(max(cur["odo_km"] - prev["odo_km"], 0.0), 3)
+            fold_in = creep_km <= GAP_CREEP_MAX_KM
             close_at = {
                 **prev,
+                "odo_km": cur["odo_km"] if fold_in else prev["odo_km"],
                 "trim_sec": 0.0,
-                "end_lost_km": round(max(cur["odo_km"] - prev["odo_km"], 0.0), 3),
+                "end_lost_km": 0.0 if fold_in else creep_km,
             }
             d = _drive_from(open_trip, close_at, capacity_kwh, open_trip.get("max_speed", 0.0),
                             _confirmed_idle_min(open_trip, prev["ts"]), idle_tracked=True,
@@ -878,6 +898,12 @@ def process_snapshot(
             if d:
                 drives.append(d)
             open_trip = _open_trip_at(cur, cur, prev)
+            # The gap's movement was accounted for above — folded into the trip
+            # that just closed, or recorded on it as end_lost_km. Either way it
+            # is not this trip's to lose, so say so explicitly rather than
+            # leaving the field unset (which would read as "uninstrumented")
+            # or reporting the same distance lost twice under two names.
+            open_trip["start_lost_km"] = 0.0
         elif is_driving(cur):
             open_trip["stop_at"] = None   # moving — cancel any pending stop point
         else:

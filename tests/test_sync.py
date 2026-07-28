@@ -1,5 +1,6 @@
 """Tests for the snapshot session state machine (app/sync.py)."""
-from app.sync import is_driving, process_snapshot, snapshot_from_vehicle_data
+from app.sync import (_energy_kwh, is_driving, process_snapshot,
+                      snapshot_from_vehicle_data)
 
 T0 = 1_760_000_000.0  # seconds epoch
 
@@ -632,15 +633,16 @@ def test_start_lost_km_is_never_null_on_a_reconstructed_drive():
     assert drives2[0]["start_lost_km"] == 0.0
 
 
-def test_end_lost_km_records_distance_dropped_after_the_closing_anchor():
-    """The blind-gap close ends a trip at the last seen reading and opens the
-    next at the current one, so odometer movement across the gap belongs to
-    neither. That is invisible in the data — the trip just reads short against
-    the car's own display while its energy looks right, because the same
-    truncation drops proportionally less energy than distance when the tail is
-    slow parking creep. Recording it makes the loss answerable.
+def test_blind_gap_close_folds_parking_creep_into_the_trip_that_ended():
+    """The blind-gap close used to end a trip at the last seen reading while
+    the next opened at the current one, so odometer movement across the gap
+    belonged to neither. The trip then read short against the car's own display
+    with its energy intact — a clipped tail, which looks nothing like a clipped
+    start (that loses both together).
 
-    Nothing is reassigned: distance_km stays exactly what the anchors measured.
+    The creep is now folded into the trip that ended. Only the odometer is
+    extended: duration and energy stay anchored at the last reading so the nap
+    itself — unbounded in length — contributes neither time nor standby drain.
     """
     # Drive, then a long quiet gap with a little creep, then driving again.
     d1 = snap(T0, 3000.0, 80, shift="D", speed=40.0, range_km=400.0)
@@ -652,11 +654,29 @@ def test_end_lost_km_records_distance_dropped_after_the_closing_anchor():
     _, _, trip, _ = step(d1, d2)
     drives, _, _, _ = step(d2, d3, trip)
     assert drives, "the first drive should close across the gap"
-    assert drives[0]["distance_km"] == 10.0        # anchors unchanged
-    assert drives[0]["end_lost_km"] == 0.3         # and the drop is recorded
+    assert drives[0]["distance_km"] == 10.3        # creep included
+    assert drives[0]["end_lost_km"] == 0.0         # nothing left behind
+    # Duration and energy stay at the last real reading — the nap contributes
+    # neither, which is the whole reason only the odometer is extended.
+    assert drives[0]["duration_min"] == 10.0
+    assert drives[0]["energy_used_kwh"] == round(_energy_kwh(d1, d2, 60.0), 2)
     # A real 0.0 rather than null: this path closes at a known reading, so
     # nothing was trimmed off the tail — distinct from never having considered.
     assert drives[0]["tail_trim_sec"] == 0.0
+
+    # A low implied speed over a long gap can still cover real distance, which
+    # would be an unobserved drive rather than creep. Past GAP_CREEP_MAX_KM it
+    # must NOT be folded in on a guess — record it and leave the trip alone.
+    b1 = snap(T0, 7000.0, 80, shift="D", speed=40.0, range_km=400.0)
+    b2 = snap(T0 + 600, 7010.0, 78, shift="D", speed=35.0, range_km=392.0)
+    # 4 h later, 12 km covered -> 3 km/h implied: still "parked" by rate, but
+    # far too much distance to call it pulling into a spot.
+    b3 = snap(T0 + 15000, 7022.0, 70, shift="D", speed=30.0, range_km=360.0)
+    _, _, trip_b, _ = step(b1, b2)
+    drives_b, _, _, _ = step(b2, b3, trip_b)
+    assert drives_b, "the first drive should still close"
+    assert drives_b[0]["distance_km"] == 10.0      # unchanged, not extended
+    assert drives_b[0]["end_lost_km"] == 12.0      # and the amount is recorded
 
     # The ordinary parked close tracks the odometer forward, so it loses
     # nothing and must say so rather than leaving the question open.
