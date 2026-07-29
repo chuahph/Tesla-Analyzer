@@ -264,6 +264,17 @@ header {
   display: flex; flex-direction: column; gap: 4px;
   font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: .4px;
 }
+/* Distance/Start SoC/Conditions stretch to fill whatever room the row's fixed-
+   width fields (Leaving, Wh/km) don't use, so each row runs edge to edge
+   instead of leaving dead space after the last field. min-width:0 lets a flex
+   item shrink below its content size when the row is tight, same as any other
+   flex-grow field — without it a long "Conditions" option can force overflow
+   instead of the box just narrowing. */
+.planner-inputs label.planner-grow { flex: 1 1 0; min-width: 0; }
+.planner-inputs label.planner-grow .planner-field { width: 100%; }
+.planner-inputs label.planner-grow .planner-field input {
+  flex: 1 1 auto; width: auto; min-width: 0;
+}
 .planner-field { display: inline-flex; align-items: baseline; gap: 4px; color: var(--text);
   font-size: 13px; text-transform: none; letter-spacing: 0; }
 .planner-inputs input, .planner-inputs select {
@@ -281,10 +292,12 @@ header {
   box-sizing: border-box; height: 44px;
 }
 .planner-inputs input { width: 78px; }
-/* A time input has to fit "HH:MM AM" plus the browser's own picker button —
-   the 78px that suits the numeric fields clips it to just the meridiem. */
+/* Matches Wh/km's width exactly (same 78px, not independently chosen) so the
+   two stay in sync if that field's own width ever changes. Narrower than a
+   full "HH:MM AM" needs, so the meridiem can clip — accepted deliberately for
+   the width match; revisit if that turns out to read badly in practice. */
 .planner-inputs input[type="time"] {
-  width: auto; min-width: 128px;
+  width: 78px;
   /* iOS Safari doesn't reliably respect height/box-sizing on a native time
      input — its own picker chrome can force a taller intrinsic size
      regardless of what the box model above says (confirmed live: this field

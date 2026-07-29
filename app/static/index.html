@@ -627,13 +627,21 @@
             <div id="plan-dest-note" class="plan-dest-note"></div>
           </div>
           <div class="planner-inputs">
-            <label>Distance
+            <label class="planner-grow">Distance
               <span class="planner-field"><input id="plan-km" type="number" min="0" step="1" inputmode="decimal" placeholder="e.g. 80"> km</span>
             </label>
-            <label>Start SoC
+            <label class="planner-grow">Start SoC
               <span class="planner-field"><input id="plan-soc" type="number" min="0" max="100" step="1" inputmode="decimal"> %</span>
             </label>
-            <label>Conditions
+            <!-- Departure time picks your own measured efficiency for the
+                 hours the drive would span, so peak-hour traffic is priced
+                 from real history rather than a guess. -->
+            <label>Leaving
+              <span class="planner-field"><input id="plan-depart" type="time"></span>
+            </label>
+          </div>
+          <div class="planner-inputs">
+            <label class="planner-grow">Conditions
               <select id="plan-cond">
                 <option value="1.0">Normal (your average)</option>
                 <option value="1.15">Highway / brisk (+15%)</option>
@@ -646,12 +654,6 @@
                  the history doesn't — a loaded car, a route that's all hills. -->
             <label>Wh/km
               <span class="planner-field"><input id="plan-wh" type="number" min="1" step="1" inputmode="decimal" placeholder="auto"></span>
-            </label>
-            <!-- Departure time picks your own measured efficiency for the
-                 hours the drive would span, so peak-hour traffic is priced
-                 from real history rather than a guess. -->
-            <label>Leaving
-              <span class="planner-field"><input id="plan-depart" type="time"></span>
             </label>
           </div>
           <div id="plan-result" class="planner-result"></div>
