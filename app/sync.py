@@ -58,6 +58,20 @@ STALE_ANCHOR_MIN = 15.0
 # parking creep or a poor-signal departure. Beyond this the movement is left
 # out and recorded rather than attributed on a guess.
 GAP_CREEP_MAX_KM = 1.0
+# The departure-side counterpart to GAP_CREEP_MAX_KM's is_driving(prev) case,
+# but deliberately more generous rather than reusing that same cap. The two
+# scenarios aren't the same size of problem: GAP_CREEP_MAX_KM elsewhere bounds
+# genuine parking creep, a few metres at most. Here the question is whether a
+# poor-signal departure could plausibly cover this much ground before network
+# returned — and confirmed live, a departure through a hillside stretch (poor
+# coverage from the driveway itself) lost 1.11 km before the first tracked
+# reading arrived, comfortably past 1.0 km. was_parked already establishes
+# the gap looks parked *on average* (see CITY_SPEED_KMH below) — that's the
+# rate check; this is a separate, purely-empirical judgement call on how much
+# absolute distance a real departure can plausibly hide, not a value derived
+# from anything stricter. Revisit if a genuinely separate short trip ever
+# turns out to be getting merged in under this.
+DEPARTURE_GAP_MAX_KM = 3.0
 # How long after a sustained-offline close (see routes.py's UNREACHABLE_CLOSE_MIN
 # — just 3 minutes, deliberately short so a genuinely-ended short trip closes
 # promptly) the next successful poll can still merge further movement into
@@ -1118,16 +1132,16 @@ def process_snapshot(
                 # leave prev mid-transition (a glitched shift/speed reading right
                 # as the car pulled off, not a real second trip) — reported live,
                 # good network at the previous trip's stop but none at this
-                # trip's own start, losing 0.566 km of a departure that was
-                # otherwise cleanly parked overnight. implied/moved above already
-                # prove the gap looks parked on average; bounding the recovered
-                # distance to GAP_CREEP_MAX_KM (the same trusted-small-amount cap
-                # used for the symmetric arrival-side fold-in) makes it safe to
-                # extend recovery to this case too — large enough to catch a
-                # missed departure, small enough that a genuine separate unclosed
-                # trip's worth of distance still gets left alone as start_lost_km
-                # rather than silently merged in.
-                if was_parked and (not is_driving(prev) or moved <= GAP_CREEP_MAX_KM):
+                # trip's own start, losing 0.566 km (and, separately, 1.11 km) of
+                # a departure that was otherwise cleanly parked overnight.
+                # implied/moved above already prove the gap looks parked on
+                # average; bounding the recovered distance to DEPARTURE_GAP_MAX_KM
+                # makes it safe to extend recovery to this case too — large
+                # enough to catch a missed departure through a real dead zone,
+                # small enough that a genuine separate unclosed trip's worth of
+                # distance still gets left alone as start_lost_km rather than
+                # silently merged in.
+                if was_parked and (not is_driving(prev) or moved <= DEPARTURE_GAP_MAX_KM):
                     # base=cur anchored the trip's own odo/SoC to the *first
                     # driving* reading, which already reflects the "catch-up"
                     # distance/energy this block just proved happened before

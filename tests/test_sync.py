@@ -590,9 +590,9 @@ def test_start_lost_km_records_distance_dropped_before_the_anchor():
 
     # A poor-signal departure: the previous reading itself already read as
     # driving (stale/glitched, not a confirmed park), then a long low-movement
-    # gap, then driving again for real. Bounded by GAP_CREEP_MAX_KM, so a small
-    # amount like this (1.0 km, right at the cap) still gets folded back in —
-    # nothing lost, distance and energy both intact.
+    # gap, then driving again for real. Bounded by DEPARTURE_GAP_MAX_KM, so a
+    # small amount like this (1.0 km) folds back in — nothing lost, distance
+    # and energy both intact.
     q1 = snap(T0, 1000.0, 80, shift="D", speed=30.0, range_km=400.0)
     q2 = snap(T0 + 1200, 1001.0, 79, shift="D", speed=40.0, range_km=396.0)
     q3 = snap(T0 + 1800, 1006.0, 78, shift="P", speed=0.0, locked=True, range_km=393.0)
@@ -601,19 +601,43 @@ def test_start_lost_km_records_distance_dropped_before_the_anchor():
     assert drives3[0]["start_lost_km"] == 0.0
     assert drives3[0]["distance_km"] == 6.0        # full q1->q3 delta, recovered
 
+    # The case that motivated raising the cap past GAP_CREEP_MAX_KM in the
+    # first place: confirmed live, a departure through a hillside stretch
+    # (poor coverage from the driveway itself, not just at the destination)
+    # lost 1.11 km before the first tracked reading arrived — comfortably past
+    # the old 1.0 km bound, still well short of a genuine second trip. Must
+    # now recover fully, matching the real production case rather than
+    # reporting a loss for a trip that was never actually split.
+    u1 = snap(T0, 3000.0, 80, shift="D", speed=20.0, range_km=400.0)
+    u2 = snap(T0 + 1200, 3001.11, 78, shift="D", speed=45.0, range_km=394.0)
+    u3 = snap(T0 + 2700, 3009.61, 76, shift="P", speed=0.0, locked=True, range_km=388.0)
+    _, _, trip_u, _ = step(u1, u2)
+    drives_u, _, _, _ = step(u2, u3, trip_u)
+    assert drives_u[0]["start_lost_km"] == 0.0
+    assert drives_u[0]["distance_km"] == 9.6        # full u1->u3 delta, recovered (rounded)
+
+    # Right at the new cap: still recovers (inclusive boundary).
+    v1 = snap(T0, 4000.0, 80, shift="D", speed=20.0, range_km=400.0)
+    v2 = snap(T0 + 1200, 4003.0, 78, shift="D", speed=45.0, range_km=394.0)
+    v3 = snap(T0 + 2700, 4009.0, 76, shift="P", speed=0.0, locked=True, range_km=388.0)
+    _, _, trip_v, _ = step(v1, v2)
+    drives_v, _, _, _ = step(v2, v3, trip_v)
+    assert drives_v[0]["start_lost_km"] == 0.0
+    assert drives_v[0]["distance_km"] == 9.0        # full v1->v3 delta, recovered
+
     # Past the cap, recovery must NOT fire — a large amount looking "parked" by
     # average speed alone is more likely a genuinely separate, still-open
     # earlier trip the gap never caught closing, not a missed departure.
     # Asserting the loss rather than papering over it: this is the case
     # start_lost_km exists to expose, not one this fix is meant to touch.
     r1 = snap(T0, 2000.0, 80, shift="D", speed=25.0, range_km=400.0)
-    r2 = snap(T0 + 7200, 2001.5, 78, shift="D", speed=35.0, range_km=396.0)
-    r3 = snap(T0 + 7800, 2007.5, 76, shift="P", speed=0.0, locked=True, range_km=392.0)
+    r2 = snap(T0 + 7200, 2003.5, 78, shift="D", speed=35.0, range_km=396.0)
+    r3 = snap(T0 + 7800, 2009.5, 76, shift="P", speed=0.0, locked=True, range_km=392.0)
     _, _, trip4, _ = step(r1, r2)
     drives4, _, _, _ = step(r2, r3, trip4)
-    assert drives4[0]["start_lost_km"] == 1.5
+    assert drives4[0]["start_lost_km"] == 3.5
     assert drives4[0]["distance_km"] == 6.0
-    assert drives4[0]["distance_km"] + drives4[0]["start_lost_km"] == 7.5
+    assert drives4[0]["distance_km"] + drives4[0]["start_lost_km"] == 9.5
 
 
 def test_start_lost_km_is_never_null_on_a_reconstructed_drive():
