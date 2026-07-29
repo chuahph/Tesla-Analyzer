@@ -1223,6 +1223,40 @@ def _process_vehicle(
     open_trip = _json.loads(state.get(session, tk) or "null")
     open_charge = _json.loads(state.get(session, ck) or "null")
 
+    # A trip closed on sustained "offline" (see LAST_SLEEP_CLOSE_KEY) may have
+    # been cut a little short by the same dead zone that caused the closure —
+    # this poll is the first fresh reading since, so it's the only chance to
+    # tell. A small further movement while the car now reads parked is the
+    # tail of that same arrival finally catching up; extend the drive that
+    # already closed rather than let process_snapshot() log it as an unrelated
+    # phantom trip. Bounded by GAP_CREEP_MAX_KM for the same reason as the
+    # symmetric fold-ins in process_snapshot() itself: a larger amount looks
+    # more like a genuine second drive the dead zone swallowed whole than a
+    # few final metres of parking.
+    sleep_close_key = state.scoped(state.LAST_SLEEP_CLOSE_KEY, vin)
+    sleep_close_raw = state.get(session, sleep_close_key)
+    if sleep_close_raw and prev:
+        marker = _json.loads(sleep_close_raw)
+        moved = snap["odo_km"] - marker["odo_km"]
+        if prev.get("odo_km") == marker["odo_km"] and 0 < moved:
+            closed_drive = session.get(Drive, marker["drive_id"])
+            if closed_drive and not sync_mod.is_driving(snap) and moved <= sync_mod.GAP_CREEP_MAX_KM:
+                closed_drive.distance_km = round(closed_drive.distance_km + moved, 1)
+                session.commit()
+                # Tell process_snapshot() this ground is already covered, so its
+                # own gap-reconstruction sees no movement here and stays quiet.
+                prev = {**prev, "odo_km": snap["odo_km"]}
+            elif closed_drive:
+                # Too large to safely attribute here (more likely a genuine
+                # second drive the dead zone swallowed whole — see
+                # process_snapshot()'s symmetric GAP_CREEP_MAX_KM check), or the
+                # car's already driving again by this reading. Either way the
+                # trip really did close short; say so rather than leaving the
+                # 0.0 recorded at close time stand uncorrected.
+                closed_drive.end_lost_km = round(moved, 3)
+                session.commit()
+        state.put(session, sleep_close_key, "")
+
     drives, charges, open_trip, open_charge = sync_mod.process_snapshot(
         prev, snap, open_trip, open_charge,
         capacity_kwh, settings.energy_price_per_kwh, settings.drive_min_km,
@@ -1554,9 +1588,23 @@ def sync_now(wake: bool = Query(False), session: Session = Depends(get_session))
                         d["start_coords"], d["end_coords"] = d["start_location"], d["end_location"]
                         d["start_location"], d["start_area"] = _place_and_area(d["start_location"], session)
                         d["end_location"], d["end_area"] = _place_and_area(d["end_location"], session)
-                        session.add(Drive(vehicle_id=vehicle_row.id, **d))
+                        drive_row = Drive(vehicle_id=vehicle_row.id, **d)
+                        session.add(drive_row)
                         session.commit()
                         total["drives"] += 1
+                        # "sustained offline" (unlike a direct "asleep" report) doesn't
+                        # guarantee the car had already stopped moving — a dead zone
+                        # right at arrival can close this trip a little short. Mark it
+                        # so the next successful poll can extend it instead of logging
+                        # the remainder as a disconnected phantom trip (see
+                        # state.LAST_SLEEP_CLOSE_KEY).
+                        state.put(
+                            session, state.scoped(state.LAST_SLEEP_CLOSE_KEY, vvin),
+                            _json.dumps({
+                                "drive_id": drive_row.id,
+                                "odo_km": _json.loads(last_raw)["odo_km"],
+                            }),
+                        )
                         notifications.fire_webhook(
                             "drive-complete", "Drive completed",
                             f"{vehicle_row.name}: {d['distance_km']:.1f} km, "

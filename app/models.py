@@ -112,13 +112,16 @@ class Drive(Base):
 
     # Odometer distance driven after this trip's closing anchor, and therefore
     # missing from its distance_km — the same silent loss as start_lost_km, at
-    # the other end. Both closes normally record 0.0: the parked one keeps
-    # extending its stop point while the odometer climbs, and the blind-gap one
-    # folds the gap's movement in as the tail of the drive that just ended.
-    # Nonzero only where that fold is refused — movement past
-    # GAP_CREEP_MAX_KM, which is too far to be pulling into a parking spot and
-    # is more likely a drive nobody observed, so it is reported rather than
-    # attributed on a guess. None means the trip predates this field.
+    # the other end. Three closes normally record 0.0: the parked one keeps
+    # extending its stop point while the odometer climbs; the blind-gap one
+    # folds the gap's movement in as the tail of the drive that just ended;
+    # and a sustained-offline sleep-close gets topped up by routes.py on the
+    # next successful poll if a small further movement turns up while the car
+    # now reads parked (see state.LAST_SLEEP_CLOSE_KEY). Nonzero where a fold
+    # is refused — movement past GAP_CREEP_MAX_KM, which is too far to be
+    # pulling into a parking spot and is more likely a drive nobody observed,
+    # so it is reported rather than attributed on a guess. None means the trip
+    # predates this field.
     end_lost_km: Mapped[float | None] = mapped_column(Float, nullable=True)
 
     # Manually-entered cost, used only when the charge-layer cost model
