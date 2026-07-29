@@ -1098,24 +1098,45 @@ def test_sustained_offline_close_is_topped_up_by_a_small_further_creep(monkeypat
         _reset_to_demo()
 
 
-class _OfflineThenParksTooFarAwayClient(_OfflineThenParksWithCreepClient):
-    """Same shape as the creep case, but the further movement (1.5 km) is past
-    GAP_CREEP_MAX_KM — more likely a second drive the dead zone swallowed
-    whole than a few final metres of parking, so it must NOT be folded in."""
+class _OfflineThenParksFarButSoonClient(_OfflineThenParksWithCreepClient):
+    """Same offline episode, but the car reconnects already 4 km further along
+    (not just a few metres of creep) — still within a plausible single-drive
+    span of the close, though. Regression case for a real production trip: a
+    drive through a hillside stretch with patchy coverage exceeded
+    UNREACHABLE_CLOSE_MIN (3 min) mid-drive, closing the trip early; the next
+    poll found the car already parked at the true destination, several
+    kilometres and several minutes further on, with no actual stop in
+    between. Distance alone must not be the only guard here."""
 
     def vehicle_data(self, vid):
         if type(self).step < 3:
             return super().vehicle_data(vid)
         d = super().vehicle_data(vid)
+        d["drive_state"]["timestamp"] = 1_760_500_900_000  # 10 min after the close
+        d["vehicle_state"]["odometer"] = ODO_KM_TO_MI(10016.0)  # 4 km further
+        return d
+
+
+class _OfflineThenParksFarAndLateClient(_OfflineThenParksWithCreepClient):
+    """Same 1.5 km further movement as the original too-large case, but the
+    reconnect takes well over an hour — long enough that a genuinely separate,
+    later drive is the more likely explanation, not a continuing one."""
+
+    def vehicle_data(self, vid):
+        if type(self).step < 3:
+            return super().vehicle_data(vid)
+        d = super().vehicle_data(vid)
+        d["drive_state"]["timestamp"] = 1_760_504_200_000  # 65 min after the close
         d["vehicle_state"]["odometer"] = ODO_KM_TO_MI(10013.5)
         return d
 
 
-def test_sustained_offline_close_records_a_too_large_gap_instead_of_folding_it(monkeypatch):
-    """The mirror case: past GAP_CREEP_MAX_KM, the closed trip's distance must
-    stay untouched (no guessed merge), but its end_lost_km should report the
-    real amount rather than the false 0.0 recorded at close time — the same
-    "measured, not assumed" discipline as every other fold-in built today."""
+def test_sustained_offline_close_merges_a_large_gap_if_reconnect_is_soon(monkeypatch):
+    """A dead zone can easily outlast UNREACHABLE_CLOSE_MIN (3 min) while the
+    car keeps driving — reconnecting to find it several km further along and
+    already parked is still the same drive continuing through the gap, not a
+    second one. Must merge regardless of distance, as long as the reconnect is
+    soon enough after the close to still plausibly be one trip."""
     import time as _time
 
     from app import services, state
@@ -1124,7 +1145,7 @@ def test_sustained_offline_close_records_a_too_large_gap_instead_of_folding_it(m
     settings = get_settings()
     old = settings.app_passcode
     settings.app_passcode = ""
-    _OfflineThenParksTooFarAwayClient.step = 0
+    _OfflineThenParksFarButSoonClient.step = 0
     try:
         monkeypatch.setattr("app.tesla_client.TeslaClient", _FakeClient)
         vin = "VINAAAAAAAAAAAAAA"
@@ -1132,12 +1153,12 @@ def test_sustained_offline_close_records_a_too_large_gap_instead_of_folding_it(m
             services.link_with_token(s, "tok")
             vid = s.query(Vehicle).filter(Vehicle.vin == vin).first().id
 
-        monkeypatch.setattr("app.tesla_client.TeslaClient", _OfflineThenParksTooFarAwayClient)
+        monkeypatch.setattr("app.tesla_client.TeslaClient", _OfflineThenParksFarButSoonClient)
         with TestClient(app) as client:
             client.post("/api/sync")
-            _OfflineThenParksTooFarAwayClient.step = 1
+            _OfflineThenParksFarButSoonClient.step = 1
             client.post("/api/sync")
-            _OfflineThenParksTooFarAwayClient.step = 2
+            _OfflineThenParksFarButSoonClient.step = 2
             client.post("/api/sync")                       # offline episode begins
 
         with SessionLocal() as s:
@@ -1150,9 +1171,64 @@ def test_sustained_offline_close_records_a_too_large_gap_instead_of_folding_it(m
         with SessionLocal() as s:
             closed_id = s.query(Drive).filter(Drive.vehicle_id == vid).first().id
 
-        _OfflineThenParksTooFarAwayClient.step = 3
+        _OfflineThenParksFarButSoonClient.step = 3
         with TestClient(app) as client:
-            resp = client.post("/api/sync")                # back online, parked, 1.5 km further
+            resp = client.post("/api/sync")                # back online, parked, 4 km further, 10 min later
+            assert resp.json()["logged"]["drives"] == 0      # merged, not a second trip
+
+        with SessionLocal() as s:
+            drives = s.query(Drive).filter(Drive.vehicle_id == vid).all()
+            assert len(drives) == 1
+            assert drives[0].id == closed_id
+            assert drives[0].distance_km == 16.0              # 12.0 + the further 4.0
+            assert state.get(s, state.scoped(state.LAST_SLEEP_CLOSE_KEY, vin)) == ""
+    finally:
+        settings.app_passcode = old
+        _reset_to_demo()
+
+
+def test_sustained_offline_close_records_a_gap_too_late_to_merge(monkeypatch):
+    """Past SLEEP_CLOSE_MERGE_MAX_MIN, a large further movement is more likely
+    a genuinely separate, later drive than a continuation — the closed trip's
+    distance must stay untouched, but end_lost_km should report the real
+    amount rather than the false 0.0 recorded at close time."""
+    import time as _time
+
+    from app import services, state
+    from app.models import Drive
+
+    settings = get_settings()
+    old = settings.app_passcode
+    settings.app_passcode = ""
+    _OfflineThenParksFarAndLateClient.step = 0
+    try:
+        monkeypatch.setattr("app.tesla_client.TeslaClient", _FakeClient)
+        vin = "VINAAAAAAAAAAAAAA"
+        with SessionLocal() as s:
+            services.link_with_token(s, "tok")
+            vid = s.query(Vehicle).filter(Vehicle.vin == vin).first().id
+
+        monkeypatch.setattr("app.tesla_client.TeslaClient", _OfflineThenParksFarAndLateClient)
+        with TestClient(app) as client:
+            client.post("/api/sync")
+            _OfflineThenParksFarAndLateClient.step = 1
+            client.post("/api/sync")
+            _OfflineThenParksFarAndLateClient.step = 2
+            client.post("/api/sync")                       # offline episode begins
+
+        with SessionLocal() as s:
+            state.put(s, state.scoped(state.UNREACHABLE_SINCE_KEY, vin),
+                      str(_time.time() - 4 * 60))
+
+        with TestClient(app) as client:
+            client.post("/api/sync")                       # sustained offline -> closes at 12.0 km
+
+        with SessionLocal() as s:
+            closed_id = s.query(Drive).filter(Drive.vehicle_id == vid).first().id
+
+        _OfflineThenParksFarAndLateClient.step = 3
+        with TestClient(app) as client:
+            resp = client.post("/api/sync")                # back online, parked, 1.5 km further, 65 min later
             assert resp.json()["logged"]["drives"] == 1      # the 1.5 km becomes its own drive
 
         with SessionLocal() as s:
@@ -1160,7 +1236,7 @@ def test_sustained_offline_close_records_a_too_large_gap_instead_of_folding_it(m
             assert len(drives) == 2
             closed = next(d for d in drives if d.id == closed_id)
             assert closed.distance_km == 12.0                # unchanged, not guessed at
-            assert closed.end_lost_km == 1.5                 # but the real amount is on record
+            assert closed.end_lost_km == 1.5                  # but the real amount is on record
             assert state.get(s, state.scoped(state.LAST_SLEEP_CLOSE_KEY, vin)) == ""
     finally:
         settings.app_passcode = old

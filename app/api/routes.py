@@ -1224,15 +1224,20 @@ def _process_vehicle(
     open_charge = _json.loads(state.get(session, ck) or "null")
 
     # A trip closed on sustained "offline" (see LAST_SLEEP_CLOSE_KEY) may have
-    # been cut a little short by the same dead zone that caused the closure —
-    # this poll is the first fresh reading since, so it's the only chance to
-    # tell. A small further movement while the car now reads parked is the
-    # tail of that same arrival finally catching up; extend the drive that
-    # already closed rather than let process_snapshot() log it as an unrelated
-    # phantom trip. Bounded by GAP_CREEP_MAX_KM for the same reason as the
-    # symmetric fold-ins in process_snapshot() itself: a larger amount looks
-    # more like a genuine second drive the dead zone swallowed whole than a
-    # few final metres of parking.
+    # been cut short by the same dead zone that caused the closure — this poll
+    # is the first fresh reading since, so it's the only chance to tell.
+    # Further movement while the car now reads parked belongs to that same
+    # drive continuing through the dead zone, not a new one; extend the trip
+    # that already closed rather than let process_snapshot() log the rest as
+    # an unrelated phantom trip. Two different guards for two different risks:
+    # a small amount (GAP_CREEP_MAX_KM) merges regardless of how long the
+    # reconnect took — that's just final parking creep. A larger amount still
+    # merges as long as it's within SLEEP_CLOSE_MERGE_MAX_MIN of the close —
+    # sustained "offline" is only 3 minutes, routinely exceeded by an active
+    # drive through a real dead zone, so a few km turning up minutes later is
+    # still more likely the same continuing drive than a genuine second one.
+    # Past both guards, or if the car's already driving again, don't guess —
+    # record the real amount instead of leaving the false 0.0 from close time.
     sleep_close_key = state.scoped(state.LAST_SLEEP_CLOSE_KEY, vin)
     sleep_close_raw = state.get(session, sleep_close_key)
     if sleep_close_raw and prev:
@@ -1240,19 +1245,20 @@ def _process_vehicle(
         moved = snap["odo_km"] - marker["odo_km"]
         if prev.get("odo_km") == marker["odo_km"] and 0 < moved:
             closed_drive = session.get(Drive, marker["drive_id"])
-            if closed_drive and not sync_mod.is_driving(snap) and moved <= sync_mod.GAP_CREEP_MAX_KM:
+            close_ts = marker.get("ts")
+            elapsed_min = (snap["ts"] - close_ts) / 60.0 if close_ts else float("inf")
+            fold_in = (
+                closed_drive is not None and not sync_mod.is_driving(snap)
+                and (moved <= sync_mod.GAP_CREEP_MAX_KM
+                     or elapsed_min <= sync_mod.SLEEP_CLOSE_MERGE_MAX_MIN)
+            )
+            if fold_in:
                 closed_drive.distance_km = round(closed_drive.distance_km + moved, 1)
                 session.commit()
                 # Tell process_snapshot() this ground is already covered, so its
                 # own gap-reconstruction sees no movement here and stays quiet.
                 prev = {**prev, "odo_km": snap["odo_km"]}
             elif closed_drive:
-                # Too large to safely attribute here (more likely a genuine
-                # second drive the dead zone swallowed whole — see
-                # process_snapshot()'s symmetric GAP_CREEP_MAX_KM check), or the
-                # car's already driving again by this reading. Either way the
-                # trip really did close short; say so rather than leaving the
-                # 0.0 recorded at close time stand uncorrected.
                 closed_drive.end_lost_km = round(moved, 3)
                 session.commit()
         state.put(session, sleep_close_key, "")
@@ -1603,6 +1609,7 @@ def sync_now(wake: bool = Query(False), session: Session = Depends(get_session))
                             _json.dumps({
                                 "drive_id": drive_row.id,
                                 "odo_km": _json.loads(last_raw)["odo_km"],
+                                "ts": _json.loads(last_raw)["ts"],
                             }),
                         )
                         notifications.fire_webhook(

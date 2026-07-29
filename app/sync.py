@@ -58,6 +58,24 @@ STALE_ANCHOR_MIN = 15.0
 # parking creep or a poor-signal departure. Beyond this the movement is left
 # out and recorded rather than attributed on a guess.
 GAP_CREEP_MAX_KM = 1.0
+# How long after a sustained-offline close (see routes.py's UNREACHABLE_CLOSE_MIN
+# — just 3 minutes, deliberately short so a genuinely-ended short trip closes
+# promptly) the next successful poll can still merge further movement into
+# that trip on distance alone, no matter how large. 3 minutes offline is
+# routinely exceeded by an active drive through a real dead zone — a long
+# tunnel, a hilly or rural stretch with patchy coverage — not just a car that
+# stopped: confirmed live, a single trip through a hillside area came back
+# online already 4 km and several minutes further along, all one continuous
+# drive with no actual stop in between. GAP_CREEP_MAX_KM's distance cap is the
+# right guard against merging a genuine second, later drive when nothing else
+# distinguishes the two; it is the wrong guard here, where the close itself is
+# already known to be unreliable. Elapsed time is the more honest signal for
+# *this* mechanism: within a plausible single-drive span of the close, still
+# finding the car parked (not mid-departure) is strong enough evidence of
+# continuity on its own. Past this window it reverts to the same distance cap
+# as every other fold-in, since by then a genuinely separate later trip is the
+# more likely explanation.
+SLEEP_CLOSE_MERGE_MAX_MIN = 60.0
 MYT = timezone(timedelta(hours=8))  # Malaysia has no DST
 
 
