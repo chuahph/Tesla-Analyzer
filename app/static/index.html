@@ -627,8 +627,14 @@
             <div id="plan-dest-note" class="plan-dest-note"></div>
           </div>
           <div class="planner-inputs">
+            <!-- width set inline, not just via style.css: two rounds of an
+                 external .planner-inputs input{width:78px} rule failed to
+                 hold this at the same width as plan-depart on real iOS
+                 Safari, despite matching in Chromium and no conflicting rule
+                 anywhere in the stylesheet — an inline style leaves no room
+                 for whatever flex-basis auto-sizing quirk was overriding it. -->
             <label>Distance
-              <span class="planner-field"><input id="plan-km" type="number" min="0" step="1" inputmode="decimal" placeholder="e.g. 80"> km</span>
+              <span class="planner-field"><input id="plan-km" type="number" min="0" step="1" inputmode="decimal" placeholder="e.g. 80" style="width:78px"> km</span>
             </label>
             <label class="planner-grow">Start SoC
               <span class="planner-field"><input id="plan-soc" type="number" min="0" max="100" step="1" inputmode="decimal"> %</span>
@@ -637,7 +643,7 @@
                  hours the drive would span, so peak-hour traffic is priced
                  from real history rather than a guess. -->
             <label>Leaving
-              <span class="planner-field"><input id="plan-depart" type="time"></span>
+              <span class="planner-field"><input id="plan-depart" type="time" style="width:78px"></span>
             </label>
           </div>
           <div class="planner-inputs">
@@ -653,7 +659,7 @@
                  departure-hour average below). Set it when you know something
                  the history doesn't — a loaded car, a route that's all hills. -->
             <label>Wh/km
-              <span class="planner-field"><input id="plan-wh" type="number" min="1" step="1" inputmode="decimal" placeholder="auto"></span>
+              <span class="planner-field"><input id="plan-wh" type="number" min="1" step="1" inputmode="decimal" placeholder="auto" style="width:78px"></span>
             </label>
           </div>
           <div id="plan-result" class="planner-result"></div>
