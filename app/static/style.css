@@ -269,6 +269,16 @@ header {
 .planner-inputs input, .planner-inputs select {
   background: var(--panel-2); border: 1px solid var(--border); color: var(--text);
   border-radius: 8px; padding: 7px 9px; font-size: 14px; font-family: inherit;
+  /* Same padding/font-size doesn't guarantee the same rendered height across
+     control types — a native time picker's internal chrome (segments, the
+     picker icon) can make it taller than a plain input or select even when
+     every other box-model property matches. Fixing the height explicitly
+     (border-box, so padding/border sit inside it rather than adding to it)
+     is what actually keeps every field in the row the same height. 44px, not
+     something smaller, so it lines up with select's own global 44px touch
+     target (below, a min-height, always wins over a smaller height here)
+     instead of fighting it. */
+  box-sizing: border-box; height: 44px;
 }
 .planner-inputs input { width: 78px; }
 /* A time input has to fit "HH:MM AM" plus the browser's own picker button —
