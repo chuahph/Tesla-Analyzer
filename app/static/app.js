@@ -2140,6 +2140,16 @@ function renderPlanner(d) {
   // Can't plan without a personal efficiency basis and a pack size.
   if (!whPerKm || !capacityKwh) { card.style.display = "none"; return; }
   card.style.display = "";
+  // Safari has a known bug class where a nested flex layout inside a subtree
+  // that was display:none at page load can render with stale/incorrect
+  // sizing the first time it's revealed (confirmed live: the planner's
+  // Distance field rendered far wider than Leaving despite matching CSS and
+  // an inline width — reproducible every time on iOS Safari, never in
+  // Chromium, which doesn't share this quirk). Reading offsetHeight forces a
+  // synchronous reflow right after the display change, which is the standard
+  // fix — it makes Safari recompute layout against the now-visible DOM
+  // instead of carrying over whatever it cached while the card was hidden.
+  void card.offsetHeight;
   const bal = d.battery_balance || {};
   const lastCharge = d.last_charge || {};
   const costPerKwh = lastCharge.rate_per_kwh
