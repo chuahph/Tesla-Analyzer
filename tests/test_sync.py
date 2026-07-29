@@ -588,21 +588,32 @@ def test_start_lost_km_records_distance_dropped_before_the_anchor():
     drives2, _, _, _ = step(p2, p3, trip2)
     assert drives2[0]["start_lost_km"] == 0.0
 
-    # And the case this field exists to expose: the departure recovery is
-    # skipped when the previous reading itself read as driving (a trip closed
-    # on sleep, then a long low-movement gap, then driving again), so the
-    # anchor sits past real movement and the trip genuinely reads short.
-    # Asserting the loss rather than a fixed distance — the point is that it
-    # is now *visible*, not that this path is currently correct.
+    # A poor-signal departure: the previous reading itself already read as
+    # driving (stale/glitched, not a confirmed park), then a long low-movement
+    # gap, then driving again for real. Bounded by GAP_CREEP_MAX_KM, so a small
+    # amount like this (1.0 km, right at the cap) still gets folded back in —
+    # nothing lost, distance and energy both intact.
     q1 = snap(T0, 1000.0, 80, shift="D", speed=30.0, range_km=400.0)
     q2 = snap(T0 + 1200, 1001.0, 79, shift="D", speed=40.0, range_km=396.0)
     q3 = snap(T0 + 1800, 1006.0, 78, shift="P", speed=0.0, locked=True, range_km=393.0)
     _, _, trip3, _ = step(q1, q2)
     drives3, _, _, _ = step(q2, q3, trip3)
-    assert drives3[0]["start_lost_km"] == 1.0
-    # 1 km short of the true q1->q3 odometer delta, and the field says so.
-    assert drives3[0]["distance_km"] == 5.0
-    assert drives3[0]["distance_km"] + drives3[0]["start_lost_km"] == 6.0
+    assert drives3[0]["start_lost_km"] == 0.0
+    assert drives3[0]["distance_km"] == 6.0        # full q1->q3 delta, recovered
+
+    # Past the cap, recovery must NOT fire — a large amount looking "parked" by
+    # average speed alone is more likely a genuinely separate, still-open
+    # earlier trip the gap never caught closing, not a missed departure.
+    # Asserting the loss rather than papering over it: this is the case
+    # start_lost_km exists to expose, not one this fix is meant to touch.
+    r1 = snap(T0, 2000.0, 80, shift="D", speed=25.0, range_km=400.0)
+    r2 = snap(T0 + 7200, 2001.5, 78, shift="D", speed=35.0, range_km=396.0)
+    r3 = snap(T0 + 7800, 2007.5, 76, shift="P", speed=0.0, locked=True, range_km=392.0)
+    _, _, trip4, _ = step(r1, r2)
+    drives4, _, _, _ = step(r2, r3, trip4)
+    assert drives4[0]["start_lost_km"] == 1.5
+    assert drives4[0]["distance_km"] == 6.0
+    assert drives4[0]["distance_km"] + drives4[0]["start_lost_km"] == 7.5
 
 
 def test_start_lost_km_is_never_null_on_a_reconstructed_drive():

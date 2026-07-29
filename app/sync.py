@@ -48,12 +48,15 @@ PARK_SPEED_KMH = 15.0
 # parked/asleep, not driving), a new drive must NOT be anchored to it — otherwise
 # the overnight idle time and its vampire drain get counted into the trip.
 STALE_ANCHOR_MIN = 15.0
-# Most odometer movement that a blind gap's tail is allowed to fold back into
-# the trip that just ended. PARK_SPEED_KMH bounds the gap's *rate*, not its
-# total: a long enough gap can stay under it and still cover real distance,
-# which would be an unobserved drive rather than the last few metres of pulling
-# into a parking spot. Beyond this the movement is left out and recorded
-# (Drive.end_lost_km) rather than attributed on a guess.
+# Most odometer movement a blind gap is allowed to fold into an adjacent trip
+# rather than being left as an unattributed loss — shared by both ends: a blind
+# gap's tail folding into the trip that just ended (Drive.end_lost_km), and an
+# is_driving(prev) departure folding into the trip that's about to start
+# (Drive.start_lost_km). PARK_SPEED_KMH/CITY_SPEED_KMH bound the gap's *rate*,
+# not its total: a long enough gap can stay under those and still cover real
+# distance, which would be an unobserved drive rather than a few metres of
+# parking creep or a poor-signal departure. Beyond this the movement is left
+# out and recorded rather than attributed on a guess.
 GAP_CREEP_MAX_KM = 1.0
 MYT = timezone(timedelta(hours=8))  # Malaysia has no DST
 
@@ -1083,7 +1086,24 @@ def process_snapshot(
             if was_parked:
                 min_gap = 0.0
             if gap_min >= min_gap and implied < CITY_SPEED_KMH and moved >= drive_min_km:
-                if was_parked and not is_driving(prev):
+                # is_driving(prev) blocks recovery below because prev isn't a
+                # *confirmed* park (shift P, zero speed) — it could be a
+                # genuinely separate, still-open earlier trip the gap simply
+                # never caught closing, and re-anchoring onto that would wrongly
+                # merge the two. But a poor-signal departure can just as easily
+                # leave prev mid-transition (a glitched shift/speed reading right
+                # as the car pulled off, not a real second trip) — reported live,
+                # good network at the previous trip's stop but none at this
+                # trip's own start, losing 0.566 km of a departure that was
+                # otherwise cleanly parked overnight. implied/moved above already
+                # prove the gap looks parked on average; bounding the recovered
+                # distance to GAP_CREEP_MAX_KM (the same trusted-small-amount cap
+                # used for the symmetric arrival-side fold-in) makes it safe to
+                # extend recovery to this case too — large enough to catch a
+                # missed departure, small enough that a genuine separate unclosed
+                # trip's worth of distance still gets left alone as start_lost_km
+                # rather than silently merged in.
+                if was_parked and (not is_driving(prev) or moved <= GAP_CREEP_MAX_KM):
                     # base=cur anchored the trip's own odo/SoC to the *first
                     # driving* reading, which already reflects the "catch-up"
                     # distance/energy this block just proved happened before
