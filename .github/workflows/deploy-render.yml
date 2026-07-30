@@ -1,0 +1,87 @@
+name: Deploy to Render
+
+# Pushes to the default branch trigger a Render deploy by calling that
+# service's Deploy Hook directly, instead of relying on Render noticing the
+# push itself.
+#
+# Why bother, when Render has its own auto-deploy? Because that path has
+# several ways to go quietly dead, and every one of them fails silently — a
+# push lands on GitHub, nothing builds, and neither side reports an error:
+#   * Auto-Deploy switched to "No" in the service's Build & Deploy settings.
+#     render.yaml has no autoDeploy key, so it inherits Render's default of
+#     true — but a blueprint is only read when it's applied, so a dashboard
+#     change made afterwards wins and no later push will reset it.
+#   * Render's GitHub App losing access to the repo (a permissions change, a
+#     re-authorisation that didn't finish). The connection looks fine in the
+#     Render UI while no hook ever arrives.
+#   * The free plan's build/instance allowance running out for the month.
+#
+# Calling the hook from here removes all three from the path: the only thing
+# that has to work is a POST from Actions, and when that fails it fails
+# loudly, in the Actions tab, against the commit that caused it.
+#
+# Setup — one repository secret (Settings → Secrets and variables → Actions →
+# New repository secret):
+#   RENDER_DEPLOY_HOOK_URL   Render → your service → Settings → Deploy Hook
+#
+# That URL already carries its own key, so treat it as a credential: anyone
+# holding it can trigger a deploy. It is only ever read from the secret, never
+# echoed — the step below prints the HTTP status, not the URL.
+#
+# Without the secret this job does nothing and passes, so it stays safe in a
+# fork or before setup. Leaving Render's own auto-deploy ON as well is fine:
+# a duplicate hook for a commit Render already built is a no-op deploy.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch: {}   # manual "Run workflow" button, e.g. to redeploy unchanged code
+
+# One deploy at a time. Not cancel-in-progress: once the hook has been POSTed
+# the build is Render's, and cancelling this workflow wouldn't stop it — so
+# queueing keeps the Actions log an honest record of what was actually asked
+# for, rather than showing a cancelled run for a deploy that did happen.
+concurrency:
+  group: deploy-render
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger the Render deploy hook
+        env:
+          HOOK_URL: ${{ secrets.RENDER_DEPLOY_HOOK_URL }}
+        run: |
+          set -uo pipefail
+          if [ -z "${HOOK_URL}" ]; then
+            echo "RENDER_DEPLOY_HOOK_URL is not configured — nothing to do."
+            echo "Add it as a repository secret to enable automatic deploys."
+            exit 0
+          fi
+          # Retry only the transport, not the outcome: a 4xx means the hook
+          # itself is wrong (revoked, wrong service) and retrying just repeats
+          # it, so only a connection failure or a 5xx is worth another go.
+          for attempt in 1 2 3; do
+            code=$(curl -sS -X POST --max-time 30 -o /tmp/hook.out -w '%{http_code}' \
+              "${HOOK_URL}") && rc=0 || rc=$?
+            if [ "$rc" -ne 0 ]; then
+              echo "attempt ${attempt}: curl failed (exit ${rc})"
+            elif [ "${code}" -ge 200 ] && [ "${code}" -lt 300 ]; then
+              echo "Deploy requested for ${GITHUB_SHA::7} (HTTP ${code})."
+              cat /tmp/hook.out
+              exit 0
+            elif [ "${code}" -ge 400 ] && [ "${code}" -lt 500 ]; then
+              # Terminal: the hook is bad, so fail now rather than after
+              # two more identical rejections.
+              echo "Deploy hook rejected the request (HTTP ${code})." >&2
+              cat /tmp/hook.out >&2
+              echo "Check the Deploy Hook URL in Render → service → Settings." >&2
+              exit 1
+            else
+              echo "attempt ${attempt}: HTTP ${code}"
+            fi
+            [ "${attempt}" -lt 3 ] && sleep $((attempt * 5))
+          done
+          echo "Could not reach the Render deploy hook after 3 attempts." >&2
+          exit 1

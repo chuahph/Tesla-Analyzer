@@ -316,6 +316,47 @@ It will work, just with the delay/reliability caveat above.
 
 ---
 
+## Deploying on every push (Render deploy hook)
+
+Render can watch the repo and rebuild on its own, and usually does. When it
+stops, it stops *silently* — the push lands on GitHub, nothing builds, and
+neither side reports an error. The usual causes are Auto-Deploy having been
+switched off in the service's Build & Deploy settings, Render's GitHub App
+losing access to the repo, or the free plan's monthly build allowance running
+out.
+
+`.github/workflows/deploy-render.yml` removes that uncertainty by calling the
+service's **Deploy Hook** itself on every push to `main`. To enable it, add one
+repository secret (Settings → Secrets and variables → Actions → New repository
+secret):
+
+| Secret | Where to get it |
+| --- | --- |
+| `RENDER_DEPLOY_HOOK_URL` | Render → your service → Settings → **Deploy Hook** |
+
+That URL carries its own key, so treat it like a password — anyone with it can
+trigger a deploy. The workflow only ever reads it from the secret and prints
+the HTTP status, never the URL.
+
+Notes:
+
+- **Without the secret the job does nothing and passes**, so it's safe in a
+  fork or before you've set it up.
+- **Leave Render's own auto-deploy on as well if you like.** A hook for a
+  commit Render already built is a no-op, and the redundancy is the point.
+- A failure now shows up **in the Actions tab against the commit that caused
+  it**, instead of as a dashboard that quietly never updates. A rejected hook
+  (4xx — revoked or wrong service) fails immediately rather than retrying;
+  only connection errors and 5xx are retried.
+- The **Run workflow** button on the Actions tab redeploys the current commit
+  without needing a code change.
+
+> Not sure whether a deploy landed? The dashboard footer shows the deployed
+> commit hash — Render sets `RENDER_GIT_COMMIT` at build time, so it reflects
+> what is actually running, not what is on GitHub.
+
+---
+
 ## Automated backups
 
 `GET /api/backup` builds a full-history export (the same ZIP as **⬇ Export
