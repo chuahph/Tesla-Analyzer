@@ -1634,10 +1634,21 @@ def test_confirmed_park_then_short_gap_does_not_start_new_trip_at_zero_gap():
 def test_stale_prev_does_not_backdate_open_trip_start():
     """A drive seen right after an overnight park must anchor its *clock* to
     now, not to last night's stale snapshot (which would add hours of idle
-    time to the duration) — but the small real distance/energy covered
-    before this first driving reading arrived (a measured odometer delta,
-    not a guess) still belongs to the trip, however short: the 60s "worth
-    it" floor gates the *timestamp* estimate only, not this recovery."""
+    time to the duration) — but the small real distance covered before this
+    first driving reading arrived (a measured odometer delta, not a guess)
+    still belongs to the trip, however short: the 60s "worth it" floor gates
+    the *timestamp* estimate only, not the distance recovery.
+
+    The energy baseline is the one thing that must NOT come back with it.
+    Odometers only count forward, so prev's reading stays a valid distance
+    anchor however stale it is; SoC and range fall while the car merely sits,
+    so last night's pair would charge the whole night's vampire drain to
+    whatever few hundred metres the car moved before it was seen. Here that
+    would be 7 km of rated range against 0.3 km driven — an implied
+    ~2800 Wh/km, well past MAX_PLAUSIBLE_WH_PER_KM, so the trip keeps cur's
+    own SoC/range and measures only the driving (regression test for trip
+    309: a 2.5 h sleep inflated a 5.9 km drive's energy and Wh/km by ~17%,
+    while the parked gap before it reported an impossible 0.0 kWh)."""
     prev = snap(T0, 10_000.0, 80, range_km=400.0)               # parked last night
     # 10 hours later the car is seen driving, having covered just 0.3 km --
     # too little for the timestamp estimate to clear its own 60s floor.
@@ -1645,8 +1656,28 @@ def test_stale_prev_does_not_backdate_open_trip_start():
     _, _, trip, _ = step(prev, cur)
     assert trip is not None
     assert trip["odo_km"] == prev["odo_km"]      # the 0.3 km recovered, not dropped
-    assert trip["soc"] == prev["soc"]
+    assert trip["soc"] == cur["soc"]             # but NOT the night's drain
+    assert trip["range_km"] == cur["range_km"]   # and the pair stays consistent
     assert trip["ts"] == cur["ts"]               # start time is now, not 10h ago
+
+
+def test_short_poor_signal_departure_still_recovers_its_energy():
+    """The counterpart to the test above: MAX_PLAUSIBLE_WH_PER_KM must not
+    have thrown out the case the recovery exists for. A genuine poor-signal
+    departure covers real ground at a real efficiency, so pulling the
+    baseline back implies a normal Wh/km and the trip keeps both the
+    distance and the energy — only an implausible figure (standby drain
+    masquerading as driving) is refused."""
+    prev = snap(T0, 5_000.0, 70, range_km=350.0)                # parked, good reading
+    # 20-min dead zone off the driveway: 1.5 km covered, 1.5 km of rated
+    # range gone with it -> ~233 Wh/km at the 60 kWh test capacity, an
+    # entirely ordinary departure figure.
+    cur = snap(T0 + 1200, 5_001.5, 70, shift="D", speed=35, range_km=348.5)
+    _, _, trip, _ = step(prev, cur)
+    assert trip is not None
+    assert trip["odo_km"] == prev["odo_km"]      # distance recovered
+    assert trip["soc"] == prev["soc"]            # and so is the energy baseline
+    assert trip["range_km"] == prev["range_km"]
 
 
 def test_stale_gap_fallback_reestimates_timing_and_energy():

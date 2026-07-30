@@ -72,6 +72,20 @@ GAP_CREEP_MAX_KM = 1.0
 # from anything stricter. Revisit if a genuinely separate short trip ever
 # turns out to be getting merged in under this.
 DEPARTURE_GAP_MAX_KM = 3.0
+# Mirror of MIN_PLAUSIBLE_WH_PER_KM below, used to decide whether prev is still
+# a usable SoC/range baseline for the departure recovery above. The recovered
+# *distance* is a measured odometer fact at any gap length, but SoC and range
+# also fall while the car merely sits, so prev's pair is only the trip's true
+# starting energy if the gap was mostly departure rather than mostly parking.
+# Gap length alone doesn't separate those (a genuine poor-signal departure can
+# span 20+ minutes), but the implied efficiency of the recovered stretch does:
+# divide the energy that pulling the baseline back would add by the distance it
+# would add, and standby drain masquerading as driving shows up immediately as
+# an impossible Wh/km. Confirmed live, trip 309: a 2.5 h sleep before a 5.9 km
+# drive offered 0.22 kWh against 0.2 km of parking shuffle — ~1100 Wh/km, where
+# a real (if slow, climate-loaded) departure runs a few hundred at most. Above
+# this the trip keeps cur's own SoC/range and measures only the driving.
+MAX_PLAUSIBLE_WH_PER_KM = 600.0
 # How long after a sustained-offline close (see routes.py's UNREACHABLE_CLOSE_MIN
 # — just 3 minutes, deliberately short so a genuinely-ended short trip closes
 # promptly) the next successful poll can still merge further movement into
@@ -1124,6 +1138,14 @@ def process_snapshot(
             if was_parked:
                 min_gap = 0.0
             if gap_min >= min_gap and implied < CITY_SPEED_KMH and moved >= drive_min_km:
+                # What pulling the energy baseline back to prev would add to
+                # the trip, per km of the distance it would add with it — the
+                # test for whether prev is still a departure reading or has
+                # aged into a parked one (see MAX_PLAUSIBLE_WH_PER_KM).
+                recovered_wh_per_km = (
+                    _energy_kwh(prev, cur, capacity_kwh) * 1000.0 / moved
+                    if moved > 0 else float("inf")
+                )
                 # is_driving(prev) blocks recovery below because prev isn't a
                 # *confirmed* park (shift P, zero speed) — it could be a
                 # genuinely separate, still-open earlier trip the gap simply
@@ -1172,9 +1194,37 @@ def process_snapshot(
                     # car's own trip meter: a 4.1 km drive logged as 3.6 km,
                     # its kWh short by the same stretch).
                     open_trip["odo_km"] = prev["odo_km"]
-                    open_trip["soc"] = prev["soc"]
-                    open_trip["range_km"] = prev.get("range_km")
                     open_trip["start_lost_km"] = 0.0  # pulled back in, nothing lost
+                    # The odometer above is safe to pull back unconditionally —
+                    # it only ever counts forward, so it carries no standby
+                    # drain and prev's reading is a valid distance baseline no
+                    # matter how stale it is. SoC/range are not: they fall while
+                    # the car merely sits, so a prev from before a real park
+                    # hands the trip that park's vampire drain as if the drive
+                    # had spent it (confirmed live, trip 309: a 2.5 h sleep
+                    # before a 5.9 km drive read +17% on energy and Wh/km, with
+                    # the parked gap before it reporting an impossible 0.0 kWh —
+                    # vampire_drain measures a gap as the previous trip's
+                    # end_soc minus this trip's start_soc, so moving start_soc
+                    # back to before the park makes the drain vanish from the
+                    # gap and reappear inside the drive). was_parked sets
+                    # min_gap to 0.0 above, so nothing else bounds how stale
+                    # prev may be here; the implied-efficiency check is that
+                    # bound. Past it the trip keeps cur's own SoC/range and
+                    # measures only the driving, omitting the recovered
+                    # stretch's own small energy — the same bounded trade the
+                    # blind-gap tail fold-in makes for the same reason (see
+                    # GAP_CREEP_MAX_KM's fold above), and the safer direction
+                    # of the two: a few hundred Wh left out of one trip beats
+                    # hours of standby drain moved into it.
+                    #
+                    # Both must move together or not at all: _energy_kwh
+                    # projects the full pack from the range/SoC pair, so a
+                    # mismatched pair (prev's soc against cur's range) is worse
+                    # than either end used consistently.
+                    if recovered_wh_per_km <= MAX_PLAUSIBLE_WH_PER_KM:
+                        open_trip["soc"] = prev["soc"]
+                        open_trip["range_km"] = prev.get("range_km")
                 # Same pace model as the arrival-side estimate: ``cur`` is the
                 # first driving reading, so its instantaneous speed is real
                 # evidence of the pace, not just an assumption — prefer it
