@@ -1254,6 +1254,36 @@ def _process_vehicle(
             )
             if fold_in:
                 closed_drive.distance_km = round(closed_drive.distance_km + moved, 1)
+                # end_time was anchored to the marker's own timestamp — the
+                # last reading *before* the dead zone, same stale anchor
+                # distance had. Folding in the distance without also moving
+                # the clock forward would leave duration understated by
+                # however long the dead zone lasted (confirmed live: a trip
+                # read 2 minutes short with distance/energy both otherwise
+                # clean). No pace evidence is available here — the car reads
+                # parked now, so its current speed says nothing about how
+                # fast it covered the extra distance — so this uses the same
+                # CITY_SPEED_KMH floor the departure-side estimate falls back
+                # on when it's equally in the dark. Clamped to snap's own
+                # timestamp so the estimate can only move the stop closer to
+                # the truth, never past the moment it was actually observed.
+                # close_ts is only missing for a marker written before it was
+                # added to LAST_SLEEP_CLOSE_KEY — skip the timestamp estimate
+                # then rather than guess from nothing; distance still gets
+                # the fold-in above regardless.
+                if close_ts:
+                    travel_sec = moved / sync_mod.CITY_SPEED_KMH * 3600.0
+                    est_end_ts = min(close_ts + travel_sec, snap["ts"])
+                    closed_drive.end_time = sync_mod._dt(est_end_ts)
+                    # start_time is naive but represents MYT wall-clock (see
+                    # sync._dt) — re-attaching that tzinfo before .timestamp()
+                    # is what makes this epoch math correct regardless of the
+                    # server's own system timezone.
+                    start_ts = closed_drive.start_time.replace(tzinfo=sync_mod.MYT).timestamp()
+                    closed_drive.duration_min = round((est_end_ts - start_ts) / 60.0, 1)
+                    if closed_drive.duration_min > 0:
+                        closed_drive.avg_speed_kmh = round(
+                            closed_drive.distance_km / (closed_drive.duration_min / 60.0), 1)
                 session.commit()
                 # Tell process_snapshot() this ground is already covered, so its
                 # own gap-reconstruction sees no movement here and stays quiet.

@@ -1081,6 +1081,7 @@ def test_sustained_offline_close_is_topped_up_by_a_small_further_creep(monkeypat
             assert len(drives) == 1
             closed_id = drives[0].id
             assert drives[0].distance_km == 12.0
+            duration_before = drives[0].duration_min      # 5.0: step0 -> step1, 300s
 
         _OfflineThenParksWithCreepClient.step = 3
         with TestClient(app) as client:
@@ -1092,6 +1093,15 @@ def test_sustained_offline_close_is_topped_up_by_a_small_further_creep(monkeypat
             assert len(drives) == 1                          # still just the one trip
             assert drives[0].id == closed_id
             assert drives[0].distance_km == 12.3              # extended by the creep
+            # end_time was anchored to the marker's own stale timestamp, same
+            # as distance was — topping up distance without also moving the
+            # clock would leave duration understated by however long the dead
+            # zone lasted. 0.3 km at the CITY_SPEED_KMH floor (30 km/h) is 36s
+            # of estimated travel, so duration grows by 0.6 min, not to the
+            # full 15 min gap until reconnect (that would double-count the
+            # nap on top of the dead zone).
+            assert drives[0].duration_min == round(duration_before + 0.6, 1)
+            assert drives[0].avg_speed_kmh == round(12.3 / (drives[0].duration_min / 60.0), 1)
             assert state.get(s, state.scoped(state.LAST_SLEEP_CLOSE_KEY, vin)) == ""  # marker consumed
     finally:
         settings.app_passcode = old
