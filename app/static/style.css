@@ -277,6 +277,15 @@ header {
 }
 .planner-field { display: inline-flex; align-items: baseline; gap: 4px; color: var(--text);
   font-size: 13px; text-transform: none; letter-spacing: 0; }
+/* The unit that trails an input ("km", "%") gets a fixed track rather than
+   sizing to its own text. Distance and Start SoC are equal-width flex items,
+   but the input inside each only gets what the unit beside it leaves over —
+   so a two-letter "km" made Distance's *box* 5.7px narrower than Start SoC's
+   even though both labels measured identically (reproduced in Chromium at
+   every viewport width; it was never the Safari-only bug it looked like,
+   because every fix before this measured the label rather than the box).
+   Wide enough for the longest unit in use; keep it ahead of any new one. */
+.planner-inputs .planner-unit { flex: 0 0 20px; }
 .planner-inputs input, .planner-inputs select {
   background: var(--panel-2); border: 1px solid var(--border); color: var(--text);
   border-radius: 8px; padding: 7px 9px; font-size: 14px; font-family: inherit;

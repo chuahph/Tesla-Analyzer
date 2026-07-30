@@ -1197,11 +1197,103 @@ def test_sustained_offline_close_merges_a_large_gap_if_reconnect_is_soon(monkeyp
         _reset_to_demo()
 
 
+class _OfflineThenParksWithConsistentEnergyClient(_OfflineThenParksWithCreepClient):
+    """Reconnects 3 km further along at a rate of rated-range loss that
+    matches the trip's own: the drive burned 20 km of range over 12 km, and
+    this stretch burns 5 km over 3 km — the same 250 Wh/km. Whatever the
+    fold-in does to distance it must do to energy, or the trip's Wh/km moves
+    when nothing about how it was driven did."""
+
+    def vehicle_data(self, vid):
+        if type(self).step < 3:
+            return super().vehicle_data(vid)
+        d = super().vehicle_data(vid)
+        d["drive_state"]["timestamp"] = 1_760_500_900_000      # 10 min after the close
+        d["vehicle_state"]["odometer"] = ODO_KM_TO_MI(10015.0)  # 3 km further
+        d["charge_state"]["battery_level"] = 75                # 76 -> 75
+        d["charge_state"]["battery_range"] = 375.0 / 1.60934   # 380 -> 375
+        return d
+
+
+def test_sustained_offline_top_up_folds_in_energy_with_the_distance(monkeypatch):
+    """Regression: the top-up grew distance_km but left energy_used_kwh at its
+    close-time value, so wh_per_km (energy / distance) and soc_used_pct (also
+    derived from the energy) both silently fell by whatever fraction of the
+    trip the dead zone had swallowed — measured at -25% on a 4 km fold-in.
+
+    The reconnect poll carries fresh soc/range and the close reading is still
+    sitting in last_snapshot, so the stretch is measurable, not a guess. Here
+    it was driven at exactly the trip's own efficiency, so folding it in
+    correctly must leave wh_per_km untouched while distance and energy both
+    grow."""
+    import time as _time
+
+    from app import services, state
+    from app.models import Drive
+
+    settings = get_settings()
+    old = settings.app_passcode
+    settings.app_passcode = ""
+    _OfflineThenParksWithConsistentEnergyClient.step = 0
+    try:
+        monkeypatch.setattr("app.tesla_client.TeslaClient", _FakeClient)
+        vin = "VINAAAAAAAAAAAAAA"
+        with SessionLocal() as s:
+            services.link_with_token(s, "tok")
+            vid = s.query(Vehicle).filter(Vehicle.vin == vin).first().id
+
+        monkeypatch.setattr("app.tesla_client.TeslaClient",
+                            _OfflineThenParksWithConsistentEnergyClient)
+        with TestClient(app) as client:
+            client.post("/api/sync")
+            _OfflineThenParksWithConsistentEnergyClient.step = 1
+            client.post("/api/sync")
+            _OfflineThenParksWithConsistentEnergyClient.step = 2
+            client.post("/api/sync")                       # offline episode begins
+
+        with SessionLocal() as s:
+            state.put(s, state.scoped(state.UNREACHABLE_SINCE_KEY, vin),
+                      str(_time.time() - 4 * 60))
+
+        with TestClient(app) as client:
+            client.post("/api/sync")                       # closes at 12.0 km
+
+        with SessionLocal() as s:
+            d = s.query(Drive).filter(Drive.vehicle_id == vid).one()
+            closed_id, energy_before, wh_before = d.id, d.energy_used_kwh, d.wh_per_km
+            assert d.distance_km == 12.0
+            assert d.end_soc == 76
+
+        _OfflineThenParksWithConsistentEnergyClient.step = 3
+        with TestClient(app) as client:
+            resp = client.post("/api/sync")                # parked, 3 km on, 10 min later
+            assert resp.json()["logged"]["drives"] == 0     # merged, not a second trip
+
+        with SessionLocal() as s:
+            d = s.query(Drive).filter(Drive.vehicle_id == vid).one()
+            assert d.id == closed_id
+            assert d.distance_km == 15.0                    # 12.0 + the further 3.0
+            assert d.energy_used_kwh > energy_before         # and the energy came too
+            assert d.end_soc == 75                           # measured at the reconnect
+            # The whole point: same driving, same efficiency figure. Before the
+            # fix this dropped by 3/15 of itself.
+            assert abs(d.wh_per_km - wh_before) < wh_before * 0.01
+    finally:
+        settings.app_passcode = old
+        _reset_to_demo()
+
+
 def test_sustained_offline_close_records_a_gap_too_late_to_merge(monkeypatch):
     """Past SLEEP_CLOSE_MERGE_MAX_MIN, a large further movement is more likely
     a genuinely separate, later drive than a continuation — the closed trip's
-    distance must stay untouched, but end_lost_km should report the real
-    amount rather than the false 0.0 recorded at close time."""
+    distance must stay untouched.
+
+    And it must not be reported as lost from that trip either: process_snapshot
+    runs next against the same unmodified prev and turns the movement into its
+    own drive (asserted below), so stamping end_lost_km on the closed trip as
+    well would report the same distance twice under two names — the thing the
+    blind-gap fold-in explicitly avoids. The 0.0 recorded at close time is the
+    right answer here: this trip really did end where it said it did."""
     import time as _time
 
     from app import services, state
@@ -1246,7 +1338,11 @@ def test_sustained_offline_close_records_a_gap_too_late_to_merge(monkeypatch):
             assert len(drives) == 2
             closed = next(d for d in drives if d.id == closed_id)
             assert closed.distance_km == 12.0                # unchanged, not guessed at
-            assert closed.end_lost_km == 1.5                  # but the real amount is on record
+            assert closed.end_lost_km == 0.0                  # and not double-reported
+            # The 1.5 km is accounted for exactly once — on the drive that
+            # actually covers it, not as a phantom loss on the one before.
+            later = next(d for d in drives if d.id != closed_id)
+            assert later.distance_km == 1.5
             assert state.get(s, state.scoped(state.LAST_SLEEP_CLOSE_KEY, vin)) == ""
     finally:
         settings.app_passcode = old

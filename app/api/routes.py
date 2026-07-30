@@ -1254,6 +1254,33 @@ def _process_vehicle(
             )
             if fold_in:
                 closed_drive.distance_km = round(closed_drive.distance_km + moved, 1)
+                # Distance alone isn't the whole trip. wh_per_km is derived
+                # (energy / distance) and soc_used_pct is derived from the
+                # energy too, so growing distance while leaving energy at its
+                # close-time value silently understates both — measured on the
+                # 4 km case, +33% distance against +0.00 kWh dropped Wh/km by
+                # 25%. prev is the close reading itself (the odo_km guard above
+                # proves nothing has moved the snapshot since), so it's the
+                # right "from" end for the stretch being folded in, and snap
+                # carries the fresh soc/range to measure it against.
+                #
+                # Gated the same way the departure-side recovery is gated, for
+                # the same reason: the merge window runs to
+                # SLEEP_CLOSE_MERGE_MAX_MIN, and a car that reached its
+                # destination early in that window sat parked for the rest of
+                # it, accruing standby drain that is not this drive's. An
+                # implausible Wh/km over the recovered stretch is exactly what
+                # that looks like, so past the bound the distance still folds
+                # in but the energy stays as measured at close time.
+                extra_kwh = sync_mod._energy_kwh(prev, snap, capacity_kwh)
+                if extra_kwh * 1000.0 / moved <= sync_mod.MAX_PLAUSIBLE_WH_PER_KM:
+                    closed_drive.energy_used_kwh = round(
+                        closed_drive.energy_used_kwh + extra_kwh, 2)
+                    # end_soc moves with it or not at all — it is what
+                    # soc_used_pct falls back on when energy is unknown, so a
+                    # fresh end_soc against a stale energy figure would leave
+                    # the two disagreeing about the same trip.
+                    closed_drive.end_soc = snap["soc"]
                 # end_time was anchored to the marker's own timestamp — the
                 # last reading *before* the dead zone, same stale anchor
                 # distance had. Folding in the distance without also moving
@@ -1288,7 +1315,20 @@ def _process_vehicle(
                 # Tell process_snapshot() this ground is already covered, so its
                 # own gap-reconstruction sees no movement here and stays quiet.
                 prev = {**prev, "odo_km": snap["odo_km"]}
-            elif closed_drive:
+            elif closed_drive and elapsed_min <= sync_mod.SLEEP_CLOSE_MERGE_MAX_MIN:
+                # Only inside the same window the merge uses. Past it, movement
+                # after the anchor is far more likely a genuinely separate
+                # later departure than a tail this trip was cut short of — and
+                # stamping it here would double-report distance the following
+                # trip already accounts for, since process_snapshot runs next
+                # against this same unmodified prev and either pulls the
+                # movement into the new trip (departure recovery) or records it
+                # as that trip's start_lost_km. Confirmed: a close, 8 h parked,
+                # then a drive off logged end_lost_km 2.0 on the old trip while
+                # the new trip's anchor was pulled back to cover the same 2 km.
+                # Reporting the same distance twice under two names is exactly
+                # what the blind-gap fold-in avoids (see sync.py's
+                # GAP_CREEP_MAX_KM branch); this is the same rule.
                 closed_drive.end_lost_km = round(moved, 3)
                 session.commit()
         state.put(session, sleep_close_key, "")
@@ -1634,14 +1674,27 @@ def sync_now(wake: bool = Query(False), session: Session = Depends(get_session))
                         # so the next successful poll can extend it instead of logging
                         # the remainder as a disconnected phantom trip (see
                         # state.LAST_SLEEP_CLOSE_KEY).
-                        state.put(
-                            session, state.scoped(state.LAST_SLEEP_CLOSE_KEY, vvin),
-                            _json.dumps({
-                                "drive_id": drive_row.id,
-                                "odo_km": _json.loads(last_raw)["odo_km"],
-                                "ts": _json.loads(last_raw)["ts"],
-                            }),
-                        )
+                        #
+                        # Only for that case. A car that reported "asleep" cannot
+                        # have been moving — sleep is only reachable once parked
+                        # and idle — so its close is already anchored at the true
+                        # stop and needs no correction. Arming the marker there
+                        # anyway (this branch fires on either signal) pointed the
+                        # correction at a close that was never wrong, so a short
+                        # hop after the nap could be folded back into the previous
+                        # trip, or stamped on it as a loss it never had. Note
+                        # sustained_offline can't make this call — unreachable_since
+                        # is armed for anything not "online", so a car asleep past
+                        # UNREACHABLE_CLOSE_MIN sets it too.
+                        if vstate != "asleep":
+                            state.put(
+                                session, state.scoped(state.LAST_SLEEP_CLOSE_KEY, vvin),
+                                _json.dumps({
+                                    "drive_id": drive_row.id,
+                                    "odo_km": _json.loads(last_raw)["odo_km"],
+                                    "ts": _json.loads(last_raw)["ts"],
+                                }),
+                            )
                         notifications.fire_webhook(
                             "drive-complete", "Drive completed",
                             f"{vehicle_row.name}: {d['distance_km']:.1f} km, "
