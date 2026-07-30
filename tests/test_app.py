@@ -2433,8 +2433,12 @@ def test_pricing_prefs_updated_at_tracks_last_save():
                 "default_source": "public",
             })
             assert resp.status_code == 200
-            from datetime import date
-            today = date.today().isoformat()
+            # The owner's date, not the server's. date.today() reads the host
+            # zone, so this assertion only held for the 16 hours a day the two
+            # happened to agree — and the value under test is exactly what the
+            # Rates page shows the owner, which must be their date.
+            from app.sync import now_local
+            today = now_local().date().isoformat()
             assert resp.json()["updated_at"] == today
             assert client.get("/api/pricing-prefs").json()["updated_at"] == today
     finally:

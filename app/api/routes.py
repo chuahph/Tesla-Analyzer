@@ -12,6 +12,11 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from .. import alerts, auth, notifications, pricing_prefs, services, state, tariff, vin as vin_mod
+# sync imports nothing from the app, so this is safe at module level (several
+# functions below still import it locally; those bindings are just local names
+# for the same module). Needed up here for now_local/to_epoch, which anything
+# comparing against a stored timestamp has to go through — see sync.now_local.
+from .. import sync as sync_mod
 from ..analysis import haversine_km
 from ..analysis import narrative as narrative_engine
 from ..analysis import battery as battery_analysis
@@ -151,7 +156,11 @@ def _window(
     since: datetime | None = None, until: datetime | None = None,
 ):
     if since is None:
-        since = datetime.now() - timedelta(days=days)
+        # Stored start_time is naive MYT wall-clock, so the boundary has to be
+        # too — datetime.now() would put it eight hours out on a UTC host and
+        # slide every "last N days" window off by that much (see
+        # sync.now_local).
+        since = sync_mod.now_local() - timedelta(days=days)
     drive_q = select(Drive).where(Drive.vehicle_id == vehicle_id, Drive.start_time >= since)
     charge_q = select(Charge).where(Charge.vehicle_id == vehicle_id, Charge.start_time >= since)
     if until is not None:
@@ -929,7 +938,7 @@ def create_place(payload: dict = Body(...), session: Session = Depends(get_sessi
         place.lat, place.lon, place.radius_km = lat, lon, radius_km
     else:
         place = Place(name=name, lat=lat, lon=lon, radius_km=radius_km,
-                      created_at=datetime.now())
+                      created_at=sync_mod.now_local())
         session.add(place)
     session.flush()
     relabeled = _relabel_existing(session, place)
@@ -996,7 +1005,8 @@ def add_service(payload: dict = Body(...), session: Session = Depends(get_sessio
     if not type_:
         raise HTTPException(400, "Missing 'type'.")
     try:
-        date = datetime.fromisoformat(payload["date"]) if payload.get("date") else datetime.now()
+        date = (datetime.fromisoformat(payload["date"]) if payload.get("date")
+                else sync_mod.now_local())
     except (KeyError, ValueError):
         raise HTTPException(400, "Invalid 'date' (expected ISO format).")
     try:
@@ -2547,7 +2557,7 @@ def _monthly_report_payload(session: Session, vehicle: Vehicle, settings, days: 
     # Data-driven narrative: this period vs the equal-length one immediately
     # before it, so "you drove more/less than usual" is a real comparison
     # instead of a stats table with no context.
-    now = datetime.now()
+    now = sync_mod.now_local()   # MYT wall-clock, to match stored start_time
     since = now - timedelta(days=days)
     prev_since = since - timedelta(days=days)
     prev_drives, prev_charges = _window(session, vehicle.id, days, since=prev_since, until=since)
@@ -2633,7 +2643,7 @@ def alerts_check(days: int = Query(30, ge=7, le=90),
     so calling it more often is harmless: a standing condition is re-sent only
     when it changes or after a cooldown (see alerts.py). ``days`` is the window
     each trend compares against the equal-length window before it."""
-    now = datetime.now()
+    now = sync_mod.now_local()   # MYT wall-clock, to match stored start_time
     vehicle = _first_vehicle(session)
     settings = get_settings()
     capacity_kwh, _ = _usable_capacity(session, vehicle, settings)
@@ -2720,16 +2730,26 @@ def plan_route(to: str = Query(..., min_length=1),
     # A departure time asks Google for its traffic prediction. Google's own
     # clock is UTC-based epoch seconds and it rejects a departure in the past,
     # so an HH:MM that's already gone today is read as tomorrow.
+    #
+    # The HH:MM is the *driver's* wall clock (the planner's "Leaving" field),
+    # which is what makes both steps below timezone-sensitive: building the
+    # datetime on datetime.now() dated it by the server's clock, and
+    # .timestamp() then read it back as the server's zone too. Nothing pins
+    # the server to MYT, so on the deployed host an 18:00 departure reached
+    # Google as 02:00 the next morning — a peak-hour trip priced off
+    # dead-of-night traffic, and optimistically, since app.js prefers the
+    # traffic basis over the (correctly zoned) departure-hour history one.
+    # Both steps go through the MYT helpers now.
     depart_epoch = None
     hhmm = (depart or "").strip()
     if hhmm:
         try:
             hh, mm = (int(p) for p in hhmm.split(":", 1))
-            now = datetime.now()
+            now = sync_mod.now_local()
             when = now.replace(hour=hh, minute=mm, second=0, microsecond=0)
             if when <= now:
                 when += timedelta(days=1)
-            depart_epoch = int(when.timestamp())
+            depart_epoch = int(sync_mod.to_epoch(when))
         except (ValueError, TypeError):
             depart_epoch = None
 
@@ -2964,7 +2984,7 @@ def summary(
 
     # This week vs last week (rolling 7-day windows anchored at now), regardless
     # of the display window — a steady, comparable pulse of usage.
-    now = datetime.now()
+    now = sync_mod.now_local()   # MYT wall-clock, to match stored start_time
     wk_drives = [d for d in drives if d.start_time >= now - timedelta(days=7)] \
         if since is None and days >= 14 else None
     week_compare = None
@@ -3222,7 +3242,7 @@ def summary(
         "window_days": days,
         "window_label": window_label,
         "last_charge": last_charge_summary,
-        "generated_at": datetime.now().isoformat(timespec="seconds"),
+        "generated_at": sync_mod.now_local().isoformat(timespec="seconds"),
         "currency": settings.currency,
         "last_status": last_status,
         "live_trip": live,

@@ -17,6 +17,7 @@ from sqlalchemy.orm import Session
 
 from .config import get_settings
 from .models import PushSubscription
+from .sync import now_local
 
 
 def _pem(value: str) -> bytes:
@@ -53,7 +54,7 @@ def subscribe(session: Session, endpoint: str, p256dh: str, auth: str) -> None:
         existing.p256dh, existing.auth = p256dh, auth
     else:
         session.add(PushSubscription(
-            endpoint=endpoint, p256dh=p256dh, auth=auth, created_at=datetime.now()))
+            endpoint=endpoint, p256dh=p256dh, auth=auth, created_at=now_local()))
     session.commit()
 
 
@@ -81,7 +82,7 @@ def fire_webhook(event: str, title: str, body: str) -> bool:
         resp = httpx.post(
             url,
             json={"event": event, "title": title, "body": body,
-                  "timestamp": datetime.now().isoformat(timespec="seconds")},
+                  "timestamp": now_local().isoformat(timespec="seconds")},
             timeout=10.0,
         )
         return resp.status_code < 300

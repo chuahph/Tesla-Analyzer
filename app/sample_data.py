@@ -16,6 +16,10 @@ from datetime import datetime, timedelta
 from sqlalchemy.orm import Session
 
 from .models import Charge, Drive, Vehicle
+# Demo rows are written with the same MYT wall-clock convention as real
+# ones, so the windows that filter them (which now anchor on MYT too)
+# don't slice the seeded data eight hours off on a UTC host.
+from .sync import now_local
 
 LOCATIONS = ["Home", "Office", "Gym", "Supermarket", "Parents", "Airport", "Mall"]
 SUPERCHARGERS = ["Supercharger - Highway 1", "Supercharger - Downtown", "Supercharger - Rest Stop"]
@@ -67,7 +71,7 @@ def generate(session: Session, days: int = 120, seed: int = 42) -> Vehicle:
     dc_price = _settings.energy_price_dc_kwh or _settings.energy_price_per_kwh
 
     soc = 80.0  # start state of charge (%)
-    start = datetime.now() - timedelta(days=days)
+    start = now_local() - timedelta(days=days)
 
     for d in range(days):
         day = start + timedelta(days=d)
@@ -116,7 +120,7 @@ def generate(session: Session, days: int = 120, seed: int = 42) -> Vehicle:
             # The final day's late-evening events can roll past midnight into
             # what's now "today" — clamp so nothing seeded ever claims to end
             # after the real current moment (breaks any "X <= now" check).
-            end_time = min(t0 + timedelta(minutes=duration), datetime.now())
+            end_time = min(t0 + timedelta(minutes=duration), now_local())
             duration_min = (end_time - t0).total_seconds() / 60.0
             session.add(
                 Drive(
@@ -162,7 +166,7 @@ def generate(session: Session, days: int = 120, seed: int = 42) -> Vehicle:
 
             # Same clamp as drives above — an overnight AC charge on the
             # final day can otherwise end after the real current moment.
-            end_time = min(t0 + timedelta(minutes=duration), datetime.now())
+            end_time = min(t0 + timedelta(minutes=duration), now_local())
             duration_min = (end_time - t0).total_seconds() / 60.0
             session.add(
                 Charge(

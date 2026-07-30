@@ -21,6 +21,7 @@ from .config import get_settings
 from .database import SessionLocal, init_db
 from .models import Charge, Drive, Vehicle
 from .sample_data import generate
+from .sync import now_local
 
 
 def seed_demo_if_empty(days: int = 120) -> None:
@@ -87,7 +88,7 @@ def _process_snapshot(session, vehicle, data, drive_state, charge_state):  # pra
     ds = data.get("drive_state", {}) or {}
     cs = data.get("charge_state", {}) or {}
     clim = data.get("climate_state", {}) or {}
-    now = datetime.now()
+    now = now_local()   # MYT wall-clock, same convention sync.py writes with
     shift = ds.get("shift_state")
 
     # --- Drive boundaries ---

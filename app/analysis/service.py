@@ -42,7 +42,14 @@ def due_status(
       - "ok" / "due_soon" / "overdue" — the usual meaning, by whichever of
         date/odometer is more pressing.
     """
-    now = now or datetime.now()
+    # MYT wall-clock, matching the convention ServiceRecord.date is written
+    # with — datetime.now() would read the server's zone instead (see
+    # sync.now_local). Defaulted here rather than at the call sites so no
+    # caller can reintroduce the skew by omitting it; sync is stdlib-only, so
+    # this keeps the module as DB- and network-free as before.
+    from ..sync import now_local
+
+    now = now or now_local()
     by_type: dict[str, dict] = {}
     for r in records:
         t = r.get("type")

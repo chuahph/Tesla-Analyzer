@@ -188,6 +188,36 @@ def _dt(ts: float) -> datetime:
     return datetime.fromtimestamp(ts, MYT).replace(tzinfo=None)
 
 
+def now_local() -> datetime:
+    """Now, as naive MYT wall-clock — the convention every stored timestamp
+    uses (see ``_dt``, which is what writes them).
+
+    ``datetime.now()`` is NOT interchangeable with this. It returns the
+    *server's* local time, and nothing pins the server to MYT: a container
+    runs UTC unless told otherwise, so on the deployed host every
+    ``datetime.now()`` compared against a stored Drive/Charge timestamp is
+    eight hours adrift — a trip logged at 23:00 reads as being in the future.
+    Anything that windows, buckets or dates stored rows against "now" must
+    come through here.
+
+    Not a substitute for ``datetime.now().timestamp()``, which is already
+    correct: a naive datetime converts to epoch through the system zone, so
+    that round-trips no matter what the system zone is. This matters only
+    where the naive value itself is compared against stored wall-clock.
+    """
+    return datetime.now(MYT).replace(tzinfo=None)
+
+
+def to_epoch(dt: datetime) -> float:
+    """Epoch seconds for a naive MYT wall-clock datetime (see ``now_local``).
+
+    ``.timestamp()`` on its own would read the value as the *server's* zone,
+    which is exactly the bug this exists to avoid; re-attaching MYT first is
+    what makes the conversion independent of where the app runs.
+    """
+    return dt.replace(tzinfo=MYT).timestamp()
+
+
 # Door/trunk and window openings Tesla reports on vehicle_state. Each is an
 # int where 0 means shut, so any truthy value is "open".
 _DOOR_FIELDS = ("df", "dr", "pf", "pr", "ft", "rt")

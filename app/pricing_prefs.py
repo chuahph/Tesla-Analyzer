@@ -22,6 +22,7 @@ from sqlalchemy.orm import Session
 from . import state, tariff
 from .analysis import haversine_km
 from .models import Place
+from .sync import now_local
 
 # Wider than a Place's own (typically ~150m) geofence radius — this is about
 # "did this charge plausibly happen at/near home or the office", not the
@@ -93,7 +94,9 @@ def save(session: Session, rates: dict[str, float], default_source: str) -> None
             state.put(session, setting_key, str(rates[key]))
     if default_source in SOURCES:
         state.put(session, state.DEFAULT_PRICE_SOURCE_KEY, default_source)
-    state.put(session, state.PRICE_UPDATED_AT_KEY, datetime.utcnow().date().isoformat())
+    # The date shown as "rates last reviewed". utcnow() reported yesterday
+    # for the first eight hours of every local day.
+    state.put(session, state.PRICE_UPDATED_AT_KEY, now_local().date().isoformat())
 
 
 def _is_coords(text: str) -> bool:
