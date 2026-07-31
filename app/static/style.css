@@ -376,6 +376,11 @@ header h1 { margin: 0; font-size: 20px; letter-spacing: .3px; }
   text-align: left; box-shadow: 0 10px 30px rgba(0, 0, 0, .5);
 }
 #car-info div { margin: 2px 0; }
+/* The charge-derived capacity cross-check, when it disagrees with the figure
+   actually in use by more than the samples' own scatter explains. Amber, not
+   red: it's a "worth a look", since the charges could equally be the noisy
+   side. Only rendered at all when the gap is real (see capacityCheckLine). */
+#car-info .warn { color: var(--amber); }
 
 .controls { display: flex; align-items: center; gap: 10px; flex-wrap: nowrap; justify-content: flex-end; }
 

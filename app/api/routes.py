@@ -3222,6 +3222,19 @@ def summary(
     # kWh) is visible and diagnosable rather than hidden.
     vehicle_out["usable_capacity_kwh"] = round(capacity_kwh, 1)
     vehicle_out["capacity_source"] = capacity_source
+    # What the car's own charge sessions imply that figure should be — the
+    # only independent check on it, since a drive's kWh is derived FROM the
+    # capacity and would just confirm itself (see battery.implied_capacity).
+    # Shown beside the figure in use rather than tucked in a separate view:
+    # capacity scales every kWh and Wh/km in the app at once, so a quiet
+    # disagreement here is exactly the kind that goes unnoticed while every
+    # trip reads a few percent off. Whole history, not the display window —
+    # charges big enough to calibrate from are rare, so a short window would
+    # usually have none.
+    all_charges = session.scalars(
+        select(Charge).where(Charge.vehicle_id == vehicle.id).order_by(Charge.start_time)
+    ).all()
+    vehicle_out["capacity_check"] = battery_analysis.implied_capacity(list(all_charges))
     # Whether time-of-use pricing is active, so it's clear why cost figures
     # vary by time of day instead of using the flat rate.
     vehicle_out["tou_enabled"] = bool(

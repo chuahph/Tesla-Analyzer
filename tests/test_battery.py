@@ -337,3 +337,82 @@ def test_forecast_unavailable_without_enough_months():
     readings = [mk(60, 500 - i, ts=datetime(2026, 1, 15)) for i in range(20)]
     r = analyze(readings, new_range_km=500)
     assert r["forecast"]["available"] is False
+
+
+# --- Charge-derived capacity cross-check -----------------------------------
+
+def _chg(start_soc, end_soc, kwh, charge_type="DC", cid=1):
+    from types import SimpleNamespace
+    return SimpleNamespace(
+        id=cid, start_time=datetime(2026, 7, 1, 8, 0), charge_type=charge_type,
+        start_soc=start_soc, end_soc=end_soc, energy_added_kwh=kwh,
+    )
+
+
+def test_implied_capacity_inverts_a_charge_to_a_pack_size():
+    """energy_added = (SoC gain / 100) x capacity, so a DC charge inverts
+    straight back to the pack size with no efficiency correction."""
+    from app.analysis.battery import implied_capacity
+
+    # 30% gain, 20.0 kWh in -> 66.7 kWh usable.
+    out = implied_capacity([_chg(40, 70, 20.0)])
+    assert out["available"] is True
+    assert out["count"] == 1
+    assert out["median_kwh"] == 66.7
+
+
+def test_implied_capacity_derates_ac_for_charging_losses():
+    """The wall meter counts energy the onboard charger never gets into the
+    pack, so an AC session overstates capacity without the correction."""
+    from app.analysis.battery import implied_capacity
+
+    dc = implied_capacity([_chg(40, 70, 20.0, "DC")])["median_kwh"]
+    ac = implied_capacity([_chg(40, 70, 20.0, "AC")])["median_kwh"]
+    assert ac < dc
+    # 20.0 / 0.30 = 66.667, x0.95 = 63.333 -> 63.3. Rounded once at the end,
+    # not applied to the already-rounded DC figure (which would give 63.4).
+    assert ac == 63.3
+
+
+def test_implied_capacity_ignores_gains_too_small_to_be_precise():
+    """start/end SoC are whole percents, so a small gain carries a rounding
+    error that swamps the answer — those samples say nothing and must not
+    dilute the ones that do."""
+    from app.analysis.battery import implied_capacity
+
+    assert implied_capacity([_chg(60, 70, 6.7)])["available"] is False   # 10% gain
+    assert implied_capacity([_chg(40, 70, 20.0)])["available"] is True   # 30% gain
+
+
+def test_implied_capacity_drops_impossible_samples():
+    """A mis-recorded session (an SoC reset mid-charge, a merged pair) is a
+    data error, not a pack — it must be discarded rather than dragging the
+    spread and making a real disagreement look like noise."""
+    from app.analysis.battery import implied_capacity
+
+    good = [_chg(40, 70, 20.0, cid=1), _chg(30, 80, 33.3, cid=2)]
+    absurd = _chg(20, 90, 100.0, cid=3)          # implies ~143 kWh
+    out = implied_capacity(good + [absurd])
+    assert out["count"] == 2
+    assert all(s["implied_kwh"] < 95 for s in out["samples"])
+
+
+def test_implied_capacity_median_survives_one_wild_sample():
+    """The headline is the median precisely so a single odd session can't
+    move it — a mean would be dragged by exactly the sample least worth
+    trusting."""
+    from app.analysis.battery import implied_capacity
+
+    charges = [_chg(40, 70, 20.0, cid=1),      # 66.7
+               _chg(40, 70, 20.1, cid=2),      # 67.0
+               _chg(20, 95, 35.0, cid=3)]      # 46.7 — an outlier, still plausible
+    out = implied_capacity(charges)
+    assert out["median_kwh"] == 66.7           # unmoved by the outlier
+    assert out["spread_kwh"] == round(67.0 - 46.7, 1)   # but the scatter shows it
+
+
+def test_implied_capacity_reports_nothing_without_qualifying_charges():
+    from app.analysis.battery import implied_capacity
+
+    assert implied_capacity([])["available"] is False
+    assert implied_capacity([])["count"] == 0

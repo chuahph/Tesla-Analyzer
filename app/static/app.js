@@ -510,6 +510,26 @@ document.getElementById("btn-compare")?.addEventListener("click", () => {
 });
 document.getElementById("compare-range")?.addEventListener("change", renderCompareTable);
 
+// "Your charges imply X kWh" — the charge-derived cross-check on the capacity
+// constant (see battery.implied_capacity). Null when there aren't enough
+// qualifying charges yet; a charge has to add ~15%+ SoC to say anything, so a
+// new car can go a while without a single sample.
+function capacityCheckLine(v) {
+  const c = v.capacity_check;
+  if (!c || !c.available || !v.usable_capacity_kwh) return null;
+  const diff = c.median_kwh - v.usable_capacity_kwh;
+  const pct = (diff / v.usable_capacity_kwh) * 100;
+  // "Disagrees" only when the gap is bigger than the samples' own scatter —
+  // a median sitting inside the spread is consistent with the figure in use,
+  // however different the midpoint looks.
+  const meaningful = Math.abs(diff) > Math.max(c.spread_kwh / 2, 1.0);
+  const detail = `<span class="muted">(median of ${c.count} charge${
+    c.count === 1 ? "" : "s"}, ${fmt(c.min_kwh, 1)}–${fmt(c.max_kwh, 1)})</span>`;
+  return `Charges imply: <strong${meaningful ? ' class="warn"' : ""}>${
+    fmt(c.median_kwh, 1)} kWh</strong> ${
+    meaningful ? `<span class="warn">${pct > 0 ? "+" : ""}${fmt(pct, 1)}%</span> ` : ""}${detail}`;
+}
+
 // Full car-info panel (opened by the "!" after the VIN in the header).
 function fillCarInfo(v) {
   const el = document.getElementById("car-info");
@@ -536,6 +556,13 @@ function fillCarInfo(v) {
     v.usable_capacity_kwh
       ? `Usable capacity: <strong>${fmt(v.usable_capacity_kwh, 1)} kWh</strong>` +
         (v.capacity_source ? ` <span class="muted">(${v.capacity_source})</span>` : "") : null,
+    // The independent cross-check, right under the figure it questions.
+    // Only flagged when the two actually disagree by more than the samples'
+    // own scatter can explain — a difference inside the spread is noise, and
+    // saying so every time would train the eye to ignore the line that
+    // matters. Capacity scales every kWh and Wh/km at once, so when it IS
+    // out, everything reads off by the same quiet few percent.
+    capacityCheckLine(v),
     v.tou_enabled ? `Tariff: <strong>time-of-use</strong> <span class="muted">(peak/off-peak)</span>` : null,
   ].filter(Boolean);
   el.innerHTML = rows.map((r) => `<div>${r}</div>`).join("")

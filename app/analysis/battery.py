@@ -214,6 +214,78 @@ def new_range_for(model: str, trim: str, year: int | None = None) -> float | Non
     return _variant_lookup(NEW_RANGE_KM, model, trim, year)
 
 
+# Charge-derived capacity calibration. A charge must add at least this much
+# SoC before it says anything useful: start/end SoC are whole percents, so a
+# small gain carries a ±1-point rounding error that swamps the answer (a 5%
+# gain is ±20% on the implied capacity; a 40% gain is ±2.5%).
+CAPACITY_MIN_GAIN_PCT = 15.0
+# Charging is lossy on the AC side — the wall meter counts energy the onboard
+# charger never gets into the pack — so an AC session overstates capacity
+# without this. DC feeds the pack directly and needs no correction.
+CAPACITY_AC_EFFICIENCY = 0.95
+# Outside this a sample is a data error (a mis-parsed session, an SoC reset
+# mid-charge), not a real pack, and would drag the median around.
+CAPACITY_PLAUSIBLE_KWH = (45.0, 95.0)
+
+
+def implied_capacity(charges: list[Any]) -> dict[str, Any]:
+    """Usable pack capacity implied by real charge sessions, for checking the
+    figure that turns every SoC delta into kWh.
+
+    ``energy_added = (SoC gain / 100) x usable_capacity``, so each charge
+    inverts to a capacity estimate. This is the only *non-circular* source
+    available: a drive's ``energy_used_kwh`` is itself computed by multiplying
+    a range/SoC delta BY the capacity constant, so calibrating from trips
+    would just hand the same number back. Charge energy comes from Tesla's own
+    charge meter and owes nothing to any assumption of ours.
+
+    The median is the headline rather than the mean — one mis-recorded session
+    (a charge interrupted and resumed, an SoC jump while plugged in) is a wild
+    outlier, and the median ignores it where a mean would be dragged.
+
+    Reports rather than decides: nothing here changes the capacity in use.
+    A disagreement can mean the spec figure is wrong for this variant, the
+    range-derived degradation estimate has drifted, or simply that too few
+    sessions have been logged to say. That judgement is the owner's.
+    """
+    samples = []
+    for c in charges:
+        gain = (getattr(c, "end_soc", 0) or 0) - (getattr(c, "start_soc", 0) or 0)
+        energy = getattr(c, "energy_added_kwh", 0) or 0.0
+        if gain < CAPACITY_MIN_GAIN_PCT or energy <= 0:
+            continue
+        cap = energy / (gain / 100.0)
+        if (getattr(c, "charge_type", "AC") or "AC") != "DC":
+            cap *= CAPACITY_AC_EFFICIENCY
+        lo, hi = CAPACITY_PLAUSIBLE_KWH
+        if not (lo <= cap <= hi):
+            continue
+        samples.append({
+            "charge_id": getattr(c, "id", None),
+            "date": getattr(c, "start_time", None).isoformat(timespec="minutes")
+            if getattr(c, "start_time", None) else None,
+            "charge_type": getattr(c, "charge_type", "AC"),
+            "soc_gain_pct": round(gain, 1),
+            "energy_added_kwh": round(energy, 2),
+            "implied_kwh": round(cap, 1),
+        })
+    if not samples:
+        return {"available": False, "samples": [], "count": 0}
+    vals = sorted(s["implied_kwh"] for s in samples)
+    return {
+        "available": True,
+        "count": len(vals),
+        "median_kwh": round(percentile(vals, 0.5), 1),
+        "min_kwh": vals[0],
+        "max_kwh": vals[-1],
+        # Spread matters as much as the middle: tightly-clustered samples make
+        # a disagreement with the figure in use worth acting on, while a wide
+        # scatter says the evidence isn't there yet whatever the median says.
+        "spread_kwh": round(vals[-1] - vals[0], 1),
+        "samples": samples[-20:],
+    }
+
+
 def usable_capacity_for(model: str, trim: str, year: int | None = None) -> float | None:
     """Nominal usable pack capacity (kWh) for the variant, if recognised."""
     return _variant_lookup(USABLE_KWH, model, trim, year)
