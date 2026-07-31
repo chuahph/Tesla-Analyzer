@@ -640,6 +640,62 @@ function wireTripEditButtons(root) {
   });
 }
 
+function wireTripDiagButtons(root) {
+  root.querySelectorAll(".trip-diag[data-trip-idx]").forEach((btn) => {
+    btn.addEventListener("click", async (e) => {
+      e.stopPropagation();
+      const t = lastRenderedTrips[+btn.dataset.tripIdx];
+      if (!t) return;
+      const text = tripDiagnostics(t, lastDiagContext);
+      const done = await copyText(text);
+      // Confirm on the button itself. Copying gives no visible feedback
+      // otherwise, and on a phone there's no way to check the clipboard
+      // without leaving the page and losing your place in the trip list.
+      const was = btn.textContent;
+      btn.textContent = done ? "✓" : "✕";
+      btn.classList.toggle("copied", done);
+      setTimeout(() => {
+        btn.textContent = was;
+        btn.classList.remove("copied");
+      }, 1500);
+      if (!done) {
+        // Clipboard refused (an insecure origin, or a WebKit build that wants
+        // a tighter gesture). Show the text so it can still be selected by
+        // hand rather than silently failing.
+        window.prompt("Copy this trip's diagnostics:", text);
+      }
+    });
+  });
+}
+
+// navigator.clipboard is unavailable on non-HTTPS origins and can reject even
+// inside a click on some iOS builds, so fall back to the execCommand route
+// rather than losing the copy. Returns whether either path worked.
+async function copyText(text) {
+  try {
+    if (navigator.clipboard && window.isSecureContext) {
+      await navigator.clipboard.writeText(text);
+      return true;
+    }
+  } catch (err) { /* fall through to the legacy path */ }
+  try {
+    const ta = document.createElement("textarea");
+    ta.value = text;
+    // Off-screen but still focusable — display:none or visibility:hidden
+    // would make the selection unselectable and the copy a no-op.
+    ta.setAttribute("readonly", "");
+    ta.style.cssText = "position:fixed;top:-1000px;left:0;opacity:0;";
+    document.body.appendChild(ta);
+    ta.select();
+    ta.setSelectionRange(0, text.length);   // iOS needs the explicit range
+    const ok = document.execCommand("copy");
+    document.body.removeChild(ta);
+    return ok;
+  } catch (err) {
+    return false;
+  }
+}
+
 function openEditDriveModal(driveId, startTime, endTime, route) {
   const form = document.getElementById("edit-drive-form");
   form.dataset.driveId = driveId;
@@ -1417,9 +1473,64 @@ function tripConditionWhy(t) {
   return bits.join("<br>");
 }
 
+// The trips currently on screen, kept so the per-trip "copy diagnostics"
+// button can hand back the untouched API object for one of them. The rendered
+// HTML is a string, so there's nowhere to hang the object itself — the button
+// carries an index into this instead.
+let lastRenderedTrips = [];
+let lastDiagContext = {};
+
+// Everything needed to diagnose one trip's accuracy, and nothing else.
+// Reading these out of /api/summary by hand means scrolling a whole window's
+// analysis on a phone to find one trip; this is the same data, scoped.
+//
+// The context block matters as much as the trip: usable_capacity_kwh scales
+// every kWh figure (so a wrong one moves every trip at once), and the build
+// stamp says which deployed version produced the numbers — without it there's
+// no telling whether a reading predates a fix.
+function tripDiagnostics(t, ctx) {
+  return JSON.stringify({
+    context: {
+      build: ctx.build || null,
+      usable_capacity_kwh: ctx.usable_capacity_kwh ?? null,
+      capacity_source: ctx.capacity_source || null,
+      copied_at: new Date().toISOString(),
+    },
+    trip: {
+      id: t.id, route: t.route,
+      start_time: t.start_time, end_time: t.end_time,
+      distance_km: t.distance_km, duration_min: t.duration_min,
+      avg_speed_kmh: t.avg_speed_kmh, max_speed_kmh: t.max_speed_kmh,
+      energy_kwh: t.energy_kwh, wh_per_km: t.wh_per_km,
+      driving_energy_kwh: t.driving_energy_kwh,
+      driving_wh_per_km: t.driving_wh_per_km,
+      soc_used_pct: t.soc_used_pct, eco_score: t.eco_score,
+      // The trip-boundary instrumentation — which anchor, if either, lost or
+      // recovered distance. This is the part that actually settles most
+      // accuracy questions, and it's invisible in the UI.
+      start_lost_km: t.start_lost_km, end_lost_km: t.end_lost_km,
+      tail_trim_sec: t.tail_trim_sec,
+      data_quality: t.data_quality, distance_flag: t.distance_flag,
+      // The parked gap before this trip: a 0.0 kWh reading over a long park
+      // is itself a symptom (drain that moved into the drive).
+      vampire_before: t.vampire_before,
+      conditions: t.conditions,
+      cost: t.cost, cost_parts: t.cost_parts, cost_source: t.cost_source,
+      start_coords: t.start_coords, end_coords: t.end_coords,
+      tag: t.tag,
+    },
+  }, null, 2);
+}
+
 function renderLists(d) {
   const rated = (d.efficiency && d.efficiency.rated_wh_per_km) || 150;
   const recent = d.driving.recent_trips || [];
+  lastRenderedTrips = recent;
+  lastDiagContext = {
+    build: (document.getElementById("build-info") || {}).textContent || null,
+    usable_capacity_kwh: d.vehicle && d.vehicle.usable_capacity_kwh,
+    capacity_source: d.vehicle && d.vehicle.capacity_source,
+  };
   const trips = recent
     .map((t, i) => {
       const when = t.end_time
@@ -1523,6 +1634,14 @@ function renderLists(d) {
           `data-end="${t.end_time || ""}" data-route="${(t.route || "").replace(/"/g, "&quot;")}" ` +
           `title="Fix start/end time">✎</button>`
         : "";
+      // Copy this trip's raw figures + boundary instrumentation, for checking
+      // one trip against the car's own display without reading the whole
+      // /api/summary payload on a phone. Index-based because the object can't
+      // travel through the HTML string (see lastRenderedTrips).
+      const diagBtn = !tripSelectMode
+        ? `<button class="trip-diag" data-trip-idx="${i}" ` +
+          `title="Copy this trip's diagnostics">⧉</button>`
+        : "";
       // Parked gap right before this trip, if it was long enough and
       // charge-free to count as vampire/standby drain (see
       // driving_analysis.vampire_drain()) — its own slim row rather than
@@ -1534,7 +1653,7 @@ function renderLists(d) {
         : "";
       return `${vampireNote}<li class="trip${tripSelectMode ? " selectable" : ""}">` +
         `<span class="trip-head">${check}${score}${dq}${distFlag}<span class="trip-route">${when}${t.route ? "<br>" + routeHtml : ""}${mapLink}</span></span>` +
-        `<span class="trip-meta">${t.distance_km} km · ${t.duration_min} min${speed}${kwh}${whkm}${soc}${cost}${tagChip}${editBtn}</span>${cond}</li>`;
+        `<span class="trip-meta">${t.distance_km} km · ${t.duration_min} min${speed}${kwh}${whkm}${soc}${cost}${tagChip}${editBtn}${diagBtn}</span>${cond}</li>`;
     })
     .join("");
   const list = document.getElementById("recentTrips");
@@ -1543,6 +1662,7 @@ function renderLists(d) {
   wireTagChips(list);
   wirePlacePins(list);
   wireTripEditButtons(list);
+  wireTripDiagButtons(list);
   wireTripCostButtons(list);
   // "Show more": every window (including since-charge) caps recent_trips
   // at 5 by default now — "current drive" is the only exception, always

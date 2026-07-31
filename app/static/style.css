@@ -1268,6 +1268,19 @@ footer { padding: 18px 28px; color: var(--muted); font-size: 12px; border-top: 1
 }
 .trip-edit:hover { opacity: 1; }
 
+/* Copy one trip's raw figures + boundary instrumentation to the clipboard,
+   for checking it against the car's own display. Same quiet weight as the
+   ✎ beside it — a diagnostic, not something to reach for daily. Its label is
+   swapped for a ✓/✕ on tap (see wireTripDiagButtons), so it needs a min-width
+   to stop the meta line reflowing as the glyph changes. */
+.trip-diag {
+  border: none; background: none; cursor: pointer; font-size: 12px;
+  opacity: .55; padding: 0 2px; vertical-align: middle; margin-left: 4px;
+  min-width: 1.2em; color: inherit;
+}
+.trip-diag:hover { opacity: 1; }
+.trip-diag.copied { opacity: 1; color: var(--good, #4ade80); }
+
 /* The per-layer breakdown shown when a trip's energy spanned two charges —
    quieter than the cost itself, since it explains rather than reports. */
 .cost-split { color: var(--muted-2, var(--muted)); font-size: .92em; }
