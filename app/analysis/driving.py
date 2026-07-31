@@ -17,6 +17,58 @@ from . import has_valid_energy, haversine_km, linregress, mean, percentile, safe
 VAMPIRE_MIN_GAP_HOURS = 1.0
 
 
+# Measuring this car's own parked standby draw. Deliberately stricter than
+# vampire_drain's reporting thresholds, because this feeds a correction rather
+# than a narrative: start/end SoC are whole percents, so a gap has to be long
+# enough for the loss to cross a point at all before its rate means anything,
+# and a handful of gaps is not a rate.
+STANDBY_MIN_GAP_HOURS = 2.0
+STANDBY_MIN_TOTAL_HOURS = 12.0
+# Outside this the answer is a measurement artifact, not a parked car — a
+# Tesla idles somewhere near 100-500 W depending on Sentry, climate and how
+# long it takes to fall asleep.
+STANDBY_PLAUSIBLE_KW = (0.02, 1.5)
+
+
+def standby_kw(drives: list[Any], charges: list[Any] | None,
+               capacity_kwh: float) -> float | None:
+    """This car's own average standby draw while parked, in kW.
+
+    Measured the same way vampire_drain measures a gap — the SoC a trip ended
+    on minus the SoC the next one started from, over the hours between — but
+    aggregated into a rate, and only from gaps long enough to be worth
+    dividing. None when the history can't support a figure yet, which the
+    caller must treat as "don't correct anything" rather than substituting a
+    guess: a wrong rate here would quietly reshape real trip energy.
+
+    Charge-containing gaps are skipped outright; a session in the middle makes
+    the endpoints say nothing about drain.
+    """
+    ordered = sorted(drives, key=lambda d: d.start_time)
+    if len(ordered) < 2 or not capacity_kwh:
+        return None
+    charge_starts = sorted(c.start_time for c in (charges or []))
+    total_kwh = 0.0
+    total_hours = 0.0
+    ci = 0
+    for a, b in zip(ordered, ordered[1:]):
+        gap_start, gap_end = a.end_time, b.start_time
+        gap_hours = (gap_end - gap_start).total_seconds() / 3600.0
+        if gap_hours < STANDBY_MIN_GAP_HOURS:
+            continue
+        while ci < len(charge_starts) and charge_starts[ci] < gap_start:
+            ci += 1
+        if ci < len(charge_starts) and charge_starts[ci] < gap_end:
+            continue
+        total_kwh += max(a.end_soc - b.start_soc, 0.0) / 100.0 * capacity_kwh
+        total_hours += gap_hours
+    if total_hours < STANDBY_MIN_TOTAL_HOURS or total_kwh <= 0:
+        return None
+    rate = total_kwh / total_hours
+    lo, hi = STANDBY_PLAUSIBLE_KW
+    return round(rate, 3) if lo <= rate <= hi else None
+
+
 def vampire_drain(
     drives: list[Drive], charges: list[Charge] | None, capacity_kwh: float,
     anchor: tuple[datetime, float] | None = None,

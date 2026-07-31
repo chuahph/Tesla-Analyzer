@@ -1368,6 +1368,26 @@ def _process_vehicle(
         capacity_kwh, settings.energy_price_per_kwh, settings.drive_min_km,
     )
     drives = recovered + drives  # include a drive recovered from the upgrade gap
+    # A trimmed tail is time the car spent parked, so its standby draw is not
+    # this drive's energy — but the trim only moves the clock, leaving the
+    # stop snapshot's SoC where the late reading found it (see
+    # sync.trim_standby_kwh). Corrected here rather than inside
+    # process_snapshot because the rate comes from this car's own history,
+    # which needs the session; and looked up only when a trim actually fired,
+    # so the ordinary poll still touches no extra rows.
+    if any((d.get("tail_trim_sec") or 0) > 0 for d in drives):
+        past_drives = session.scalars(
+            select(Drive).where(Drive.vehicle_id == vehicle.id).order_by(Drive.start_time)
+        ).all()
+        past_charges = session.scalars(
+            select(Charge).where(Charge.vehicle_id == vehicle.id)
+        ).all()
+        rate_kw = driving_analysis.standby_kw(
+            list(past_drives), list(past_charges), capacity_kwh)
+        for d in drives:
+            d["energy_used_kwh"] = sync_mod.trim_standby_kwh(
+                d["energy_used_kwh"], d["distance_km"],
+                d.get("tail_trim_sec") or 0.0, rate_kw)
     for d in drives:
         # Keep the raw coords (for map links) before geocoding replaces them.
         d["start_coords"], d["end_coords"] = d["start_location"], d["end_location"]

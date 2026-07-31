@@ -491,6 +491,37 @@ def _idle_adjusted_kwh(energy_kwh, idle_min, out_temp_c=None):
     return max(energy_kwh - idle_min / 60.0 * idle_kw, energy_kwh * 0.5)
 
 
+def trim_standby_kwh(energy_kwh: float, distance_km: float, trim_sec: float,
+                     standby_kw: float | None) -> float:
+    """Trip energy with the trimmed tail's parked drain taken back out.
+
+    The pace-based stop correction (see Drive.tail_trim_sec) rewrites the
+    recorded stop time but deliberately leaves the stop snapshot's own
+    odo/SoC/range alone, so the trip's energy still runs to whenever the
+    reading actually arrived. While the trim stayed near its 60s floor that
+    was immaterial. It is not once an arrival lands in a dead zone: confirmed
+    live, a 4.2 km trip trimmed by 1002 s carried 0.14 kWh of post-arrival
+    standby — a sixth of the whole trip, and exactly the 0.2 SoC points it
+    read high by against the car's own screen.
+
+    ``standby_kw`` is this car's *measured* parked draw
+    (driving.standby_kw), not a modelled one. The existing idle model is the
+    wrong instrument here: it describes a car stopped mid-trip with someone
+    aboard and climate running, and at 31 degrees would assume 1.43 kW against
+    the ~0.5 kW a just-parked car actually showed. None means the history
+    can't support a figure, and then nothing is subtracted at all &mdash;
+    leaving the energy slightly high beats reshaping it with a guess.
+
+    Floored at what the distance alone must have cost, so an over-long trim
+    can never drive a real drive's energy down to nothing.
+    """
+    if not trim_sec or trim_sec <= 0 or not standby_kw:
+        return energy_kwh
+    drained = standby_kw * (trim_sec / 3600.0)
+    floor = max(distance_km, 0.0) * MIN_PLAUSIBLE_WH_PER_KM / 1000.0
+    return round(max(energy_kwh - drained, floor), 3)
+
+
 def _subtract_idle_energy(energy_kwh, distance_km, idle_min, out_temp_c=None):
     """Driving-only Wh/km: the idle-adjusted energy over the distance. Shared
     by the historical-trip estimate below and live_trip's real-tracked figure,

@@ -1779,3 +1779,46 @@ def test_close_trip_on_sleep_uses_last_snapshot_as_the_end():
     # Anchored at the last real reading's own timestamp, not a guess.
     assert d["end_time"] == _dt(T0 + 900)
     assert d["start_time"] == _dt(T0)
+
+
+# --- Trimmed-tail standby correction ---------------------------------------
+
+def test_trim_standby_removes_the_parked_tail_from_trip_energy():
+    """Regression for trip 316: a 4.2 km arrival into a dead zone was trimmed
+    by 1002 s, but the trim moves only the clock — the stop snapshot keeps the
+    late reading's SoC, so the trip carried ~17 min of post-arrival standby.
+    Against the car's own screen it read 1.11 kWh for a 0.97 kWh drive."""
+    from app.sync import trim_standby_kwh
+
+    # 0.50 kW measured standby over the 1001.8 s trim = 0.139 kWh.
+    out = trim_standby_kwh(1.11, 4.2, 1001.8, 0.50)
+    assert out == 0.971                      # lands on the car's own figure
+    assert round(1.11 - out, 3) == 0.139
+
+
+def test_trim_standby_does_nothing_without_a_measured_rate():
+    """No history, no correction. Leaving the energy slightly high is the
+    honest failure; inventing a rate would reshape real trip energy."""
+    from app.sync import trim_standby_kwh
+
+    assert trim_standby_kwh(1.11, 4.2, 1001.8, None) == 1.11
+    assert trim_standby_kwh(1.11, 4.2, 1001.8, 0.0) == 1.11
+
+
+def test_trim_standby_ignores_trips_that_were_not_trimmed():
+    """The ordinary parked close records a real 0.0 trim — nothing to take
+    back, and every trip must not quietly lose energy."""
+    from app.sync import trim_standby_kwh
+
+    assert trim_standby_kwh(2.0, 10.0, 0.0, 0.5) == 2.0
+    assert trim_standby_kwh(2.0, 10.0, None, 0.5) == 2.0
+
+
+def test_trim_standby_cannot_drain_a_real_drive_to_nothing():
+    """An implausibly long trim must not eat the drive itself — floored at
+    what the distance alone had to cost."""
+    from app.sync import MIN_PLAUSIBLE_WH_PER_KM, trim_standby_kwh
+
+    out = trim_standby_kwh(1.0, 5.0, 36000.0, 1.0)   # 10 h of trim at 1 kW
+    assert out == round(5.0 * MIN_PLAUSIBLE_WH_PER_KM / 1000.0, 3)
+    assert out > 0

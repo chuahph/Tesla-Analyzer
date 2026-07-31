@@ -1405,3 +1405,70 @@ def test_assessment_trend_direction_and_confidence():
     assert a["trend"]["wh_per_km"]["dir"] == "better"
     assert a["confidence"] == "low"
     assert "indicative" in a["verdict"]
+
+
+# --- Measured standby rate --------------------------------------------------
+
+def _d(start, end, start_soc, end_soc):
+    """A drive stub: only the four fields the standby measurement reads."""
+    from types import SimpleNamespace
+    from datetime import datetime
+    return SimpleNamespace(
+        start_time=datetime.fromisoformat(start), end_time=datetime.fromisoformat(end),
+        start_soc=start_soc, end_soc=end_soc,
+    )
+
+
+def test_standby_kw_measures_the_rate_from_parked_gaps():
+    """SoC lost between one trip ending and the next starting, over the hours
+    between — a 2% drop across 10 parked hours of a 70 kWh pack is 0.14 kW."""
+    from app.analysis.driving import standby_kw
+
+    drives = [
+        _d("2026-07-01T08:00", "2026-07-01T09:00", 90, 88),
+        _d("2026-07-01T19:00", "2026-07-01T20:00", 86, 84),   # 10 h gap, 2% lost
+        _d("2026-07-02T06:00", "2026-07-02T07:00", 82, 80),   # 10 h gap, 2% lost
+    ]
+    rate = standby_kw(drives, [], 70.0)
+    assert rate == round(2.8 / 20.0, 3)      # 2 x (2% of 70) over 2 x 10 h
+
+
+def test_standby_kw_skips_gaps_containing_a_charge():
+    """A charge mid-gap makes the endpoints say nothing about drain — the SoC
+    went up, not down."""
+    from app.analysis.driving import standby_kw
+    from types import SimpleNamespace
+    from datetime import datetime
+
+    drives = [
+        _d("2026-07-01T08:00", "2026-07-01T09:00", 90, 88),
+        _d("2026-07-01T19:00", "2026-07-01T20:00", 86, 84),
+        _d("2026-07-02T06:00", "2026-07-02T07:00", 82, 80),
+    ]
+    charged = SimpleNamespace(start_time=datetime.fromisoformat("2026-07-01T12:00"))
+    # With that gap excluded only 10 h remain, below the total-hours floor.
+    assert standby_kw(drives, [charged], 70.0) is None
+
+
+def test_standby_kw_needs_enough_observed_hours():
+    """A rate from one short gap is noise: whole-percent SoC over a couple of
+    hours is mostly rounding."""
+    from app.analysis.driving import standby_kw
+
+    drives = [
+        _d("2026-07-01T08:00", "2026-07-01T09:00", 90, 88),
+        _d("2026-07-01T12:00", "2026-07-01T13:00", 87, 85),   # only a 3 h gap
+    ]
+    assert standby_kw(drives, [], 70.0) is None
+
+
+def test_standby_kw_rejects_an_implausible_rate():
+    """Way outside a parked car's range is a measurement artifact, and the
+    caller must get None rather than a number that would reshape trip energy."""
+    from app.analysis.driving import standby_kw
+
+    drives = [
+        _d("2026-07-01T08:00", "2026-07-01T09:00", 90, 88),
+        _d("2026-07-01T21:00", "2026-07-01T22:00", 40, 38),   # 48% over 12 h
+    ]
+    assert standby_kw(drives, [], 70.0) is None
