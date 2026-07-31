@@ -1257,10 +1257,25 @@ def _process_vehicle(
             closed_drive = session.get(Drive, marker["drive_id"])
             close_ts = marker.get("ts")
             elapsed_min = (snap["ts"] - close_ts) / 60.0 if close_ts else float("inf")
+            # Which report closed the trip decides how much this poll may
+            # attribute to it. "asleep" is the trustworthy one — a car cannot
+            # reach sleep while moving, so the drive really was over. But that
+            # only proves the car had STOPPED, not that last_snapshot was taken
+            # at the stop: that reading can still be a poll interval stale, and
+            # a trip closed on it then reads short by whatever the car covered
+            # in between (confirmed live, trip 314: 0.4 km and a minute of
+            # arrival missing, with tail_trim_sec null marking the sleep-close
+            # path). So a small tail still folds in. What must NOT apply is the
+            # time-based branch, which exists because sustained "offline" can
+            # fire mid-drive; after a genuine sleep any sizable movement is a
+            # new trip, not this one continuing. Markers written before the
+            # field default to the offline (less trusting) rules.
+            asleep_close = marker.get("reason") == "asleep"
             fold_in = (
                 closed_drive is not None and not sync_mod.is_driving(snap)
                 and (moved <= sync_mod.GAP_CREEP_MAX_KM
-                     or elapsed_min <= sync_mod.SLEEP_CLOSE_MERGE_MAX_MIN)
+                     or (not asleep_close
+                         and elapsed_min <= sync_mod.SLEEP_CLOSE_MERGE_MAX_MIN))
             )
             if fold_in:
                 closed_drive.distance_km = round(closed_drive.distance_km + moved, 1)
@@ -1325,7 +1340,12 @@ def _process_vehicle(
                 # Tell process_snapshot() this ground is already covered, so its
                 # own gap-reconstruction sees no movement here and stays quiet.
                 prev = {**prev, "odo_km": snap["odo_km"]}
-            elif closed_drive and elapsed_min <= sync_mod.SLEEP_CLOSE_MERGE_MAX_MIN:
+            elif (closed_drive and not asleep_close
+                  and elapsed_min <= sync_mod.SLEEP_CLOSE_MERGE_MAX_MIN):
+                # Never for an asleep close: that anchor is only ever a poll
+                # interval short, so movement big enough to be refused above
+                # belongs to a later trip, and stamping it here would report a
+                # loss this trip never had.
                 # Only inside the same window the merge uses. Past it, movement
                 # after the anchor is far more likely a genuinely separate
                 # later departure than a tail this trip was cut short of — and
@@ -1685,26 +1705,30 @@ def sync_now(wake: bool = Query(False), session: Session = Depends(get_session))
                         # the remainder as a disconnected phantom trip (see
                         # state.LAST_SLEEP_CLOSE_KEY).
                         #
-                        # Only for that case. A car that reported "asleep" cannot
-                        # have been moving — sleep is only reachable once parked
-                        # and idle — so its close is already anchored at the true
-                        # stop and needs no correction. Arming the marker there
-                        # anyway (this branch fires on either signal) pointed the
-                        # correction at a close that was never wrong, so a short
-                        # hop after the nap could be folded back into the previous
-                        # trip, or stamped on it as a loss it never had. Note
-                        # sustained_offline can't make this call — unreachable_since
-                        # is armed for anything not "online", so a car asleep past
-                        # UNREACHABLE_CLOSE_MIN sets it too.
-                        if vstate != "asleep":
-                            state.put(
-                                session, state.scoped(state.LAST_SLEEP_CLOSE_KEY, vvin),
-                                _json.dumps({
-                                    "drive_id": drive_row.id,
-                                    "odo_km": _json.loads(last_raw)["odo_km"],
-                                    "ts": _json.loads(last_raw)["ts"],
-                                }),
-                            )
+                        # Armed for BOTH reports, but recording which one, because
+                        # they earn different amounts of trust downstream. An
+                        # "asleep" close is anchored at a reading the car had
+                        # genuinely stopped moving by — yet not necessarily AT
+                        # the stop, since last_snapshot can be a poll interval
+                        # old, so a small arrival tail can still be missing
+                        # (trip 314). Sustained "offline" is weaker still: it can
+                        # fire mid-drive, so movement well past the close can
+                        # legitimately belong to the same trip. The reader uses
+                        # this to allow a small tail in both cases but the
+                        # time-based merge only for offline (see the top-up in
+                        # _process_vehicle). Note sustained_offline can't stand in
+                        # for this: unreachable_since is armed for anything not
+                        # "online", so a car asleep past UNREACHABLE_CLOSE_MIN
+                        # sets it too.
+                        state.put(
+                            session, state.scoped(state.LAST_SLEEP_CLOSE_KEY, vvin),
+                            _json.dumps({
+                                "drive_id": drive_row.id,
+                                "odo_km": _json.loads(last_raw)["odo_km"],
+                                "ts": _json.loads(last_raw)["ts"],
+                                "reason": "asleep" if vstate == "asleep" else "offline",
+                            }),
+                        )
                         notifications.fire_webhook(
                             "drive-complete", "Drive completed",
                             f"{vehicle_row.name}: {d['distance_km']:.1f} km, "

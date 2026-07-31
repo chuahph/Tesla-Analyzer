@@ -1008,6 +1008,116 @@ def test_sustained_offline_eventually_closes_open_trip(monkeypatch):
         _reset_to_demo()
 
 
+class _AsleepThenParksWithCreepClient(_SleepsAfterDrivingClient):
+    """Reports a genuine "asleep" (not "offline") after driving, then comes
+    back parked a little further along. Sleep proves the car had stopped, but
+    the closing reading can still be a poll interval old, so the last stretch
+    of the arrival can be missing from the trip."""
+
+    def list_vehicles(self):
+        # Asleep only for the read that closes the trip; back online after, so
+        # there is a poll to carry the correction.
+        st = "asleep" if type(self).step == 2 else "online"
+        return [{"vin": self.VIN, "id_s": "1", "id": 1, "state": st}]
+
+    def vehicle_data(self, vid):
+        if type(self).step < 3:
+            return super().vehicle_data(vid)
+        return {
+            "vin": self.VIN,
+            "display_name": "Highland",
+            "drive_state": {"timestamp": 1_760_500_000_000 + 3 * 300_000,
+                            "shift_state": "P", "speed": 0},
+            "charge_state": {"battery_level": 75, "battery_range": 375.0 / 1.60934,
+                             "charging_state": "Disconnected"},
+            "climate_state": {"outside_temp": 28},
+            "vehicle_state": {"odometer": ODO_KM_TO_MI(10012.4),
+                              "is_user_present": False, "locked": True},
+            "vehicle_config": {"car_type": "model3"},
+        }
+
+
+class _AsleepThenDrivesAgainClient(_AsleepThenParksWithCreepClient):
+    """Same genuine sleep, but the car wakes and makes a whole separate short
+    trip before the next poll catches it parked again — 3 km on, well past a
+    parking creep."""
+
+    def vehicle_data(self, vid):
+        d = super().vehicle_data(vid)
+        if type(self).step >= 3:
+            d["vehicle_state"]["odometer"] = ODO_KM_TO_MI(10015.0)
+        return d
+
+
+def _run_asleep_close(monkeypatch, client_cls):
+    """Drive, fall genuinely asleep (closing the trip), then poll once more."""
+    from app import services, state
+    from app.models import Drive
+
+    settings = get_settings()
+    old = settings.app_passcode
+    settings.app_passcode = ""
+    client_cls.step = 0
+    try:
+        monkeypatch.setattr("app.tesla_client.TeslaClient", _FakeClient)
+        vin = "VINAAAAAAAAAAAAAA"
+        with SessionLocal() as s:
+            services.link_with_token(s, "tok")
+            vid = s.query(Vehicle).filter(Vehicle.vin == vin).first().id
+
+        monkeypatch.setattr("app.tesla_client.TeslaClient", client_cls)
+        with TestClient(app) as client:
+            client.post("/api/sync")
+            client_cls.step = 1
+            client.post("/api/sync")
+            client_cls.step = 2
+            resp = client.post("/api/sync")          # reports "asleep" -> closes
+            assert resp.json()["logged"]["drives"] == 1
+
+        with SessionLocal() as s:
+            d = s.query(Drive).filter(Drive.vehicle_id == vid).one()
+            closed_id, dist_before = d.id, d.distance_km
+            assert dist_before == 12.0
+            # Armed even for a trustworthy asleep close — the anchor can still
+            # be a poll interval short of the true stop.
+            assert state.get(s, state.scoped(state.LAST_SLEEP_CLOSE_KEY, vin)) != ""
+
+        client_cls.step = 3
+        with TestClient(app) as client:
+            resp2 = client.post("/api/sync")
+        with SessionLocal() as s:
+            drives = s.query(Drive).filter(Drive.vehicle_id == vid).order_by(Drive.id).all()
+            return closed_id, dist_before, drives, resp2.json()["logged"]["drives"]
+    finally:
+        settings.app_passcode = old
+        _reset_to_demo()
+
+
+def test_asleep_close_still_recovers_a_short_arrival_tail(monkeypatch):
+    """Regression for trip 314: a trip closed on a genuine "asleep" read 0.4 km
+    and a minute short, because sleep proves the car had STOPPED but not that
+    the closing reading was taken at the stop — last_snapshot can be a poll
+    interval old. A small tail must still fold back in."""
+    closed_id, dist_before, drives, logged = _run_asleep_close(
+        monkeypatch, _AsleepThenParksWithCreepClient)
+    assert logged == 0                      # topped up, not a phantom second trip
+    assert len(drives) == 1
+    assert drives[0].id == closed_id
+    assert drives[0].distance_km == 12.4    # the 0.4 km arrival tail recovered
+
+
+def test_asleep_close_does_not_swallow_a_later_separate_trip(monkeypatch):
+    """The other half of the same rule. After a genuine sleep, movement past a
+    parking creep is a NEW trip — the time-based merge that exists for
+    mid-drive "offline" closes must not apply here, and the closed trip must
+    not be stamped with a loss it never had."""
+    closed_id, dist_before, drives, _ = _run_asleep_close(
+        monkeypatch, _AsleepThenDrivesAgainClient)
+    closed = next(d for d in drives if d.id == closed_id)
+    assert closed.distance_km == dist_before   # untouched by the 3 km
+    assert closed.end_lost_km == 0.0           # and not reported as its loss
+
+
 class _OfflineThenParksWithCreepClient(_OfflineAfterDrivingClient):
     """Same offline episode as above, but once back online the car reports a
     little further odometer movement while already parked — the dead zone

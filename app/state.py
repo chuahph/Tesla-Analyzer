@@ -32,7 +32,7 @@ LAST_STATUS_KEY = "last_status"  # JSON: {status, ts, soc, odo_km, speed_kmh, no
 UNREACHABLE_SINCE_KEY = "unreachable_since_ts"  # epoch a car was first seen not
 # "online" (asleep or offline) this episode, per VIN — cleared once it's back
 # online. Used to close an open trip after sustained "offline", not just "asleep".
-LAST_SLEEP_CLOSE_KEY = "last_sleep_close"  # JSON {drive_id, odo_km, ts} per VIN,
+LAST_SLEEP_CLOSE_KEY = "last_sleep_close"  # JSON {drive_id, odo_km, ts, reason} per VIN,
 # set when close_trip_on_sleep closes a trip. A dead zone right at arrival can
 # leave that closing reading slightly short of where the car actually came to
 # rest, in both distance and time — unlike a normal "asleep" report, "sustained
@@ -42,6 +42,12 @@ LAST_SLEEP_CLOSE_KEY = "last_sleep_close"  # JSON {drive_id, odo_km, ts} per VIN
 # its end_time forward too, rather than logging the remainder as a disconnected
 # phantom trip and leaving duration silently understated. Cleared
 # (consumed) on the very next successful poll either way.
+# ``reason`` is which report closed it, "asleep" or "offline", because the two
+# earn different trust. Sleep proves the car had stopped, but not that the
+# closing reading was taken AT the stop — it can be a poll interval old — so a
+# small arrival tail still folds in. Only "offline", which can fire mid-drive,
+# also gets the time-based merge of a larger gap. Absent on markers written
+# before the field, which then default to the offline rules.
 LOW_SOC_NOTIFIED_KEY = "low_soc_notified"  # "1" once the low-SoC push has fired
 # for the current low-battery episode, per VIN — cleared once SoC recovers
 # above the threshold, so plugging in and charging re-arms it instead of
