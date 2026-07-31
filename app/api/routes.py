@@ -38,6 +38,11 @@ router = APIRouter(prefix="/api", tags=["analytics"])
 # polling tightly": long enough to catch a likely departure, short enough that
 # an online-but-idle car isn't kept awake past this on our account.
 FAST_POLL_WINDOW_MIN = 3.0
+# How long to keep the tight polling cadence after a car with an open trip
+# first reads stopped. Covers the final creep into a parking space so the
+# trip's stop is anchored where the car actually came to rest, without
+# polling hard through the whole PARK_END_MIN wait before the trip closes.
+ARRIVAL_SETTLE_MIN = 4.0
 
 # A vehicle_data() read is itself an activity signal to the car — it resets
 # Tesla's own inactivity countdown, delaying sleep, regardless of how the
@@ -1897,7 +1902,26 @@ def sync_now(wake: bool = Query(False), session: Session = Depends(get_session))
     # back to sleep) this drops to False and the normal cadence takes over.
     woke_at = float(state.get(session, state.scoped(state.WOKE_AT_KEY, active_target)) or 0)
     recently_woke = bool(woke_at) and (now_ts - woke_at) <= FAST_POLL_WINDOW_MIN * 60
-    poll_fast = activity == "driving" or recently_woke
+    # Arrival is the one moment this most needs a prompt reading, and it was
+    # exactly when polling used to slow down: the instant the car stops,
+    # is_driving goes false, activity becomes "stopped", and the cadence
+    # dropped back to the idle tick — leaving the trip's stop anchored at
+    # whatever reading happened to be last. That is the direct cause of a
+    # clipped arrival tail (trip 314 lost 0.4 km) and of the pace-based trim
+    # having to reach 1002 s to undo a 17-minute-late reading (trip 316).
+    #
+    # So keep the tight cadence for a short settle window after the car first
+    # reads stopped with a trip still open — long enough to catch the final
+    # creep into a parking space and anchor the stop where the car actually
+    # came to rest. Bounded deliberately: a trip stays open for PARK_END_MIN
+    # after stopping, and polling hard for all of it would spend the Fleet
+    # API budget this cadence exists to protect. A few readings settle the
+    # anchor; the remaining wait does not need them.
+    # stop_at is set to None outright while the car is moving, so the key
+    # existing says nothing — `or {}` rather than a default argument.
+    stop_ts = ((open_trip or {}).get("stop_at") or {}).get("ts")
+    settling = bool(stop_ts) and (now_ts - stop_ts) <= ARRIVAL_SETTLE_MIN * 60
+    poll_fast = activity == "driving" or settling or recently_woke
 
     _save_last_status(
         session, active_target, status=activity, ts=now_ts,

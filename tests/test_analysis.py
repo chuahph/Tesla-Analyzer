@@ -502,16 +502,19 @@ def test_zero_energy_drive_does_not_dilute_efficiency():
 
 
 def test_confirmed_zero_idle_is_trusted_not_re_estimated():
-    """A trip with real live idle-tracking (idle_tracked=True) that measured
-    genuinely zero sustained stops must show driving_wh_per_km == the raw
-    figure — not silently re-estimated by the old avg/max-speed heuristic,
-    which would guess idle time from the speed spread alone and produce a
-    lower, wrong number despite having the real (zero) measurement in hand.
+    """The driving figure must not be guessed from the speed spread.
 
-    Real-world case: 8.0 km / 25.5 min, avg 18.9 avg / max 74 km/h (heavy
-    stop-go traffic with many short lights, none reaching the 3-min
-    threshold), 1.52 kWh -> 190 Wh/km. Before idle_tracked existed, this
-    silently fell back to the heuristic and showed ~144 instead of 190.
+    Real-world case: 8.0 km / 25.5 min, avg 18.9 / max 74 km/h (heavy stop-go
+    with many short lights), 1.52 kWh -> 190 Wh/km gross. The old avg/max
+    heuristic inferred idle time from the speed spread alone and produced
+    ~144; the model now subtracts a climate load measured against duration and
+    temperature instead, so the answer no longer depends on how spiky the
+    speed was.
+
+    Note the driving figure is deliberately BELOW the gross even though this
+    trip had zero sustained stops: climate runs while the car moves, so idle
+    was never the right thing to gate it on (the car's own breakdown shows a
+    Climate line on every trip).
     """
     from datetime import datetime
 
@@ -527,7 +530,10 @@ def test_confirmed_zero_idle_is_trusted_not_re_estimated():
     result = driving_analysis.analyze([tracked], 150.0, 75.0)
     trip = result["recent_trips"][0]
     assert trip["wh_per_km"] == 190
-    assert trip["driving_wh_per_km"] == 190  # trusted zero, not re-estimated to ~144
+    # Not the old heuristic's ~144, and not the gross either: climate over
+    # 25.5 min at 31C is stripped whatever the stop pattern was.
+    assert trip["driving_wh_per_km"] == 114
+    assert trip["driving_wh_per_km"] != 144
 
     # An otherwise-identical *untracked* trip (idle_tracked=False, e.g. logged
     # before this feature or reconstructed across a gap) must still fall back
@@ -972,9 +978,9 @@ def test_top_routes_falls_back_to_location_when_area_missing():
 
 
 def test_recent_trips_report_idle_stripped_driving_energy():
-    """A trip with real tracked idle exposes driving_energy_kwh below the gross
-    energy (Tesla-'Current Drive'-comparable); a trip with no idle reports the
-    two equal."""
+    """driving_energy_kwh sits below the gross (which is what matches Tesla's
+    "Current Drive"), and does so whether or not the trip had sustained stops
+    — climate is a whole-trip load, so a steady drive is charged for it too."""
     from datetime import datetime
 
     from app.analysis import driving as driving_analysis
@@ -994,10 +1000,13 @@ def test_recent_trips_report_idle_stripped_driving_energy():
         start_time=datetime(2026, 7, 9, 8, 0), end_time=datetime(2026, 7, 9, 8, 25),
         distance_km=8.0, duration_min=25.5, avg_speed_kmh=18.9, max_speed_kmh=74.0,
         start_soc=44, end_soc=42, energy_used_kwh=1.52, outside_temp_c=31.0,
-        idle_min=0.0, idle_tracked=True,   # confirmed zero idle -> no stripping
+        idle_min=0.0, idle_tracked=True,   # zero sustained stops...
     )
     row = driving_analysis.analyze([steady], 150.0, 72.0)["recent_trips"][0]
-    assert row["driving_energy_kwh"] == row["energy_kwh"]
+    # ...but climate still ran, so this is stripped too. Under the old
+    # idle-gated model this trip reported driving == gross, which is exactly
+    # the case that made the figure useless in stop-go traffic.
+    assert row["driving_energy_kwh"] < row["energy_kwh"]
 
 
 def test_recent_trips_report_soc_used_pct():

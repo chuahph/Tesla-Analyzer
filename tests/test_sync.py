@@ -1863,3 +1863,81 @@ def test_drive_records_its_odometer_anchors():
     assert drives[0]["start_odo_km"] == 5000.0
     assert drives[0]["end_odo_km"] == 5006.0
     assert round(drives[0]["end_odo_km"] - drives[0]["start_odo_km"], 1) == drives[0]["distance_km"]
+
+
+# --- Whole-trip climate model ----------------------------------------------
+
+def test_climate_is_stripped_across_the_whole_trip_not_just_stops():
+    """The gap this closes: climate runs while the car moves, so gating it on
+    sustained stops meant stop-go traffic had nothing stripped at all and the
+    driving figure came out equal to the gross (trips 313 and 317 both did,
+    while the car's own screen put a fifth of each trip under Climate)."""
+    from app.sync import driving_only_wh_per_km
+
+    # Trip 317: 11.2 km, 20 min at 29C, 1.73 kWh gross -> 154 Wh/km.
+    out = driving_only_wh_per_km(1.73, 11.2, 20.0, 29.0)
+    assert out == 119                       # was 154, i.e. no strip at all
+    # Tesla's own Driving line for that trip works out near 108 Wh/km, so the
+    # model now lands the right side of the gross rather than on top of it.
+    assert 100 < out < 154
+
+
+def test_climate_strip_is_capped_so_a_hot_trip_cannot_be_gutted():
+    """The rate is inherited from the idle model and overstates in real heat —
+    measured against the car's breakdown it was about right at 29-31C and
+    roughly double at 33C. The cap bounds that rather than fitting a new
+    constant to a handful of trips."""
+    from app.sync import CLIMATE_MAX_SHARE, driving_only_kwh
+
+    # Trip 312's shape: 33 min at 33C would model 0.92 kWh of a 1.8 kWh trip.
+    out = driving_only_kwh(1.8, 33.0, 33.0)
+    assert out == round(1.8 * (1 - CLIMATE_MAX_SHARE), 10)
+    assert out > 1.8 * 0.5
+
+
+def test_climate_strip_follows_measured_on_time():
+    """A trip driven with climate off must not be charged for it."""
+    from app.sync import driving_only_kwh
+
+    off = driving_only_kwh(1.73, 20.0, 29.0, climate_min=0.0)
+    half = driving_only_kwh(1.73, 20.0, 29.0, climate_min=10.0)
+    always = driving_only_kwh(1.73, 20.0, 29.0, climate_min=20.0)
+    assert off == 1.73                       # nothing stripped
+    assert always < half < off
+
+
+def test_climate_unknown_is_not_read_as_off():
+    """None means the car never reported the flag. Treating that as "off"
+    would silently switch the correction off for those cars."""
+    from app.sync import driving_only_kwh
+
+    assert driving_only_kwh(1.73, 20.0, 29.0, climate_min=None) < 1.73
+    assert (driving_only_kwh(1.73, 20.0, 29.0, climate_min=None)
+            == driving_only_kwh(1.73, 20.0, 29.0, climate_min=20.0))
+
+
+def test_climate_minutes_are_tracked_from_the_reported_flag():
+    """Tracked off the same interval walk idle uses, and only where the car
+    actually reported the flag."""
+    from app.sync import _track_climate, climate_on_fraction
+
+    trip = {}
+    a = snap(T0, 100.0, 80, shift="D", speed=40)
+    b = snap(T0 + 120, 101.0, 80, shift="D", speed=40)
+    b["climate_on"] = True
+    _track_climate(trip, a, b)
+    assert trip["climate_min"] == 2.0
+    assert climate_on_fraction(trip) == 1.0
+
+    c = snap(T0 + 240, 102.0, 80, shift="D", speed=40)
+    c["climate_on"] = False
+    _track_climate(trip, b, c)
+    assert trip["climate_min"] == 2.0        # unchanged
+    assert climate_on_fraction(trip) == 0.5  # on for half the observed time
+
+    # A car that never reports it reads as unknown, not off.
+    blank = {}
+    d2 = snap(T0 + 360, 103.0, 80, shift="D", speed=40)
+    d2["climate_on"] = None
+    _track_climate(blank, c, d2)
+    assert climate_on_fraction(blank) == 1.0

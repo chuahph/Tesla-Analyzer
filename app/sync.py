@@ -401,6 +401,45 @@ def _track_idle(open_trip: dict[str, Any], prev: dict[str, Any] | None,
         _flush_idle_run(open_trip)
 
 
+def _track_climate(open_trip: dict[str, Any], prev: dict[str, Any] | None,
+                   cur: dict[str, Any]) -> None:
+    """Accumulate how long climate ran during this trip, from the same
+    interval walk _track_idle uses.
+
+    Needed because climate is a whole-trip load, not an idle one: it runs
+    while the car is moving just as much as while it sits, so the share of the
+    trip it was actually on is what decides how much of the energy was not
+    propulsion. Tracks the observed minutes and the minutes the car actually
+    reported the flag separately — ``climate_on`` is None on cars/firmware
+    that don't report it, and an unknown must not read as "off". Mutates
+    open_trip in place.
+    """
+    if not prev:
+        return
+    interval_min = (cur["ts"] - prev["ts"]) / 60.0
+    if interval_min <= 0 or interval_min >= PARK_GAP_MIN:
+        return
+    on = cur.get("climate_on")
+    if on is None:
+        return
+    open_trip["climate_known_min"] = open_trip.get("climate_known_min", 0.0) + interval_min
+    if on:
+        open_trip["climate_min"] = open_trip.get("climate_min", 0.0) + interval_min
+
+
+def climate_on_fraction(open_trip: dict[str, Any]) -> float:
+    """Share of the observed trip that climate was running, 0..1.
+
+    1.0 when the car never reported the flag — the pre-existing assumption,
+    and the safe one: it keeps the correction working on cars that don't
+    report climate rather than silently switching it off for them.
+    """
+    known = open_trip.get("climate_known_min", 0.0)
+    if known <= 0:
+        return 1.0
+    return min(max(open_trip.get("climate_min", 0.0) / known, 0.0), 1.0)
+
+
 def _confirmed_idle_min(open_trip: dict[str, Any], end_ts: float) -> float:
     """Real idle minutes accumulated in ``open_trip`` as of ``end_ts`` —
     committed runs plus any in-progress stationary run, truncated at
@@ -478,6 +517,69 @@ def _energy_kwh(frm: dict, to: dict, capacity_kwh: float) -> float:
 
 
 MIN_PLAUSIBLE_WH_PER_KM = 40.0  # below this over a whole trip = contaminated data
+# Most of a trip's energy the climate model is ever allowed to claim. The rate
+# below is inherited from the idle estimate and is known to run high in real
+# heat — measured against the car's own breakdown it was about right at 29-31
+# degrees and roughly double at 33 — so this bounds how wrong that can get.
+# Tesla's own Climate line ran 20-36% of trip energy across the trips checked,
+# so a cap here only ever binds on the cases the rate overstates.
+CLIMATE_MAX_SHARE = 0.40
+
+
+def climate_kwh(duration_min, out_temp_c=None, climate_frac=1.0):
+    """Modelled climate/accessory energy over a whole trip, in kWh.
+
+    The distinction that matters: this is a load that runs for the WHOLE trip,
+    not only while the car sits. The previous model subtracted it over idle
+    minutes alone, which meant stop-go traffic — where stops are frequent but
+    each too short to count as idle — had no climate stripped at all, and the
+    driving-only figure came out equal to the gross. Trips 313 and 317 both
+    reported driving_wh_per_km identical to wh_per_km for exactly that reason,
+    while the car's own screen attributed a fifth of each trip to Climate.
+
+    ``climate_frac`` is the measured share of the trip climate actually ran
+    (see climate_on_fraction), so a trip driven with it off is not charged for
+    it. Defaults to 1.0, which is what cars that never report the flag get —
+    the same assumption the idle model always made.
+    """
+    if duration_min <= 0:
+        return 0.0
+    t = out_temp_c if out_temp_c is not None else 22.0
+    kw = min(0.35 + 0.12 * abs(t - 22.0), 2.6)
+    return kw * (duration_min / 60.0) * max(min(climate_frac, 1.0), 0.0)
+
+
+def driving_only_kwh(energy_kwh, duration_min, out_temp_c=None, climate_min=None):
+    """Propulsion-only energy: gross minus the climate load that ran across
+    the whole trip. The counterpart to Tesla's own "Driving" breakdown line,
+    which its "Current Drive" total (our gross) sits above.
+
+    ``climate_min`` is the measured minutes climate ran, or None when the car
+    never reported the flag — None means assume it ran throughout, which is
+    what the previous model effectively assumed and keeps the correction
+    working on cars that don't report it.
+
+    Capped at CLIMATE_MAX_SHARE of the gross rather than trusted outright: the
+    rate is inherited from the idle model and overstates in real heat, and a
+    cap bounds that without inventing a new constant fitted to a handful of
+    trips.
+    """
+    if not energy_kwh or energy_kwh <= 0:
+        return energy_kwh
+    frac = 1.0 if climate_min is None else (
+        min(max(climate_min / duration_min, 0.0), 1.0) if duration_min > 0 else 1.0)
+    modelled = climate_kwh(duration_min, out_temp_c, frac)
+    return max(energy_kwh - modelled, energy_kwh * (1.0 - CLIMATE_MAX_SHARE))
+
+
+def driving_only_wh_per_km(energy_kwh, distance_km, duration_min,
+                           out_temp_c=None, climate_min=None):
+    """driving_only_kwh expressed over the distance, in Wh/km."""
+    if not energy_kwh or energy_kwh <= 0 or not distance_km or distance_km <= 0:
+        return None
+    return round(
+        driving_only_kwh(energy_kwh, duration_min, out_temp_c, climate_min)
+        * 1000.0 / distance_km)
 
 
 def _idle_adjusted_kwh(energy_kwh, idle_min, out_temp_c=None):
@@ -611,6 +713,11 @@ def _drive_from(start: dict, cur: dict, capacity_kwh: float, max_speed: float = 
         # 0.0 there too, but analysis code must not read that as "confirmed
         # zero" without checking idle_tracked first.
         "idle_min": round(min(idle_min, dt_min), 1) if dt_min else 0.0,
+        # Minutes climate was observed running, for the whole-trip climate
+        # model (see climate_kwh). None when the car never reported the flag,
+        # which must read as "unknown", not "off".
+        "climate_min": (round(min(start.get("climate_min", 0.0), dt_min), 1)
+                        if start.get("climate_known_min") else None),
         "idle_tracked": idle_tracked,
         # Seconds this trip's stop time was back-dated by the pace-based
         # correction, when the closing path evaluated one (see
@@ -986,6 +1093,7 @@ def process_snapshot(
             "max_speed": max(open_trip.get("max_speed", 0.0), cur.get("speed_kmh") or 0.0),
         }
         _track_idle(open_trip, prev, cur)
+        _track_climate(open_trip, prev, cur)
         gap_min = ((cur["ts"] - prev["ts"]) / 60.0) if prev else 0.0
         moved = cur["odo_km"] - (prev["odo_km"] if prev else cur["odo_km"])
         implied = (moved / (gap_min / 60.0)) if gap_min > 0 else 0.0

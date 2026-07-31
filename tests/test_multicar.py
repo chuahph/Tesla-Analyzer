@@ -1596,3 +1596,63 @@ def test_compare_endpoint_covers_only_real_cars(monkeypatch):
     finally:
         settings.app_passcode = old_pc
         _reset_to_demo()
+
+
+class _DrivesThenParksOnlineClient(_SleepsAfterDrivingClient):
+    """Drives, then parks and STAYS online — the trip is still open (the
+    parked close waits PARK_END_MIN), which is the arrival window."""
+
+    def list_vehicles(self):
+        return [{"vin": self.VIN, "id_s": "1", "id": 1, "state": "online"}]
+
+    def vehicle_data(self, vid):
+        if type(self).step < 2:
+            return super().vehicle_data(vid)
+        import time as _t
+        return {
+            "vin": self.VIN, "display_name": "Highland",
+            "drive_state": {"timestamp": int(_t.time() * 1000),
+                            "shift_state": "P", "speed": 0},
+            "charge_state": {"battery_level": 76, "battery_range": 380.0 / 1.60934,
+                             "charging_state": "Disconnected"},
+            "climate_state": {"outside_temp": 28},
+            "vehicle_state": {"odometer": ODO_KM_TO_MI(10012.0),
+                              "is_user_present": True, "locked": False},
+            "vehicle_config": {"car_type": "model3"},
+        }
+
+
+def test_arrival_keeps_the_fast_poll_cadence(monkeypatch):
+    """The moment a car stops, is_driving goes false and the cadence used to
+    drop straight back to the idle tick — exactly when the trip's stop anchor
+    most needs a prompt reading. That is what left trip 314's arrival 0.4 km
+    short and made trip 316 need a 1002 s trim. A trip still open and only
+    just stopped must hold the tight cadence."""
+    from app import services
+
+    settings = get_settings()
+    old = settings.app_passcode
+    settings.app_passcode = ""
+    _DrivesThenParksOnlineClient.step = 0
+    try:
+        monkeypatch.setattr("app.tesla_client.TeslaClient", _FakeClient)
+        with SessionLocal() as s:
+            services.link_with_token(s, "tok")
+
+        monkeypatch.setattr("app.tesla_client.TeslaClient", _DrivesThenParksOnlineClient)
+        with TestClient(app) as client:
+            client.post("/api/sync")
+            _DrivesThenParksOnlineClient.step = 1
+            moving = client.post("/api/sync").json()
+            assert moving["status"] == "driving"
+            assert moving["poll_fast"] is True            # moving, as before
+
+            _DrivesThenParksOnlineClient.step = 2
+            arrived = client.post("/api/sync").json()
+
+        assert arrived["trip_in_progress"] is True        # trip still open
+        assert arrived["status"] == "stopped"             # and no longer driving
+        assert arrived["poll_fast"] is True               # settling, not abandoned
+    finally:
+        settings.app_passcode = old
+        _reset_to_demo()

@@ -81,6 +81,14 @@ class Drive(Base):
     # read the same. Analysis code trusts idle_min only when idle_tracked is
     # true; otherwise it falls back to the avg/max-speed estimate.
     idle_min: Mapped[float] = mapped_column(Float, default=0.0)
+
+    # Minutes climate was observed running during this trip. Climate is a
+    # whole-trip load rather than an idle one — it runs while moving just as
+    # much as while stopped — so this, not idle_min, is what decides how much
+    # of the energy was something other than propulsion (see
+    # sync.driving_only_kwh). None means the car never reported the flag, which
+    # must read as "unknown" and fall back to assuming it ran, not as "off".
+    climate_min: Mapped[float | None] = mapped_column(Float, nullable=True)
     idle_tracked: Mapped[bool] = mapped_column(Boolean, default=False)
 
     # User-assigned category ("work" / "personal", or any free text) for

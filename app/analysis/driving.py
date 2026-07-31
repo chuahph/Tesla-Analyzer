@@ -836,23 +836,17 @@ def analyze(drives: list[Drive], rated_wh_per_km: float = 150.0,
                 "wh_per_km": round(d.wh_per_km) if has_valid_energy(d) else None,
                 "energy_kwh": round(d.energy_used_kwh, 2) if has_valid_energy(d) else None,
                 "driving_wh_per_km": (
-                    # Prefer real tracked idle time (from live 1-min-cron
-                    # sampling while the trip was open) over the avg/max-speed
-                    # estimate, when it's available — a genuine measurement,
-                    # not a guess. Gated on idle_tracked, not just idle_min
-                    # being truthy: a trip with confirmed zero sustained stops
-                    # and a trip nobody ever measured both read idle_min=0.0,
-                    # and only idle_tracked tells them apart. Trust a real
-                    # zero; only fall back to the estimate when it's unknown.
-                    driving_wh_val := (
-                        sync_mod._subtract_idle_energy(
-                            d.energy_used_kwh, d.distance_km, getattr(d, "idle_min", 0.0) or 0.0,
-                            d.outside_temp_c)
-                        if getattr(d, "idle_tracked", False) else
-                        sync_mod.driving_wh_per_km(
-                            d.energy_used_kwh, d.distance_km, d.duration_min, d.outside_temp_c,
-                            d.avg_speed_kmh, d.max_speed_kmh)
-                    )
+                    # Gross minus the climate load, modelled across the WHOLE
+                    # trip rather than over sustained stops only. Climate runs
+                    # while the car moves just as much as while it sits, and
+                    # gating it on idle meant stop-go traffic — frequent stops,
+                    # each too short to count — had nothing stripped at all, so
+                    # this figure came out equal to the gross exactly when it
+                    # was most worth having. Needs no speed heuristic either,
+                    # so legacy trips get a real figure instead of a fallback.
+                    driving_wh_val := sync_mod.driving_only_wh_per_km(
+                        d.energy_used_kwh, d.distance_km, d.duration_min,
+                        d.outside_temp_c, getattr(d, "climate_min", None))
                     if has_valid_energy(d) else None
                 ),
                 # Propulsion-only energy for this drive, the counterpart to
