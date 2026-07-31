@@ -1536,6 +1536,12 @@ function tripDiagnostics(t, ctx) {
       // recovered distance. This is the part that actually settles most
       // accuracy questions, and it's invisible in the UI.
       start_lost_km: t.start_lost_km, end_lost_km: t.end_lost_km,
+      // Disambiguates a 0.0 start_lost_km: nothing to lose, or the departure
+      // recovery reclaimed it. Without this the two look identical.
+      start_recovered_km: t.start_recovered_km,
+      // Where the anchors sat, so the trip can be checked against the
+      // odometer readings around it rather than taken on its own word.
+      start_odo_km: t.start_odo_km, end_odo_km: t.end_odo_km,
       tail_trim_sec: t.tail_trim_sec,
       data_quality: t.data_quality, distance_flag: t.distance_flag,
       // The parked gap before this trip: a 0.0 kWh reading over a long park

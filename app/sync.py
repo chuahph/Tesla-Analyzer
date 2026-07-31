@@ -624,6 +624,14 @@ def _drive_from(start: dict, cur: dict, capacity_kwh: float, max_speed: float = 
         # And the same at the closing end (see Drive.end_lost_km) — read from
         # the close point, which is the `cur` argument.
         "end_lost_km": cur.get("end_lost_km"),
+        # How much the departure recovery pulled back into this trip, which is
+        # what disambiguates a 0.0 start_lost_km (see Drive.start_recovered_km).
+        "start_recovered_km": start.get("start_recovered_km"),
+        # Where on the odometer the two anchors sat. distance_km is their
+        # difference; these are what let a trip be checked against the readings
+        # taken around it (see driving.odometer_continuity).
+        "start_odo_km": round(start["odo_km"], 3) if start.get("odo_km") is not None else None,
+        "end_odo_km": round(cur["odo_km"], 3) if cur.get("odo_km") is not None else None,
     }
 
 
@@ -923,7 +931,7 @@ def _split_gap_events(prev: dict, cur: dict, capacity_kwh: float, price_per_kwh:
          # whole gap and nothing can have been dropped ahead of it — a confirmed
          # 0.0, not an unknown. Leaving it unset would make this path's rows
          # indistinguishable from pre-instrumentation ones.
-         "start_lost_km": 0.0},
+         "start_lost_km": 0.0, "start_recovered_km": 0.0},
         {**cur, "end_lost_km": 0.0}, capacity_kwh, drive_min_km=drive_min_km,
     )
     return charge, drive
@@ -1027,6 +1035,7 @@ def process_snapshot(
             # leaving the field unset (which would read as "uninstrumented")
             # or reporting the same distance lost twice under two names.
             open_trip["start_lost_km"] = 0.0
+            open_trip["start_recovered_km"] = 0.0
         elif is_driving(cur):
             open_trip["stop_at"] = None   # moving — cancel any pending stop point
         else:
@@ -1161,6 +1170,9 @@ def process_snapshot(
             round(max(cur["odo_km"] - prev["odo_km"], 0.0), 3)
             if (prev and was_parked) else 0.0
         )
+        # Nothing reclaimed unless the recovery below fires. A real 0.0, so a
+        # trip can always be asked the question rather than answering None.
+        open_trip["start_recovered_km"] = 0.0
         # Symmetric to the arrival case: if the first *driving* reading only came
         # through after an unpolled gap (poor signal at power-on), the last
         # parked reading is well before the car actually set off, so counting
@@ -1254,6 +1266,11 @@ def process_snapshot(
                     # no recovery at all (reported live, checked against the
                     # car's own trip meter: a 4.1 km drive logged as 3.6 km,
                     # its kWh short by the same stretch).
+                    # Record what was reclaimed BEFORE zeroing the loss —
+                    # otherwise the two zeros are indistinguishable, which is
+                    # exactly the ambiguity start_recovered_km exists to end.
+                    open_trip["start_recovered_km"] = round(
+                        max(cur["odo_km"] - prev["odo_km"], 0.0), 3)
                     open_trip["odo_km"] = prev["odo_km"]
                     open_trip["start_lost_km"] = 0.0  # pulled back in, nothing lost
                     # The odometer above is safe to pull back unconditionally —
@@ -1314,7 +1331,7 @@ def process_snapshot(
         # the span covers everything between the two readings: start_lost_km is
         # a confirmed 0.0 here. Set it on a copy rather than mutating prev,
         # which the caller still holds.
-        d = _drive_from({**prev, "start_lost_km": 0.0},
+        d = _drive_from({**prev, "start_lost_km": 0.0, "start_recovered_km": 0.0},
                         {**cur, "end_lost_km": 0.0}, capacity_kwh,
                         drive_min_km=drive_min_km)
         if d:

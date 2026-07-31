@@ -3279,6 +3279,25 @@ def summary(
         select(Charge).where(Charge.vehicle_id == vehicle.id).order_by(Charge.start_time)
     ).all()
     vehicle_out["capacity_check"] = battery_analysis.implied_capacity(list(all_charges))
+    # Ground the odometer says was covered that no trip claims. The one check
+    # in the app that doesn't depend on any of its own derived figures — it
+    # compares each trip's recorded stop against the readings taken while the
+    # car sat parked afterwards, which is where the car actually came to rest.
+    # Scoped to the displayed window's drives, but against every reading in
+    # that span, since a short close is only visible in the parked readings
+    # that follow it.
+    # since is None for the default window — _window derives that bound itself,
+    # so mirror it here rather than reaching for a value that isn't set yet.
+    readings_since = since if since is not None else (
+        sync_mod.now_local() - timedelta(days=days))
+    window_readings = session.scalars(
+        select(BatteryReading).where(
+            BatteryReading.vehicle_id == vehicle.id,
+            BatteryReading.ts >= readings_since,
+        ).order_by(BatteryReading.ts)
+    ).all()
+    vehicle_out["continuity"] = driving_analysis.odometer_continuity(
+        list(drives), list(window_readings))
     # Whether time-of-use pricing is active, so it's clear why cost figures
     # vary by time of day instead of using the flat rate.
     vehicle_out["tou_enabled"] = bool(

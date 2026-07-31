@@ -1472,3 +1472,83 @@ def test_standby_kw_rejects_an_implausible_rate():
         _d("2026-07-01T21:00", "2026-07-01T22:00", 40, 38),   # 48% over 12 h
     ]
     assert standby_kw(drives, [], 70.0) is None
+
+
+# --- Odometer continuity ----------------------------------------------------
+
+def _drv(did, start, end, end_odo, end_lost=0.0, start_odo=None):
+    from types import SimpleNamespace
+    from datetime import datetime
+    return SimpleNamespace(
+        id=did, start_time=datetime.fromisoformat(start),
+        end_time=datetime.fromisoformat(end),
+        start_odo_km=start_odo, end_odo_km=end_odo, end_lost_km=end_lost,
+        start_location="A", end_location="B",
+    )
+
+
+def _rd(ts, odo):
+    from types import SimpleNamespace
+    from datetime import datetime
+    return SimpleNamespace(ts=datetime.fromisoformat(ts), odo_km=odo)
+
+
+def test_continuity_flags_a_trip_that_closed_before_the_car_stopped():
+    """Regression for trip 314: the trip recorded its stop at 10000.0 but the
+    readings taken while it sat parked show 10000.4 — that 0.4 km happened and
+    belongs to this trip's arrival, and nothing recorded it."""
+    from app.analysis.driving import odometer_continuity
+
+    drives = [_drv(1, "2026-07-01T08:00", "2026-07-01T09:00", 10000.0)]
+    readings = [_rd("2026-07-01T09:05", 10000.4), _rd("2026-07-01T10:00", 10000.4)]
+    out = odometer_continuity(drives, readings)
+    assert out["available"] is True
+    assert out["unattributed_km"] == 0.4
+    assert out["gaps"][0]["drive_id"] == 1
+    assert out["gaps"][0]["recorded_end_odo_km"] == 10000.0
+    assert out["gaps"][0]["observed_odo_km"] == 10000.4
+
+
+def test_continuity_accepts_a_trip_that_reported_its_own_shortfall():
+    """A trip that already recorded end_lost_km has hidden nothing — the same
+    0.4 km, declared, must not be reported again as unattributed."""
+    from app.analysis.driving import odometer_continuity
+
+    drives = [_drv(1, "2026-07-01T08:00", "2026-07-01T09:00", 10000.0, end_lost=0.4)]
+    readings = [_rd("2026-07-01T09:05", 10000.4)]
+    assert odometer_continuity(drives, readings)["unattributed_km"] == 0.0
+
+
+def test_continuity_ignores_parking_shuffle():
+    """Sub-tolerance movement is odometer resolution and parking manoeuvres,
+    not a boundary the app got wrong."""
+    from app.analysis.driving import odometer_continuity
+
+    drives = [_drv(1, "2026-07-01T08:00", "2026-07-01T09:00", 10000.0)]
+    readings = [_rd("2026-07-01T09:05", 10000.1)]
+    assert odometer_continuity(drives, readings)["gaps"] == []
+
+
+def test_continuity_only_counts_readings_before_the_next_trip_sets_off():
+    """Movement after the next trip has begun is that trip's, not this one's
+    — otherwise every trip would be blamed for the one after it."""
+    from app.analysis.driving import odometer_continuity
+
+    drives = [
+        _drv(1, "2026-07-01T08:00", "2026-07-01T09:00", 10000.0),
+        _drv(2, "2026-07-01T12:00", "2026-07-01T13:00", 10050.0),
+    ]
+    readings = [_rd("2026-07-01T10:00", 10000.0),   # parked, no drift
+                _rd("2026-07-01T12:30", 10025.0)]   # mid second trip
+    assert odometer_continuity(drives, readings)["unattributed_km"] == 0.0
+
+
+def test_continuity_needs_odometer_anchors_and_readings():
+    """Trips logged before end_odo_km was recorded can't be checked, and must
+    not be silently counted as clean."""
+    from app.analysis.driving import odometer_continuity
+
+    legacy = [_drv(1, "2026-07-01T08:00", "2026-07-01T09:00", None)]
+    assert odometer_continuity(legacy, [_rd("2026-07-01T09:05", 10000.4)])["available"] is False
+    good = [_drv(1, "2026-07-01T08:00", "2026-07-01T09:00", 10000.0)]
+    assert odometer_continuity(good, [])["available"] is False

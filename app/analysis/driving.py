@@ -17,6 +17,82 @@ from . import has_valid_energy, haversine_km, linregress, mean, percentile, safe
 VAMPIRE_MIN_GAP_HOURS = 1.0
 
 
+# Odometer reconciliation. Below this a mismatch is parking shuffle, GPS-grade
+# odometer jitter, or the 0.1 km the odometer itself is reported to — not a
+# boundary the app got wrong.
+CONTINUITY_TOLERANCE_KM = 0.15
+
+
+def odometer_continuity(drives: list[Any], readings: list[Any]) -> dict[str, Any]:
+    """Check each trip's recorded stop against where the car was actually seen
+    resting afterwards, and report the ground no trip claims.
+
+    The odometer only counts up, so it is the one measurement in the system
+    that cannot be argued with. A trip that closed early still leaves the car
+    sitting further along, and the readings taken while it is parked say
+    exactly where — so the difference between a trip's ``end_odo_km`` and the
+    highest odometer observed before the next trip began is distance that
+    happened and belongs to that trip's arrival.
+
+    ``end_lost_km`` is subtracted before judging, because a trip that already
+    reported its own shortfall has not hidden anything. What is left is
+    unrecorded: the case where a close was anchored short and nothing
+    corrected it (trip 314), where the provisional 0.0 from a sleep close was
+    never revisited, or where real movement was logged as no trip at all.
+
+    Note what this deliberately cannot see. When a trip closes short and the
+    *next* trip's departure recovery pulls its anchor back over the same
+    ground, the odometer stays perfectly continuous — every metre is claimed
+    exactly once, just by the wrong trip. That is a misattribution, not a
+    discontinuity, and only the parked readings between the two can expose it,
+    which is why this compares against readings rather than chaining trip to
+    trip.
+    """
+    ordered = [d for d in sorted(drives, key=lambda d: d.start_time)
+               if getattr(d, "end_odo_km", None) is not None]
+    if not ordered or not readings:
+        return {"available": False, "gaps": [], "unattributed_km": 0.0}
+    obs = sorted(
+        ((r.ts, r.odo_km) for r in readings if getattr(r, "odo_km", None) is not None),
+        key=lambda x: x[0],
+    )
+    if not obs:
+        return {"available": False, "gaps": [], "unattributed_km": 0.0}
+
+    out: list[dict[str, Any]] = []
+    total = 0.0
+    for i, d in enumerate(ordered):
+        nxt = ordered[i + 1] if i + 1 < len(ordered) else None
+        # Readings taken while parked after this trip: after it stopped, and
+        # before the next one set off. The highest is where the car came to
+        # rest, whatever the trip recorded.
+        until = nxt.start_time if nxt else None
+        resting = [o for t, o in obs
+                   if t >= d.end_time and (until is None or t <= until)]
+        if not resting:
+            continue
+        seen = max(resting)
+        missing = seen - d.end_odo_km - (getattr(d, "end_lost_km", None) or 0.0)
+        if missing <= CONTINUITY_TOLERANCE_KM:
+            continue
+        total += missing
+        out.append({
+            "drive_id": getattr(d, "id", None),
+            "route": f"{d.start_location} → {d.end_location}"
+            if d.start_location and d.end_location else "",
+            "end_time": d.end_time.isoformat(timespec="minutes"),
+            "recorded_end_odo_km": round(d.end_odo_km, 1),
+            "observed_odo_km": round(seen, 1),
+            "unrecorded_km": round(missing, 2),
+        })
+    return {
+        "available": True,
+        "gaps": out[-10:],
+        "trips_checked": len(ordered),
+        "unattributed_km": round(total, 2),
+    }
+
+
 # Measuring this car's own parked standby draw. Deliberately stricter than
 # vampire_drain's reporting thresholds, because this feeds a correction rather
 # than a narrative: start/end SoC are whole percents, so a gap has to be long
@@ -833,6 +909,15 @@ def analyze(drives: list[Drive], rated_wh_per_km: float = 150.0,
                 # that reads short on distance but not on energy points here
                 # rather than at the start anchor, which loses both together.
                 "end_lost_km": getattr(d, "end_lost_km", None),
+                # What the departure recovery pulled back in, which is what
+                # tells a "nothing was lost" 0.0 apart from a "the recovery
+                # reclaimed it" 0.0 (see Drive.start_recovered_km).
+                "start_recovered_km": getattr(d, "start_recovered_km", None),
+                # Where the two anchors sat on the odometer, so a trip can be
+                # reconciled against the readings around it without re-deriving
+                # its position from every trip before it.
+                "start_odo_km": getattr(d, "start_odo_km", None),
+                "end_odo_km": getattr(d, "end_odo_km", None),
                 "route": f"{d.start_location} → {d.end_location}"
                 if d.start_location and d.end_location else "",
                 # Raw endpoints, so the UI can offer "name this place" (a

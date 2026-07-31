@@ -1822,3 +1822,44 @@ def test_trim_standby_cannot_drain_a_real_drive_to_nothing():
     out = trim_standby_kwh(1.0, 5.0, 36000.0, 1.0)   # 10 h of trim at 1 kW
     assert out == round(5.0 * MIN_PLAUSIBLE_WH_PER_KM / 1000.0, 3)
     assert out > 0
+
+
+def test_start_recovered_km_says_which_kind_of_zero_a_start_is():
+    """start_lost_km reads 0.0 both when nothing could be lost and when the
+    departure recovery reclaimed real distance — the two cases most worth
+    telling apart, since the second means the trip's distance and energy
+    include ground driven before its own start time. start_recovered_km is
+    what separates them."""
+    # Recovery fires: a 20-min blind gap covering 3 km before the first
+    # driving reading, which the recovery pulls back into the trip.
+    s1 = snap(T0, 1000.0, 80, range_km=400.0)
+    s2 = snap(T0 + 1200, 1003.0, 79, shift="D", speed=45.0, range_km=396.0)
+    s3 = snap(T0 + 1800, 1010.0, 78, shift="P", speed=0.0, locked=True, range_km=392.0)
+    _, _, trip, _ = step(s1, s2)
+    drives, _, _, _ = step(s2, s3, trip)
+    assert drives[0]["start_lost_km"] == 0.0        # nothing left lost...
+    assert drives[0]["start_recovered_km"] == 3.0   # ...because 3 km came back
+    assert drives[0]["distance_km"] == 10.0
+
+    # Ordinary start: anchored at the previous reading, nothing could precede
+    # it. Same 0.0 loss, but nothing was reclaimed either.
+    p1 = snap(T0, 2000.0, 80, range_km=400.0)
+    p2 = snap(T0 + 60, 2000.5, 80, shift="D", speed=30.0, range_km=399.8)
+    p3 = snap(T0 + 600, 2005.0, 79, shift="P", speed=0.0, locked=True, range_km=398.0)
+    _, _, trip2, _ = step(p1, p2)
+    drives2, _, _, _ = step(p2, p3, trip2)
+    assert drives2[0]["start_lost_km"] == 0.0
+    assert drives2[0]["start_recovered_km"] == 0.0
+
+
+def test_drive_records_its_odometer_anchors():
+    """distance_km says how far a trip ran but not where it sat, and without
+    that it can't be reconciled against the readings around it."""
+    s1 = snap(T0, 5000.0, 80, range_km=400.0)
+    s2 = snap(T0 + 60, 5000.4, 80, shift="D", speed=30.0, range_km=399.8)
+    s3 = snap(T0 + 900, 5006.0, 79, shift="P", speed=0.0, locked=True, range_km=398.0)
+    _, _, trip, _ = step(s1, s2)
+    drives, _, _, _ = step(s2, s3, trip)
+    assert drives[0]["start_odo_km"] == 5000.0
+    assert drives[0]["end_odo_km"] == 5006.0
+    assert round(drives[0]["end_odo_km"] - drives[0]["start_odo_km"], 1) == drives[0]["distance_km"]

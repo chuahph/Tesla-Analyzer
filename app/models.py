@@ -107,8 +107,35 @@ class Drive(Base):
     # belongs to no trip, and the trip quietly reads short against the car's
     # own meter. 0.0 means the anchor sat at the previous reading (nothing can
     # precede it) or the departure recovery pulled the movement back in; None
-    # means the trip predates this field.
+    # means the trip predates this field. When the recovery is what made it
+    # zero, start_recovered_km carries the amount — the two together say which
+    # of the two zeros this is.
     start_lost_km: Mapped[float | None] = mapped_column(Float, nullable=True)
+
+    # Odometer distance the departure recovery pulled back INTO this trip: the
+    # ground covered between the last parked reading and the first tracked
+    # driving one, which the trip would otherwise have started after.
+    #
+    # Exists because start_lost_km alone is ambiguous, and expensively so. It
+    # reads 0.0 both when nothing could be lost (the anchor already sat at the
+    # previous reading) and when the recovery reclaimed real distance — the
+    # two cases most worth telling apart, since the second means the trip's
+    # distance and energy include ground driven before its own start time.
+    # Three separate investigations stalled on that ambiguity before this was
+    # recorded. 0.0 means the recovery did not fire; None means the trip
+    # predates the field.
+    start_recovered_km: Mapped[float | None] = mapped_column(Float, nullable=True)
+
+    # The odometer at this trip's own start and stop anchors. distance_km is
+    # their difference, so on its own it says how far the trip ran but not
+    # WHERE on the odometer it sat — and without that, a trip cannot be checked
+    # against the readings taken around it. With them, the ground between one
+    # trip's stop and the next one's start is measurable, and so is the
+    # difference between where a trip recorded its stop and where the car was
+    # actually observed resting afterwards (see driving.odometer_continuity).
+    # None on trips logged before this was recorded.
+    start_odo_km: Mapped[float | None] = mapped_column(Float, nullable=True)
+    end_odo_km: Mapped[float | None] = mapped_column(Float, nullable=True)
 
     # Odometer distance driven after this trip's closing anchor, and therefore
     # missing from its distance_km — the same silent loss as start_lost_km, at
