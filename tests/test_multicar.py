@@ -1077,6 +1077,7 @@ def _run_asleep_close(monkeypatch, client_cls):
         with SessionLocal() as s:
             d = s.query(Drive).filter(Drive.vehicle_id == vid).one()
             closed_id, dist_before = d.id, d.distance_km
+            energy_before = d.energy_used_kwh
             assert dist_before == 12.0
             # Armed even for a trustworthy asleep close — the anchor can still
             # be a poll interval short of the true stop.
@@ -1087,7 +1088,8 @@ def _run_asleep_close(monkeypatch, client_cls):
             resp2 = client.post("/api/sync")
         with SessionLocal() as s:
             drives = s.query(Drive).filter(Drive.vehicle_id == vid).order_by(Drive.id).all()
-            return closed_id, dist_before, drives, resp2.json()["logged"]["drives"]
+            return (closed_id, dist_before, energy_before, drives,
+                    resp2.json()["logged"]["drives"])
     finally:
         settings.app_passcode = old
         _reset_to_demo()
@@ -1098,7 +1100,7 @@ def test_asleep_close_still_recovers_a_short_arrival_tail(monkeypatch):
     and a minute short, because sleep proves the car had STOPPED but not that
     the closing reading was taken at the stop — last_snapshot can be a poll
     interval old. A small tail must still fold back in."""
-    closed_id, dist_before, drives, logged = _run_asleep_close(
+    closed_id, dist_before, _energy, drives, logged = _run_asleep_close(
         monkeypatch, _AsleepThenParksWithCreepClient)
     assert logged == 0                      # topped up, not a phantom second trip
     assert len(drives) == 1
@@ -1111,11 +1113,51 @@ def test_asleep_close_does_not_swallow_a_later_separate_trip(monkeypatch):
     parking creep is a NEW trip — the time-based merge that exists for
     mid-drive "offline" closes must not apply here, and the closed trip must
     not be stamped with a loss it never had."""
-    closed_id, dist_before, drives, _ = _run_asleep_close(
+    closed_id, dist_before, _energy, drives, _ = _run_asleep_close(
         monkeypatch, _AsleepThenDrivesAgainClient)
     closed = next(d for d in drives if d.id == closed_id)
     assert closed.distance_km == dist_before   # untouched by the 3 km
     assert closed.end_lost_km == 0.0           # and not reported as its loss
+
+
+class _AsleepThenWakesHoursLaterClient(_AsleepThenParksWithCreepClient):
+    """Same genuine sleep and the same small arrival creep, but the car stays
+    quiet for two hours before the next poll reaches it — the normal shape of a
+    sleep close, since the whole point of the path is that the car went silent.
+    The SoC drop across those two hours is standby drain, not the arrival."""
+
+    def vehicle_data(self, vid):
+        d = super().vehicle_data(vid)
+        if type(self).step >= 3:
+            # +2 h after the close. The drain is deliberately small enough to
+            # look like driving: ~0.2 kWh over the 0.4 km creep is ~490 Wh/km,
+            # under MAX_PLAUSIBLE_WH_PER_KM, which is the whole point — this is
+            # the trip 319 shape, where efficiency alone waves it through.
+            # Integer SoC doesn't move at all across it, so the range delta is
+            # the only thing that shows it happened.
+            d["drive_state"]["timestamp"] = 1_760_500_000_000 + 300_000 + 7_200_000
+            d["charge_state"]["battery_range"] = 378.6 / 1.60934
+        return d
+
+
+def test_a_stale_arrival_keeps_its_distance_but_not_the_parked_energy(monkeypatch):
+    """Regression, and the mirror of trip 319. The energy fold was gated on
+    implied efficiency alone — the exact test that trip proved cannot separate
+    a stale anchor from a slow crawl, because 0.4 km of parking-lot creep at
+    400 Wh/km looks entirely ordinary. Here the same 0.4 km arrives with two
+    hours of standby drain attached, which passes that gate comfortably.
+
+    The odometer is measured at any staleness, so the distance still folds in;
+    the SoC drop across a two-hour park is not this drive's energy and must
+    not."""
+    closed_id, dist_before, energy_before, drives, logged = _run_asleep_close(
+        monkeypatch, _AsleepThenWakesHoursLaterClient)
+    assert logged == 0
+    assert len(drives) == 1
+    closed = drives[0]
+    assert closed.id == closed_id
+    assert closed.distance_km == 12.4          # distance: measured, folds in
+    assert closed.energy_used_kwh == pytest.approx(energy_before, abs=0.011)
 
 
 class _OfflineThenParksWithCreepClient(_OfflineAfterDrivingClient):

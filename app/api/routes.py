@@ -1323,15 +1323,25 @@ def _process_vehicle(
                 # carries the fresh soc/range to measure it against.
                 #
                 # Gated the same way the departure-side recovery is gated, for
-                # the same reason: the merge window runs to
-                # SLEEP_CLOSE_MERGE_MAX_MIN, and a car that reached its
-                # destination early in that window sat parked for the rest of
-                # it, accruing standby drain that is not this drive's. An
-                # implausible Wh/km over the recovered stretch is exactly what
-                # that looks like, so past the bound the distance still folds
-                # in but the energy stays as measured at close time.
+                # the same reason: a car that reached its destination early in
+                # the window sat parked for the rest of it, accruing standby
+                # drain that is not this drive's. Past either bound the distance
+                # still folds in — the odometer is measured either way — but the
+                # energy stays as measured at close time.
+                #
+                # BOTH bounds, because efficiency alone cannot do this job.
+                # Trip 319 proved it on the departure side: 0.21 kWh over
+                # 0.517 km is 406 Wh/km, comfortably under the threshold,
+                # because 400 Wh/km is ordinary for half a kilometre of
+                # parking-lot crawl in the heat — so a 2.3 h park passed as
+                # plausible driving. The identical hole was here, and this is
+                # the likelier end for it to open: a sleep close means the car
+                # went quiet, so a long gap before the next poll is the normal
+                # case on this path rather than the exception. Duration is what
+                # separates an arrival from a stale anchor.
                 extra_kwh = sync_mod._energy_kwh(prev, snap, capacity_kwh)
-                if extra_kwh * 1000.0 / moved <= sync_mod.MAX_PLAUSIBLE_WH_PER_KM:
+                if (extra_kwh * 1000.0 / moved <= sync_mod.MAX_PLAUSIBLE_WH_PER_KM
+                        and elapsed_min <= sync_mod.STALE_ANCHOR_MAX_MIN):
                     closed_drive.energy_used_kwh = round(
                         closed_drive.energy_used_kwh + extra_kwh, 2)
                     # end_soc moves with it or not at all — it is what

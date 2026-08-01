@@ -105,7 +105,14 @@ MAX_PLAUSIBLE_WH_PER_KM = 600.0
 # of the former and nowhere near the latter. The odometer still comes back
 # regardless: distance is a measured fact at any staleness, and the recovered
 # stretch is priced at the trip's own efficiency (see energy_for_blind_distance).
-DEPARTURE_STALE_MAX_MIN = 45.0
+#
+# Both boundaries use this, which is why the name is about staleness rather
+# than departures. The arrival side has the identical failure mode — a trip
+# closed on a sleep report, then a later poll folding the intervening SoC drop
+# into it — and is if anything the likelier end for it, since a sleep close
+# means the car went quiet and the next poll is often hours away.
+STALE_ANCHOR_MAX_MIN = 45.0
+DEPARTURE_STALE_MAX_MIN = STALE_ANCHOR_MAX_MIN  # back-compat alias
 # How long after a sustained-offline close (see routes.py's UNREACHABLE_CLOSE_MIN
 # — just 3 minutes, deliberately short so a genuinely-ended short trip closes
 # promptly) the next successful poll can still merge further movement into
@@ -1571,7 +1578,7 @@ def process_snapshot(
                     # than either end used consistently.
                     open_trip["start_energy_recovered"] = (
                         recovered_wh_per_km <= MAX_PLAUSIBLE_WH_PER_KM
-                        and gap_min <= DEPARTURE_STALE_MAX_MIN)
+                        and gap_min <= STALE_ANCHOR_MAX_MIN)
                     if open_trip["start_energy_recovered"]:
                         open_trip["soc"] = prev["soc"]
                         open_trip["range_km"] = prev.get("range_km")
