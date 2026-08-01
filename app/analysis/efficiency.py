@@ -23,7 +23,14 @@ def _temp_bucket(temp: float) -> str:
 def analyze(drives: list[Drive], rated_wh_per_km: float) -> dict[str, Any]:
     drives = [d for d in drives if d.distance_km > 0]
     if not drives:
-        return {"available": False}
+        # rated_wh_per_km is echoed back even here. It's a setting, not a
+        # measurement, so an empty window doesn't make it unknown — and
+        # callers use it as the fallback basis when there's nothing measured
+        # to use instead (the Trip Planner won't render without one). Dropping
+        # it made the planner vanish for the whole stretch between a charge
+        # finishing and the next drive, since the since-charge window has no
+        # drives in it yet — exactly when you'd want to plan the drive.
+        return {"available": False, "rated_wh_per_km": rated_wh_per_km}
 
     # Only trips with real energy data feed efficiency — a trip whose range
     # reading was missing logs 0 kWh, and a contaminated one (< 40 Wh/km) is

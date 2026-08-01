@@ -1083,6 +1083,29 @@ def test_charging_analysis(seeded):
 
 # --- efficiency ------------------------------------------------------------
 
+def test_empty_window_still_reports_the_rated_basis():
+    """Regression: the Trip Planner vanished for the whole stretch between a
+    charge finishing and the next drive. The since-charge window has no drives
+    in it yet, and this branch dropped rated_wh_per_km, leaving the planner
+    with no efficiency basis at all — so it hid itself, exactly when you'd be
+    planning the drive. rated_wh_per_km is a setting, not a measurement; an
+    empty window doesn't make it unknown."""
+    out = efficiency_analysis.analyze([], rated_wh_per_km=150)
+    assert out["available"] is False
+    assert out["rated_wh_per_km"] == 150
+
+
+def test_a_window_with_drives_but_no_energy_also_reports_it():
+    """The neighbouring early return already did this — the two must agree, or
+    the planner's fallback works in one empty case and not the other."""
+    from types import SimpleNamespace
+
+    no_energy = SimpleNamespace(distance_km=10.0, energy_used_kwh=0.0, wh_per_km=0.0)
+    out = efficiency_analysis.analyze([no_energy], rated_wh_per_km=150)
+    assert out["available"] is False
+    assert out["rated_wh_per_km"] == 150
+
+
 def test_efficiency_analysis(seeded):
     drives = seeded.scalars(select(Drive)).all()
     result = efficiency_analysis.analyze(list(drives), rated_wh_per_km=150)

@@ -2183,7 +2183,7 @@ function speedBandWhPerKm(kmh) {
 function computePlan() {
   const out = document.getElementById("plan-result");
   if (!out || !plannerCtx) return;
-  const { whPerKm, capacityKwh, currency, costPerKwh } = plannerCtx;
+  const { whPerKm, whPerKmMeasured, capacityKwh, currency, costPerKwh } = plannerCtx;
   const km = parseFloat(document.getElementById("plan-km").value);
   const soc = parseFloat(document.getElementById("plan-soc").value);
   const cond = parseFloat(document.getElementById("plan-cond").value) || 1.0;
@@ -2221,7 +2221,9 @@ function computePlan() {
   let baseWh = whPerKm;
   // "approx" marks a basis averaged over routes that aren't this one — the
   // figure is a reasonable guess, not a measurement of this drive.
-  let basis = "your overall average across all routes";
+  let basis = whPerKmMeasured
+    ? "your overall average across all routes"
+    : "this car's rated figure — no measured drives in this window yet";
   let approx = true;
   let condApplies = true;
   if (isFinite(manualWh) && manualWh > 0) {
@@ -2291,7 +2293,13 @@ function renderPlanner(d) {
   const card = document.getElementById("planner-card");
   if (!card) return;
   const eff = d.efficiency || {};
-  const whPerKm = eff.avg_efficiency_wh_per_km || eff.rated_wh_per_km || 0;
+  // Measured first, the car's rated figure as fallback — the window can be
+  // legitimately empty (right after a charge, before the next drive) without
+  // the planner being unusable. Which one is in play has to travel with it,
+  // because the result line names its basis and "your overall average" would
+  // be a plain untruth about a rated number.
+  const measuredWh = eff.avg_efficiency_wh_per_km || 0;
+  const whPerKm = measuredWh || eff.rated_wh_per_km || 0;
   const capacityKwh = (d.vehicle && d.vehicle.usable_capacity_kwh) || 0;
   // Can't plan without a personal efficiency basis and a pack size.
   if (!whPerKm || !capacityKwh) { card.style.display = "none"; return; }
@@ -2303,7 +2311,8 @@ function renderPlanner(d) {
   // efficiency_by_hour / avg speed feed the departure-time projection — your
   // own measured Wh/km per hour of day, rather than a generic traffic model.
   plannerCtx = {
-    whPerKm, capacityKwh, currency: d.currency || "", costPerKwh,
+    whPerKm, whPerKmMeasured: !!measuredWh,
+    capacityKwh, currency: d.currency || "", costPerKwh,
     efficiencyByHour: (d.driving && d.driving.efficiency_by_hour) || {},
     avgSpeedKmh: (d.driving && d.driving.avg_speed_kmh) || 0,
     // Measured Wh/km per speed regime — what a predicted traffic speed is
