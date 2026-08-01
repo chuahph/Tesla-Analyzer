@@ -545,13 +545,29 @@ def _energy_kwh(frm: dict, to: dict, capacity_kwh: float) -> float:
 
 
 MIN_PLAUSIBLE_WH_PER_KM = 40.0  # below this over a whole trip = contaminated data
-# Most of a trip's energy the climate model is ever allowed to claim. The rate
-# below is inherited from the idle estimate and is known to run high in real
-# heat — measured against the car's own breakdown it was about right at 29-31
-# degrees and roughly double at 33 — so this bounds how wrong that can get.
-# Tesla's own Climate line ran 20-36% of trip energy across the trips checked,
-# so a cap here only ever binds on the cases the rate overstates.
-CLIMATE_MAX_SHARE = 0.40
+# Non-propulsion load while driving, split into the two parts the car's own
+# energy breakdown reports separately — and calibrated against it across eight
+# audited trips rather than assumed.
+#
+# The accessory term (Tesla's "Everything Else": 12V, electronics, pumps) is
+# the steadiest figure in the whole dataset — 0.40 to 0.63 kW, a +/-21% spread
+# with no visible dependence on anything. Flat is the honest shape for it.
+#
+# Climate is noisier: 0.67 to 1.34 kW, +/-33%, and the variation does NOT track
+# outside temperature the way the model used to assume — 33-degree trips came
+# in at 0.76 and 0.80 while 31-degree ones read 1.16 and 1.30. Cabin soak, sun
+# load and fan setting evidently matter more than the number on the dash. The
+# temperature term is kept because heating a cold cabin genuinely costs more
+# and nothing here samples below 27 degrees, but its slope is cut to match what
+# was measured: the old 0.12/degree averaged 1.43 kW against 1.01 observed, 42%
+# high, which is what the discarded share-cap was really compensating for.
+#
+# Revisit both with cold-weather data. Eight trips inside a 27-34 degree band
+# cannot say what happens at 5.
+ACCESSORY_KW = 0.5
+CLIMATE_BASE_KW = 0.35
+CLIMATE_KW_PER_DEGREE = 0.08
+CLIMATE_MAX_KW = 2.6
 
 
 def climate_kwh(duration_min, out_temp_c=None, climate_frac=1.0):
@@ -573,31 +589,44 @@ def climate_kwh(duration_min, out_temp_c=None, climate_frac=1.0):
     if duration_min <= 0:
         return 0.0
     t = out_temp_c if out_temp_c is not None else 22.0
-    kw = min(0.35 + 0.12 * abs(t - 22.0), 2.6)
+    kw = min(CLIMATE_BASE_KW + CLIMATE_KW_PER_DEGREE * abs(t - 22.0), CLIMATE_MAX_KW)
     return kw * (duration_min / 60.0) * max(min(climate_frac, 1.0), 0.0)
 
 
-def driving_only_kwh(energy_kwh, duration_min, out_temp_c=None, climate_min=None):
-    """Propulsion-only energy: gross minus the climate load that ran across
-    the whole trip. The counterpart to Tesla's own "Driving" breakdown line,
-    which its "Current Drive" total (our gross) sits above.
+def driving_only_kwh(energy_kwh, duration_min, out_temp_c=None, climate_min=None,
+                     distance_km=None):
+    """Propulsion-only energy: gross minus the loads that run regardless of how
+    far the car goes — climate, and the steady accessory draw the car's own
+    breakdown files under "Everything Else".
+
+    Both are modelled because both are in the gap between the gross figure and
+    Tesla's "Driving" line, and subtracting only climate left this figure
+    structurally unable to reach it. Accessories are the better-behaved of the
+    two: measured at 0.40-0.63 kW across the audited trips against climate's
+    0.67-1.34.
 
     ``climate_min`` is the measured minutes climate ran, or None when the car
-    never reported the flag — None means assume it ran throughout, which is
-    what the previous model effectively assumed and keeps the correction
-    working on cars that don't report it.
+    never reported the flag — None means assume it ran throughout, which keeps
+    the correction working on cars that don't report it. Accessory draw is not
+    gated on it; it runs whenever the car is on.
 
-    Capped at CLIMATE_MAX_SHARE of the gross rather than trusted outright: the
-    rate is inherited from the idle model and overstates in real heat, and a
-    cap bounds that without inventing a new constant fitted to a handful of
-    trips.
+    Floored at what the distance alone must have cost at MIN_PLAUSIBLE_WH_PER_KM,
+    replacing an earlier cap at a fixed share of the gross. That share was the
+    wrong shape: non-propulsion load scales with time, so as a fraction of a
+    trip it is small on a fast run and large on a slow one — measured at 65% of
+    a 45-minute, 8.9 km crawl, where a 40% cap blocked a subtraction the car's
+    own numbers said should have been larger. A distance floor bounds the
+    absurd case without fighting the physical one.
     """
     if not energy_kwh or energy_kwh <= 0:
         return energy_kwh
     frac = 1.0 if climate_min is None else (
         min(max(climate_min / duration_min, 0.0), 1.0) if duration_min > 0 else 1.0)
     modelled = climate_kwh(duration_min, out_temp_c, frac)
-    return max(energy_kwh - modelled, energy_kwh * (1.0 - CLIMATE_MAX_SHARE))
+    modelled += ACCESSORY_KW * max(duration_min, 0.0) / 60.0
+    floor = (max(distance_km, 0.0) * MIN_PLAUSIBLE_WH_PER_KM / 1000.0
+             if distance_km else 0.0)
+    return max(energy_kwh - modelled, floor)
 
 
 def driving_only_wh_per_km(energy_kwh, distance_km, duration_min,
@@ -606,7 +635,7 @@ def driving_only_wh_per_km(energy_kwh, distance_km, duration_min,
     if not energy_kwh or energy_kwh <= 0 or not distance_km or distance_km <= 0:
         return None
     return round(
-        driving_only_kwh(energy_kwh, duration_min, out_temp_c, climate_min)
+        driving_only_kwh(energy_kwh, duration_min, out_temp_c, climate_min, distance_km)
         * 1000.0 / distance_km)
 
 

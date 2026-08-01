@@ -1896,23 +1896,38 @@ def test_climate_is_stripped_across_the_whole_trip_not_just_stops():
 
     # Trip 317: 11.2 km, 20 min at 29C, 1.73 kWh gross -> 154 Wh/km.
     out = driving_only_wh_per_km(1.73, 11.2, 20.0, 29.0)
-    assert out == 119                       # was 154, i.e. no strip at all
+    assert out == 113                       # was 154, i.e. no strip at all
     # Tesla's own Driving line for that trip works out near 108 Wh/km, so the
     # model now lands the right side of the gross rather than on top of it.
     assert 100 < out < 154
 
 
-def test_climate_strip_is_capped_so_a_hot_trip_cannot_be_gutted():
-    """The rate is inherited from the idle model and overstates in real heat —
-    measured against the car's breakdown it was about right at 29-31C and
-    roughly double at 33C. The cap bounds that rather than fitting a new
-    constant to a handful of trips."""
-    from app.sync import CLIMATE_MAX_SHARE, driving_only_kwh
+def test_driving_energy_is_floored_by_the_distance_not_a_share_of_the_trip():
+    """The old cap held the subtraction to a fixed share of the gross, which is
+    the wrong shape: non-propulsion load scales with time, so as a fraction of
+    a trip it is small on a fast run and large on a slow one. Measured at 65%
+    of a 45-minute 8.9 km crawl, where a 40% cap blocked a subtraction the
+    car's own numbers said should have been LARGER. The floor is what the
+    distance alone must have cost."""
+    from app.sync import MIN_PLAUSIBLE_WH_PER_KM, driving_only_kwh
 
-    # Trip 312's shape: 33 min at 33C would model 0.92 kWh of a 1.8 kWh trip.
-    out = driving_only_kwh(1.8, 33.0, 33.0)
-    assert out == round(1.8 * (1 - CLIMATE_MAX_SHARE), 10)
-    assert out > 1.8 * 0.5
+    # A slow crawl: the model wants more than 40% of the gross, and gets it.
+    slow = driving_only_kwh(2.26, 45.0, 31.0, distance_km=8.9)
+    assert slow < 2.26 * 0.6
+    # But never below what the distance itself had to cost.
+    absurd = driving_only_kwh(1.0, 600.0, 40.0, distance_km=5.0)
+    assert absurd == round(5.0 * MIN_PLAUSIBLE_WH_PER_KM / 1000.0, 10)
+
+
+def test_accessory_load_is_subtracted_as_well_as_climate():
+    """Tesla's breakdown reports climate and "Everything Else" separately, and
+    both sit between the gross figure and its Driving line — so modelling only
+    climate left this structurally unable to reach it. Accessories measured
+    0.40-0.63 kW across the audited trips, the steadiest figure in the set."""
+    from app.sync import ACCESSORY_KW, driving_only_kwh
+
+    with_acc = driving_only_kwh(2.0, 60.0, 22.0)      # mild, so climate is minimal
+    assert round(2.0 - with_acc, 3) >= round(ACCESSORY_KW, 3)
 
 
 def test_climate_strip_follows_measured_on_time():
@@ -1922,8 +1937,10 @@ def test_climate_strip_follows_measured_on_time():
     off = driving_only_kwh(1.73, 20.0, 29.0, climate_min=0.0)
     half = driving_only_kwh(1.73, 20.0, 29.0, climate_min=10.0)
     always = driving_only_kwh(1.73, 20.0, 29.0, climate_min=20.0)
-    assert off == 1.73                       # nothing stripped
-    assert always < half < off
+    assert always < half < off               # more climate time, more stripped
+    # Not the full gross even with climate off: accessories run whenever the
+    # car is on, and are not gated on the climate flag.
+    assert off < 1.73
 
 
 def test_climate_unknown_is_not_read_as_off():
