@@ -42,8 +42,10 @@
   function hasValidEnergy(d) {
     return d.energy_used_kwh > 0 && whPerKm(d) >= MIN_PLAUSIBLE_WH_PER_KM;
   }
-  // Driving-only Wh/km — removes modeled idle/climate load so it's comparable to
-  // Tesla's "Current Drive". Mirror of app/sync.driving_wh_per_km.
+  // Gross Wh/km less the overheads we model (idle/climate). Not comparable to
+  // the car's own "Driving" line, which also nets out elevation and everything
+  // else; the gross figure is the one that matches "Current Drive".
+  // Mirror of app/sync.driving_wh_per_km.
   function drivingWhPerKm(d) {
     const energy = d.energy_used_kwh, dist = d.distance_km, dur = d.duration_min;
     if (!energy || energy <= 0 || dist <= 0 || !dur || dur <= 0) return null;

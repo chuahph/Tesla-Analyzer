@@ -1593,6 +1593,82 @@ def test_trim_rate_is_none_when_neither_rate_has_evidence():
     assert _trim_rate_kw([], [], 70.0) is None
 
 
+# --- Route directional cost -------------------------------------------------
+
+def _leg(start, end, km, kwh, speed=30.0):
+    from types import SimpleNamespace
+    return SimpleNamespace(
+        start_location=start, end_location=end, start_area=start, end_area=end,
+        distance_km=km, energy_used_kwh=kwh, avg_speed_kmh=speed,
+        wh_per_km=kwh / km * 1000.0,
+    )
+
+
+def _both_ways(out_kwh, back_kwh, n=3, out_speed=30.0, back_speed=30.0, km=10.0):
+    return ([_leg("Home", "Office", km, out_kwh, out_speed) for _ in range(n)]
+            + [_leg("Office", "Home", km, back_kwh, back_speed) for _ in range(n)])
+
+
+def test_route_asymmetry_measures_what_the_direction_costs():
+    """The climb out costs what the roll back returns, while drag, climate and
+    accessories are the same both ways — so the difference between a route's
+    two directions is the one handle this app has on elevation."""
+    from app.analysis.driving import route_asymmetry
+
+    rows = route_asymmetry(_both_ways(2.0, 1.6))     # 200 vs 160 Wh/km
+    assert len(rows) == 1
+    assert rows[0]["delta_wh_per_km"] == 40.0
+    assert rows[0]["out"]["wh_per_km"] == 200.0
+    assert rows[0]["back"]["wh_per_km"] == 160.0
+    assert rows[0]["comparable"] is True
+
+
+def test_route_asymmetry_flags_directions_driven_at_different_speeds():
+    """A commute runs out in morning traffic and back in evening traffic, so a
+    difference between its directions may be congestion rather than terrain.
+    That cannot be separated here, so it must not be presented as if it had
+    been — the row still reports, marked not comparable."""
+    from app.analysis.driving import route_asymmetry
+
+    rows = route_asymmetry(_both_ways(2.0, 1.6, out_speed=18.0, back_speed=34.0))
+    assert len(rows) == 1
+    assert rows[0]["speed_gap_kmh"] == 16.0
+    assert rows[0]["comparable"] is False
+
+
+def test_route_asymmetry_needs_both_directions():
+    """One direction is just a route average; the subtraction is the whole
+    measurement."""
+    from app.analysis.driving import route_asymmetry
+
+    one_way = [_leg("Home", "Office", 10.0, 2.0) for _ in range(6)]
+    assert route_asymmetry(one_way) == []
+
+
+def test_route_asymmetry_needs_repeats_in_each_direction():
+    """A single trip each way is two samples of a noisy quantity, not a rate."""
+    from app.analysis.driving import route_asymmetry
+
+    assert route_asymmetry(_both_ways(2.0, 1.6, n=2)) == []
+
+
+def test_route_asymmetry_skips_trips_too_short_to_measure():
+    """Under a few km the fixed boundary rounding is a bigger share of the trip
+    than the elevation term being looked for."""
+    from app.analysis.driving import route_asymmetry
+
+    assert route_asymmetry(_both_ways(0.4, 0.32, km=2.0)) == []
+
+
+def test_route_asymmetry_reports_each_pair_once():
+    """Both orientations key the same unordered pair; emitting both would show
+    the same finding twice with opposite signs."""
+    from app.analysis.driving import route_asymmetry
+
+    rows = route_asymmetry(_both_ways(2.0, 1.6) + _both_ways(2.0, 1.6))
+    assert len(rows) == 1
+
+
 # --- Odometer continuity ----------------------------------------------------
 
 def _drv(did, start, end, end_odo, end_lost=0.0, start_odo=None):

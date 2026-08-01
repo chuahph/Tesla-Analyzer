@@ -170,6 +170,93 @@ def standby_kw(drives: list[Any], charges: list[Any] | None,
                         STANDBY_MIN_GAP_HOURS, None, STANDBY_MIN_TOTAL_HOURS)
 
 
+# Directional cost of a route. Elevation is the one term the car's own energy
+# breakdown reports that this app does not model at all, and it is the only
+# component that reverses sign when you drive a route the other way: the climb
+# out costs what the roll back returns (less regen losses), while rolling drag,
+# aero, climate and accessories are the same both ways. So the difference
+# between a route's two directions isolates it — from this car's own history,
+# with no elevation service to call.
+#
+# The confound is that direction and conditions are often correlated: a commute
+# runs outbound in morning traffic and home in evening traffic. That cannot be
+# separated with the data here, so it is not hidden either — every row carries
+# the mean speed each way, and `comparable` is False when they differ enough
+# that traffic, not terrain, is the likelier explanation. A row that is not
+# comparable is still reported; it just isn't evidence about elevation.
+ROUTE_MIN_TRIPS_PER_DIRECTION = 3
+ROUTE_MIN_KM = 3.0            # under this, boundary rounding swamps the signal
+ROUTE_SPEED_GAP_MAX_KMH = 6.0  # beyond this the two directions aren't like-for-like
+
+
+def _direction_stats(group: list[Any]) -> dict[str, Any]:
+    """Distance-weighted Wh/km for one direction, plus what it was driven at."""
+    distance = sum(d.distance_km for d in group)
+    energy = sum(d.energy_used_kwh for d in group)
+    speeds = [d.avg_speed_kmh for d in group if getattr(d, "avg_speed_kmh", None)]
+    return {
+        "n": len(group),
+        "km": round(distance / len(group), 1),
+        "wh_per_km": round(energy / distance * 1000.0, 1) if distance > 0 else None,
+        "avg_speed_kmh": round(mean(speeds), 1) if speeds else None,
+    }
+
+
+def route_asymmetry(drives: list[Any]) -> list[dict[str, Any]]:
+    """Routes driven both ways, and what the direction costs in Wh/km.
+
+    Reported rather than applied. The figure is a measurement of this car on
+    these roads, but attributing it to elevation is an inference, and this
+    audit has twice had to withdraw a conclusion drawn from a plausible
+    inference over too few samples.
+    """
+    by_pair: dict[tuple[str, str], list[Any]] = defaultdict(list)
+    for d in drives:
+        if not (d.start_location and d.end_location) or not has_valid_energy(d):
+            continue
+        if d.distance_km < ROUTE_MIN_KM:
+            continue
+        by_pair[(
+            getattr(d, "start_area", "") or d.start_location,
+            getattr(d, "end_area", "") or d.end_location,
+        )].append(d)
+
+    out: list[dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
+    for key, group in by_pair.items():
+        reverse = (key[1], key[0])
+        # Each unordered pair once. `seen` rather than an ordering rule on the
+        # key, so the direction reported as "out" is whichever the dict reached
+        # first and the two rows can't disagree about which way is which.
+        if key in seen or reverse in seen or reverse not in by_pair:
+            continue
+        back = by_pair[reverse]
+        if min(len(group), len(back)) < ROUTE_MIN_TRIPS_PER_DIRECTION:
+            continue
+        seen.add(key)
+        out_stats, back_stats = _direction_stats(group), _direction_stats(back)
+        if out_stats["wh_per_km"] is None or back_stats["wh_per_km"] is None:
+            continue
+        speed_gap = (
+            abs(out_stats["avg_speed_kmh"] - back_stats["avg_speed_kmh"])
+            if out_stats["avg_speed_kmh"] and back_stats["avg_speed_kmh"] else None
+        )
+        label = Counter(f"{d.start_location} → {d.end_location}" for d in group)
+        back_label = Counter(f"{d.start_location} → {d.end_location}" for d in back)
+        out.append({
+            "route": label.most_common(1)[0][0],
+            "reverse_route": back_label.most_common(1)[0][0],
+            "out": out_stats,
+            "back": back_stats,
+            "delta_wh_per_km": round(
+                out_stats["wh_per_km"] - back_stats["wh_per_km"], 1),
+            "speed_gap_kmh": round(speed_gap, 1) if speed_gap is not None else None,
+            "comparable": speed_gap is not None and speed_gap <= ROUTE_SPEED_GAP_MAX_KMH,
+        })
+    out.sort(key=lambda r: abs(r["delta_wh_per_km"]), reverse=True)
+    return out[:5]
+
+
 def parked_awake_kw(drives: list[Any], charges: list[Any] | None,
                     capacity_kwh: float) -> float | None:
     """Draw over the first stretch after parking, before the car sleeps.
@@ -856,6 +943,9 @@ def analyze(drives: list[Drive], rated_wh_per_km: float = 150.0,
         "efficiency_by_hour": efficiency_by_hour,
         "trips_by_weekday": {weekdays[i]: by_weekday.get(i, 0) for i in range(7)},
         "top_routes": routes.most_common(5),
+        # What driving a route the other way costs — the only handle this app
+        # has on elevation (see route_asymmetry).
+        "route_asymmetry": route_asymmetry(drives),
         "speed_efficiency_slope_wh_per_kmh": round(speed_slope, 3),
         # Distance-weighted (total energy over total km): one noisy short trip
         # can't skew it the way a plain mean of per-trip ratios does.

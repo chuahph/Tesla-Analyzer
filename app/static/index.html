@@ -506,6 +506,14 @@
       <div class="card" data-export="routes">
         <h2>🔁 Top Routes</h2>
         <ul id="topRoutes" class="plain-list"></ul>
+        <!-- Routes you drive both ways, and what the direction costs. Hidden
+             until a route has enough trips each way to subtract one from the
+             other — see driving.route_asymmetry. -->
+        <div id="route-direction" style="display:none">
+          <h3 class="sub-h">Cost of direction</h3>
+          <ul id="routeDirection" class="plain-list"></ul>
+          <div class="hint" id="route-direction-note"></div>
+        </div>
       </div>
       <div class="card" id="trips-card" data-export="trips">
         <h2>🧭 Recent Trips</h2>

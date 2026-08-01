@@ -779,7 +779,9 @@ function renderKpis(d) {
     if (lt.wh_per_km) {
       const hasDrive = lt.driving_wh_per_km != null && lt.driving_wh_per_km < lt.wh_per_km - 3;
       const dKwh = (hasDrive && lt.driving_energy_kwh != null) ? `${fmt(lt.driving_energy_kwh, 1)} kWh / ` : "";
-      const dsub = hasDrive ? ` · drive ≈${dKwh}${fmt(lt.driving_wh_per_km)} Wh/km` : "";
+      // Named for what was subtracted, not for what it approximates. It is
+      // NOT the car's own "Driving" line — see the recent-trips renderer.
+      const dsub = hasDrive ? ` · less climate/idle ≈${dKwh}${fmt(lt.driving_wh_per_km)} Wh/km` : "";
       // Colour by how this drive's efficiency compares to rated (drive-only
       // figure when idle was stripped out, else the raw one).
       const rated = (eff && eff.rated_wh_per_km) || null;
@@ -1579,15 +1581,20 @@ function renderLists(d) {
         : "";
       const score = t.eco_score != null
         ? `<span class="trip-score tone-${scoreTone(t.eco_score)}">${t.eco_score}</span>` : "";
-      // Propulsion-only figures (idle/AC stripped) shown next to the gross
-      // total when meaningfully lower — ≈ Tesla's "Driving" energy-breakdown
-      // line. (The gross total is what matches Tesla's "Current Drive", which
-      // includes climate/idle.)
+      // Gross energy less the overheads we model — climate and accessory
+      // draw. Deliberately NOT labelled as the car's own "Driving" line, and
+      // not comparable to it: Tesla's Driving also nets out Elevation and
+      // "Everything Else", so ours sits above it by that residue on a flat
+      // route and can sit below it on a downhill one (audited both ways —
+      // 152 against ~86 one trip, 87 against ~97 the next). Naming the
+      // subtraction rather than the target is what stops the two being read
+      // as a score against each other. The gross total is the figure that
+      // matches Tesla's "Current Drive".
       const hasDrive = t.driving_wh_per_km != null && t.wh_per_km != null
         && t.driving_wh_per_km < t.wh_per_km - 3;
       const driveKwh = (hasDrive && t.driving_energy_kwh != null)
         ? `${t.driving_energy_kwh} kWh / ` : "";
-      const drv = hasDrive ? ` · drive ≈${driveKwh}${t.driving_wh_per_km} Wh/km` : "";
+      const drv = hasDrive ? ` · less climate/idle ≈${driveKwh}${t.driving_wh_per_km} Wh/km` : "";
       const kwh = t.energy_kwh != null ? ` · ${t.energy_kwh} kWh` : "";
       const whkm = t.wh_per_km != null ? ` · ${t.wh_per_km} Wh/km${drv}` : "";
       const soc = t.soc_used_pct != null ? ` · ${fmt(t.soc_used_pct, 1)}% battery` : "";
@@ -1739,6 +1746,42 @@ function renderLists(d) {
     .map(([r, c]) => `<li><span>${r}</span><span class="count">${c}×</span></li>`).join("");
   document.getElementById("topRoutes").innerHTML =
     routes || '<li class="empty">No repeated routes yet</li>';
+
+  // Cost of direction. Elevation is the one line in the car's own energy
+  // breakdown this app doesn't model, and the only one that reverses when you
+  // drive a route backwards — so the gap between a route's two directions is
+  // the handle we have on it, measured from this car rather than looked up.
+  // Shown, never applied: on a commute the two directions also differ in
+  // traffic, which is why each row carries both speeds and an uncontrolled
+  // row is marked rather than dropped.
+  const dirWrap = document.getElementById("route-direction");
+  if (dirWrap) {
+    const pairs = (d.driving && d.driving.route_asymmetry) || [];
+    dirWrap.style.display = pairs.length ? "" : "none";
+    if (pairs.length) {
+      document.getElementById("routeDirection").innerHTML = pairs.map((p) => {
+        // The row names whichever direction costs more, so its own count and
+        // speed have to lead too — reading "Office → Home" beside the
+        // Home → Office trip count would be a plain misstatement.
+        const flipped = p.delta_wh_per_km < 0;
+        const costlier = flipped ? p.reverse_route : p.route;
+        const hi = flipped ? p.back : p.out;
+        const lo = flipped ? p.out : p.back;
+        const gap = Math.abs(p.delta_wh_per_km);
+        const speeds = p.speed_gap_kmh != null
+          ? ` · ${fmt(hi.avg_speed_kmh)} vs ${fmt(lo.avg_speed_kmh)} km/h` : "";
+        return `<li class="${p.comparable ? "" : "uncontrolled"}">
+          <span class="dir-route">${costlier}</span>
+          <span class="dir-meta">+${fmt(gap, 1)} Wh/km vs the way back · ${
+            hi.n}&times; / ${lo.n}&times;${speeds}${
+            p.comparable ? "" : " · speeds differ, may be traffic"}</span></li>`;
+      }).join("");
+      const anyUncontrolled = pairs.some((p) => !p.comparable);
+      document.getElementById("route-direction-note").textContent = anyUncontrolled
+        ? "Routes driven both ways. Most of a like-for-like gap is elevation — but where the two directions were driven at different speeds, traffic can't be told apart from terrain here."
+        : "Routes driven both ways. Drag, climate and accessories cost the same each way, so what's left is mostly elevation.";
+    }
+  }
 
   const chargesEl = document.getElementById("recentCharges");
   if (chargesEl) {
