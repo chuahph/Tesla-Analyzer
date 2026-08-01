@@ -106,19 +106,29 @@ STANDBY_MIN_TOTAL_HOURS = 12.0
 STANDBY_PLAUSIBLE_KW = (0.02, 1.5)
 
 
-def standby_kw(drives: list[Any], charges: list[Any] | None,
-               capacity_kwh: float) -> float | None:
-    """This car's own average standby draw while parked, in kW.
+# The first stretch after parking is a different animal from the hours that
+# follow. The car is still awake — screens up, HVAC settling, Sentry arming —
+# and draws several times what it settles to once asleep. Measured live on
+# trip 316: a 17-minute tail cost ~0.5 kW where this car's multi-hour gaps
+# average ~0.22.
+#
+# Individually these gaps say nothing: 17 minutes at 0.5 kW is 0.14 kWh, a
+# fifth of one whole-percent SoC point, so most read as an exact zero. The rate
+# only appears once enough of them are summed, which is why the totals required
+# here are about the aggregate rather than any single gap.
+AWAKE_MIN_GAP_HOURS = 0.15   # below this it's a traffic stop, not a park
+AWAKE_MAX_GAP_HOURS = 2.0    # above this the car has slept — that's standby_kw's range
+AWAKE_MIN_TOTAL_HOURS = 6.0
 
-    Measured the same way vampire_drain measures a gap — the SoC a trip ended
-    on minus the SoC the next one started from, over the hours between — but
-    aggregated into a rate, and only from gaps long enough to be worth
-    dividing. None when the history can't support a figure yet, which the
-    caller must treat as "don't correct anything" rather than substituting a
-    guess: a wrong rate here would quietly reshape real trip energy.
 
-    Charge-containing gaps are skipped outright; a session in the middle makes
-    the endpoints say nothing about drain.
+def _gap_rate_kw(drives: list[Any], charges: list[Any] | None, capacity_kwh: float,
+                 min_gap_h: float, max_gap_h: float | None,
+                 min_total_h: float) -> float | None:
+    """Average draw (kW) across the parked gaps falling in a duration band.
+
+    Shared by the two rates that matter — the deep-sleep average and the
+    just-parked one — because they differ only in which gaps they look at, and
+    letting them drift apart in method would make them incomparable.
     """
     ordered = sorted(drives, key=lambda d: d.start_time)
     if len(ordered) < 2 or not capacity_kwh:
@@ -126,23 +136,53 @@ def standby_kw(drives: list[Any], charges: list[Any] | None,
     charge_starts = sorted(c.start_time for c in (charges or []))
     total_kwh = 0.0
     total_hours = 0.0
-    ci = 0
     for a, b in zip(ordered, ordered[1:]):
         gap_start, gap_end = a.end_time, b.start_time
         gap_hours = (gap_end - gap_start).total_seconds() / 3600.0
-        if gap_hours < STANDBY_MIN_GAP_HOURS:
+        if gap_hours < min_gap_h or (max_gap_h is not None and gap_hours >= max_gap_h):
             continue
-        while ci < len(charge_starts) and charge_starts[ci] < gap_start:
-            ci += 1
-        if ci < len(charge_starts) and charge_starts[ci] < gap_end:
+        # A charge anywhere inside the gap moved SoC upward, so its endpoints
+        # say nothing about drain. Scanned per gap rather than with a marching
+        # index: the bands skip gaps, so a shared cursor would fall behind.
+        if any(gap_start < c < gap_end for c in charge_starts):
             continue
         total_kwh += max(a.end_soc - b.start_soc, 0.0) / 100.0 * capacity_kwh
         total_hours += gap_hours
-    if total_hours < STANDBY_MIN_TOTAL_HOURS or total_kwh <= 0:
+    if total_hours < min_total_h or total_kwh <= 0:
         return None
     rate = total_kwh / total_hours
     lo, hi = STANDBY_PLAUSIBLE_KW
     return round(rate, 3) if lo <= rate <= hi else None
+
+
+def standby_kw(drives: list[Any], charges: list[Any] | None,
+               capacity_kwh: float) -> float | None:
+    """This car's own average standby draw once properly parked, in kW.
+
+    Measured the same way vampire_drain measures a gap — the SoC a trip ended
+    on minus the SoC the next one started from, over the hours between — but
+    aggregated into a rate, and only from gaps long enough to be worth
+    dividing. None when the history can't support a figure yet, which the
+    caller must treat as "don't correct anything" rather than substituting a
+    guess: a wrong rate here would quietly reshape real trip energy.
+    """
+    return _gap_rate_kw(drives, charges, capacity_kwh,
+                        STANDBY_MIN_GAP_HOURS, None, STANDBY_MIN_TOTAL_HOURS)
+
+
+def parked_awake_kw(drives: list[Any], charges: list[Any] | None,
+                    capacity_kwh: float) -> float | None:
+    """Draw over the first stretch after parking, before the car sleeps.
+
+    The rate that belongs to a trimmed tail. standby_kw samples gaps of hours,
+    so it measures a sleeping car and understates the minutes just after
+    arrival by roughly half — applying it to a trim under-corrects by that
+    much. Errand stops are the sample: park, sit twenty minutes, drive on,
+    with the car awake throughout, which is exactly the window a trim covers.
+    """
+    return _gap_rate_kw(drives, charges, capacity_kwh,
+                        AWAKE_MIN_GAP_HOURS, AWAKE_MAX_GAP_HOURS,
+                        AWAKE_MIN_TOTAL_HOURS)
 
 
 def vampire_drain(

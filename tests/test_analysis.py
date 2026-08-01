@@ -1483,6 +1483,93 @@ def test_standby_kw_rejects_an_implausible_rate():
     assert standby_kw(drives, [], 70.0) is None
 
 
+# --- Measured just-parked rate ----------------------------------------------
+
+def _errands(gap_hours, n, lost_pct=1):
+    """n back-to-back errand stops of gap_hours each, losing lost_pct per stop."""
+    from datetime import datetime, timedelta
+    t = datetime.fromisoformat("2026-07-01T08:00")
+    soc = 90
+    out = []
+    for _ in range(n + 1):
+        out.append(_d(t.isoformat(), (t + timedelta(minutes=30)).isoformat(),
+                      soc, soc - 1))
+        soc -= 1 + lost_pct
+        t += timedelta(minutes=30) + timedelta(hours=gap_hours)
+    return out
+
+
+def test_parked_awake_kw_measures_the_short_gaps_standby_ignores():
+    """Four 90-minute errand stops, 1% of a 70 kWh pack lost at each: 2.8 kWh
+    over 6 h is ~0.47 kW — roughly double what the same car reads asleep."""
+    from app.analysis.driving import parked_awake_kw
+
+    rate = parked_awake_kw(_errands(1.5, 4), [], 70.0)
+    assert rate == round(2.8 / 6.0, 3)
+
+
+def test_parked_awake_kw_ignores_gaps_long_enough_to_have_slept():
+    """Past two hours the car is asleep and the average stops describing the
+    window a trim covers — those gaps belong to standby_kw."""
+    from app.analysis.driving import parked_awake_kw
+
+    assert parked_awake_kw(_errands(6.0, 4), [], 70.0) is None
+
+
+def test_parked_awake_kw_ignores_traffic_stops():
+    """A few minutes between drives is one journey the splitter cut in two, not
+    a park, and its SoC delta is rounding noise."""
+    from app.analysis.driving import parked_awake_kw
+
+    assert parked_awake_kw(_errands(0.05, 40), [], 70.0) is None
+
+
+def test_parked_awake_and_standby_read_disjoint_gaps():
+    """The two rates partition the history at the two-hour mark, so neither can
+    be quietly contaminated by the other's sample."""
+    from app.analysis.driving import parked_awake_kw, standby_kw
+
+    short = _errands(1.5, 4)
+    assert parked_awake_kw(short, [], 70.0) is not None
+    assert standby_kw(short, [], 70.0) is None
+
+
+def test_parked_awake_kw_skips_gaps_containing_a_charge():
+    """Same reason as standby_kw: a charge mid-gap moved SoC upward."""
+    from app.analysis.driving import parked_awake_kw
+    from types import SimpleNamespace
+    from datetime import timedelta
+
+    drives = _errands(1.5, 4)
+    # Inside the first gap — dropping it leaves 4.5 h, under the 6 h floor.
+    charged = SimpleNamespace(start_time=drives[0].end_time + timedelta(minutes=30))
+    assert parked_awake_kw(drives, [charged], 70.0) is None
+
+
+def test_trim_is_charged_at_the_just_parked_rate_not_the_sleeping_one():
+    """A trimmed tail is the first minutes after arrival, so it must be priced
+    at the awake rate. Using the deep-sleep one leaves roughly half the parked
+    energy inside the trip."""
+    from app.api.routes import _trim_rate_kw
+
+    short = _errands(1.5, 4)                       # awake sample only
+    long_gaps = _errands(10.0, 2)                  # sleeping sample only
+    assert _trim_rate_kw(short, [], 70.0) == round(2.8 / 6.0, 3)
+    # And when only sleeping gaps exist, fall back rather than skip the
+    # correction entirely.
+    from app.analysis.driving import standby_kw
+    assert _trim_rate_kw(long_gaps, [], 70.0) == standby_kw(long_gaps, [], 70.0)
+    assert _trim_rate_kw(long_gaps, [], 70.0) is not None
+
+
+def test_trim_rate_is_none_when_neither_rate_has_evidence():
+    """No history, no correction — trim_standby_kwh must get None rather than a
+    guessed rate that would reshape real trip energy."""
+    from app.api.routes import _trim_rate_kw
+
+    assert _trim_rate_kw([], [], 70.0) is None
+
+
 # --- Odometer continuity ----------------------------------------------------
 
 def _drv(did, start, end, end_odo, end_lost=0.0, start_odo=None):

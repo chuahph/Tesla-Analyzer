@@ -44,6 +44,23 @@ FAST_POLL_WINDOW_MIN = 3.0
 # polling hard through the whole PARK_END_MIN wait before the trip closes.
 ARRIVAL_SETTLE_MIN = 4.0
 
+
+def _trim_rate_kw(past_drives: list, past_charges: list,
+                  capacity_kwh: float) -> float | None:
+    """The standby rate to charge a trimmed tail at, in kW.
+
+    A trim covers minutes, not hours, and through those minutes the car is
+    still awake — screens up, Sentry arming — drawing roughly twice what it
+    settles to once asleep. So parked_awake_kw is the right rate and
+    standby_kw is only the fallback: it under-corrects a trim by about half,
+    but under-correcting beats not correcting, and until enough errand stops
+    have accumulated it is the only rate this car's history can support.
+    """
+    awake = driving_analysis.parked_awake_kw(past_drives, past_charges, capacity_kwh)
+    if awake is not None:
+        return awake
+    return driving_analysis.standby_kw(past_drives, past_charges, capacity_kwh)
+
 # A vehicle_data() read is itself an activity signal to the car — it resets
 # Tesla's own inactivity countdown, delaying sleep, regardless of how the
 # request got triggered. /api/sync may now be called every minute or so (an
@@ -1398,7 +1415,7 @@ def _process_vehicle(
         past_charges = session.scalars(
             select(Charge).where(Charge.vehicle_id == vehicle.id)
         ).all()
-        rate_kw = driving_analysis.standby_kw(
+        rate_kw = _trim_rate_kw(
             list(past_drives), list(past_charges), capacity_kwh)
         for d in drives:
             d["energy_used_kwh"] = sync_mod.trim_standby_kwh(
