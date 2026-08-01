@@ -691,10 +691,19 @@ def test_blind_gap_close_folds_parking_creep_into_the_trip_that_ended():
     assert drives, "the first drive should close across the gap"
     assert drives[0]["distance_km"] == 10.3        # creep included
     assert drives[0]["end_lost_km"] == 0.0         # nothing left behind
-    # Duration and energy stay at the last real reading — the nap contributes
-    # neither, which is the whole reason only the odometer is extended.
+    # Duration stays at the last real reading — the nap contributes none of it,
+    # which is the whole reason only the odometer is extended.
     assert drives[0]["duration_min"] == 10.0
-    assert drives[0]["energy_used_kwh"] == round(_energy_kwh(d1, d2, 60.0), 2)
+    # The creep's own energy IS counted, priced at the trip's measured
+    # efficiency. Taking the later reading's SoC instead would drag the whole
+    # nap's standby drain in, which is what this close exists to avoid — but
+    # dropping it entirely diluted Wh/km by the folded share, the same defect
+    # the sustained-offline top-up had.
+    raw = _energy_kwh(d1, d2, 60.0)
+    assert drives[0]["energy_used_kwh"] == round(raw * 10.3 / 10.0, 2)
+    assert drives[0]["energy_used_kwh"] > round(raw, 2)
+    # Wh/km is what stays put — that is the point of pricing it this way.
+    assert round(drives[0]["energy_used_kwh"] * 1000 / 10.3) == round(raw * 1000 / 10.0)
     # A real 0.0 rather than null: this path closes at a known reading, so
     # nothing was trimmed off the tail — distinct from never having considered.
     assert drives[0]["tail_trim_sec"] == 0.0
@@ -1941,3 +1950,79 @@ def test_climate_minutes_are_tracked_from_the_reported_flag():
     d2["climate_on"] = None
     _track_climate(blank, c, d2)
     assert climate_on_fraction(blank) == 1.0
+
+
+# --- Blind folded distance carries its own energy ---------------------------
+
+def test_recovered_departure_distance_is_priced_not_left_at_zero():
+    """The departure recovery moves the start anchor back over real ground but
+    only brings the SoC/range with it when that pair looks like driving. When
+    it doesn't — a long park, where the gap's implied Wh/km is mostly standby
+    drain — the distance used to arrive with no energy attached, diluting the
+    trip's Wh/km by exactly the recovered share. Same defect the
+    sustained-offline top-up had."""
+    from app.sync import energy_for_blind_distance
+
+    # 7.9 km logged, 0.5 of it recovered blind, 1.71 kWh measured over the 7.4
+    # that carried a reading.
+    out = energy_for_blind_distance(1.71, 7.9, 0.5)
+    assert round(out, 3) == round(1.71 * 7.9 / 7.4, 3)
+    # Wh/km is what's preserved — that is the point.
+    assert round(out * 1000 / 7.9) == round(1.71 * 1000 / 7.4)
+
+
+def test_blind_distance_pricing_is_refused_when_it_would_carry_the_trip():
+    """Past half the trip the assumption is doing more work than the
+    measurement, and a wrong efficiency would be amplified rather than
+    extended."""
+    from app.sync import energy_for_blind_distance
+
+    assert energy_for_blind_distance(1.0, 10.0, 6.0) == 1.0     # 60% blind
+    assert energy_for_blind_distance(1.0, 10.0, 4.0) > 1.0      # 40% blind
+
+
+def test_blind_distance_pricing_ignores_trips_with_nothing_folded():
+    from app.sync import energy_for_blind_distance
+
+    assert energy_for_blind_distance(1.5, 10.0, 0.0) == 1.5
+    assert energy_for_blind_distance(0.0, 10.0, 1.0) == 0.0
+
+
+def test_trip_records_the_polling_window_at_each_boundary():
+    """Every anchor is an estimate placed inside a polling window, so the
+    window's width is that end's uncertainty — and nothing previously
+    distinguished a trip anchored 30 s apart from one anchored 8 min apart."""
+    s1 = snap(T0, 5000.0, 80, range_km=400.0)
+    s2 = snap(T0 + 45, 5000.4, 80, shift="D", speed=30.0, range_km=399.8)
+    s3 = snap(T0 + 900, 5006.0, 79, shift="P", speed=0.0, locked=True, range_km=398.0)
+    _, _, trip, _ = step(s1, s2)
+    drives, _, _, _ = step(s2, s3, trip)
+    assert drives[0]["start_gap_sec"] == 45.0          # departure window
+    assert drives[0]["end_gap_sec"] == round((900 - 45) * 1.0, 1)
+
+
+def test_trim_pace_trusts_a_real_low_speed_over_the_floor():
+    """Nosing into a car park, the last reading really is 5-10 km/h. Forcing
+    that up to the 30 km/h floor puts the estimated stop earlier than it
+    happened, so the trim under-corrects and the trip still reads long (trip
+    316 kept +3 min after a 1002 s trim). The floor is for absent evidence,
+    not for overruling it."""
+    from app.sync import CITY_SPEED_KMH
+
+    # A slow final approach: last seen at 8 km/h, then a long silent gap.
+    a = snap(T0, 100.0, 80, shift="D", speed=8.0, range_km=400.0)
+    b = snap(T0 + 60, 100.6, 80, shift="D", speed=8.0, range_km=399.9)
+    c = snap(T0 + 1800, 100.9, 79, shift="P", speed=0.0, locked=True, range_km=399.5)
+    d = snap(T0 + 3600, 100.9, 79, shift="P", speed=0.0, locked=True, range_km=399.4)
+    _, _, trip, _ = step(a, b)
+    d1, _, trip, _ = step(b, c, trip)
+    d2, _, _, _ = step(c, d, trip) if trip else ([], None, None, None)
+    drives = list(d1) + list(d2)
+    assert drives, "the trip should close"
+    # 0.3 km at 8*0.65 = 5.2 km/h is ~3.5 min of travel, so the stop lands far
+    # earlier than the 30 km/h floor's ~36 s would have put it — a bigger,
+    # more honest trim.
+    assert drives[0]["tail_trim_sec"] > 0
+    at_floor = 0.3 / CITY_SPEED_KMH * 3600.0
+    at_real = 0.3 / (8.0 * 0.65) * 3600.0
+    assert at_real > at_floor

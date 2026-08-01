@@ -912,6 +912,10 @@ def analyze(drives: list[Drive], rated_wh_per_km: float = 150.0,
                 # its position from every trip before it.
                 "start_odo_km": getattr(d, "start_odo_km", None),
                 "end_odo_km": getattr(d, "end_odo_km", None),
+                # How wide the polling window was at each boundary — the
+                # trip's own uncertainty there (see Drive.start_gap_sec).
+                "start_gap_sec": getattr(d, "start_gap_sec", None),
+                "end_gap_sec": getattr(d, "end_gap_sec", None),
                 "route": f"{d.start_location} → {d.end_location}"
                 if d.start_location and d.end_location else "",
                 # Raw endpoints, so the UI can offer "name this place" (a

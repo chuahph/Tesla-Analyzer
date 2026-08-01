@@ -1542,6 +1542,9 @@ function tripDiagnostics(t, ctx) {
       // Where the anchors sat, so the trip can be checked against the
       // odometer readings around it rather than taken on its own word.
       start_odo_km: t.start_odo_km, end_odo_km: t.end_odo_km,
+      // The polling window each boundary was placed inside — how well
+      // anchored this trip actually is, rather than assuming all are equal.
+      start_gap_sec: t.start_gap_sec, end_gap_sec: t.end_gap_sec,
       tail_trim_sec: t.tail_trim_sec,
       data_quality: t.data_quality, distance_flag: t.distance_flag,
       // The parked gap before this trip: a 0.0 kWh reading over a long park

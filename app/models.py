@@ -89,6 +89,19 @@ class Drive(Base):
     # sync.driving_only_kwh). None means the car never reported the flag, which
     # must read as "unknown" and fall back to assuming it ran, not as "off".
     climate_min: Mapped[float | None] = mapped_column(Float, nullable=True)
+
+    # The polling windows this trip's two boundaries were placed inside, in
+    # seconds. Every anchor at either end is an estimate located somewhere in
+    # its window, so the window's width IS that end's uncertainty — a trip
+    # whose first driving reading arrived thirty seconds after the last parked
+    # one is far better anchored than one where eight minutes passed, and
+    # nothing previously distinguished them. Recorded so a discrepancy can be
+    # weighed against how well the trip was observed rather than every trip
+    # reading as equally authoritative. None where the path had no previous
+    # reading to measure against (a trip opened with no prior snapshot, or a
+    # close that never evaluated one).
+    start_gap_sec: Mapped[float | None] = mapped_column(Float, nullable=True)
+    end_gap_sec: Mapped[float | None] = mapped_column(Float, nullable=True)
     idle_tracked: Mapped[bool] = mapped_column(Boolean, default=False)
 
     # User-assigned category ("work" / "personal", or any free text) for

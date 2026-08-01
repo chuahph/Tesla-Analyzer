@@ -344,6 +344,14 @@ def _open_trip_at(base: dict[str, Any], cur: dict[str, Any], prev: dict[str, Any
         # Lock event tracking: if the car was just unlocked, this trip is confirmed
         # as intentional driving (not just a brief shift to P or accidental gear change).
         "unlocked_before_drive": _lock_unlocked(prev, cur),
+        # How wide the polling window was that the departure actually happened
+        # inside. Every anchor at this end is an estimate placed somewhere in
+        # this window, so its size IS the trip's start-side uncertainty — and
+        # without it every trip reads as equally authoritative whether its
+        # first driving reading arrived thirty seconds or eight minutes after
+        # the last parked one (see Drive.start_gap_sec).
+        "start_gap_sec": (round(cur["ts"] - prev["ts"], 1)
+                          if prev and cur["ts"] >= prev["ts"] else None),
         # Real (not estimated) idle-time tracking, from the odometer: idle_min
         # accumulates stationary runs of at least IDLE_STREAK_MIN; still_run is
         # the in-progress run not yet committed, and still_since is when that
@@ -593,6 +601,45 @@ def _idle_adjusted_kwh(energy_kwh, idle_min, out_temp_c=None):
     return max(energy_kwh - idle_min / 60.0 * idle_kw, energy_kwh * 0.5)
 
 
+# Most of a trip's distance that may have been folded in without its own
+# energy reading before the correction below refuses to apply. Past this the
+# "keep Wh/km constant" assumption is carrying more of the trip than the
+# measured part is, and a wrong efficiency would be amplified rather than
+# extended.
+BLIND_DISTANCE_MAX_SHARE = 0.5
+
+
+def energy_for_blind_distance(energy_kwh: float, distance_km: float,
+                              blind_km: float) -> float:
+    """Trip energy with the folded-in distance's own consumption added back.
+
+    Both trip boundaries can pull odometer distance into a trip without the
+    matching energy reading. The departure recovery moves the start anchor
+    back over ground the car really covered, but only takes the SoC/range with
+    it when that pair looks like driving rather than standby drain — and when
+    it doesn't, the distance arrives with nothing attached. The blind-gap
+    close does the same at the other end, deliberately: it folds the parking
+    creep's metres in while keeping the earlier reading's SoC, because taking
+    the later one would drag a whole nap's drain in with it.
+
+    Both leave the same artifact — distance grew, energy didn't, so Wh/km is
+    diluted by exactly the folded share. This is the identical defect the
+    sustained-offline top-up had before it was fixed, where +33% distance
+    against +0.00 kWh dropped Wh/km by a quarter.
+
+    The estimate is the trip's own measured efficiency over the part that DID
+    carry a reading, applied to the part that didn't — which is the same as
+    holding Wh/km constant. That assumes the blind stretch was driven like the
+    rest of the trip, which is why it is refused once the blind part is a
+    large share of the whole.
+    """
+    measured = distance_km - blind_km
+    if (not energy_kwh or energy_kwh <= 0 or blind_km <= 0
+            or measured <= 0 or blind_km > distance_km * BLIND_DISTANCE_MAX_SHARE):
+        return energy_kwh
+    return energy_kwh * distance_km / measured
+
+
 def trim_standby_kwh(energy_kwh: float, distance_km: float, trim_sec: float,
                      standby_kw: float | None) -> float:
     """Trip energy with the trimmed tail's parked drain taken back out.
@@ -684,6 +731,16 @@ def _drive_from(start: dict, cur: dict, capacity_kwh: float, max_speed: float = 
     dt_min = max((cur["ts"] - start["ts"]) / 60.0, 0.0)
     soc_used = max(start["soc"] - cur["soc"], 0.0)
     energy = _energy_kwh(start, cur, capacity_kwh)
+    # Distance either anchor folded in without a matching SoC/range reading —
+    # priced at the trip's own efficiency rather than left at zero, which
+    # would dilute Wh/km by exactly the folded share (see
+    # energy_for_blind_distance).
+    energy = energy_for_blind_distance(
+        energy, distance,
+        (start.get("start_recovered_km") or 0.0
+         if not start.get("start_energy_recovered") else 0.0)
+        + (cur.get("end_folded_km") or 0.0),
+    )
     # A real drive can't average below ~40 Wh/km over its whole distance — that
     # means the range reading was refilled mid-trip (a charge or BMS recalibration
     # slipped into the session). Flag energy unknown so the trip shows "—" and is
@@ -713,6 +770,10 @@ def _drive_from(start: dict, cur: dict, capacity_kwh: float, max_speed: float = 
         # 0.0 there too, but analysis code must not read that as "confirmed
         # zero" without checking idle_tracked first.
         "idle_min": round(min(idle_min, dt_min), 1) if dt_min else 0.0,
+        # The polling windows the two boundaries were placed inside — the
+        # trip's own uncertainty at each end (see Drive.start_gap_sec).
+        "start_gap_sec": start.get("start_gap_sec"),
+        "end_gap_sec": cur.get("end_gap_sec"),
         # Minutes climate was observed running, for the whole-trip climate
         # model (see climate_kwh). None when the car never reported the flag,
         # which must read as "unknown", not "off".
@@ -1130,6 +1191,10 @@ def process_snapshot(
                 "odo_km": cur["odo_km"] if fold_in else prev["odo_km"],
                 "trim_sec": 0.0,
                 "end_lost_km": 0.0 if fold_in else creep_km,
+                # Folded odometer distance carrying no SoC/range of its own —
+                # this close keeps prev's reading deliberately, so the creep's
+                # energy has to be priced rather than dropped.
+                "end_folded_km": creep_km if fold_in else 0.0,
             }
             d = _drive_from(open_trip, close_at, capacity_kwh, open_trip.get("max_speed", 0.0),
                             _confirmed_idle_min(open_trip, prev["ts"]), idle_tracked=True,
@@ -1209,12 +1274,25 @@ def process_snapshot(
                 # worth distinguishing from "never evaluated" (see
                 # Drive.tail_trim_sec).
                 stop["trim_sec"] = 0.0
+                # The interval this stop point was chosen inside — the trip's
+                # arrival-side uncertainty, whether or not a trim then fired.
+                stop["end_gap_sec"] = round(gap_min * 60.0, 1) if prev else None
                 # This close point tracks the odometer forward for as long as
                 # it keeps climbing, so by the time the trip ends nothing is
                 # left beyond it — a measured 0.0, not an assumption.
                 stop["end_lost_km"] = 0.0
                 if prev and gap_min >= min_gap and implied < CITY_SPEED_KMH and moved >= drive_min_km:
-                    pace = max((prev.get("speed_kmh") or 0.0) * 0.65, CITY_SPEED_KMH)
+                    # The floor exists for when there is no speed evidence at
+                    # all, not to overrule evidence that disagrees with it. A
+                    # car nosing into a multi-storey car park genuinely was
+                    # doing 5-10 km/h on its last reading, and forcing that up
+                    # to 30 puts the estimated stop earlier than it happened —
+                    # so the trim under-corrects and the trip still reads long
+                    # (trip 316 kept +3 min after a 1002 s trim). Trust a real
+                    # nonzero reading; fall back to the floor only when the
+                    # car reported nothing to go on.
+                    last_speed = prev.get("speed_kmh") or 0.0
+                    pace = last_speed * 0.65 if last_speed > 0 else CITY_SPEED_KMH
                     est_stop = min(cur["ts"], prev["ts"] + moved / pace * 3600.0)
                     # Worth applying once it trims at least a minute of idle
                     # off the tail — not the estimate's own travel time (a
@@ -1408,7 +1486,9 @@ def process_snapshot(
                     # projects the full pack from the range/SoC pair, so a
                     # mismatched pair (prev's soc against cur's range) is worse
                     # than either end used consistently.
-                    if recovered_wh_per_km <= MAX_PLAUSIBLE_WH_PER_KM:
+                    open_trip["start_energy_recovered"] = (
+                        recovered_wh_per_km <= MAX_PLAUSIBLE_WH_PER_KM)
+                    if open_trip["start_energy_recovered"]:
                         open_trip["soc"] = prev["soc"]
                         open_trip["range_km"] = prev.get("range_km")
                 # Same pace model as the arrival-side estimate: ``cur`` is the
