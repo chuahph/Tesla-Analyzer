@@ -228,6 +228,63 @@ CAPACITY_AC_EFFICIENCY = 0.95
 CAPACITY_PLAUSIBLE_KWH = (45.0, 95.0)
 
 
+# Measuring capacity from a session's own charging curve. The slope of
+# energy-added against SoC IS kWh per percent, so x100 is the pack — and a
+# slope through many samples is far less exposed to whole-percent SoC than the
+# two endpoints are.
+CURVE_MIN_SAMPLES = 6        # below this the slope is barely better than the ends
+CURVE_MIN_SPAN_PCT = 8.0     # and it needs real SoC spread to have a slope at all
+CURVE_MAX_RESIDUAL_KWH = 1.2  # a BMS jump or a paused-and-resumed session
+
+
+def capacity_from_curve(curve: list[Any], charge_type: str = "AC") -> dict[str, Any] | None:
+    """Usable pack capacity from the (SoC, kWh-added) samples taken during one
+    charging session.
+
+    ``energy_added = (SoC / 100) x capacity`` holds throughout a session, not
+    just across its ends, so every poll while plugged in is another point on a
+    line whose slope is the pack size. Fitting that line uses the whole session
+    instead of two readings, which matters because Tesla reports SoC as a whole
+    percent: the endpoint method carries a +/-1 point error on each end, and on
+    a 20-point charge that is +/-10% on the answer. A slope through twenty
+    points spread over the same range is barely troubled by it.
+
+    Returns the capacity, how many samples it rests on and how well they fit,
+    or None when the session can't support a figure — too few samples, too
+    little SoC covered, or residuals big enough to mean the line isn't a line
+    (a BMS recalibration mid-session, or a charge paused and resumed on a
+    different meter).
+
+    Charging is lossy on the AC side, so an AC slope measures energy the pack
+    never received and is derated the same way the endpoint method derates.
+    """
+    pts = [(float(a), float(b)) for a, b in (curve or []) if a is not None and b is not None]
+    if len(pts) < CURVE_MIN_SAMPLES:
+        return None
+    socs = [p[0] for p in pts]
+    span = max(socs) - min(socs)
+    if span < CURVE_MIN_SPAN_PCT:
+        return None
+    slope, intercept = linregress(socs, [p[1] for p in pts])
+    if not slope or slope <= 0:
+        return None
+    residual = max(abs(e - (slope * s + intercept)) for s, e in pts)
+    if residual > CURVE_MAX_RESIDUAL_KWH:
+        return None
+    cap = slope * 100.0
+    if (charge_type or "AC") != "DC":
+        cap *= CAPACITY_AC_EFFICIENCY
+    lo, hi = CAPACITY_PLAUSIBLE_KWH
+    if not (lo <= cap <= hi):
+        return None
+    return {
+        "kwh": round(cap, 1),
+        "samples": len(pts),
+        "soc_span_pct": round(span, 1),
+        "max_residual_kwh": round(residual, 3),
+    }
+
+
 def implied_capacity(charges: list[Any]) -> dict[str, Any]:
     """Usable pack capacity implied by real charge sessions, for checking the
     figure that turns every SoC delta into kWh.
@@ -252,6 +309,26 @@ def implied_capacity(charges: list[Any]) -> dict[str, Any]:
     for c in charges:
         gain = (getattr(c, "end_soc", 0) or 0) - (getattr(c, "start_soc", 0) or 0)
         energy = getattr(c, "energy_added_kwh", 0) or 0.0
+        # A figure fitted through the session's own charging curve beats
+        # anything the two endpoints can say, and beats it by enough to be
+        # worth taking on its own terms: it needs neither the 15% gain the
+        # endpoint method requires to outrun whole-percent SoC, nor the
+        # scatter that comes with it. Fall back to the endpoints only where a
+        # session predates the curve or couldn't be fitted.
+        curve_cap = getattr(c, "implied_capacity_kwh", None)
+        if curve_cap:
+            samples.append({
+                "charge_id": getattr(c, "id", None),
+                "date": getattr(c, "start_time", None).isoformat(timespec="minutes")
+                if getattr(c, "start_time", None) else None,
+                "charge_type": getattr(c, "charge_type", "AC"),
+                "soc_gain_pct": round(gain, 1),
+                "energy_added_kwh": round(energy, 2),
+                "implied_kwh": round(curve_cap, 1),
+                "method": "curve",
+                "curve_samples": getattr(c, "capacity_samples", None),
+            })
+            continue
         if gain < CAPACITY_MIN_GAIN_PCT or energy <= 0:
             continue
         cap = energy / (gain / 100.0)
@@ -261,6 +338,7 @@ def implied_capacity(charges: list[Any]) -> dict[str, Any]:
         if not (lo <= cap <= hi):
             continue
         samples.append({
+            "method": "endpoints",
             "charge_id": getattr(c, "id", None),
             "date": getattr(c, "start_time", None).isoformat(timespec="minutes")
             if getattr(c, "start_time", None) else None,

@@ -100,6 +100,17 @@ def _first_vehicle(session: Session) -> Vehicle:
     return vehicle
 
 
+def _attach_curve_capacity(c: dict) -> None:
+    """Turn a closed session's charging curve into the capacity it implies, and
+    drop the curve itself (transient, not a column). Measured per session so
+    the running median has real measurements to work from rather than
+    re-deriving everything from endpoints on every read."""
+    fit = battery_analysis.capacity_from_curve(
+        c.pop("curve", None) or [], c.get("charge_type", "AC"))
+    c["implied_capacity_kwh"] = fit["kwh"] if fit else None
+    c["capacity_samples"] = fit["samples"] if fit else None
+
+
 def _degradation_pct(session: Session, vehicle: Vehicle, settings) -> float | None:
     """The car's own range-based degradation estimate (% capacity lost vs
     new) — the same figure the Battery Health card shows, computed purely
@@ -1411,6 +1422,7 @@ def _process_vehicle(
         )
     for c in charges:
         cap = sync_mod.implied_capacity_kwh(c)
+        _attach_curve_capacity(c)
         c.pop("energy_measured", None)  # transient flag, not a DB column
         if cap:
             old = vehicle.battery_capacity_kwh or 75.0
@@ -1773,6 +1785,7 @@ def sync_now(wake: bool = Query(False), session: Session = Depends(get_session))
                     )
                     if c:
                         cap = sync_mod.implied_capacity_kwh(c)
+                        _attach_curve_capacity(c)
                         c.pop("energy_measured", None)
                         if cap:
                             old_cap = vehicle_row.battery_capacity_kwh or 75.0

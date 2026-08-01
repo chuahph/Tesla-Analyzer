@@ -950,6 +950,9 @@ def _charge_from(start: dict, cur: dict, capacity_kwh: float, price_per_kwh: flo
         # Transient (not a DB column): whether energy came from Tesla's meter,
         # so usable capacity can be calibrated only from real measurements.
         "energy_measured": energy_measured,
+        # Transient: the session's own (SoC, kWh) samples, for measuring pack
+        # capacity from the slope through them (see _charge_curve).
+        "curve": start.get("curve") or [],
     }
 
 
@@ -1000,6 +1003,37 @@ def implied_capacity_kwh(charge: dict) -> float | None:
     if charge.get("charge_type") != "DC":
         cap *= AC_CHARGE_EFFICIENCY
     return round(cap, 1) if 45.0 <= cap <= 95.0 else None
+
+
+# Most (SoC, kWh) samples kept from one charging session. A long AC session
+# polled every couple of minutes would otherwise grow this without bound, and
+# the slope stops improving long before then — the spread of SoC covered
+# matters, not how densely it was sampled.
+CHARGE_CURVE_MAX_SAMPLES = 400
+
+
+def _charge_curve(open_charge: dict, cur: dict) -> list[list[float]]:
+    """Append this poll's (SoC, energy-added-so-far) pair to the session's
+    curve, for measuring pack capacity from the slope rather than the ends.
+
+    Only samples that move the SoC are kept. A charge polled every two minutes
+    spends most of its samples on the same whole percent — Tesla reports SoC as
+    an integer — and keeping all of them would weight the regression toward
+    whichever percent happened to be sampled most, rather than toward the span
+    the session actually covered.
+    """
+    curve = list(open_charge.get("curve") or [])
+    soc = cur.get("soc")
+    energy = cur.get("energy_added_kwh")
+    if soc is None or energy is None or energy <= 0:
+        return curve
+    if curve and curve[-1][0] == soc:
+        # Same whole percent: keep the latest reading for it rather than a
+        # second point, so the pair describes where that percent ENDED.
+        curve[-1] = [float(soc), float(energy)]
+        return curve
+    curve.append([float(soc), float(energy)])
+    return curve[-CHARGE_CURVE_MAX_SAMPLES:]
 
 
 def _gap_meter_total(prev: dict, cur: dict) -> float | None:
@@ -1543,6 +1577,11 @@ def process_snapshot(
             **open_charge,
             "max_kw": max(open_charge.get("max_kw", 0.0), cur.get("charger_kw") or 0.0),
             "fast": bool(open_charge.get("fast") or cur.get("fast")),
+            # Every poll during a charge is a (SoC, kWh-so-far) pair, and the
+            # slope through them IS the pack size — a far better measurement
+            # than the session's two endpoints, which is all the endpoint
+            # method has. See battery.capacity_from_curve.
+            "curve": _charge_curve(open_charge, cur),
         }
         if not cur.get("charging") or is_driving(cur):
             c = _charge_from(open_charge, cur, capacity_kwh, price_per_kwh, drive_min_km,

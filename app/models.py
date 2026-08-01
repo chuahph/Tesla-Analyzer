@@ -263,6 +263,19 @@ class Charge(Base):
     # telemetry field reliably distinguishes these from a paid AC charger, so
     # this is set by hand rather than auto-detected. Forces cost to 0.
     is_free: Mapped[bool] = mapped_column(Boolean, default=False)
+
+    # Usable pack capacity this session implies, measured from the slope of
+    # energy-added against SoC across the whole charge rather than from its two
+    # endpoints (see battery.capacity_from_curve). The endpoint method carries a
+    # whole-percent SoC error at each end — on a 20-point charge that is +/-10%
+    # on the answer — which is why it needs a 15%+ gain before it says anything
+    # and still scatters. A slope through the session's own samples is barely
+    # troubled by it. None when the session couldn't support a fit: too few
+    # samples, too little SoC covered, or residuals showing the line isn't one.
+    implied_capacity_kwh: Mapped[float | None] = mapped_column(Float, nullable=True)
+    # How many samples that rests on, so a figure can be weighed rather than
+    # taken at face value.
+    capacity_samples: Mapped[int | None] = mapped_column(Integer, nullable=True)
     # Which of Public/Home/Office this session was actually priced against —
     # set when a charge is first priced, and again whenever the dashboard's
     # 🌐/🏠/🏢 quick-rate buttons are used to fix one after the fact. Blank

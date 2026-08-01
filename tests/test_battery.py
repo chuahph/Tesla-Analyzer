@@ -416,3 +416,73 @@ def test_implied_capacity_reports_nothing_without_qualifying_charges():
 
     assert implied_capacity([])["available"] is False
     assert implied_capacity([])["count"] == 0
+
+
+# --- Capacity measured from the charging curve ------------------------------
+
+def _curve(start_soc, end_soc, capacity_kwh, step=2, ac=True):
+    """A clean session's (SoC, kWh-added) samples for a given pack."""
+    eff = 0.95 if ac else 1.0
+    return [[s, (s - start_soc) / 100.0 * capacity_kwh / eff]
+            for s in range(start_soc, end_soc + 1, step)]
+
+
+def test_capacity_from_curve_recovers_the_pack_from_the_slope():
+    """energy_added = SoC/100 x capacity holds throughout a session, so the
+    slope through its samples IS the pack size."""
+    from app.analysis.battery import capacity_from_curve
+
+    fit = capacity_from_curve(_curve(30, 75, 69.5), "AC")
+    assert fit["kwh"] == 69.5
+    assert fit["samples"] == 23
+    assert fit["soc_span_pct"] == 44.0     # 30..74 in steps of 2
+
+
+def test_capacity_from_curve_beats_the_endpoints_on_a_short_charge():
+    """The point of fitting the curve: a small gain is hopeless from the two
+    ends, because whole-percent SoC at each is a large share of it, but a
+    slope through the samples is barely troubled."""
+    from app.analysis.battery import CAPACITY_MIN_GAIN_PCT, capacity_from_curve
+
+    # A 12-point charge — below the gain the endpoint method insists on.
+    assert 12 < CAPACITY_MIN_GAIN_PCT + 1
+    fit = capacity_from_curve(_curve(50, 62, 69.5, step=1), "AC")
+    assert fit is not None
+    assert fit["kwh"] == 69.5
+
+
+def test_capacity_from_curve_refuses_a_session_that_is_not_a_line():
+    """A BMS recalibration or a paused-and-resumed session breaks the
+    proportionality the whole method rests on — better to say nothing."""
+    from app.analysis.battery import capacity_from_curve
+
+    broken = _curve(30, 75, 69.5)
+    broken[12][1] += 4.0          # a step change mid-session
+    assert capacity_from_curve(broken, "AC") is None
+
+
+def test_capacity_from_curve_needs_samples_and_spread():
+    from app.analysis.battery import capacity_from_curve
+
+    assert capacity_from_curve(_curve(30, 75, 69.5)[:3], "AC") is None   # too few
+    assert capacity_from_curve(                                          # no spread
+        [[50, 1.0], [50.5, 1.3], [51, 1.6], [51.5, 1.9], [52, 2.2], [52.5, 2.5]], "DC") is None
+
+
+def test_implied_capacity_prefers_the_curve_figure_over_the_endpoints():
+    """A curve-fitted session is used on its own terms — including when its
+    SoC gain is below what the endpoint method would require."""
+    from types import SimpleNamespace
+
+    from app.analysis.battery import implied_capacity
+
+    fitted = SimpleNamespace(
+        id=1, start_time=datetime(2026, 8, 1, 8, 0), charge_type="AC",
+        start_soc=50, end_soc=62, energy_added_kwh=8.8,     # only a 12% gain
+        implied_capacity_kwh=67.8, capacity_samples=13,
+    )
+    out = implied_capacity([fitted])
+    assert out["available"] is True
+    assert out["median_kwh"] == 67.8
+    assert out["samples"][0]["method"] == "curve"
+    assert out["samples"][0]["curve_samples"] == 13
