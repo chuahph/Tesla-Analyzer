@@ -1512,10 +1512,21 @@ def test_power_on_backdate_reanchors_odo_and_soc_not_just_timestamp():
     _, _, trip, _ = step(s1, s2)
     assert trip is not None
     assert trip["ts"] < s2["ts"]                     # timestamp backdated, as before
-    # odo/SoC no longer silently pinned to cur's already-driven values --
-    # the 1 km / 0.3% covered just before cur now counts toward the trip.
+    # The odometer is no longer silently pinned to cur's already-driven value:
+    # the 1 km covered just before cur counts toward the trip, which is the
+    # complaint this test was written for.
     assert trip["odo_km"] == s1["odo_km"]
-    assert trip["soc"] == s1["soc"]
+    # Its ENERGY comes back by a different route now. Only ~2 of these 60
+    # minutes were departure; the other 58 were a parked car, and taking s1's
+    # SoC as the trip's baseline would charge the trip for all of it (the
+    # defect trip 319 exposed at 2.3 hours, present here in miniature). Past
+    # DEPARTURE_STALE_MAX_MIN the baseline stays at cur and the recovered
+    # kilometre is priced at the trip's own measured efficiency instead — so
+    # the catch-up energy still lands on the trip, without the standby drain
+    # riding in with it.
+    assert trip["soc"] == s2["soc"]
+    assert trip["start_recovered_km"] == 1.0
+    assert trip["start_energy_recovered"] is False
 
 
 def test_power_on_backdate_recovers_odo_even_when_shift_too_short_to_estimate():
@@ -2026,3 +2037,33 @@ def test_trim_pace_trusts_a_real_low_speed_over_the_floor():
     at_floor = 0.3 / CITY_SPEED_KMH * 3600.0
     at_real = 0.3 / (8.0 * 0.65) * 3600.0
     assert at_real > at_floor
+
+
+def test_a_stale_park_is_not_a_departure_baseline_however_plausible_it_looks():
+    """Regression for trip 319. A 2.3 h park offered 0.52 km at ~406 Wh/km —
+    under MAX_PLAUSIBLE_WH_PER_KM, because 400 Wh/km is ordinary for half a
+    kilometre of parking-lot crawl in the heat. So the efficiency gate passed
+    it, the SoC baseline came back with the odometer, and the park's standby
+    drain went into the trip, putting it 5% over the car's own figure.
+
+    Duration is what separates a departure from a stale anchor: minutes versus
+    hours. The odometer still comes back either way — that part is measured."""
+    from app.sync import DEPARTURE_STALE_MAX_MIN
+
+    # 2.3 h parked (well past the bound), then driving, 0.52 km covered.
+    p1 = snap(T0, 9000.0, 70, range_km=350.0)
+    p2 = snap(T0 + 8220, 9000.52, 70, shift="D", speed=35.0, range_km=348.9)
+    _, _, trip, _ = step(p1, p2)
+    assert trip["odo_km"] == p1["odo_km"]            # distance still recovered
+    assert trip["start_recovered_km"] == 0.52
+    assert trip["soc"] == p2["soc"]                  # but not the stale baseline
+    assert trip["start_energy_recovered"] is False
+
+    # The same movement inside a plausible departure window keeps its energy.
+    q1 = snap(T0, 9000.0, 70, range_km=350.0)
+    q2 = snap(T0 + int(DEPARTURE_STALE_MAX_MIN * 60) - 60, 9000.52, 70,
+              shift="D", speed=35.0, range_km=348.9)
+    _, _, trip2, _ = step(q1, q2)
+    assert trip2["odo_km"] == q1["odo_km"]
+    assert trip2["soc"] == q1["soc"]
+    assert trip2["start_energy_recovered"] is True

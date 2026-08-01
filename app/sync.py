@@ -86,6 +86,26 @@ DEPARTURE_GAP_MAX_KM = 3.0
 # a real (if slow, climate-loaded) departure runs a few hundred at most. Above
 # this the trip keeps cur's own SoC/range and measures only the driving.
 MAX_PLAUSIBLE_WH_PER_KM = 600.0
+# How stale the last parked reading may be before it stops counting as a
+# departure baseline at all, whatever its implied efficiency looks like.
+#
+# MAX_PLAUSIBLE_WH_PER_KM alone is not enough, because a long park and a slow
+# hot crawl produce similar figures. Confirmed live, trip 319: a 2.3 hour park
+# offered 0.52 km at roughly 406 Wh/km — comfortably under that bound, since
+# 400 Wh/km is entirely ordinary for half a kilometre of parking-lot crawl with
+# the air-conditioning fighting 34 degrees. The SoC baseline came back with the
+# odometer and the park's standby drain came with it, putting the trip 5% over
+# the car's own figure.
+#
+# Duration separates them where efficiency cannot. A poor-signal departure is a
+# matter of minutes — the live cases this recovery exists for ran about twenty
+# — while a stale anchor is hours old. This bound was rejected once on the
+# reasoning that "a real departure runs 20+ minutes so gap length can't
+# discriminate", which confused twenty minutes with two hours; set well clear
+# of the former and nowhere near the latter. The odometer still comes back
+# regardless: distance is a measured fact at any staleness, and the recovered
+# stretch is priced at the trip's own efficiency (see energy_for_blind_distance).
+DEPARTURE_STALE_MAX_MIN = 45.0
 # How long after a sustained-offline close (see routes.py's UNREACHABLE_CLOSE_MIN
 # — just 3 minutes, deliberately short so a genuinely-ended short trip closes
 # promptly) the next successful poll can still merge further movement into
@@ -1521,7 +1541,8 @@ def process_snapshot(
                     # mismatched pair (prev's soc against cur's range) is worse
                     # than either end used consistently.
                     open_trip["start_energy_recovered"] = (
-                        recovered_wh_per_km <= MAX_PLAUSIBLE_WH_PER_KM)
+                        recovered_wh_per_km <= MAX_PLAUSIBLE_WH_PER_KM
+                        and gap_min <= DEPARTURE_STALE_MAX_MIN)
                     if open_trip["start_energy_recovered"]:
                         open_trip["soc"] = prev["soc"]
                         open_trip["range_km"] = prev.get("range_km")
