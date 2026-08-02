@@ -93,13 +93,28 @@ def odometer_continuity(drives: list[Any], readings: list[Any]) -> dict[str, Any
     }
 
 
-# Measuring this car's own parked standby draw. Deliberately stricter than
-# vampire_drain's reporting thresholds, because this feeds a correction rather
-# than a narrative: start/end SoC are whole percents, so a gap has to be long
-# enough for the loss to cross a point at all before its rate means anything,
-# and a handful of gaps is not a rate.
-STANDBY_MIN_GAP_HOURS = 2.0
-STANDBY_MIN_TOTAL_HOURS = 12.0
+# Measuring this car's own parked standby draw once it is properly asleep.
+# Deliberately stricter than vampire_drain's reporting thresholds, because this
+# feeds a correction rather than a narrative: start/end SoC are whole percents,
+# so a gap has to be long enough for the loss to cross a point at all before
+# its rate means anything, and a handful of gaps is not a rate.
+#
+# The floor was 2 h and that was measuring the wrong thing. Every park begins
+# awake — screens, Sentry arming, HVAC settling — at several times the sleeping
+# rate (see parked_awake_kw), so a short gap is mostly that opening burst and a
+# long one is mostly sleep. Averaging both together lands between the two and
+# describes neither: this car read 0.22 kW that way, while a measured 12.3 h
+# overnight park lost under one whole percent, i.e. under 0.06 kW. At 0.22 kW
+# it would have lost 3.9%. Six hours makes the opening burst a small enough
+# share that what is left really is the sleeping rate.
+#
+# 2-6 h gaps now belong to neither rate, on purpose. They are a mixture, and
+# there is no way to split one without knowing when the car actually fell
+# asleep — which the API does not report.
+STANDBY_MIN_GAP_HOURS = 6.0
+# Two overnight parks. Raised with the floor: at 6 h a 12 h total could be a
+# single gap, and one gap has never been a rate anywhere else in this module.
+STANDBY_MIN_TOTAL_HOURS = 24.0
 # Outside this the answer is a measurement artifact, not a parked car — a
 # Tesla idles somewhere near 100-500 W depending on Sentry, climate and how
 # long it takes to fall asleep.
@@ -117,7 +132,7 @@ STANDBY_PLAUSIBLE_KW = (0.02, 1.5)
 # only appears once enough of them are summed, which is why the totals required
 # here are about the aggregate rather than any single gap.
 AWAKE_MIN_GAP_HOURS = 0.15   # below this it's a traffic stop, not a park
-AWAKE_MAX_GAP_HOURS = 2.0    # above this the car has slept — that's standby_kw's range
+AWAKE_MAX_GAP_HOURS = 2.0    # past this the sleeping hours start to dominate
 AWAKE_MIN_TOTAL_HOURS = 6.0
 
 
@@ -157,14 +172,15 @@ def _gap_rate_kw(drives: list[Any], charges: list[Any] | None, capacity_kwh: flo
 
 def standby_kw(drives: list[Any], charges: list[Any] | None,
                capacity_kwh: float) -> float | None:
-    """This car's own average standby draw once properly parked, in kW.
+    """This car's own average standby draw once properly asleep, in kW.
 
     Measured the same way vampire_drain measures a gap — the SoC a trip ended
     on minus the SoC the next one started from, over the hours between — but
-    aggregated into a rate, and only from gaps long enough to be worth
-    dividing. None when the history can't support a figure yet, which the
-    caller must treat as "don't correct anything" rather than substituting a
-    guess: a wrong rate here would quietly reshape real trip energy.
+    aggregated into a rate, and only from gaps long enough that the awake
+    opening burst no longer dominates them. None when the history can't
+    support a figure yet, which the caller must treat as "don't correct
+    anything" rather than substituting a guess: a wrong rate here would
+    quietly reshape real trip energy.
     """
     return _gap_rate_kw(drives, charges, capacity_kwh,
                         STANDBY_MIN_GAP_HOURS, None, STANDBY_MIN_TOTAL_HOURS)

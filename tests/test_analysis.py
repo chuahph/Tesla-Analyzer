@@ -1460,9 +1460,10 @@ def test_standby_kw_measures_the_rate_from_parked_gaps():
         _d("2026-07-01T08:00", "2026-07-01T09:00", 90, 88),
         _d("2026-07-01T19:00", "2026-07-01T20:00", 86, 84),   # 10 h gap, 2% lost
         _d("2026-07-02T06:00", "2026-07-02T07:00", 82, 80),   # 10 h gap, 2% lost
+        _d("2026-07-02T17:00", "2026-07-02T18:00", 78, 76),   # 10 h gap, 2% lost
     ]
     rate = standby_kw(drives, [], 70.0)
-    assert rate == round(2.8 / 20.0, 3)      # 2 x (2% of 70) over 2 x 10 h
+    assert rate == round(4.2 / 30.0, 3)      # 3 x (2% of 70) over 3 x 10 h
 
 
 def test_standby_kw_skips_gaps_containing_a_charge():
@@ -1476,21 +1477,41 @@ def test_standby_kw_skips_gaps_containing_a_charge():
         _d("2026-07-01T08:00", "2026-07-01T09:00", 90, 88),
         _d("2026-07-01T19:00", "2026-07-01T20:00", 86, 84),
         _d("2026-07-02T06:00", "2026-07-02T07:00", 82, 80),
+        _d("2026-07-02T17:00", "2026-07-02T18:00", 78, 76),
     ]
     charged = SimpleNamespace(start_time=datetime.fromisoformat("2026-07-01T12:00"))
-    # With that gap excluded only 10 h remain, below the total-hours floor.
+    # With that gap excluded only 20 h remain, below the total-hours floor.
     assert standby_kw(drives, [charged], 70.0) is None
 
 
 def test_standby_kw_needs_enough_observed_hours():
-    """A rate from one short gap is noise: whole-percent SoC over a couple of
-    hours is mostly rounding."""
+    """One qualifying gap is a sample, not a rate — whole-percent SoC leaves
+    each individual gap uncertain by most of a point."""
     from app.analysis.driving import standby_kw
 
     drives = [
         _d("2026-07-01T08:00", "2026-07-01T09:00", 90, 88),
-        _d("2026-07-01T12:00", "2026-07-01T13:00", 87, 85),   # only a 3 h gap
+        _d("2026-07-01T19:00", "2026-07-01T20:00", 86, 84),   # one 10 h gap
     ]
+    assert standby_kw(drives, [], 70.0) is None
+
+
+def test_standby_kw_ignores_the_hours_where_awake_and_asleep_are_mixed():
+    """Every park opens awake at several times the sleeping rate, so a 3 h gap
+    is mostly that burst and a 12 h one is mostly sleep. Averaging both lands
+    between the two and describes neither — this car read 0.22 kW that way,
+    while a measured 12.3 h overnight park lost under 0.06 kW. The middle band
+    belongs to neither rate, because nothing here says when sleep began."""
+    from app.analysis.driving import standby_kw
+
+    drives = [
+        _d("2026-07-01T08:00", "2026-07-01T09:00", 90, 88),
+        _d("2026-07-01T12:00", "2026-07-01T13:00", 87, 85),   # 3 h gap
+        _d("2026-07-01T16:00", "2026-07-01T17:00", 84, 82),   # 3 h gap
+        _d("2026-07-01T20:00", "2026-07-01T21:00", 81, 79),   # 3 h gap
+        _d("2026-07-02T00:00", "2026-07-02T01:00", 78, 76),   # 3 h gap
+    ]
+    # 12 h of gaps, every one of them in the mixed band.
     assert standby_kw(drives, [], 70.0) is None
 
 
@@ -1502,6 +1523,7 @@ def test_standby_kw_rejects_an_implausible_rate():
     drives = [
         _d("2026-07-01T08:00", "2026-07-01T09:00", 90, 88),
         _d("2026-07-01T21:00", "2026-07-01T22:00", 40, 38),   # 48% over 12 h
+        _d("2026-07-02T10:00", "2026-07-02T11:00", 20, 18),   # 18% over 12 h
     ]
     assert standby_kw(drives, [], 70.0) is None
 
@@ -1576,7 +1598,7 @@ def test_trim_is_charged_at_the_just_parked_rate_not_the_sleeping_one():
     from app.api.routes import _trim_rate_kw
 
     short = _errands(1.5, 4)                       # awake sample only
-    long_gaps = _errands(10.0, 2)                  # sleeping sample only
+    long_gaps = _errands(10.0, 3)                  # sleeping sample only
     assert _trim_rate_kw(short, [], 70.0) == round(2.8 / 6.0, 3)
     # And when only sleeping gaps exist, fall back rather than skip the
     # correction entirely.
