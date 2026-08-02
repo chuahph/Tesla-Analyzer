@@ -237,6 +237,45 @@ class BatteryReading(Base):
     center_display_state: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
 
+class SecurityEvent(Base):
+    """A physical opening while the car sat parked, armed and unoccupied.
+
+    The alert for this has always been push-only, which meant the event left
+    no trace once the notification was dismissed. Persisting it exists for one
+    specific purpose: Tesla publishes no accelerometer, tilt or alarm-state
+    field, so whether a Sentry trigger is visible in the API at all is an open
+    question, and the only way to answer it is to compare a *known* real event
+    against what the API was reporting at that moment.
+
+    ``dashcam_state`` and ``center_display_state`` are therefore captured here
+    as they read when the opening was detected — the same two fields
+    BatteryReading logs on every change (see routes.py, which forces a row
+    whenever either moves). One row here plus those transitions is the whole
+    experiment: if an escalating Sentry event really does wake the screen or
+    write a clip, it should show up around these timestamps and nowhere else.
+
+    A door opening is not itself a Sentry trigger — it is a proxy, and a good
+    one, since an opening on an armed car escalates Sentry. Nothing is built
+    on top of this yet, and nothing should be until the correlation is real.
+    """
+
+    __tablename__ = "security_events"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    vehicle_id: Mapped[int] = mapped_column(ForeignKey("vehicles.id"), index=True)
+    ts: Mapped[datetime] = mapped_column(DateTime, index=True)
+    # "door" or "window" — which opening tripped it, matching the alert text.
+    kind: Mapped[str] = mapped_column(String(16), default="")
+    # The arming context, so a locked-but-no-Sentry opening stays tellable
+    # apart from a Sentry-armed one when reading the correlation later.
+    sentry_mode: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    locked: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    soc: Mapped[float | None] = mapped_column(Float, nullable=True)
+    # The two fields under test, as they read at the moment of the opening.
+    dashcam_state: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    center_display_state: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
+
 class Charge(Base):
     """A single charging session."""
 

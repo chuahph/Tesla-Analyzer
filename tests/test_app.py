@@ -1490,6 +1490,76 @@ def test_display_state_flicker_forces_a_battery_reading(monkeypatch):
                 s.commit()
 
 
+def test_sentry_check_pairs_field_transitions_against_real_openings(monkeypatch):
+    """The whole experiment in one payload: confirmed physical openings, and
+    every change in the two candidate fields while parked, each row carrying
+    how far it sat from the nearest opening. A transition during a drive is
+    meaningless — the screen is on because someone is in the car — so those
+    are excluded rather than counted as signal."""
+    from datetime import datetime, timedelta
+
+    from app.api import routes as routes_mod
+    from app.api.routes import sentry_check
+    from app.database import SessionLocal
+    from app.models import BatteryReading, Drive, SecurityEvent, Vehicle
+
+    t0 = datetime(2026, 8, 1, 9, 0)
+    try:
+        with SessionLocal() as s:
+            s.add(Vehicle(vin="TESTVIN-SENTRY", name="Test", model="Model 3"))
+            s.commit()
+            v = s.query(Vehicle).filter(Vehicle.vin == "TESTVIN-SENTRY").first()
+            # The suite shares one database, so _first_vehicle would hand back
+            # whichever car another test seeded. Pin it: vehicle selection
+            # isn't what this test is about.
+            monkeypatch.setattr(routes_mod, "_first_vehicle", lambda _s: v)
+
+            def reading(mins, dash, disp):
+                s.add(BatteryReading(
+                    vehicle_id=v.id, ts=t0 + timedelta(minutes=mins), soc=80.0,
+                    range_km=300.0, dashcam_state=dash, center_display_state=disp))
+
+            reading(0, "Recording", 0)
+            reading(30, "Recording", 2)     # parked: screen woke -> a transition
+            reading(60, "Recording", 0)     # parked: and back -> another
+            reading(120, "Unavailable", 0)  # mid-drive: must NOT count
+            s.add(Drive(vehicle_id=v.id, start_time=t0 + timedelta(minutes=115),
+                        end_time=t0 + timedelta(minutes=130), distance_km=5.0,
+                        duration_min=15.0, start_soc=80.0, end_soc=78.0))
+            s.add(SecurityEvent(vehicle_id=v.id, ts=t0 + timedelta(minutes=32),
+                                kind="door", sentry_mode=True, locked=True,
+                                soc=80.0, dashcam_state="Recording",
+                                center_display_state=2))
+            s.commit()
+
+            out = sentry_check(days=3650, session=s)
+            assert out["available"] and out["openings_total"] == 1
+            fields = [(t["field"], t["to"]) for t in out["parked_transitions"]]
+            assert ("center_display_state", 2) in fields
+            assert ("center_display_state", 0) in fields
+            # The drive-time change is excluded, so the count is the two
+            # parked ones and nothing else.
+            assert out["transitions_total"] == 2
+            assert all(t["field"] != "dashcam_state" for t in out["parked_transitions"])
+            # The screen waking two minutes before the opening is the pairing
+            # this endpoint exists to surface.
+            woke = next(t for t in out["parked_transitions"] if t["to"] == 2)
+            assert woke["minutes_from_opening"] == 2.0
+            # And the window discriminates: the screen going back to sleep 28
+            # minutes later is a parked transition but not a near one, which
+            # is the difference between "clusters around openings" and "flips
+            # all day on its own".
+            assert out["transitions_within_15min_of_an_opening"] == 1
+    finally:
+        with SessionLocal() as s:
+            v = s.query(Vehicle).filter(Vehicle.vin == "TESTVIN-SENTRY").first()
+            if v:
+                for model in (Drive, BatteryReading, SecurityEvent):
+                    s.query(model).filter(model.vehicle_id == v.id).delete()
+                s.delete(v)
+                s.commit()
+
+
 def test_intrusion_alert_fires_once_per_opening(monkeypatch):
     """A door opening while the car sits parked with Sentry armed and nobody
     aboard fires once, stays quiet while it's still open, and re-arms once
@@ -1568,12 +1638,27 @@ def test_intrusion_alert_fires_once_per_opening(monkeypatch):
             tick(540, False, False, locked=False)
             tick(600, False, True, locked=False)
             assert fired() == 3
+
+            # Every one of those openings is now on record, not just pushed.
+            # The alert alone left no trace once dismissed, which is exactly
+            # why "when did a real event happen?" kept blocking the
+            # Sentry-visibility question (see SecurityEvent).
+            from app.models import SecurityEvent
+            v = s.query(Vehicle).filter(Vehicle.vin == "TESTVIN-INTRUDE").first()
+            rows = s.query(SecurityEvent).filter(
+                SecurityEvent.vehicle_id == v.id).order_by(SecurityEvent.ts).all()
+            assert len(rows) == 3                  # one per fired alert, no more
+            assert [r.kind for r in rows] == ["door", "door", "door"]
+            assert [r.sentry_mode for r in rows] == [True, True, False]
+            assert all(r.locked for r in rows)
     finally:
         with SessionLocal() as s:
             from app.models import Drive as _Drive
+            from app.models import SecurityEvent as _Sec
             v = s.query(Vehicle).filter(Vehicle.vin == "TESTVIN-INTRUDE").first()
             if v:
                 s.query(_Drive).filter(_Drive.vehicle_id == v.id).delete()
+                s.query(_Sec).filter(_Sec.vehicle_id == v.id).delete()
                 s.query(BatteryReading).filter(BatteryReading.vehicle_id == v.id).delete()
                 s.delete(v)
                 s.commit()

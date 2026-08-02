@@ -4,6 +4,7 @@ from __future__ import annotations
 import re
 import time
 from datetime import datetime, timedelta
+from typing import Any
 
 import httpx
 from fastapi import APIRouter, Body, Depends, File, HTTPException, Query, Request, UploadFile
@@ -28,7 +29,8 @@ from ..analysis import service as service_analysis
 from ..config import get_settings
 from ..database import get_session
 from ..importer import ImportError_, parse_upload
-from ..models import BatteryReading, Charge, Drive, Place, ServiceRecord, Vehicle
+from ..models import (BatteryReading, Charge, Drive, Place, SecurityEvent,
+                      ServiceRecord, Vehicle)
 from ..schemas import ChargeOut, DriveOut, VehicleOut
 
 router = APIRouter(prefix="/api", tags=["analytics"])
@@ -1614,6 +1616,21 @@ def _process_vehicle(
                     "with nobody aboard.",
                     tag="intrusion",
                 )
+                # Persisted as well as pushed. The alert alone left no trace
+                # once dismissed, which is why the Sentry-visibility question
+                # kept stalling on "when did one actually happen?" — see
+                # SecurityEvent. The two fields under test are captured as
+                # they read right now, at the moment of the opening.
+                session.add(SecurityEvent(
+                    vehicle_id=vehicle.id,
+                    ts=sync_mod._dt(snap["ts"]),
+                    kind="door" if opened_doors else "window",
+                    sentry_mode=sentry_now,
+                    locked=snap.get("locked"),
+                    soc=snap.get("soc"),
+                    dashcam_state=snap.get("dashcam_state"),
+                    center_display_state=snap.get("center_display_state"),
+                ))
                 state.put(session, intrusion_key, "1")
             elif not breached and state.get(session, intrusion_key) == "1":
                 # Everything shut again (or the car was driven/occupied) — arm
@@ -2945,6 +2962,102 @@ def push_test(session: Session = Depends(get_session)):
         "test",
     )
     return {"sent": sent}
+
+
+@router.get("/sentry-check")
+def sentry_check(
+    days: int = Query(60, ge=1, le=730),
+    session: Session = Depends(get_session),
+):
+    """Evidence for one open question: does a Sentry trigger show in the API?
+
+    Tesla publishes no accelerometer, tilt or alarm-state field, so the only
+    candidates are indirect — ``dashcam_state`` (a clip being written) and
+    ``center_display_state`` (the screen waking). Both are logged on every
+    change, so their transitions are already on record; what was missing was
+    anything to line them up against.
+
+    This returns the two side by side: confirmed physical openings, and every
+    transition in those fields while the car sat parked. It deliberately draws
+    no conclusion. If the theory holds, transitions cluster around openings
+    and are rare otherwise; if they fire constantly, they are measuring
+    something else entirely (the car waking for its own reasons) and the idea
+    is dead. Both readings are useful; neither is the endpoint's to make.
+    """
+    vehicle = _first_vehicle(session)
+    if vehicle is None:
+        return {"available": False, "reason": "no vehicle linked"}
+    since = sync_mod.now_local() - timedelta(days=days)
+
+    events = session.scalars(
+        select(SecurityEvent)
+        .where(SecurityEvent.vehicle_id == vehicle.id, SecurityEvent.ts >= since)
+        .order_by(SecurityEvent.ts.desc())
+    ).all()
+
+    readings = session.scalars(
+        select(BatteryReading)
+        .where(BatteryReading.vehicle_id == vehicle.id, BatteryReading.ts >= since)
+        .order_by(BatteryReading.ts)
+    ).all()
+
+    # Only changes, and only while parked. A reading during a drive says
+    # nothing — the screen is on and the dashcam is recording because someone
+    # is sitting in the car.
+    drives = session.scalars(
+        select(Drive).where(Drive.vehicle_id == vehicle.id, Drive.end_time >= since)
+    ).all()
+    spans = [(d.start_time, d.end_time) for d in drives]
+
+    def driving_at(ts: datetime) -> bool:
+        return any(a <= ts <= b for a, b in spans)
+
+    transitions: list[dict[str, Any]] = []
+    prev_r = None
+    for r in readings:
+        if prev_r is not None and not driving_at(r.ts):
+            for field in ("dashcam_state", "center_display_state"):
+                was, now = getattr(prev_r, field), getattr(r, field)
+                if was != now and now is not None:
+                    transitions.append({
+                        "ts": r.ts.isoformat(timespec="minutes"),
+                        "field": field, "from": was, "to": now,
+                        "sentry_mode": r.sentry_mode, "soc": r.soc,
+                        # How close the nearest confirmed opening was. This is
+                        # the whole correlation, per row, so it can be read
+                        # without cross-referencing the two lists by eye.
+                        "minutes_from_opening": min(
+                            (round(abs((r.ts - e.ts).total_seconds()) / 60.0, 1)
+                             for e in events), default=None),
+                    })
+        prev_r = r
+
+    near = [t for t in transitions if (t["minutes_from_opening"] or 1e9) <= 15]
+    return {
+        "available": True,
+        "window_days": days,
+        "reported": bool(readings) and readings[-1].dashcam_state is not None,
+        "openings": [
+            {"ts": e.ts.isoformat(timespec="minutes"), "kind": e.kind,
+             "sentry_mode": e.sentry_mode, "locked": e.locked, "soc": e.soc,
+             "dashcam_state": e.dashcam_state,
+             "center_display_state": e.center_display_state}
+            for e in events
+        ],
+        "parked_transitions": transitions[-40:],
+        # The two numbers that decide it, stated plainly rather than judged.
+        # A signal worth using would be many transitions near openings and few
+        # away from them; a field that flips constantly while parked is
+        # tracking the car's own wake cycle, not an intruder.
+        "transitions_total": len(transitions),
+        "transitions_within_15min_of_an_opening": len(near),
+        "openings_total": len(events),
+        "note": (
+            "Openings are physical entries (a door, trunk or window opened "
+            "while parked, armed and unoccupied), not Sentry triggers — Tesla "
+            "exposes no alarm state. Nothing in the app acts on these fields."
+        ),
+    }
 
 
 @router.get("/summary")
