@@ -1525,13 +1525,18 @@ def test_place_split_divides_a_blind_stretch_at_the_parking_spot():
             assert place.name == "SplitHome"
             assert 0.32 <= tail <= 0.42          # the arrival, not the whole lump
 
-            # Too far to be this park: the legs can't sum to less than the
-            # odometer moved, so the geometry doesn't describe this movement.
+            # Legs longer than the odometer moved can't describe this
+            # movement — a straight line never exceeds the road it
+            # approximates.
             assert _place_split(s, before, after, 0.30) is None
-            # And a stretch far longer than the two legs is a drive that
-            # merely passed nearby, not a stop here.
-            assert _place_split(s, before, after, 2.9) is not None  # still plausible
-            assert _place_split(s, before, after, 9.0) is None      # past the bound
+            # And the movement has to be EXPLAINED by the legs, not merely
+            # compatible with them. The two together are ~1.1 km; an odometer
+            # that ran 2.9 km went somewhere these legs don't account for, and
+            # splitting it proportionally would hand a 0.36 km arrival nearly
+            # a kilometre it never drove.
+            assert _place_split(s, before, after, 1.8) is not None   # ordinary roads
+            assert _place_split(s, before, after, 2.9) is None       # a detour
+            assert _place_split(s, before, after, 9.0) is None
     finally:
         with SessionLocal() as s:
             for p in s.query(Place).filter(Place.name == "SplitHome").all():
@@ -1687,6 +1692,20 @@ def test_sentry_check_pairs_field_transitions_against_real_openings(monkeypatch)
             # this endpoint exists to surface.
             woke = next(t for t in out["parked_transitions"] if t["to"] == 2)
             assert woke["minutes_from_opening"] == 2.0
+
+            # A transition landing in the SAME minute as an opening is the
+            # strongest coincidence there is, and 0.0 is falsy — an `or`
+            # fallback here would substitute it away and count it as
+            # infinitely distant, discarding the best evidence available.
+            s.add(SecurityEvent(vehicle_id=v.id, ts=t0 + timedelta(minutes=30),
+                                kind="door", sentry_mode=True, locked=True,
+                                soc=80.0, dashcam_state="Recording",
+                                center_display_state=2))
+            s.commit()
+            exact = sentry_check(days=3650, session=s)
+            same_minute = next(t for t in exact["parked_transitions"] if t["to"] == 2)
+            assert same_minute["minutes_from_opening"] == 0.0
+            assert exact["transitions_within_15min_of_an_opening"] >= 1
             # And the window discriminates: the screen going back to sleep 28
             # minutes later is a parked transition but not a near one, which
             # is the difference between "clusters around openings" and "flips

@@ -156,6 +156,17 @@ CAPACITY_RECENT_N = 300
 # rejected as not describing this movement at all.
 PLACE_SPLIT_SLACK = 1.15
 PLACE_SPLIT_MIN_KM = 0.02   # below this the split is noise, not a correction
+# The other side of the same test, and the one that was missing: rejecting
+# legs that are too LONG for the odometer stops a place being matched from
+# far away, but says nothing about an odometer that ran far further than the
+# two legs explain. A car that detoured, or stopped somewhere else entirely,
+# still lands near enough to a place for the geometry to look acceptable —
+# and the ratio then scales BOTH legs up, handing the arriving trip distance
+# it never drove. Measured on the live geometry: legs of 0.36 and 0.74 km
+# with 2.9 km on the odometer credited 0.96 km to a 0.36 km arrival.
+# Town driving runs about 1.2-1.4x straight line; past 1.8 the place no
+# longer explains the movement.
+PLACE_SPLIT_MAX_DETOUR = 1.8
 
 
 def _parked_place_split(session: Session, prev: dict, snap: dict,
@@ -186,6 +197,10 @@ def _parked_place_split(session: Session, prev: dict, snap: dict,
         # road distances summing to `moved`, and a straight line can never
         # exceed the road it approximates.
         if d0 + d1 > moved * PLACE_SPLIT_SLACK:
+            continue
+        # ...and the movement has to be explained BY those legs, not merely
+        # compatible with them (see PLACE_SPLIT_MAX_DETOUR).
+        if moved > (d0 + d1) * PLACE_SPLIT_MAX_DETOUR:
             continue
         # Ties broken toward the place lying most nearly ON the path travelled
         # rather than off to one side of it.
@@ -3178,6 +3193,12 @@ def backfill_start_locations(
     }
 
 
+# How close a field transition has to sit to a confirmed opening to count as
+# coinciding with it. Wide enough to cover a poll interval either side, narrow
+# enough that a car waking on its own schedule doesn't land inside it by luck.
+SENTRY_NEAR_MIN = 15.0
+
+
 @router.get("/sentry-check")
 def sentry_check(
     days: int = Query(60, ge=1, le=730),
@@ -3246,7 +3267,13 @@ def sentry_check(
                     })
         prev_r = r
 
-    near = [t for t in transitions if (t["minutes_from_opening"] or 1e9) <= 15]
+    # `or` would be wrong here: a transition landing in the same minute as an
+    # opening has minutes_from_opening == 0.0, which is falsy, so it would be
+    # substituted away and counted as infinitely distant — losing exactly the
+    # coincidence this endpoint exists to detect.
+    near = [t for t in transitions
+            if t["minutes_from_opening"] is not None
+            and t["minutes_from_opening"] <= SENTRY_NEAR_MIN]
     return {
         "available": True,
         "window_days": days,

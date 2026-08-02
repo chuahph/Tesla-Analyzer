@@ -270,6 +270,11 @@ def route_asymmetry(drives: list[Any]) -> list[dict[str, Any]]:
     seen: set[tuple[str, str]] = set()
     for key, group in by_pair.items():
         reverse = (key[1], key[0])
+        # A round trip inside one area is its own reverse, so it would be
+        # compared against itself for a guaranteed zero — a row saying nothing,
+        # occupying one of the five.
+        if key == reverse:
+            continue
         # Each unordered pair once. `seen` rather than an ordering rule on the
         # key, so the direction reported as "out" is whichever the dict reached
         # first and the two rows can't disagree about which way is which.

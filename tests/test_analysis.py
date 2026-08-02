@@ -1682,6 +1682,18 @@ def test_route_asymmetry_skips_trips_too_short_to_measure():
     assert route_asymmetry(_both_ways(0.4, 0.32, km=2.0)) == []
 
 
+def test_route_asymmetry_skips_a_round_trip_within_one_area():
+    """An area paired with itself is its own reverse, so it would be compared
+    against itself for a guaranteed zero — a row saying nothing while taking
+    one of the five slots a real pair could have used."""
+    from app.analysis.driving import route_asymmetry
+
+    loop = [_leg("Home", "Home", 10.0, 2.0) for _ in range(6)]
+    assert route_asymmetry(loop) == []
+    # A real pair alongside it still reports.
+    assert len(route_asymmetry(loop + _both_ways(2.0, 1.6))) == 1
+
+
 def test_direction_wh_per_km_is_the_road_not_an_average_of_roads():
     """The planner's other bases average over other roads — every route at
     this hour, every route at this speed. This one is the route itself in the
