@@ -1379,6 +1379,23 @@ def _process_vehicle(
                     if closed_drive.duration_min > 0:
                         closed_drive.avg_speed_kmh = round(
                             closed_drive.distance_km / (closed_drive.duration_min / 60.0), 1)
+                # The arrival point moves with the distance, the mirror of the
+                # departure-side rule in sync.py: growing a trip's odometer
+                # while leaving its end coordinates at the pre-blackout anchor
+                # makes the row claim two different places for one arrival. The
+                # car reads parked right now, so snap IS where it came to rest,
+                # however late the reading is — a stopped car doesn't move, the
+                # same argument the departure side uses about a parked one.
+                #
+                # This matters most on the offline path, which has no distance
+                # bound at all: a drive through a dead zone that reconnects
+                # several km later folds every one of them in, and without this
+                # would name the tunnel mouth as its destination.
+                end_coords = sync_mod._coords(snap)
+                if end_coords:
+                    closed_drive.end_coords = end_coords
+                    closed_drive.end_location, closed_drive.end_area = (
+                        _place_and_area(end_coords, session))
                 session.commit()
                 # Tell process_snapshot() this ground is already covered, so its
                 # own gap-reconstruction sees no movement here and stays quiet.

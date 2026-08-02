@@ -1037,6 +1037,41 @@ class _AsleepThenParksWithCreepClient(_SleepsAfterDrivingClient):
         }
 
 
+class _AsleepThenParksWithCreepAndCoordsClient(_AsleepThenParksWithCreepClient):
+    """The creep case, with the car reporting a position throughout: driving at
+    one point, finally at rest a little further on."""
+
+    DRIVING_AT = (5.30000, 100.30000)
+    PARKED_AT = (5.32000, 100.31000)
+
+    def vehicle_data(self, vid):
+        d = super().vehicle_data(vid)
+        lat, lon = (self.PARKED_AT if type(self).step >= 3 else self.DRIVING_AT)
+        d["drive_state"]["latitude"], d["drive_state"]["longitude"] = lat, lon
+        return d
+
+
+def test_a_folded_arrival_tail_moves_the_trip_s_destination(monkeypatch):
+    """Mirror of the departure-side rule. The fold-in grows a sleep-closed
+    trip's distance to cover ground it drove after its anchor, so leaving
+    end_coords at that anchor makes the row claim two different places for one
+    arrival — the odometer says it travelled further, the map pin says it
+    didn't. The car reads parked at this poll, so that reading is where it
+    actually came to rest."""
+    from app.api import routes as routes_mod
+
+    monkeypatch.setattr(routes_mod, "_place_and_area",
+                        lambda coords, session=None: (f"place<{coords}>", "area"))
+    closed_id, dist_before, _energy, drives, logged = _run_asleep_close(
+        monkeypatch, _AsleepThenParksWithCreepAndCoordsClient)
+    assert logged == 0
+    closed = next(d for d in drives if d.id == closed_id)
+    assert closed.distance_km == 12.4                     # the tail folded in
+    lat, lon = _AsleepThenParksWithCreepAndCoordsClient.PARKED_AT
+    assert closed.end_coords == f"{lat:.4f}, {lon:.4f}"   # ...and so did the pin
+    assert closed.end_area == "area"
+
+
 class _AsleepThenDrivesAgainClient(_AsleepThenParksWithCreepClient):
     """Same genuine sleep, but the car wakes and makes a whole separate short
     trip before the next poll catches it parked again — 3 km on, well past a
