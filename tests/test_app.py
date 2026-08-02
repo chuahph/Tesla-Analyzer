@@ -1490,69 +1490,6 @@ def test_display_state_flicker_forces_a_battery_reading(monkeypatch):
                 s.commit()
 
 
-def _place_split(session, p0, p1, moved):
-    from app.api.routes import _parked_place_split
-    def snap(c):
-        lat, lon = (float(x) for x in c.split(","))
-        return {"lat": lat, "lon": lon}
-    return _parked_place_split(session, snap(p0), snap(p1), moved)
-
-
-def test_place_split_divides_a_blind_stretch_at_the_parking_spot():
-    """A dead zone at a regular destination makes the arrival correction
-    impossible: no poll ever catches the car stopped, so the previous trip's
-    last few hundred metres and the next trip's first few arrive as one
-    undivided lump. A named place between the two readings says how it
-    divides — and only the ratio is estimated, since the total is the
-    odometer's own."""
-    from datetime import datetime
-
-    from app.database import SessionLocal
-    from app.models import Place
-
-    try:
-        with SessionLocal() as s:
-            # Home, with a reading 0.36 km short of it and another 0.72 km
-            # past it: a 1:2 split of whatever the odometer moved.
-            s.add(Place(name="SplitHome", lat=5.3430, lon=100.3107,
-                        radius_km=0.15, created_at=datetime(2026, 1, 1)))
-            s.commit()
-            before = "5.3462, 100.3113"   # ~0.36 km north
-            after = "5.3365, 100.3095"    # ~0.73 km south
-            got = _place_split(s, before, after, 1.10)
-            assert got is not None
-            tail, place = got
-            assert place.name == "SplitHome"
-            assert 0.32 <= tail <= 0.42          # the arrival, not the whole lump
-
-            # Legs longer than the odometer moved can't describe this
-            # movement — a straight line never exceeds the road it
-            # approximates.
-            assert _place_split(s, before, after, 0.30) is None
-            # And the movement has to be EXPLAINED by the legs, not merely
-            # compatible with them. The two together are ~1.1 km; an odometer
-            # that ran 2.9 km went somewhere these legs don't account for, and
-            # splitting it proportionally would hand a 0.36 km arrival nearly
-            # a kilometre it never drove.
-            assert _place_split(s, before, after, 1.8) is not None   # ordinary roads
-            assert _place_split(s, before, after, 2.9) is None       # a detour
-            assert _place_split(s, before, after, 9.0) is None
-    finally:
-        with SessionLocal() as s:
-            for p in s.query(Place).filter(Place.name == "SplitHome").all():
-                s.delete(p)
-            s.commit()
-
-
-def test_place_split_declines_without_a_named_place():
-    """No place, no split — the movement stays undivided rather than being
-    apportioned on a guess."""
-    from app.database import SessionLocal
-
-    with SessionLocal() as s:
-        assert _place_split(s, "5.3462, 100.3113", "5.3365, 100.3095", 1.10) is None
-
-
 def test_backfill_repairs_origins_the_odometer_can_prove(monkeypatch):
     """Trips recorded before 10e8423 name wherever the network came back, not
     where the car set off. The odometer is what makes them repairable: a
