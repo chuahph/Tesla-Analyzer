@@ -144,6 +144,59 @@ def _attach_curve_capacity(c: dict) -> None:
 CAPACITY_RECENT_N = 300
 
 
+# A stretch of odometer that spans a park is only ambiguous while nobody knows
+# where the park was. Straight-line distances from a named Place to the last
+# reading before the blackout and the first one after it say how the movement
+# divides: the ratio is what matters, and it is robust because road distance
+# over-runs straight line at BOTH ends, so most of that bias cancels. Only the
+# ratio is estimated — the total is the odometer's, measured exactly.
+#
+# GPS noise and a slightly off-centre Place mean the two legs won't sum to the
+# odometer exactly, so a little slack is allowed before the geometry is
+# rejected as not describing this movement at all.
+PLACE_SPLIT_SLACK = 1.15
+PLACE_SPLIT_MIN_KM = 0.02   # below this the split is noise, not a correction
+
+
+def _parked_place_split(session: Session, prev: dict, snap: dict,
+                        moved: float) -> tuple[float, Any] | None:
+    """How much of a blind stretch belongs to the trip that ended inside it.
+
+    Returns (km_for_the_closed_trip, place) or None when no named place
+    plausibly explains the movement.
+
+    The case this exists for is a permanent dead zone at a regular
+    destination: the car goes unreachable a few hundred metres out, parks,
+    sleeps, and is not heard from again until it has already left. No poll
+    ever catches it stopped, so the arrival correction can never run, and the
+    whole stretch — the previous trip's last minute AND this one's first —
+    lands on the departing trip.
+    """
+    p0, p1 = sync_mod._coords(prev), sync_mod._coords(snap)
+    if not p0 or not p1 or moved <= 0 or moved > sync_mod.DEPARTURE_GAP_MAX_KM:
+        return None
+    best = None
+    for place in session.scalars(select(Place)).all():
+        centre = f"{place.lat}, {place.lon}"
+        d0, d1 = haversine_km(p0, centre), haversine_km(centre, p1)
+        if d0 is None or d1 is None or d0 + d1 <= 0:
+            continue
+        # The physical test, and the reason this can't quietly match a place
+        # the car merely drove past: a real stop here means the two legs are
+        # road distances summing to `moved`, and a straight line can never
+        # exceed the road it approximates.
+        if d0 + d1 > moved * PLACE_SPLIT_SLACK:
+            continue
+        # Ties broken toward the place lying most nearly ON the path travelled
+        # rather than off to one side of it.
+        slack = abs(moved - (d0 + d1))
+        if best is None or slack < best[0]:
+            best = (slack, moved * d0 / (d0 + d1), place)
+    if best is None or best[1] < PLACE_SPLIT_MIN_KM:
+        return None
+    return round(best[1], 3), best[2]
+
+
 def _newest_readings(session: Session, vehicle_id: int, columns: tuple,
                      limit: int = 2000) -> list:
     """The most recent ``limit`` battery readings, returned oldest-first.
@@ -1434,6 +1487,53 @@ def _process_vehicle(
                 # Tell process_snapshot() this ground is already covered, so its
                 # own gap-reconstruction sees no movement here and stays quiet.
                 prev = {**prev, "odo_km": snap["odo_km"]}
+            elif closed_drive is not None and sync_mod.is_driving(snap) and (
+                    split := _parked_place_split(session, prev, snap, moved)):
+                # The car is already moving again, so the ordinary fold-in is
+                # refused — correctly, since some of this stretch is the NEW
+                # trip's. But a named place between the two readings says how
+                # much: the arrival owed to the trip that ended here, and the
+                # departure belonging to the one starting now.
+                #
+                # This is the only path that helps a permanent dead zone at a
+                # regular destination, where no poll ever catches the car
+                # stopped and the arrival correction can therefore never run.
+                # Measured live: four consecutive arrivals home, each losing
+                # its last few hundred metres to the following trip.
+                tail_km, place = split
+                before = closed_drive.distance_km
+                closed_drive.distance_km = round(before + tail_km, 1)
+                if closed_drive.end_odo_km is not None:
+                    closed_drive.end_odo_km = round(closed_drive.end_odo_km + tail_km, 3)
+                # Now a measured figure rather than the provisional zero this
+                # path leaves behind: the stretch was found, not merely absent.
+                closed_drive.end_lost_km = 0.0
+                # Priced at the trip's own efficiency, never from SoC. The
+                # readings either side of this stretch straddle a park, so
+                # their SoC difference is mostly standby drain — the same
+                # reason the departure side refuses a stale energy baseline.
+                closed_drive.energy_used_kwh = round(sync_mod.energy_for_blind_distance(
+                    closed_drive.energy_used_kwh, closed_drive.distance_km, tail_km), 2)
+                # And it ended at the place, which is the one thing here that
+                # isn't an estimate at all.
+                closed_drive.end_coords = f"{place.lat}, {place.lon}"
+                closed_drive.end_location, closed_drive.end_area = (
+                    _place_and_area(closed_drive.end_coords, session))
+                if close_ts:
+                    travel_sec = tail_km / sync_mod.CITY_SPEED_KMH * 3600.0
+                    est_end_ts = min(close_ts + travel_sec, snap["ts"])
+                    closed_drive.end_time = sync_mod._dt(est_end_ts)
+                    start_ts = closed_drive.start_time.replace(
+                        tzinfo=sync_mod.MYT).timestamp()
+                    closed_drive.duration_min = round((est_end_ts - start_ts) / 60.0, 1)
+                    if closed_drive.duration_min > 0:
+                        closed_drive.avg_speed_kmh = round(
+                            closed_drive.distance_km / (closed_drive.duration_min / 60.0), 1)
+                session.commit()
+                # Only this trip's share is covered. The rest is the departing
+                # trip's, and moving prev forward by exactly the tail is what
+                # hands it over without either trip counting it twice.
+                prev = {**prev, "odo_km": prev["odo_km"] + tail_km}
             elif (closed_drive and not asleep_close
                   and elapsed_min <= sync_mod.SLEEP_CLOSE_MERGE_MAX_MIN):
                 # Never for an asleep close: that anchor is only ever a poll
