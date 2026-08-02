@@ -1490,6 +1490,82 @@ def test_display_state_flicker_forces_a_battery_reading(monkeypatch):
                 s.commit()
 
 
+def test_repair_moves_a_boundary_and_the_figures_that_follow_from_it(monkeypatch):
+    """Undoing the reverted place-split's damage: it credited an arriving trip
+    1.311 km it never drove and starved the departing one by the same amount.
+    Moving the boundary back has to carry energy with it — at each trip's own
+    Wh/km, which is the exact inverse of how the bad figure was made — and
+    hand the stretch back to the trip that really drove it."""
+    from datetime import datetime, timedelta
+
+    from app.api.routes import repair_trip_boundary
+    from app.database import SessionLocal
+    from app.models import Drive, Vehicle
+
+    t0 = datetime(2026, 8, 2, 19, 19)
+    try:
+        with SessionLocal() as s:
+            s.add(Vehicle(vin="TESTVIN-REPAIR", name="Test", model="Model 3"))
+            s.commit()
+            v = s.query(Vehicle).filter(Vehicle.vin == "TESTVIN-REPAIR").first()
+            # The corrupted pair, as the live rows read.
+            closed = Drive(vehicle_id=v.id, start_time=t0,
+                           end_time=t0 + timedelta(minutes=8),
+                           distance_km=5.4, duration_min=8.0,
+                           start_soc=35.0, end_soc=34.0, energy_used_kwh=0.74,
+                           start_odo_km=28908.673, end_odo_km=28914.093,
+                           start_location="7-Eleven", end_location="Home")
+            opened = Drive(vehicle_id=v.id, start_time=t0 + timedelta(hours=11),
+                           end_time=t0 + timedelta(hours=11, minutes=22),
+                           distance_km=8.0, duration_min=22.0,
+                           start_soc=34.0, end_soc=32.0, energy_used_kwh=1.19,
+                           start_odo_km=28914.093, end_odo_km=28922.049,
+                           start_recovered_km=0.515,
+                           start_location="Home", end_location="Office")
+            s.add_all([closed, opened])
+            s.commit()
+            cid, oid = closed.id, opened.id
+
+            preview = repair_trip_boundary(
+                closed_id=cid, open_id=oid, boundary_odo_km=28912.782,
+                closed_end_time=None, apply=False, session=s)
+            assert preview["delta_km"] == -1.311
+            assert preview["closed"]["distance_km"] == [5.4, 4.1]
+            assert preview["open"]["distance_km"] == [8.0, 9.3]
+            # Energy follows distance at each trip's own Wh/km, which returns
+            # the arriving trip to what it measured before the fault.
+            assert preview["closed"]["energy_kwh"] == [0.74, 0.56]
+            assert preview["open"]["energy_kwh"] == [1.19, 1.38]
+            s.expire_all()
+            assert s.get(Drive, cid).distance_km == 5.4      # dry run wrote nothing
+
+            repair_trip_boundary(
+                closed_id=cid, open_id=oid, boundary_odo_km=28912.782,
+                closed_end_time="2026-08-02T19:25", apply=True, session=s)
+            s.expire_all()
+            c2, o2 = s.get(Drive, cid), s.get(Drive, oid)
+            assert (c2.distance_km, c2.end_odo_km) == (4.1, 28912.782)
+            assert (o2.distance_km, o2.start_odo_km) == (9.3, 28912.782)
+            assert c2.duration_min == 6.0                    # end time restored
+            # The stretch handed back arrived with no reading of its own.
+            assert o2.start_recovered_km == 1.826
+            assert o2.avg_speed_kmh == round(9.3 / (22.0 / 60.0), 1)
+
+            # A boundary that would leave a trip with no distance at all is
+            # refused rather than written as a negative.
+            with pytest.raises(Exception):
+                repair_trip_boundary(closed_id=cid, open_id=oid,
+                                     boundary_odo_km=28900.0, closed_end_time=None,
+                                     apply=False, session=s)
+    finally:
+        with SessionLocal() as s:
+            v = s.query(Vehicle).filter(Vehicle.vin == "TESTVIN-REPAIR").first()
+            if v:
+                s.query(Drive).filter(Drive.vehicle_id == v.id).delete()
+                s.delete(v)
+                s.commit()
+
+
 def test_backfill_repairs_origins_the_odometer_can_prove(monkeypatch):
     """Trips recorded before 10e8423 name wherever the network came back, not
     where the car set off. The odometer is what makes them repairable: a

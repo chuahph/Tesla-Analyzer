@@ -3009,6 +3009,92 @@ def push_test(session: Session = Depends(get_session)):
     return {"sent": sent}
 
 
+@router.post("/repair-trip-boundary")
+def repair_trip_boundary(
+    closed_id: int = Query(...),
+    open_id: int = Query(...),
+    boundary_odo_km: float = Query(...),
+    closed_end_time: str | None = Query(None),
+    apply: bool = Query(False),
+    session: Session = Depends(get_session),
+):
+    """Move the odometer boundary between two consecutive trips.
+
+    Written to undo a specific piece of damage: the place-split reverted in
+    cc40c8e credited an arriving trip 1.311 km it never drove and starved the
+    departing one by the same amount. Nothing self-heals that — both rows are
+    already written — so the boundary has to be put back by hand.
+
+    Kept general and explicit rather than hard-coding those two trips: the
+    caller supplies where the boundary belongs, and every derived figure
+    follows from it. Energy moves with distance, holding each trip's own
+    Wh/km constant, which is the same rule energy_for_blind_distance uses and
+    the exact inverse of how the bad figure was produced. soc_used_pct is left
+    alone — it is measured from SoC readings, not derived from distance, and
+    was never touched by the fault.
+
+    Dry run by default.
+    """
+    closed = session.get(Drive, closed_id)
+    opened = session.get(Drive, open_id)
+    if closed is None or opened is None:
+        raise HTTPException(404, "One of those trips doesn't exist.")
+    if closed.end_odo_km is None or opened.start_odo_km is None:
+        raise HTTPException(409, "Those trips predate odometer instrumentation.")
+    if abs(closed.end_odo_km - opened.start_odo_km) > 0.002:
+        raise HTTPException(
+            409, f"Those trips don't share a boundary: {closed.end_odo_km} vs "
+                 f"{opened.start_odo_km}. Repairing a gap needs a different fix.")
+
+    delta = round(boundary_odo_km - closed.end_odo_km, 3)
+    closed_new_dist = round(closed.distance_km + delta, 1)
+    opened_new_dist = round(opened.distance_km - delta, 1)
+    if closed_new_dist <= 0 or opened_new_dist <= 0:
+        raise HTTPException(409, "That boundary would leave a trip with no distance.")
+
+    def rescaled(drive, new_dist):
+        """Energy at the trip's own Wh/km over its corrected distance."""
+        if not drive.energy_used_kwh or drive.distance_km <= 0:
+            return drive.energy_used_kwh
+        return round(drive.energy_used_kwh * new_dist / drive.distance_km, 2)
+
+    plan = {
+        "delta_km": delta,
+        "closed": {
+            "id": closed.id, "route": f"{closed.start_location} → {closed.end_location}",
+            "distance_km": [closed.distance_km, closed_new_dist],
+            "energy_kwh": [closed.energy_used_kwh, rescaled(closed, closed_new_dist)],
+            "end_odo_km": [closed.end_odo_km, boundary_odo_km],
+        },
+        "open": {
+            "id": opened.id, "route": f"{opened.start_location} → {opened.end_location}",
+            "distance_km": [opened.distance_km, opened_new_dist],
+            "energy_kwh": [opened.energy_used_kwh, rescaled(opened, opened_new_dist)],
+            "start_odo_km": [opened.start_odo_km, boundary_odo_km],
+        },
+    }
+    if apply:
+        closed.energy_used_kwh = rescaled(closed, closed_new_dist)
+        closed.distance_km, closed.end_odo_km = closed_new_dist, boundary_odo_km
+        opened.energy_used_kwh = rescaled(opened, opened_new_dist)
+        opened.distance_km, opened.start_odo_km = opened_new_dist, boundary_odo_km
+        # The stretch handed back to the departing trip arrived without a
+        # reading of its own, which is what start_recovered_km records.
+        if delta < 0:
+            opened.start_recovered_km = round(
+                (opened.start_recovered_km or 0.0) - delta, 3)
+        if closed_end_time:
+            closed.end_time = datetime.fromisoformat(closed_end_time)
+            start = closed.start_time
+            closed.duration_min = round(
+                (closed.end_time - start).total_seconds() / 60.0, 1)
+        for d, dist in ((closed, closed_new_dist), (opened, opened_new_dist)):
+            if d.duration_min and d.duration_min > 0:
+                d.avg_speed_kmh = round(dist / (d.duration_min / 60.0), 1)
+        session.commit()
+    return {"applied": apply, **plan}
+
+
 @router.post("/backfill-start-locations")
 def backfill_start_locations(
     apply: bool = Query(False),
