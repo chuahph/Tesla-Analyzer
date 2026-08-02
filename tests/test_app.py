@@ -1490,6 +1490,90 @@ def test_display_state_flicker_forces_a_battery_reading(monkeypatch):
                 s.commit()
 
 
+def test_backfill_repairs_origins_the_odometer_can_prove(monkeypatch):
+    """Trips recorded before 10e8423 name wherever the network came back, not
+    where the car set off. The odometer is what makes them repairable: a
+    recovered departure starting on the previous trip's closing reading began
+    exactly where that trip ended. Dry run by default — a repair that rewrites
+    history unasked is worse than the wrong location."""
+    from datetime import datetime, timedelta
+
+    from app.api import routes as routes_mod
+    from app.api.routes import backfill_start_locations
+    from app.database import SessionLocal
+    from app.models import Drive, Vehicle
+
+    t0 = datetime(2026, 7, 1, 8, 0)
+
+    def drive(n, start_odo, end_odo, recovered, start_coords, end_coords):
+        return Drive(
+            vehicle_id=None, start_time=t0 + timedelta(hours=n),
+            end_time=t0 + timedelta(hours=n, minutes=30),
+            distance_km=end_odo - start_odo, duration_min=30.0,
+            start_soc=80.0, end_soc=78.0,
+            start_odo_km=start_odo, end_odo_km=end_odo,
+            start_recovered_km=recovered,
+            start_coords=start_coords, start_location=f"place<{start_coords}>",
+            start_area=f"area<{start_coords}>",
+            end_coords=end_coords, end_location=f"place<{end_coords}>",
+            end_area=f"area<{end_coords}>")
+
+    try:
+        with SessionLocal() as s:
+            s.add(Vehicle(vin="TESTVIN-BACKFILL", name="Test", model="Model 3"))
+            s.commit()
+            v = s.query(Vehicle).filter(Vehicle.vin == "TESTVIN-BACKFILL").first()
+            monkeypatch.setattr(routes_mod, "_first_vehicle", lambda _s: v)
+
+            rows = [
+                # Ends at home.
+                drive(0, 100.0, 110.0, 0.0, "5.30, 100.30", "5.3430, 100.3107"),
+                # Recovered departure: odometer says it left home, coords say
+                # it started on the highway. The repairable case.
+                drive(2, 110.0, 121.0, 1.579, "5.3494, 100.3095", "5.40, 100.32"),
+                # Recovered, but the odometer does NOT hand over — a gap means
+                # something else happened between them. Must be left alone.
+                drive(4, 125.0, 130.0, 0.5, "5.41, 100.33", "5.42, 100.34"),
+                # No recovery at all: its own start reading is the truth.
+                drive(6, 130.0, 140.0, 0.0, "5.42, 100.34", "5.43, 100.35"),
+            ]
+            for r in rows:
+                r.vehicle_id = v.id
+                s.add(r)
+            s.commit()
+
+            preview = backfill_start_locations(apply=False, session=s)
+            assert preview["would_change"] == 1
+            only = preview["changes"][0]
+            assert only["from"]["coords"] == "5.3494, 100.3095"
+            assert only["to"]["coords"] == "5.3430, 100.3107"
+            # Nothing written on a dry run.
+            s.expire_all()
+            still = s.query(Drive).filter(Drive.start_odo_km == 110.0).one()
+            assert still.start_coords == "5.3494, 100.3095"
+
+            applied = backfill_start_locations(apply=True, session=s)
+            assert applied["changed"] == 1
+            s.expire_all()
+            fixed = s.query(Drive).filter(Drive.start_odo_km == 110.0).one()
+            assert fixed.start_coords == "5.3430, 100.3107"
+            assert fixed.start_location == "place<5.3430, 100.3107>"
+            assert fixed.start_area == "area<5.3430, 100.3107>"
+            # The non-contiguous one is untouched.
+            untouched = s.query(Drive).filter(Drive.start_odo_km == 125.0).one()
+            assert untouched.start_coords == "5.41, 100.33"
+
+            # And it's idempotent — a second run finds nothing left to do.
+            assert backfill_start_locations(apply=False, session=s)["would_change"] == 0
+    finally:
+        with SessionLocal() as s:
+            v = s.query(Vehicle).filter(Vehicle.vin == "TESTVIN-BACKFILL").first()
+            if v:
+                s.query(Drive).filter(Drive.vehicle_id == v.id).delete()
+                s.delete(v)
+                s.commit()
+
+
 def test_sentry_check_pairs_field_transitions_against_real_openings(monkeypatch):
     """The whole experiment in one payload: confirmed physical openings, and
     every change in the two candidate fields while parked, each row carrying

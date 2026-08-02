@@ -1682,6 +1682,30 @@ def test_route_asymmetry_skips_trips_too_short_to_measure():
     assert route_asymmetry(_both_ways(0.4, 0.32, km=2.0)) == []
 
 
+def test_direction_wh_per_km_is_the_road_not_an_average_of_roads():
+    """The planner's other bases average over other roads — every route at
+    this hour, every route at this speed. This one is the route itself in the
+    direction about to be driven, which is also the only basis that carries
+    its elevation: a climb cancels out of anything pooling both ways."""
+    from app.analysis.driving import direction_wh_per_km
+
+    out = direction_wh_per_km(_both_ways(2.0, 1.6), "Home", "Office")
+    assert out["wh_per_km"] == 200.0        # not the 180 both-ways average
+    assert out["n"] == 3
+    assert direction_wh_per_km(_both_ways(2.0, 1.6), "Office", "Home")["wh_per_km"] == 160.0
+
+
+def test_direction_wh_per_km_holds_back_on_thin_history():
+    """A basis is only worth swapping to if it's better. Two trips is a
+    thinner measurement than the broad average it would replace, so the
+    caller keeps what it had."""
+    from app.analysis.driving import direction_wh_per_km
+
+    assert direction_wh_per_km(_both_ways(2.0, 1.6, n=2), "Home", "Office") is None
+    assert direction_wh_per_km(_both_ways(2.0, 1.6), "Home", "Nowhere") is None
+    assert direction_wh_per_km(_both_ways(2.0, 1.6), "", "Office") is None
+
+
 def test_route_asymmetry_reports_each_pair_once():
     """Both orientations key the same unordered pair; emitting both would show
     the same finding twice with opposite signs."""

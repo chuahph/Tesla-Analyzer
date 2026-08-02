@@ -218,6 +218,35 @@ def _direction_stats(group: list[Any]) -> dict[str, Any]:
     }
 
 
+def direction_wh_per_km(drives: list[Any], start_area: str,
+                        end_area: str) -> dict[str, Any] | None:
+    """What this exact direction of this exact route has actually cost.
+
+    The planner's other bases are all averages over something else — every
+    route at this hour, or every route at this speed. This one is the road
+    being planned, driven the way it is about to be driven, which is why it
+    also settles the elevation term that no average can: a route's climb only
+    cancels when both directions are pooled.
+
+    None unless the same direction has been driven enough times to mean
+    something; the caller keeps its existing basis rather than trading a broad
+    measurement for a thin one.
+    """
+    if not start_area or not end_area:
+        return None
+    group = [
+        d for d in drives
+        if (getattr(d, "start_area", "") or d.start_location) == start_area
+        and (getattr(d, "end_area", "") or d.end_location) == end_area
+        and d.start_location and d.end_location
+        and has_valid_energy(d) and d.distance_km >= ROUTE_MIN_KM
+    ]
+    if len(group) < ROUTE_MIN_TRIPS_PER_DIRECTION:
+        return None
+    stats = _direction_stats(group)
+    return stats if stats["wh_per_km"] else None
+
+
 def route_asymmetry(drives: list[Any]) -> list[dict[str, Any]]:
     """Routes driven both ways, and what the direction costs in Wh/km.
 

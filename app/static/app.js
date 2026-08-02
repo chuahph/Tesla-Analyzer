@@ -2183,6 +2183,10 @@ let plannerCtx = null;
 // route+departure it was fetched for so a later edit of either discards it
 // rather than pricing a different trip off a stale figure.
 let plannerTraffic = null;
+// The measured cost of the exact direction just looked up, when this route has
+// been driven enough times. Held apart from plannerTraffic because it survives
+// a change of departure time: traffic is about when, this is about where.
+let plannerRoute = null;
 
 // Your own measured Wh/km averaged over the hours a drive leaving at
 // `departHHMM` would actually span — so a 5pm departure is priced from what
@@ -2261,6 +2265,10 @@ function computePlan() {
   // and looks the same as one that never had traffic at all.
   const staleTraffic = !!plannerTraffic && !traffic;
   const bandWh = traffic ? speedBandWhPerKm(traffic.kmh) : null;
+  // Same staleness rule as traffic: a figure fetched for a different route
+  // must not price this one. Distance is the handle on "different route".
+  const routeEff = (plannerRoute && Math.abs(plannerRoute.km - km) < 0.6)
+    ? plannerRoute : null;
   let baseWh = whPerKm;
   // "approx" marks a basis averaged over routes that aren't this one — the
   // figure is a reasonable guess, not a measurement of this drive.
@@ -2287,6 +2295,15 @@ function computePlan() {
     condApplies = false;
     approx = false;   // speed-specific to this route, not a route average
     basis = `traffic ~${Math.round(traffic.kmh)} km/h at ${depart} — your measured ${bandWh.band} figure`;
+  } else if (routeEff) {
+    // Below the traffic band, which knows what today looks like, but above
+    // the departure-hour average, which knows the hour and not the road.
+    // This is the only basis measured on the actual route in the actual
+    // direction — and so the only one that carries its elevation, which
+    // cancels out of anything pooling both ways.
+    baseWh = routeEff.whPerKm;
+    approx = false;
+    basis = `this run to ${routeEff.label} — your measured figure over ${routeEff.n} trips`;
   } else if (byHour) {
     baseWh = byHour.whPerKm;
     basis = `your ${depart} driving (${byHour.hours} h of history, your usual routes)`;
@@ -2408,6 +2425,12 @@ async function lookupPlanDest() {
     // Keyed to this route+departure: a later edit of either invalidates it.
     plannerTraffic = body.traffic_kmh
       ? { kmh: body.traffic_kmh, depart, km: body.km } : null;
+    // Keyed to the distance only, not the departure — what this direction
+    // costs is a property of the road, not of when you leave.
+    plannerRoute = body.route_wh_per_km
+      ? { whPerKm: body.route_wh_per_km, n: body.route_trips,
+          label: body.dest_label, km: body.km }
+      : null;
     computePlan();
     const est = body.method === "driving" ? "driving distance" : "straight-line estimate";
     const traffic = plannerTraffic

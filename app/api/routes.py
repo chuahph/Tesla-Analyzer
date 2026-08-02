@@ -2926,10 +2926,28 @@ def plan_route(to: str = Query(..., min_length=1),
     if result is None:
         raise HTTPException(502, "Couldn't work out the distance to there.")
     km, method, traffic_kmh = result
+    # What this direction of this route has actually cost, when it's been
+    # driven enough times. Every other basis the planner has is an average
+    # over other roads — this one is the road itself, which is also the only
+    # thing that prices the climb, since a route's elevation cancels out of
+    # any figure that pools both directions (see driving.route_asymmetry).
+    route_eff = None
+    if last_drive is not None:
+        _dest_place, dest_area = _place_and_area(dest_coords, session)
+        past = session.scalars(
+            select(Drive).where(Drive.vehicle_id == vehicle.id)
+        ).all()
+        route_eff = driving_analysis.direction_wh_per_km(
+            list(past), last_drive.end_area or last_drive.end_location, dest_area)
     return {
         "km": km, "method": method,
         "origin_label": origin_label, "dest_label": dest_label,
         "dest_coords": dest_coords,
+        # None unless this direction has enough history of its own; the
+        # planner keeps its broader basis rather than trading down to a
+        # thinner measurement.
+        "route_wh_per_km": route_eff["wh_per_km"] if route_eff else None,
+        "route_trips": route_eff["n"] if route_eff else None,
         # Google's predicted average speed for this route at this departure —
         # the planner converts it to Wh/km through the driver's OWN measured
         # speed/efficiency slope. None when no departure was given, no key is
@@ -2989,6 +3007,75 @@ def push_test(session: Session = Depends(get_session)):
         "test",
     )
     return {"sent": sent}
+
+
+@router.post("/backfill-start-locations")
+def backfill_start_locations(
+    apply: bool = Query(False),
+    session: Session = Depends(get_session),
+):
+    """Repair trips whose recorded origin is where the network came back.
+
+    Until 10e8423, a departure recovered after a blackout pulled its odometer
+    back to the last parked reading but left its coordinates wherever the
+    first poll caught the car — so the row named a place it had already
+    driven away from (measured live: 725 m onto a highway).
+
+    Those rows are repairable because the odometer says so. A trip with
+    ``start_recovered_km > 0`` whose ``start_odo_km`` equals the previous
+    trip's ``end_odo_km`` began exactly where that trip ended, and that
+    previous trip's end location is on record. Trips whose coordinates
+    already agree are left alone.
+
+    Defaults to a dry run: returns what it would change and changes nothing.
+    Pass ``apply=true`` to write.
+    """
+    vehicle = _first_vehicle(session)
+    if vehicle is None:
+        return {"available": False, "reason": "no vehicle linked"}
+    drives = session.scalars(
+        select(Drive).where(Drive.vehicle_id == vehicle.id).order_by(Drive.start_time)
+    ).all()
+
+    changes: list[dict[str, Any]] = []
+    for prev_d, d in zip(drives, drives[1:]):
+        if not (d.start_recovered_km and d.start_recovered_km > 0):
+            continue
+        if d.start_odo_km is None or prev_d.end_odo_km is None:
+            continue
+        # Same odometer reading at both ends of the handover is what proves
+        # the two trips are contiguous. Tolerance because these are floats
+        # written through a round(), not because the values are approximate.
+        if abs(d.start_odo_km - prev_d.end_odo_km) > 0.002:
+            continue
+        if not prev_d.end_coords or prev_d.end_coords == d.start_coords:
+            continue
+        changes.append({
+            "drive_id": d.id,
+            "start_time": d.start_time.isoformat(timespec="minutes"),
+            "recovered_km": d.start_recovered_km,
+            "from": {"coords": d.start_coords, "place": d.start_location},
+            "to": {"coords": prev_d.end_coords, "place": prev_d.end_location},
+        })
+        if apply:
+            d.start_coords = prev_d.end_coords
+            d.start_location = prev_d.end_location
+            d.start_area = prev_d.end_area
+    if apply and changes:
+        session.commit()
+    return {
+        "available": True,
+        "applied": apply,
+        "trips_scanned": len(drives),
+        "would_change" if not apply else "changed": len(changes),
+        "changes": changes[-50:],
+        "note": (
+            "The previous trip's own end may itself be short by whatever its "
+            "arrival lost to a blackout, so this moves each origin to the best "
+            "record there is rather than to a certainty. It is the same "
+            "parking spot either way, which is what the route grouping keys on."
+        ),
+    }
 
 
 @router.get("/sentry-check")
