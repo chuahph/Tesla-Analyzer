@@ -130,6 +130,41 @@ def _attach_curve_capacity(c: dict) -> None:
     c["capacity_samples"] = fit["samples"] if fit else None
 
 
+# How many trailing readings the capacity constant's degradation figure is a
+# median of. Far wider than the Battery Health card's 12, because the two want
+# opposite things: the card should follow the pack, while this number scales
+# every kWh and Wh/km the app reports, so it moving is indistinguishable from
+# the car's energy use changing.
+#
+# At 12 it moved 69.7 -> 69.4 -> 69.9 -> 69.4 inside two days (recorded in the
+# audit's own diagnostics), which is 0.7% of noise on every energy figure —
+# two identical drives on consecutive days differing for no physical reason.
+# A pack degrades on the order of 0.1% a month, so a window of weeks costs
+# nothing in responsiveness and cuts that scatter by about five times.
+CAPACITY_RECENT_N = 300
+
+
+def _newest_readings(session: Session, vehicle_id: int, columns: tuple,
+                     limit: int = 2000) -> list:
+    """The most recent ``limit`` battery readings, returned oldest-first.
+
+    battery.analyze() documents its input as oldest-first and takes the tail
+    as "now", so the ordering and the limit have to agree: ORDER BY ts ASC
+    with a LIMIT selects the OLDEST rows, and once a car passes the limit the
+    "current" estimate silently freezes at whatever the pack looked like back
+    then — degradation, battery health and the capacity constant with it.
+    Sorting descending to pick the newest and reversing is what the callers
+    all meant.
+    """
+    rows = session.execute(
+        select(*columns)
+        .where(BatteryReading.vehicle_id == vehicle_id)
+        .order_by(BatteryReading.ts.desc())
+        .limit(limit)
+    ).all()
+    return list(reversed(rows))
+
+
 def _degradation_pct(session: Session, vehicle: Vehicle, settings) -> float | None:
     """The car's own range-based degradation estimate (% capacity lost vs
     new) — the same figure the Battery Health card shows, computed purely
@@ -141,17 +176,14 @@ def _degradation_pct(session: Session, vehicle: Vehicle, settings) -> float | No
     ORM rows a minute — the width of what crosses the wire to a remote
     Postgres matters more here than in a once-per-page-load path.
     """
-    rows = session.execute(
-        select(BatteryReading.soc, BatteryReading.range_km)
-        .where(BatteryReading.vehicle_id == vehicle.id)
-        .order_by(BatteryReading.ts)
-        .limit(2000)
-    ).all()
+    rows = _newest_readings(
+        session, vehicle.id, (BatteryReading.soc, BatteryReading.range_km))
     vin_info = vin_mod.decode(vehicle.vin)
     spec_km = settings.battery_new_range_km or battery_analysis.new_range_for(
         vehicle.model, vehicle.trim, year=vin_info.get("year"))
     health = battery_analysis.analyze(
-        [{"soc": soc, "range_km": range_km} for soc, range_km in rows], new_range_km=spec_km)
+        [{"soc": soc, "range_km": range_km} for soc, range_km in rows],
+        new_range_km=spec_km, recent_n=CAPACITY_RECENT_N)
     return health["degradation_pct"] if health.get("available") else None
 
 
@@ -2061,13 +2093,10 @@ def compare_vehicles(days: int = Query(30, ge=1, le=730), session: Session = Dep
             tariff.price_fn_from_settings(settings), charges=charges,
             trip_costs=_trip_cost_map(session, vehicle.id))
         charging = charging_analysis.analyze(charges, drives)
-        readings = session.execute(
-            select(BatteryReading.soc, BatteryReading.range_km,
-                   BatteryReading.ts, BatteryReading.odo_km)
-            .where(BatteryReading.vehicle_id == vehicle.id)
-            .order_by(BatteryReading.ts)
-            .limit(2000)
-        ).all()
+        readings = _newest_readings(
+            session, vehicle.id,
+            (BatteryReading.soc, BatteryReading.range_km,
+             BatteryReading.ts, BatteryReading.odo_km))
         vin_info = vin_mod.decode(vehicle.vin)
         spec_km = settings.battery_new_range_km or battery_analysis.new_range_for(
             vehicle.model, vehicle.trim, year=vin_info.get("year"))
@@ -2798,12 +2827,10 @@ def alerts_check(days: int = Query(30, ge=7, le=90),
     efficiency = efficiency_analysis.analyze(drives, settings.rated_wh_per_km)
     prev_efficiency = efficiency_analysis.analyze(prev_drives, settings.rated_wh_per_km)
 
-    readings = session.execute(
-        select(BatteryReading.soc, BatteryReading.range_km,
-               BatteryReading.ts, BatteryReading.odo_km)
-        .where(BatteryReading.vehicle_id == vehicle.id)
-        .order_by(BatteryReading.ts).limit(2000)
-    ).all()
+    readings = _newest_readings(
+        session, vehicle.id,
+        (BatteryReading.soc, BatteryReading.range_km,
+         BatteryReading.ts, BatteryReading.odo_km))
     vin_info = vin_mod.decode(vehicle.vin)
     spec_km = settings.battery_new_range_km or battery_analysis.new_range_for(
         vehicle.model, vehicle.trim, year=vin_info.get("year"))
@@ -3398,13 +3425,10 @@ def summary(
     # Battery health uses the full reading history, not the display window.
     # Column-only select: analyze() needs four fields, not 2000 hydrated ORM
     # rows on every dashboard load.
-    readings = session.execute(
-        select(BatteryReading.soc, BatteryReading.range_km,
-               BatteryReading.ts, BatteryReading.odo_km)
-        .where(BatteryReading.vehicle_id == vehicle.id)
-        .order_by(BatteryReading.ts)
-        .limit(2000)
-    ).all()
+    readings = _newest_readings(
+        session, vehicle.id,
+        (BatteryReading.soc, BatteryReading.range_km,
+         BatteryReading.ts, BatteryReading.odo_km))
     # 100% reference: explicit override, else the factory figure for this
     # exact variant — model+badge+wheel from the trim, generation from the
     # VIN's model-year letter (74D means 536 km in 2023 but 549 km in 2024).

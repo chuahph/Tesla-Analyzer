@@ -370,9 +370,17 @@ def usable_capacity_for(model: str, trim: str, year: int | None = None) -> float
 
 
 def analyze(
-    readings: list[dict[str, Any]], new_range_km: float | None = None
+    readings: list[dict[str, Any]], new_range_km: float | None = None,
+    recent_n: int | None = None,
 ) -> dict[str, Any]:
-    """``readings``: dicts with soc / range_km, oldest first."""
+    """``readings``: dicts with soc / range_km, oldest first.
+
+    ``recent_n`` overrides how many trailing projections the "current"
+    estimate is a median of. The default suits the Battery Health card, which
+    should follow the pack. A caller that scales other numbers by this result
+    wants a much wider window — see routes._degradation_pct.
+    """
+    window = recent_n or RECENT_N
     projections = [
         (r, r["range_km"] / (r["soc"] / 100.0))
         for r in readings
@@ -395,7 +403,7 @@ def analyze(
     # near-empty pack). Fall back to all projections if too few in that band.
     reliable = [(r, p) for r, p in projections if r["soc"] >= RELIABLE_SOC]
     pool = reliable if len(reliable) >= MIN_READINGS else projections
-    recent = pool[-RECENT_N:]
+    recent = pool[-window:]
     current_km = percentile([p for _, p in recent], 0.5)  # median resists outliers
 
     # 100% reference: the factory when-new figure (EPA-published, looked up

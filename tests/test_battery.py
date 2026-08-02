@@ -217,6 +217,91 @@ def test_usable_capacity_uses_spec_minus_degradation_as_the_primary_method():
         assert _usable_capacity(s, v, override) == (73.0, "override")
 
 
+def test_degradation_reads_the_newest_history_not_the_oldest():
+    """battery.analyze documents its input as oldest-first and treats the tail
+    as "now", so ORDER BY ts ASC with a LIMIT hands it exactly the wrong rows:
+    past the limit the "current" estimate freezes at whatever the pack looked
+    like back then. Here the pack visibly degrades across a history longer
+    than the fetch limit — the estimate must follow the recent rows."""
+    from datetime import datetime, timedelta
+
+    from app.analysis.battery import analyze
+    from app.api.routes import _newest_readings
+    from app.database import SessionLocal
+    from app.models import BatteryReading, Vehicle
+
+    try:
+        with SessionLocal() as s:
+            v = Vehicle(vin="LRW3F7EK3RC000009", model="Model 3",
+                        trim="74D Nova19", battery_capacity_kwh=75.0)
+            s.add(v)
+            s.flush()
+            base = datetime(2026, 1, 1)
+            # Healthy for a long stretch, then clearly degraded. The healthy
+            # run alone is longer than the window we fetch.
+            for i in range(60):
+                soc = 50 + (i % 40)
+                s.add(BatteryReading(vehicle_id=v.id, ts=base + timedelta(hours=i),
+                                     soc=soc, range_km=491.0 * soc / 100.0))
+            for i in range(60, 90):
+                soc = 50 + (i % 40)
+                s.add(BatteryReading(vehicle_id=v.id, ts=base + timedelta(hours=i),
+                                     soc=soc, range_km=440.0 * soc / 100.0))
+            s.commit()
+
+            newest = _newest_readings(
+                s, v.id, (BatteryReading.soc, BatteryReading.range_km), limit=30)
+            assert len(newest) == 30
+            # Oldest-first within the window, and the window is the recent end.
+            assert all(r.range_km / (r.soc / 100.0) < 460 for r in newest)
+
+            # The ordering bug in isolation: same limit, opposite ends.
+            # Oldest-30 is the pack as it was and no longer is.
+            from sqlalchemy import select as _select
+            oldest = s.execute(
+                _select(BatteryReading.soc, BatteryReading.range_km)
+                .where(BatteryReading.vehicle_id == v.id)
+                .order_by(BatteryReading.ts).limit(30)
+            ).all()
+
+            def deg_of(rows):
+                return analyze([{"soc": r.soc, "range_km": r.range_km} for r in rows],
+                               new_range_km=491.0)["degradation_pct"]
+            assert deg_of(newest) > 8.0    # what the pack is now
+            assert deg_of(oldest) < 1.0    # what ORDER BY ts ASC + LIMIT saw
+    finally:
+        with SessionLocal() as s:
+            v = s.query(Vehicle).filter(Vehicle.vin == "LRW3F7EK3RC000009").first()
+            if v:
+                s.query(BatteryReading).filter(
+                    BatteryReading.vehicle_id == v.id).delete()
+                s.delete(v)
+                s.commit()
+
+
+def test_capacity_uses_a_far_wider_window_than_the_health_card():
+    """The card should follow the pack; the capacity constant scales every kWh
+    the app reports, so it moving is indistinguishable from the car's energy
+    use changing. Recorded live: 69.7 -> 69.4 -> 69.9 -> 69.4 inside two days,
+    0.7% of pure noise on every energy figure. Same readings, two windows: the
+    narrow one chases the recent dip, the wide one doesn't."""
+    from app.analysis.battery import RECENT_N, analyze
+
+    # A steady pack with a short noisy excursion at the very end.
+    readings = [{"soc": 50 + (i % 40), "range_km": 491.0 * (50 + (i % 40)) / 100.0}
+                for i in range(200)]
+    for r in readings[-RECENT_N:]:
+        r["range_km"] = 455.0 * r["soc"] / 100.0
+
+    narrow = analyze(readings, new_range_km=491.0)
+    wide = analyze(readings, new_range_km=491.0, recent_n=300)
+    assert narrow["available"] and wide["available"]
+    # The narrow window takes the excursion at face value; the wide one keeps
+    # its median on the years of steady readings behind it.
+    assert narrow["degradation_pct"] > wide["degradation_pct"] + 5.0
+    assert wide["degradation_pct"] < 1.0
+
+
 def test_usable_capacity_falls_back_without_degradation_history():
     """A freshly-linked car has no battery-reading history yet: falls back to
     the measured charge EMA if it's moved off the default, else the spec."""
