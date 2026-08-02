@@ -1549,6 +1549,24 @@ def process_snapshot(
                         max(cur["odo_km"] - prev["odo_km"], 0.0), 3)
                     open_trip["odo_km"] = prev["odo_km"]
                     open_trip["start_lost_km"] = 0.0  # pulled back in, nothing lost
+                    # The start coordinates move with the odometer, or the trip
+                    # says two contradictory things about where it began: an
+                    # odometer reading from the parking spot and a position from
+                    # wherever the first poll after the blackout caught the car.
+                    # Confirmed live (trip 322): a departure seen 1.579 km late
+                    # kept the correct odometer but recorded its start 725 m
+                    # away on a highway, so the trip read "Lim Chong Eu" when
+                    # the car had left from home.
+                    #
+                    # Unconditional like the odometer, and for a stronger
+                    # reason: a parked car does not move, so prev's position is
+                    # exactly right however stale it is — unlike SoC, which
+                    # drifts while it sits. Skipped only when prev carries no
+                    # fix at all, since blanking a known position to adopt an
+                    # unknown one would lose information rather than correct it.
+                    if prev.get("lat") is not None and prev.get("lon") is not None:
+                        open_trip["lat"] = prev["lat"]
+                        open_trip["lon"] = prev["lon"]
                     # The odometer above is safe to pull back unconditionally —
                     # it only ever counts forward, so it carries no standby
                     # drain and prev's reading is a valid distance baseline no

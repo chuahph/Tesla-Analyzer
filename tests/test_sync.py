@@ -2084,3 +2084,39 @@ def test_a_stale_park_is_not_a_departure_baseline_however_plausible_it_looks():
     assert trip2["odo_km"] == q1["odo_km"]
     assert trip2["soc"] == q1["soc"]
     assert trip2["start_energy_recovered"] is True
+
+
+def test_a_recovered_departure_starts_where_the_car_was_parked():
+    """Regression for trip 322. The car left home during a network blackout and
+    the first poll caught it 1.579 km along. The odometer was pulled back
+    correctly, but the coordinates weren't, so the trip recorded an odometer
+    reading from the driveway and a position 725 m away on a highway — and
+    reverse-geocoded to the highway. A parked car doesn't move, so prev's fix
+    is exactly where the trip began no matter how late the poll arrived."""
+    home = (5.3430, 100.3107)
+    highway = (5.3494, 100.3095)
+    # Parked overnight, exactly as trip 322 was: the long gap is what makes
+    # this a departure recovery at all (a short one anchors at prev already).
+    p1 = snap(T0, 9000.0, 70, range_km=350.0, lat=home[0], lon=home[1])
+    p2 = snap(T0 + 44400, 9001.579, 70, shift="D", speed=40.0, range_km=349.0,
+              lat=highway[0], lon=highway[1])
+    _, _, trip, _ = step(p1, p2)
+    assert trip["odo_km"] == p1["odo_km"]
+    assert (trip["lat"], trip["lon"]) == home     # not where the poll found it
+
+    # And the whole way through to the logged trip's start_location.
+    p3 = snap(T0 + 46200, 9010.0, 68, shift="P", speed=0.0, locked=True,
+              range_km=340.0, lat=5.40, lon=100.33)
+    drives, _, _, _ = step(p2, p3, trip)
+    assert drives and drives[0]["start_location"] == "5.3430, 100.3107"
+
+
+def test_a_departure_recovery_keeps_a_known_fix_when_prev_has_none():
+    """Blanking a position we have to adopt one we don't would lose information
+    rather than correct it — the odometer still comes back either way."""
+    p1 = snap(T0, 9000.0, 70, range_km=350.0)                  # no lat/lon
+    p2 = snap(T0 + 44400, 9001.579, 70, shift="D", speed=40.0, range_km=349.0,
+              lat=5.3494, lon=100.3095)
+    _, _, trip, _ = step(p1, p2)
+    assert trip["odo_km"] == p1["odo_km"]
+    assert (trip["lat"], trip["lon"]) == (5.3494, 100.3095)
