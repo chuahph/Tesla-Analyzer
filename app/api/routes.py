@@ -144,6 +144,32 @@ def _attach_curve_capacity(c: dict) -> None:
 CAPACITY_RECENT_N = 300
 
 
+def _retract_estimated_tail(drive, km: float, sec: float) -> None:
+    """Take back `km` (and its `sec`) of a trip's estimated arrival tail.
+
+    Used wherever a later reading knows better than the estimate did: a poll
+    that can finally measure the ground, or simply an odometer that moved less
+    than the estimate claimed. Distance, energy and the clock all came from one
+    assumption, so they all go back together — unwinding only the distance
+    would leave a trip whose Wh/km and average speed silently changed.
+    """
+    if km <= 0 or drive.distance_km <= km:
+        return
+    new_dist = round(drive.distance_km - km, 1)
+    if drive.energy_used_kwh and drive.distance_km > 0:
+        drive.energy_used_kwh = round(
+            drive.energy_used_kwh * new_dist / drive.distance_km, 2)
+    drive.distance_km = new_dist
+    if drive.end_odo_km is not None:
+        drive.end_odo_km = round(drive.end_odo_km - km, 3)
+    drive.end_est_km = round((drive.end_est_km or 0.0) - km, 3) or None
+    if sec > 0 and drive.duration_min:
+        drive.end_time = drive.end_time - timedelta(seconds=sec)
+        drive.duration_min = round(max(drive.duration_min - sec / 60.0, 0.0), 1)
+    if drive.duration_min and drive.duration_min > 0:
+        drive.avg_speed_kmh = round(new_dist / (drive.duration_min / 60.0), 1)
+
+
 def _newest_readings(session: Session, vehicle_id: int, columns: tuple,
                      limit: int = 2000) -> list:
     """The most recent ``limit`` battery readings, returned oldest-first.
@@ -1319,12 +1345,28 @@ def _process_vehicle(
     sleep_close_raw = state.get(session, sleep_close_key)
     if sleep_close_raw and prev:
         marker = _json.loads(sleep_close_raw)
-        # The boundary is where the estimate left it, not the raw reading —
-        # the estimated tail already belongs to the closed trip.
         est_credited = marker.get("est_km") or 0.0
-        moved = snap["odo_km"] - marker["odo_km"] - est_credited
-        if prev.get("odo_km") == marker["odo_km"] and 0 < moved:
+        est_sec = marker.get("est_sec") or 0.0
+        # Everything the odometer has done since the close. The estimate was a
+        # claim on part of it, and this is the first moment anything can check
+        # that claim against a measurement.
+        raw_moved = snap["odo_km"] - marker["odo_km"]
+        if prev.get("odo_km") == marker["odo_km"] and 0 < raw_moved:
             closed_drive = session.get(Drive, marker["drive_id"])
+            # An estimate larger than the ground the car actually covered is
+            # simply wrong, and wrong in the direction that matters: left
+            # standing it would also push the next trip's start past its own
+            # beginning. Trimmed to fit before anything else reads it.
+            if closed_drive is not None and est_credited > raw_moved:
+                over = est_credited - raw_moved
+                _retract_estimated_tail(
+                    closed_drive, over,
+                    est_sec * (over / est_credited) if est_credited else 0.0)
+                est_sec *= raw_moved / est_credited
+                est_credited = raw_moved
+            # The boundary is where the estimate left it, not the raw reading —
+            # the estimated tail already belongs to the closed trip.
+            moved = raw_moved - est_credited
             close_ts = marker.get("ts")
             elapsed_min = (snap["ts"] - close_ts) / 60.0 if close_ts else float("inf")
             # Which report closed the trip decides how much this poll may
@@ -1352,11 +1394,22 @@ def _process_vehicle(
                 # close time is superseded — taken back whole before the
                 # measurement goes in, or the trip would carry both. This is
                 # the correction the estimate exists to wait for.
+                #
+                # Whole estimate out, whole measurement in: raw_moved, not
+                # moved. The two are different quantities and only one of them
+                # belongs here. `moved` is what is left over ONCE the estimate
+                # is allowed to stand, which is the right question for the
+                # branches that leave it standing — but this branch has just
+                # revoked it, so the trip is short by the full stretch from the
+                # marker's anchor to here. Subtracting the estimate and then
+                # adding only the remainder credited the tail to nobody.
                 est_back = closed_drive.end_est_km or 0.0
-                if est_back:
-                    closed_drive.distance_km = round(closed_drive.distance_km - est_back, 1)
-                    closed_drive.end_est_km = None
-                closed_drive.distance_km = round(closed_drive.distance_km + moved, 1)
+                est_kwh = 0.0
+                if est_back and closed_drive.energy_used_kwh and closed_drive.distance_km:
+                    est_kwh = (closed_drive.energy_used_kwh
+                               * est_back / closed_drive.distance_km)
+                _retract_estimated_tail(closed_drive, est_back, est_sec)
+                closed_drive.distance_km = round(closed_drive.distance_km + raw_moved, 1)
                 # Distance alone isn't the whole trip. wh_per_km is derived
                 # (energy / distance) and soc_used_pct is derived from the
                 # energy too, so growing distance while leaving energy at its
@@ -1385,7 +1438,7 @@ def _process_vehicle(
                 # case on this path rather than the exception. Duration is what
                 # separates an arrival from a stale anchor.
                 extra_kwh = sync_mod._energy_kwh(prev, snap, capacity_kwh)
-                if (extra_kwh * 1000.0 / moved <= sync_mod.MAX_PLAUSIBLE_WH_PER_KM
+                if (extra_kwh * 1000.0 / raw_moved <= sync_mod.MAX_PLAUSIBLE_WH_PER_KM
                         and elapsed_min <= sync_mod.STALE_ANCHOR_MAX_MIN):
                     closed_drive.energy_used_kwh = round(
                         closed_drive.energy_used_kwh + extra_kwh, 2)
@@ -1394,6 +1447,17 @@ def _process_vehicle(
                     # fresh end_soc against a stale energy figure would leave
                     # the two disagreeing about the same trip.
                     closed_drive.end_soc = snap["soc"]
+                elif est_kwh:
+                    # "Stays as measured at close time" has to be arranged now
+                    # that the retraction above took the estimated tail's share
+                    # of the energy out with its kilometres. Putting exactly
+                    # that share back leaves the figure where the close left
+                    # it, which is what this branch means to do: the tail was
+                    # priced at the trip's own Wh/km, and that remains a better
+                    # number than a measurement contaminated by hours of
+                    # standby drain.
+                    closed_drive.energy_used_kwh = round(
+                        closed_drive.energy_used_kwh + est_kwh, 2)
                 # end_time was anchored to the marker's own timestamp — the
                 # last reading *before* the dead zone, same stale anchor
                 # distance had. Folding in the distance without also moving
@@ -1412,7 +1476,7 @@ def _process_vehicle(
                 # then rather than guess from nothing; distance still gets
                 # the fold-in above regardless.
                 if close_ts:
-                    travel_sec = moved / sync_mod.CITY_SPEED_KMH * 3600.0
+                    travel_sec = raw_moved / sync_mod.CITY_SPEED_KMH * 3600.0
                     est_end_ts = min(close_ts + travel_sec, snap["ts"])
                     closed_drive.end_time = sync_mod._dt(est_end_ts)
                     # start_time is naive but represents MYT wall-clock (see
@@ -1436,6 +1500,15 @@ def _process_vehicle(
                 # bound at all: a drive through a dead zone that reconnects
                 # several km later folds every one of them in, and without this
                 # would name the tunnel mouth as its destination.
+                # And so does the odometer the trip records stopping at. It is
+                # not decoration: odometer_continuity reads exactly this field
+                # against the next trip's start_odo_km, so a trip whose
+                # distance grew to cover the dead zone while its end_odo_km
+                # stayed at the pre-blackout anchor reports the very ground it
+                # just absorbed as missing. snap is the reading the fold-in
+                # trusted for everything else here; it has to be trusted for
+                # this too.
+                closed_drive.end_odo_km = round(snap["odo_km"], 3)
                 end_coords = sync_mod._coords(snap)
                 if end_coords:
                     closed_drive.end_coords = end_coords
@@ -1834,10 +1907,11 @@ def sync_now(wake: bool = Query(False), session: Session = Depends(get_session))
                 )
                 row_capacity_kwh = _usable_capacity(session, vehicle_row, settings)[0] if vehicle_row else 75.0
                 if trip_raw and last_raw and vehicle_row:
+                    close_ts = datetime.now().timestamp()
                     d = sync_mod.close_trip_on_sleep(
                         _json.loads(trip_raw), _json.loads(last_raw),
                         row_capacity_kwh, settings.drive_min_km,
-                        close_ts=datetime.now().timestamp(),
+                        close_ts=close_ts,
                     )
                     if d:
                         d["start_coords"], d["end_coords"] = d["start_location"], d["end_location"]
@@ -1883,6 +1957,19 @@ def sync_now(wake: bool = Query(False), session: Session = Depends(get_session))
                                 # or both claim it. Carried on the marker so
                                 # the next poll can do exactly that.
                                 "est_km": d.get("end_est_km") or 0.0,
+                                # And the clock the estimate moved, which has
+                                # to come back with the kilometres or a
+                                # corrected trip keeps time it never spent —
+                                # duration and average speed both derive from
+                                # it. Recomputed rather than carried out of
+                                # close_trip_on_sleep because `d` becomes a
+                                # Drive row and only real columns may ride in
+                                # it; the inputs here are the same ones, so
+                                # the answer is the same one.
+                                "est_sec": (
+                                    (sync_mod.estimate_arrival_tail(
+                                        _json.loads(last_raw), close_ts) or (0.0, 0.0))[1]
+                                ),
                             }),
                         )
                         notifications.fire_webhook(

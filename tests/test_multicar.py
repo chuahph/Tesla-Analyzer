@@ -1233,6 +1233,72 @@ def test_an_estimated_tail_is_credited_once_not_to_both_trips(monkeypatch):
                 f"before trip {a.id} ended")
 
 
+class _SlowlyArrivesThenBarelyMovesClient(_AsleepThenParksWithCreepClient):
+    """Last seen crawling (20 mph) with the close 3 minutes past it, so the
+    tail is estimated at 0.805 km — but the car had very nearly arrived and the
+    odometer, once a poll can read it again, has moved only 0.1 km. The
+    estimate overshot the ground."""
+
+    def vehicle_data(self, vid):
+        d = super().vehicle_data(vid)
+        if type(self).step < 3:
+            d["drive_state"]["speed"] = 20
+        else:
+            d["vehicle_state"]["odometer"] = ODO_KM_TO_MI(10012.1)
+        return d
+
+
+def test_an_over_estimated_tail_is_trimmed_to_the_ground_actually_covered(monkeypatch):
+    """An estimate is a claim awaiting a measurement, and the measurement can
+    come back smaller. The arithmetic that netted the estimate off the raw
+    movement went negative when it did — failing the `0 < moved` guard, so the
+    over-estimate was never corrected AND the odometer was never handed over,
+    leaving the next trip free to re-count the same ground. The estimate must
+    give way to the measurement in both directions."""
+    closed_id, dist_before, _e, drives, logged = _run_asleep_close(
+        monkeypatch, _SlowlyArrivesThenBarelyMovesClient)
+    assert dist_before == pytest.approx(12.8), "the estimate must have fired"
+    assert logged == 0                       # topped up, not a phantom trip
+    assert len(drives) == 1
+    closed = drives[0]
+    assert closed.id == closed_id
+    assert closed.distance_km == pytest.approx(12.1)   # measured, not estimated
+    assert closed.end_est_km is None         # nothing left standing on a guess
+
+
+class _SlowlyArrivesThenParksFurtherOnClient(_AsleepThenParksWithCreepClient):
+    """The ordinary correction: the tail was estimated at 0.805 km and the car
+    turns out to have covered 0.9 — more than the guess, still a creep."""
+
+    def vehicle_data(self, vid):
+        d = super().vehicle_data(vid)
+        if type(self).step < 3:
+            d["drive_state"]["speed"] = 20
+        else:
+            d["vehicle_state"]["odometer"] = ODO_KM_TO_MI(10012.9)
+        return d
+
+
+def test_a_measured_tail_replaces_the_estimate_whole(monkeypatch):
+    """The fold-in revokes the estimate and then has to put the *whole*
+    measurement in its place. It was subtracting the estimate and adding only
+    what was left over after it — 0.805 km out, 0.095 km back, and the 0.805
+    the car genuinely drove credited to nobody. The trip must end up covering every
+    metre between its anchor and the reading that could finally see it."""
+    closed_id, dist_before, _e, drives, logged = _run_asleep_close(
+        monkeypatch, _SlowlyArrivesThenParksFurtherOnClient)
+    assert dist_before == pytest.approx(12.8), "the estimate must have fired"
+    assert logged == 0
+    assert len(drives) == 1
+    closed = drives[0]
+    assert closed.id == closed_id
+    assert closed.distance_km == pytest.approx(12.9)
+    assert closed.end_est_km is None
+    # The odometer is the independent check: the trip's end has to agree with
+    # what the car actually read, not with the estimate it superseded.
+    assert closed.end_odo_km == pytest.approx(10012.9, abs=0.002)
+
+
 class _OfflineThenParksWithCreepClient(_OfflineAfterDrivingClient):
     """Same offline episode as above, but once back online the car reports a
     little further odometer movement while already parked — the dead zone
