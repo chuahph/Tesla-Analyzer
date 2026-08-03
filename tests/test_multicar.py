@@ -1,4 +1,6 @@
 """Multi-car account support: register all cars, per-VIN state, active picker."""
+from datetime import timedelta
+
 import pytest
 from fastapi.testclient import TestClient
 
@@ -1893,6 +1895,77 @@ def test_arrival_keeps_the_fast_poll_cadence(monkeypatch):
         assert arrived["trip_in_progress"] is True        # trip still open
         assert arrived["status"] == "stopped"             # and no longer driving
         assert arrived["poll_fast"] is True               # settling, not abandoned
+    finally:
+        settings.app_passcode = old
+        _reset_to_demo()
+
+
+def test_repair_arrival_tail_takes_back_only_what_the_estimate_credited(monkeypatch):
+    """The automatic correction gets exactly one chance, at the first poll
+    after the close. A trip that was already wrong before that correction
+    existed is past it and needs a hand repair — driven by the car's own trip
+    meter, which is the only authority that settles it.
+
+    And bounded by the estimate: this tool removes a guess, so it must refuse
+    to remove anything the guess didn't put there. A trip reading long for some
+    other reason is a different fault, and quietly absorbing it here would
+    destroy the evidence for it."""
+    from app.models import Drive
+
+    settings = get_settings()
+    old = settings.app_passcode
+    settings.app_passcode = ""
+    try:
+        with TestClient(app) as client:
+            with SessionLocal() as s:
+                d = s.query(Drive).order_by(Drive.id).first()
+                d.distance_km, d.end_est_km = 14.1, 0.163
+                d.start_odo_km, d.end_odo_km = 28943.109, 28957.172
+                d.energy_used_kwh = 1.77
+                d.duration_min, d.avg_speed_kmh = 21.0, 41.0
+                d.end_time = d.start_time + timedelta(minutes=21)
+                s.commit()
+                did = d.id
+
+            # More than the estimate ever credited: refused, not absorbed.
+            over = client.get("/api/repair-arrival-tail",
+                              params={"drive_id": did, "true_distance_km": 13.0})
+            assert "estimate" in over.json()["detail"]
+            assert over.status_code == 409
+            # Nor a trip that reads short — the opposite fault entirely.
+            short = client.get("/api/repair-arrival-tail",
+                               params={"drive_id": did, "true_distance_km": 15.0})
+            assert short.status_code == 409
+
+            r = client.get("/api/repair-arrival-tail",
+                           params={"drive_id": did, "true_distance_km": 13.9,
+                                   "true_duration_min": 18})
+            body = r.json()
+            assert r.status_code == 200
+            assert body["applied"] is False
+            assert body["retracted_km"] == 0.163
+            assert body["after"]["distance_km"] == 13.9
+            assert body["after"]["end_est_km"] is None
+            assert body["after"]["end_odo_km"] == pytest.approx(28957.009)
+            assert body["after"]["duration_min"] == 18.0
+            # Energy leaves with the kilometres, at the trip's own rate.
+            # 1.77 kWh over 14.1 km, kept at that rate over 13.9.
+            assert body["after"]["energy_used_kwh"] == pytest.approx(
+                1.77 * 13.9 / 14.1, abs=0.006)
+
+            with SessionLocal() as s:
+                assert s.get(Drive, did).distance_km == 14.1   # dry run wrote nothing
+
+            client.get("/api/repair-arrival-tail",
+                       params={"drive_id": did, "true_distance_km": 13.9,
+                               "true_duration_min": 18, "apply": "true"})
+            with SessionLocal() as s:
+                fixed = s.get(Drive, did)
+                assert fixed.distance_km == 13.9
+                assert fixed.end_est_km is None
+                assert fixed.duration_min == 18.0
+                # avg_speed follows both, or the row contradicts itself.
+                assert fixed.avg_speed_kmh == pytest.approx(13.9 / (18.0 / 60.0), abs=0.05)
     finally:
         settings.app_passcode = old
         _reset_to_demo()

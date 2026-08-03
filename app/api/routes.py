@@ -3250,6 +3250,110 @@ def repair_trip_boundary(
     return {"applied": apply, **plan}
 
 
+@router.api_route("/repair-arrival-tail", methods=["GET", "POST"])
+def repair_arrival_tail(
+    drive_id: int = Query(...),
+    true_distance_km: float = Query(...),
+    true_duration_min: float | None = Query(None),
+    apply: bool = Query(False),
+    session: Session = Depends(get_session),
+):
+    """Take back an estimated arrival tail the car's own screen disproves.
+
+    repair_trip_boundary can't do this job: it trades distance BETWEEN two
+    trips that share a boundary, and an over-estimated tail has no counterpart
+    to trade with — the kilometres belong to nobody, which is exactly the
+    complaint. Here the distance simply leaves.
+
+    The correction that runs automatically (see LAST_SLEEP_CLOSE_KEY) only ever
+    gets one chance, at the first poll after the close. A trip whose estimate
+    was already wrong before that correction existed, or whose marker has since
+    been cleared, is past it — the row is written and nothing revisits it. This
+    is that repair, driven by the one authority that settles it: the car's own
+    trip meter.
+
+    Both figures come from the same screen and are applied together, because
+    the estimate produced both from one assumption. Give distance alone and the
+    clock stays where the estimate left it, leaving a trip whose average speed
+    now disagrees with its own distance and duration.
+
+    Dry run by default.
+    """
+    drive = session.get(Drive, drive_id)
+    if drive is None:
+        raise HTTPException(404, "No such trip.")
+    # Measured from the odometer span, not from distance_km. distance_km is
+    # stored to 0.1 and the car's screen reads to 0.1, so their difference
+    # carries up to 0.1 km of pure rounding — enough on its own to fail the
+    # "is this really the estimate?" check below and refuse a correct repair.
+    # The odometer anchors are stored to 0.001 and are what the estimate
+    # actually moved, so they give the difference exactly (trip 332: 14.063
+    # against the car's 13.9 is 0.163, precisely the estimate; the rounded
+    # 14.1 would have said 0.2).
+    span = (drive.end_odo_km - drive.start_odo_km
+            if drive.end_odo_km is not None and drive.start_odo_km is not None
+            else drive.distance_km)
+    km = round(span - true_distance_km, 3)
+    if km <= 0:
+        raise HTTPException(
+            409, f"Trip {drive_id} reads {drive.distance_km} km, which is not "
+                 f"longer than the {true_distance_km} km given. This tool only "
+                 f"removes estimated distance; a trip reading SHORT is a "
+                 f"different fault (see end_lost_km).")
+    est = drive.end_est_km or 0.0
+    if km > max(est, 0.0) + 0.002:
+        raise HTTPException(
+            409, f"Trip {drive_id} carries {est} km of estimated tail but the "
+                 f"correction asks for {km} km. The excess isn't the estimate's "
+                 f"to give back, so removing it here would hide a real "
+                 f"measurement error rather than fix an estimate.")
+    sec = (max(drive.duration_min - true_duration_min, 0.0) * 60.0
+           if true_duration_min is not None else 0.0)
+    before = {
+        "distance_km": drive.distance_km, "energy_used_kwh": drive.energy_used_kwh,
+        "duration_min": drive.duration_min, "avg_speed_kmh": drive.avg_speed_kmh,
+        "end_odo_km": drive.end_odo_km, "end_est_km": drive.end_est_km,
+        "end_time": drive.end_time.isoformat(),
+    }
+    # Applied to a throwaway copy for the dry run, so the preview is produced
+    # by the same code that would do the work rather than by a second
+    # description of it that can drift from it.
+    target = drive if apply else _DetachedDrive(before)
+    _retract_estimated_tail(target, km, sec)
+    after = {
+        "distance_km": target.distance_km, "energy_used_kwh": target.energy_used_kwh,
+        "duration_min": target.duration_min, "avg_speed_kmh": target.avg_speed_kmh,
+        "end_odo_km": target.end_odo_km, "end_est_km": target.end_est_km,
+        "end_time": target.end_time.isoformat(),
+    }
+    if apply:
+        session.commit()
+    return {
+        "applied": apply, "drive_id": drive_id,
+        "route": f"{drive.start_location} → {drive.end_location}",
+        "retracted_km": km, "retracted_sec": sec,
+        "before": before, "after": after,
+    }
+
+
+class _DetachedDrive:
+    """A stand-in carrying only the fields _retract_estimated_tail touches.
+
+    So the dry run can run the real function without a session anywhere near
+    it — no row to accidentally leave dirty, and no second implementation of
+    the arithmetic to keep in step with the first.
+    """
+
+    def __init__(self, before: dict):
+        self.distance_km = before["distance_km"]
+        self.energy_used_kwh = before["energy_used_kwh"]
+        self.duration_min = before["duration_min"]
+        self.avg_speed_kmh = before["avg_speed_kmh"]
+        self.end_odo_km = before["end_odo_km"]
+        self.end_est_km = before["end_est_km"]
+        self.end_time = datetime.fromisoformat(before["end_time"])
+
+
 # GET as well as POST: these are hand-run repair tools, and the person
 # running them is on a phone where the only way to issue a request is the
 # address bar — which sends GET. POST-only made them look like they had
