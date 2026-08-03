@@ -1351,14 +1351,13 @@ def _process_vehicle(
         # claim on part of it, and this is the first moment anything can check
         # that claim against a measurement.
         raw_moved = snap["odo_km"] - marker["odo_km"]
-        # Zero is a measurement, not the absence of one, and it is the single
-        # most common one on this path: a car that parks and sleeps is next
-        # read still parked, at the odometer it stopped on. Requiring strictly
-        # positive movement here excluded exactly the case the estimate most
-        # needs checking against — an estimated tail the car never drove would
-        # stand forever, because nothing else ever revisits it. Confirmed live
-        # (trip 332): 0.163 km estimated into a multi-storey arrival the car's
-        # own trip meter never recorded, unreachable by every correction here.
+        # Zero is a measurement, not the absence of one, and on this path it is
+        # the strongest one available: it proves the tail did not happen. A car
+        # whose last reading really was its arrival is next read at the same
+        # odometer, and requiring strictly positive movement excluded exactly
+        # that case — the one where the estimate is most wrong and where
+        # nothing else will ever revisit it, since this block runs once and
+        # then clears its marker.
         if prev.get("odo_km") == marker["odo_km"] and raw_moved >= 0:
             closed_drive = session.get(Drive, marker["drive_id"])
             # An estimate larger than the ground the car actually covered is
@@ -3326,12 +3325,39 @@ def repair_arrival_tail(
         "end_odo_km": target.end_odo_km, "end_est_km": target.end_est_km,
         "end_time": target.end_time.isoformat(),
     }
+    # The automatic correction may still be pending on this very trip — the
+    # marker survives until the next poll reaches the car, which for a sleeping
+    # car in a car park can be hours. Both are the same correction from
+    # different evidence, and running them both would apply it twice: the
+    # marker still carries the ORIGINAL est_km, so the clamp would measure the
+    # overshoot against a row that has already given it back.
+    #
+    # The car's own trip meter is the better authority of the two, so this one
+    # wins and the pending one is stood down. Only when it names this drive —
+    # a marker for any other trip is not ours to clear.
+    import json as _json
+
+    pending = None
+    vehicle = session.get(Vehicle, drive.vehicle_id)
+    if vehicle is not None:
+        sleep_key = state.scoped(state.LAST_SLEEP_CLOSE_KEY, vehicle.vin)
+        raw = state.get(session, sleep_key)
+        if raw:
+            try:
+                pending = _json.loads(raw).get("drive_id")
+            except ValueError:
+                pending = None
+        if apply and pending == drive_id:
+            state.put(session, sleep_key, "")
     if apply:
         session.commit()
     return {
         "applied": apply, "drive_id": drive_id,
         "route": f"{drive.start_location} → {drive.end_location}",
         "retracted_km": km, "retracted_sec": sec,
+        # So a dry run says whether it is racing the automatic correction, and
+        # an applied one says it stood it down.
+        "pending_auto_correction": pending == drive_id,
         "before": before, "after": after,
     }
 

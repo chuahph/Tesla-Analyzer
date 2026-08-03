@@ -1,4 +1,5 @@
 """Multi-car account support: register all cars, per-VIN state, active picker."""
+import json as _json
 from datetime import timedelta
 
 import pytest
@@ -1250,10 +1251,10 @@ def test_an_estimated_tail_is_credited_once_not_to_both_trips(monkeypatch):
 
 
 class _SlowlyArrivesThenBarelyMovesClient(_AsleepThenParksWithCreepClient):
-    """Last seen crawling (20 mph, so 32 km/h), which buys an estimated tail of
-    0.267 km — but the car had very nearly arrived and the odometer, once a
-    poll can read it again, has moved only 0.1 km. The estimate overshot the
-    ground."""
+    """Last seen crawling (20 mph) with the close 3 minutes past it, so the
+    tail is estimated at 0.805 km — but the car had very nearly arrived and the
+    odometer, once a poll can read it again, has moved only 0.1 km. The
+    estimate overshot the ground."""
 
     def vehicle_data(self, vid):
         d = super().vehicle_data(vid)
@@ -1273,7 +1274,7 @@ def test_an_over_estimated_tail_is_trimmed_to_the_ground_actually_covered(monkey
     give way to the measurement in both directions."""
     closed_id, dist_before, _e, drives, logged = _run_asleep_close(
         monkeypatch, _SlowlyArrivesThenBarelyMovesClient)
-    assert dist_before == pytest.approx(12.3), "the estimate must have fired"
+    assert dist_before == pytest.approx(12.8), "the estimate must have fired"
     assert logged == 0                       # topped up, not a phantom trip
     assert len(drives) == 1
     closed = drives[0]
@@ -1297,19 +1298,18 @@ class _SlowlyArrivesThenNeverMovesClient(_AsleepThenParksWithCreepClient):
 
 
 def test_an_estimate_the_car_never_drove_is_taken_back_when_it_never_moves(monkeypatch):
-    """Trip 332. The car's own trip meter read 13.9 km; the analyser read 14.1,
-    because a last reading at 6.5 km/h bought a 0.163 km tail. Its odometer was
-    already the final one to the metre.
+    """When the last reading before signal died really was the arrival, the
+    car's odometer never moves again — and an estimated tail on top of it is
+    distance that did not happen.
 
-    The correction could never reach it: it required strictly positive movement
-    since the close, and a car that parks and sleeps moves exactly zero. Zero
-    is a measurement — the strongest one available, since it proves the tail
-    did not happen — and it is the most common one on this path, so excluding
-    it left the estimate standing on the very trips it was most likely wrong
-    on."""
+    The correction could never reach that case: it required strictly positive
+    movement since the close, so zero movement fell through the guard, and the
+    block clears its marker on the way out. One chance, declined. Zero is a
+    measurement here, and the strongest one available: it does not merely fail
+    to confirm the tail, it disproves it."""
     closed_id, dist_before, energy_before, drives, logged = _run_asleep_close(
         monkeypatch, _SlowlyArrivesThenNeverMovesClient)
-    assert dist_before == pytest.approx(12.3), "the estimate must have fired"
+    assert dist_before == pytest.approx(12.8), "the estimate must have fired"
     assert logged == 0
     assert len(drives) == 1
     closed = drives[0]
@@ -1326,7 +1326,7 @@ def test_an_estimate_the_car_never_drove_is_taken_back_when_it_never_moves(monke
 
 
 class _SlowlyArrivesThenParksFurtherOnClient(_AsleepThenParksWithCreepClient):
-    """The ordinary correction: the tail was estimated at 0.267 km and the car
+    """The ordinary correction: the tail was estimated at 0.805 km and the car
     turns out to have covered 0.9 — more than the guess, still a creep."""
 
     def vehicle_data(self, vid):
@@ -1341,12 +1341,12 @@ class _SlowlyArrivesThenParksFurtherOnClient(_AsleepThenParksWithCreepClient):
 def test_a_measured_tail_replaces_the_estimate_whole(monkeypatch):
     """The fold-in revokes the estimate and then has to put the *whole*
     measurement in its place. It was subtracting the estimate and adding only
-    what was left over after it — 0.267 km out, 0.633 km back, and the 0.267
+    what was left over after it — 0.805 km out, 0.095 km back, and the 0.805
     the car genuinely drove credited to nobody. The trip must end up covering every
     metre between its anchor and the reading that could finally see it."""
     closed_id, dist_before, _e, drives, logged = _run_asleep_close(
         monkeypatch, _SlowlyArrivesThenParksFurtherOnClient)
-    assert dist_before == pytest.approx(12.3), "the estimate must have fired"
+    assert dist_before == pytest.approx(12.8), "the estimate must have fired"
     assert logged == 0
     assert len(drives) == 1
     closed = drives[0]
@@ -1910,6 +1910,7 @@ def test_repair_arrival_tail_takes_back_only_what_the_estimate_credited(monkeypa
     to remove anything the guess didn't put there. A trip reading long for some
     other reason is a different fault, and quietly absorbing it here would
     destroy the evidence for it."""
+    from app import state
     from app.models import Drive
 
     settings = get_settings()
@@ -1937,6 +1938,17 @@ def test_repair_arrival_tail_takes_back_only_what_the_estimate_credited(monkeypa
                                params={"drive_id": did, "true_distance_km": 15.0})
             assert short.status_code == 409
 
+            # A pending automatic correction on this same trip would apply the
+            # same fix a second time, against a marker still carrying the
+            # original estimate. The dry run has to say so, and applying has to
+            # stand it down.
+            with SessionLocal() as s:
+                veh = s.get(Vehicle, s.get(Drive, did).vehicle_id)
+                state.put(s, state.scoped(state.LAST_SLEEP_CLOSE_KEY, veh.vin),
+                          _json.dumps({"drive_id": did, "odo_km": 28956.689,
+                                       "ts": 0.0, "est_km": 0.483}))
+                s.commit()
+
             r = client.get("/api/repair-arrival-tail",
                            params={"drive_id": did, "true_distance_km": 13.9,
                                    "true_duration_min": 18})
@@ -1946,6 +1958,7 @@ def test_repair_arrival_tail_takes_back_only_what_the_estimate_credited(monkeypa
             assert body["retracted_km"] == 0.163
             assert body["after"]["distance_km"] == 13.9
             assert body["after"]["end_est_km"] is None
+            assert body["pending_auto_correction"] is True
             assert body["after"]["end_odo_km"] == pytest.approx(28957.009)
             assert body["after"]["duration_min"] == 18.0
             # Energy leaves with the kilometres, at the trip's own rate.
@@ -1960,6 +1973,9 @@ def test_repair_arrival_tail_takes_back_only_what_the_estimate_credited(monkeypa
                        params={"drive_id": did, "true_distance_km": 13.9,
                                "true_duration_min": 18, "apply": "true"})
             with SessionLocal() as s:
+                # Stood down, so the next poll cannot re-apply the same fix.
+                assert state.get(
+                    s, state.scoped(state.LAST_SLEEP_CLOSE_KEY, veh.vin)) == ""
                 fixed = s.get(Drive, did)
                 assert fixed.distance_km == 13.9
                 assert fixed.end_est_km is None

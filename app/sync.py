@@ -888,30 +888,6 @@ ARRIVAL_EST_MAX_KM = GAP_CREEP_MAX_KM
 # the last reading whatever time we notice. Three minutes is the same window
 # routes.py waits before calling a car unreachable.
 ARRIVAL_EST_MAX_MIN = 3.0
-# But that outer bound is a property of the POLLER, not of the car: three
-# minutes is how long routes.py waits before calling a car unreachable. Using
-# it as the travel window says a car keeps driving for exactly as long as we
-# take to notice it stopped, which is not a fact about the car at all — and it
-# is the whole error whenever the last reading was already the arrival.
-#
-# Measured, trip 332: last seen at 6.5 km/h, and its odometer turned out to be
-# the final one to the metre — the car's own trip meter read 13.9 km from the
-# same start. The flat window still credited it 0.163 km and three minutes of
-# driving it had already finished.
-#
-# What actually bounds the tail is how long a car at that speed can still be
-# going before it is stopped, and that scales with the speed. A gentle
-# effective rate — not a braking figure but an "approach, turn in, park" one,
-# covering the whole ramp-and-slot manoeuvre rather than a single stop — gives
-# a window of v/a, so the estimate becomes v²/2a: metres at a crawl, a couple
-# of hundred at a real approach speed. That matches this car's own measured
-# arrivals at Home (0.05, 0.19 and 0.36 km), which the flat window could only
-# reproduce by giving a nearly-parked car the same three minutes as one still
-# at speed.
-#
-# Only ever an additional cap, never a floor: it can lower an estimate but
-# never raise one, keeping the whole model on the side it was built to err on.
-ARRIVAL_STOP_DECEL_MS2 = 0.15
 # And it only applies to a car that was plainly arriving. The whole model is
 # "it was slowing and had to reach zero", which is credible at 15 km/h on a
 # final approach and worthless at 60: a car still at speed when signal died was
@@ -938,11 +914,7 @@ def estimate_arrival_tail(last_snapshot: dict,
     if not close_ts or speed <= 0 or speed > ARRIVAL_EST_MAX_SPEED_KMH:
         return None
     unseen_sec = min(max(close_ts - last_snapshot["ts"], 0.0),
-                     ARRIVAL_EST_MAX_MIN * 60.0,
-                     # How long a car still going at this speed can have left
-                     # (see ARRIVAL_STOP_DECEL_MS2). The one bound here that is
-                     # about the car rather than about the polling.
-                     speed / 3.6 / ARRIVAL_STOP_DECEL_MS2)
+                     ARRIVAL_EST_MAX_MIN * 60.0)
     if unseen_sec <= 0:
         return None
     est = speed / 2.0 * (unseen_sec / 3600.0)
