@@ -1113,7 +1113,11 @@ def _run_asleep_close(monkeypatch, client_cls):
             d = s.query(Drive).filter(Drive.vehicle_id == vid).one()
             closed_id, dist_before = d.id, d.distance_km
             energy_before = d.energy_used_kwh
-            assert dist_before == 12.0
+            # >= not ==: a client whose last reading looks like an arrival
+            # gets an estimated tail folded in (see estimate_arrival_tail), so
+            # the exact figure is the individual test's business, not this
+            # helper's.
+            assert dist_before >= 12.0
             # Armed even for a trustworthy asleep close — the anchor can still
             # be a poll interval short of the true stop.
             assert state.get(s, state.scoped(state.LAST_SLEEP_CLOSE_KEY, vin)) != ""
@@ -1195,6 +1199,38 @@ def test_a_stale_arrival_keeps_its_distance_but_not_the_parked_energy(monkeypatc
     assert closed.id == closed_id
     assert closed.distance_km == 12.4          # distance: measured, folds in
     assert closed.energy_used_kwh == pytest.approx(energy_before, abs=0.011)
+
+
+class _SlowlyArrivesThenDrivesAgainClient(_AsleepThenDrivesAgainClient):
+    """Last seen crawling — an arrival, so the tail gets estimated — then the
+    car is next heard from 3 km on, too far for the fold-in to reclaim. That is
+    the case where the estimate has to stand AND be handed over."""
+
+    def vehicle_data(self, vid):
+        d = super().vehicle_data(vid)
+        if type(self).step < 3:
+            d["drive_state"]["speed"] = 20      # final approach, not mid-drive
+        return d
+
+
+def test_an_estimated_tail_is_credited_once_not_to_both_trips(monkeypatch):
+    """The blind stretch between the last reading and the next is one fixed
+    quantity. Crediting the arriving trip with an estimate of it and then
+    letting the departing trip's recovery claim the whole thing counts the same
+    ground twice — which is precisely how the reverted place-split corrupted
+    two trips. Whatever the estimate takes, the next trip must start past."""
+    closed_id, dist_before, _e, drives, _logged = _run_asleep_close(
+        monkeypatch, _SlowlyArrivesThenDrivesAgainClient)
+    rows = sorted(drives, key=lambda d: d.id)
+    assert len(rows) >= 2, "needs both trips to check the hand-over"
+    assert rows[0].end_est_km, "the estimate must actually have fired here"
+    # However the tail was handled, consecutive trips must not overlap: each
+    # starts at or after the previous one's end. An overlap is double-counting.
+    for a, b in zip(rows, rows[1:]):
+        if a.end_odo_km is not None and b.start_odo_km is not None:
+            assert b.start_odo_km >= a.end_odo_km - 0.002, (
+                f"trip {b.id} starts {a.end_odo_km - b.start_odo_km:.3f} km "
+                f"before trip {a.id} ended")
 
 
 class _OfflineThenParksWithCreepClient(_OfflineAfterDrivingClient):

@@ -859,8 +859,66 @@ def _drive_from(start: dict, cur: dict, capacity_kwh: float, max_speed: float = 
     }
 
 
+# An arrival nobody saw still happened. Where signal dies before the car
+# settles — a car park, a basement, a concrete stairwell of a building — the
+# closing reading is wherever the last poll reached, and the remaining drive is
+# invisible: no reading covers it, and the next one comes only once the car is
+# moving again, by which point its odometer also carries the new trip's start.
+#
+# So this is an estimate and is kept as one. It lands in its own field
+# (Drive.end_est_km) rather than disappearing into the distance, and the moment
+# a poll can actually measure the tail the estimate is thrown away and replaced
+# (see LAST_SLEEP_CLOSE_KEY in routes.py).
+#
+# The model is deliberately the most conservative one that is still worth
+# having: the car was last seen at some speed and had to reach zero, so half
+# that speed over the unseen window is a lower bound on nothing and an upper
+# bound on nothing, but it is the midpoint of a decelerating run rather than a
+# guess at physics. Capped at the same creep threshold the fold-in trusts.
+#
+# It errs low on purpose. Reading short is the failure this record already
+# documents and understands; inventing distance a trip never drove is the one
+# that corrupted two trips in a morning.
+ARRIVAL_EST_MAX_KM = GAP_CREEP_MAX_KM
+# And the window is capped before the speed is applied, which matters more than
+# the distance cap does. The elapsed time to the *close* is not the time the car
+# spent driving: a car can be found asleep hours after it parked, and the naive
+# product then pins every estimate to the cap regardless of the trip. What the
+# car was actually doing is arriving — it stops within a couple of minutes of
+# the last reading whatever time we notice. Three minutes is the same window
+# routes.py waits before calling a car unreachable.
+ARRIVAL_EST_MAX_MIN = 3.0
+# And it only applies to a car that was plainly arriving. The whole model is
+# "it was slowing and had to reach zero", which is credible at 15 km/h on a
+# final approach and worthless at 60: a car still at speed when signal died was
+# mid-drive, and how far it went afterwards is genuinely unbounded — an
+# estimate there would be a number invented to fill a hole. Above this the tail
+# stays unknown, which is what end_lost_km: None already says.
+ARRIVAL_EST_MAX_SPEED_KMH = 40.0
+
+
+def estimate_arrival_tail(last_snapshot: dict, close_ts: float | None) -> float | None:
+    """Distance the car probably covered after its last reading, or None.
+
+    None whenever the inputs cannot support a figure — no closing timestamp, no
+    observed speed, or the car already reading stopped — because a zero here
+    would be indistinguishable from a measured zero, which is exactly the
+    confusion end_lost_km was changed to avoid.
+    """
+    speed = last_snapshot.get("speed_kmh") or 0.0
+    if not close_ts or speed <= 0 or speed > ARRIVAL_EST_MAX_SPEED_KMH:
+        return None
+    unseen_sec = max(close_ts - last_snapshot["ts"], 0.0)
+    if unseen_sec <= 0:
+        return None
+    unseen_h = min(unseen_sec, ARRIVAL_EST_MAX_MIN * 60.0) / 3600.0
+    est = speed / 2.0 * unseen_h
+    return round(min(est, ARRIVAL_EST_MAX_KM), 3) or None
+
+
 def close_trip_on_sleep(open_trip: dict, last_snapshot: dict, capacity_kwh: float,
-                        drive_min_km: float = DRIVE_MIN_KM):
+                        drive_min_km: float = DRIVE_MIN_KM,
+                        close_ts: float | None = None):
     """Close a trip the moment the car is confirmed properly asleep.
 
     A car cannot reach true sleep while driving — it needs power to move, so
@@ -900,9 +958,23 @@ def close_trip_on_sleep(open_trip: dict, last_snapshot: dict, capacity_kwh: floa
     # tail_trim_sec stays unset for a different reason: this path runs no
     # pace-based stop estimate, so it genuinely never evaluates one, which is
     # exactly what null means for that field.
-    return _drive_from(open_trip, {**last_snapshot, "end_lost_km": None}, capacity_kwh,
-                       open_trip.get("max_speed", 0.0),
-                       idle_min, idle_tracked=True, drive_min_km=drive_min_km)
+    # The unseen tail, folded in through the ordinary blind-distance path so
+    # distance, energy, Wh/km and the driving figures all derive from one
+    # place: a synthetic closing odometer plus end_folded_km, which
+    # _drive_from already prices at the trip's own efficiency. Patching the
+    # finished dict instead would leave those five to be kept in step by hand.
+    est = estimate_arrival_tail(last_snapshot, close_ts)
+    close = {**last_snapshot, "end_lost_km": None}
+    if est:
+        close["odo_km"] = last_snapshot["odo_km"] + est
+        close["end_folded_km"] = est
+    d = _drive_from(open_trip, close, capacity_kwh, open_trip.get("max_speed", 0.0),
+                    idle_min, idle_tracked=True, drive_min_km=drive_min_km)
+    if d is not None:
+        # Recorded separately so the estimate never passes for a measurement,
+        # and so the correction below it knows exactly how much to take back.
+        d["end_est_km"] = est
+    return d
 
 
 def live_trip(

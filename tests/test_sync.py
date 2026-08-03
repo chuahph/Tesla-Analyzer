@@ -759,6 +759,55 @@ def test_close_trip_on_sleep_leaves_the_lost_tail_unknown():
     assert d["tail_trim_sec"] is None
 
 
+def test_arrival_tail_is_estimated_only_for_a_car_that_was_arriving():
+    """A car last seen at 15 km/h was on a final approach and had to reach zero,
+    so half that speed over the unseen window is a defensible tail. One last
+    seen at 60 was mid-drive when signal died and how far it went afterwards is
+    unbounded — an estimate there would be a number invented to fill a hole."""
+    from app.sync import ARRIVAL_EST_MAX_KM, estimate_arrival_tail
+
+    slow = snap(T0, 8006.0, 78, shift="D", speed=15.0, range_km=394.0)
+    assert estimate_arrival_tail(slow, T0 + 120) == round(15.0 / 2 * (120 / 3600), 3)
+
+    fast = snap(T0, 8006.0, 78, shift="D", speed=60.0, range_km=394.0)
+    assert estimate_arrival_tail(fast, T0 + 120) is None      # not an arrival
+    stopped = snap(T0, 8006.0, 78, shift="P", speed=0.0, range_km=394.0)
+    assert estimate_arrival_tail(stopped, T0 + 120) is None   # nothing to add
+    assert estimate_arrival_tail(slow, None) is None          # no window to use
+
+    # A car found asleep hours later still only parked minutes after the last
+    # reading, so the window is capped before the speed is applied. Without
+    # that every estimate pins to the cap regardless of the trip.
+    assert estimate_arrival_tail(slow, T0 + 36000) < ARRIVAL_EST_MAX_KM
+    assert estimate_arrival_tail(slow, T0 + 36000) == estimate_arrival_tail(slow, T0 + 600)
+
+
+def test_a_sleep_close_folds_its_estimated_tail_in_and_records_it_as_estimated():
+    """The estimate goes into distance so the trip reads closer to the car's own
+    figure, and into end_est_km so it can never pass for a measurement — and so
+    the correction that supersedes it knows exactly how much to take back."""
+    from app.sync import close_trip_on_sleep
+
+    open_trip = {
+        "ts": T0, "odo_km": 8000.0, "soc": 80, "range_km": 400.0,
+        "max_speed": 50.0, "idle_min": 0.0, "still_run": 0.0, "still_since": None,
+    }
+    last = snap(T0 + 600, 8006.0, 78, shift="D", speed=20.0, range_km=394.0)
+    plain = close_trip_on_sleep(open_trip, last, 60.0)
+    assert plain["end_est_km"] is None            # no close_ts, no estimate
+    assert plain["distance_km"] == 6.0
+
+    est = close_trip_on_sleep(open_trip, last, 60.0, close_ts=T0 + 600 + 180)
+    assert est["end_est_km"] == 0.5               # 20 km/h for half of 3 min
+    assert est["distance_km"] == 6.5              # folded in
+    assert est["end_lost_km"] is None             # still nothing measured
+    # Energy came with it, so Wh/km doesn't collapse by the folded share.
+    assert est["energy_used_kwh"] > plain["energy_used_kwh"]
+    def whkm(d):
+        return d["energy_used_kwh"] * 1000.0 / d["distance_km"]
+    assert abs(whkm(est) - whkm(plain)) < 0.5
+
+
 def test_tail_trim_changes_duration_only_never_distance_or_energy():
     """The stop-time correction rewrites the recorded timestamp and nothing
     else — the stop snapshot keeps the real reading's odometer and range, so

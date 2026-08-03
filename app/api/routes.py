@@ -1319,7 +1319,10 @@ def _process_vehicle(
     sleep_close_raw = state.get(session, sleep_close_key)
     if sleep_close_raw and prev:
         marker = _json.loads(sleep_close_raw)
-        moved = snap["odo_km"] - marker["odo_km"]
+        # The boundary is where the estimate left it, not the raw reading —
+        # the estimated tail already belongs to the closed trip.
+        est_credited = marker.get("est_km") or 0.0
+        moved = snap["odo_km"] - marker["odo_km"] - est_credited
         if prev.get("odo_km") == marker["odo_km"] and 0 < moved:
             closed_drive = session.get(Drive, marker["drive_id"])
             close_ts = marker.get("ts")
@@ -1345,6 +1348,14 @@ def _process_vehicle(
                          and elapsed_min <= sync_mod.SLEEP_CLOSE_MERGE_MAX_MIN))
             )
             if fold_in:
+                # A poll can finally see this ground, so the estimate made at
+                # close time is superseded — taken back whole before the
+                # measurement goes in, or the trip would carry both. This is
+                # the correction the estimate exists to wait for.
+                est_back = closed_drive.end_est_km or 0.0
+                if est_back:
+                    closed_drive.distance_km = round(closed_drive.distance_km - est_back, 1)
+                    closed_drive.end_est_km = None
                 closed_drive.distance_km = round(closed_drive.distance_km + moved, 1)
                 # Distance alone isn't the whole trip. wh_per_km is derived
                 # (energy / distance) and soc_used_pct is derived from the
@@ -1455,6 +1466,13 @@ def _process_vehicle(
                 # GAP_CREEP_MAX_KM branch); this is the same rule.
                 closed_drive.end_lost_km = round(moved, 3)
                 session.commit()
+            if not fold_in and est_credited:
+                # The fold-in, when it runs, already hands the whole stretch
+                # over. When it doesn't, the estimate stands and the departing
+                # trip has to start past it — one fixed quantity, credited
+                # once. Independent of the branches above, which decide what
+                # the CLOSED trip records, not where the next one begins.
+                prev = {**prev, "odo_km": prev["odo_km"] + est_credited}
         state.put(session, sleep_close_key, "")
 
     drives, charges, open_trip, open_charge = sync_mod.process_snapshot(
@@ -1819,6 +1837,7 @@ def sync_now(wake: bool = Query(False), session: Session = Depends(get_session))
                     d = sync_mod.close_trip_on_sleep(
                         _json.loads(trip_raw), _json.loads(last_raw),
                         row_capacity_kwh, settings.drive_min_km,
+                        close_ts=datetime.now().timestamp(),
                     )
                     if d:
                         d["start_coords"], d["end_coords"] = d["start_location"], d["end_location"]
@@ -1857,6 +1876,13 @@ def sync_now(wake: bool = Query(False), session: Session = Depends(get_session))
                                 "odo_km": _json.loads(last_raw)["odo_km"],
                                 "ts": _json.loads(last_raw)["ts"],
                                 "reason": "asleep" if vstate == "asleep" else "offline",
+                                # Distance already credited to this trip as an
+                                # estimate. The blind stretch is one fixed
+                                # quantity: whatever is given to the arriving
+                                # trip has to be taken off the departing one,
+                                # or both claim it. Carried on the marker so
+                                # the next poll can do exactly that.
+                                "est_km": d.get("end_est_km") or 0.0,
                             }),
                         )
                         notifications.fire_webhook(

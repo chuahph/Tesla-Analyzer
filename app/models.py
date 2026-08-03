@@ -155,6 +155,12 @@ class Drive(Base):
     # difference between where a trip recorded its stop and where the car was
     # actually observed resting afterwards (see driving.odometer_continuity).
     # None on trips logged before this was recorded.
+    # The arrival tail this trip could not see, estimated rather than measured
+    # (see sync.estimate_arrival_tail). Folded into distance_km and priced into
+    # the energy, but kept here so it never passes for a measurement and can be
+    # taken back whole the moment a real reading covers that ground. None when
+    # nothing was estimated, which includes every trip that closed normally.
+    end_est_km: Mapped[float | None] = mapped_column(Float, nullable=True)
     start_odo_km: Mapped[float | None] = mapped_column(Float, nullable=True)
     end_odo_km: Mapped[float | None] = mapped_column(Float, nullable=True)
 
