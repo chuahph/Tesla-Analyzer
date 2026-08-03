@@ -84,6 +84,7 @@ def init_db() -> None:
     _ensure_column("drives", "start_gap_sec", "FLOAT", "NULL")
     _ensure_column("drives", "end_gap_sec", "FLOAT", "NULL")
     _ensure_column("drives", "end_est_km", "FLOAT", "NULL")
+    _ensure_column("drives", "end_est_verified", "BOOLEAN", "NULL")
     _ensure_column("drives", "start_odo_km", "FLOAT", "NULL")
     _ensure_column("drives", "end_odo_km", "FLOAT", "NULL")
     _ensure_column("charges", "is_free", "BOOLEAN", "FALSE")

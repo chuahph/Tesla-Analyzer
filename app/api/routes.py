@@ -3270,6 +3270,7 @@ def estimated_tails(
     """
     rows = session.scalars(
         select(Drive).where(Drive.end_est_km.isnot(None))
+        .where(Drive.end_est_verified.isnot(True))
         .order_by(Drive.start_time.desc()).limit(max(limit, 1) * 4)
     ).all()
     out = []
@@ -3413,6 +3414,12 @@ def repair_arrival_tail(
         if apply and pending == drive_id:
             state.put(session, sleep_key, "")
     if apply:
+        # Whatever estimate survives the retraction has now been checked
+        # against the car's own trip meter and found right — still unseen by
+        # any poll, which is what end_est_km records, but no longer an open
+        # question. Marked so the review list can be worked down rather than
+        # showing the same reconciled rows forever.
+        drive.end_est_verified = True
         session.commit()
     return {
         "applied": apply, "drive_id": drive_id,

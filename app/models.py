@@ -161,6 +161,17 @@ class Drive(Base):
     # taken back whole the moment a real reading covers that ground. None when
     # nothing was estimated, which includes every trip that closed normally.
     end_est_km: Mapped[float | None] = mapped_column(Float, nullable=True)
+    # Whether that estimate has since been reconciled against the car's own
+    # trip meter (see routes.repair_arrival_tail). The distinction matters
+    # because end_est_km alone conflates two states that call for opposite
+    # treatment: a guess still waiting to be checked, and a figure that has
+    # been checked and found right. Both are estimates in the sense that no
+    # poll ever saw the ground; only the first is an open question.
+    #
+    # Without this the review list can never be worked down — a trip stays on
+    # it after being verified, with nothing able to clear it, and a checklist
+    # that always shows the same rows stops being read.
+    end_est_verified: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     start_odo_km: Mapped[float | None] = mapped_column(Float, nullable=True)
     end_odo_km: Mapped[float | None] = mapped_column(Float, nullable=True)
 

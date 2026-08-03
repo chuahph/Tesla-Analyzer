@@ -1541,7 +1541,7 @@ function tripDiagnostics(t, ctx) {
       // How much of the distance at the arrival end is estimated rather than
       // measured. Without it, a trip reading long against the car's own screen
       // can only be explained by re-deriving the estimate from the odometer.
-      end_est_km: t.end_est_km,
+      end_est_km: t.end_est_km, end_est_verified: t.end_est_verified,
       // Disambiguates a 0.0 start_lost_km: nothing to lose, or the departure
       // recovery reclaimed it. Without this the two look identical.
       start_recovered_km: t.start_recovered_km,

@@ -1089,6 +1089,10 @@ def analyze(drives: list[Drive], rated_wh_per_km: float = 150.0,
                 # trip that reads long against the car's own screen by exactly
                 # this much has been answered without deriving anything.
                 "end_est_km": getattr(d, "end_est_km", None),
+                # And whether that estimate has been checked against the car
+                # itself — the difference between a figure still in question
+                # and one already settled.
+                "end_est_verified": getattr(d, "end_est_verified", None),
                 # What the departure recovery pulled back in, which is what
                 # tells a "nothing was lost" 0.0 apart from a "the recovery
                 # reclaimed it" 0.0 (see Drive.start_recovered_km).

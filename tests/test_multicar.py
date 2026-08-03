@@ -2021,3 +2021,46 @@ def test_estimated_tails_lists_what_to_check_ranked_by_distortion(monkeypatch):
     finally:
         settings.app_passcode = old
         _reset_to_demo()
+
+
+def test_a_verified_estimate_leaves_the_review_list(monkeypatch):
+    """A checklist that can never be worked down stops being read. end_est_km
+    alone conflates a guess still awaiting a check with one already checked and
+    found right — both unseen by any poll, but only the first an open question.
+    Repairing against the car's own trip meter settles it, so it goes."""
+    from app.models import Drive
+
+    settings = get_settings()
+    old = settings.app_passcode
+    settings.app_passcode = ""
+    try:
+        with SessionLocal() as s:
+            d = s.query(Drive).order_by(Drive.id).first()
+            d.distance_km, d.end_est_km, d.end_est_verified = 14.1, 0.483, None
+            d.start_odo_km, d.end_odo_km = 28943.109, 28957.172
+            d.energy_used_kwh, d.duration_min = 1.77, 20.8
+            d.end_time = d.start_time + timedelta(minutes=20.8)
+            s.commit()
+            did = d.id
+
+        with TestClient(app) as client:
+            listed = client.get("/api/estimated-tails").json()
+            assert did in [t["drive_id"] for t in listed["trips"]]
+
+            client.get("/api/repair-arrival-tail",
+                       params={"drive_id": did, "true_distance_km": 13.9,
+                               "true_duration_min": 18, "apply": "true"})
+
+            after = client.get("/api/estimated-tails").json()
+            assert did not in [t["drive_id"] for t in after["trips"]]
+
+        with SessionLocal() as s:
+            fixed = s.get(Drive, did)
+            # Gone from the list, but the provenance is NOT erased: 0.32 km of
+            # this trip still never appeared in any poll, and a reader has to
+            # be able to see that.
+            assert fixed.end_est_km == pytest.approx(0.32)
+            assert fixed.end_est_verified is True
+    finally:
+        settings.app_passcode = old
+        _reset_to_demo()
