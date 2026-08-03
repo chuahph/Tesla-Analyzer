@@ -897,8 +897,13 @@ ARRIVAL_EST_MAX_MIN = 3.0
 ARRIVAL_EST_MAX_SPEED_KMH = 40.0
 
 
-def estimate_arrival_tail(last_snapshot: dict, close_ts: float | None) -> float | None:
-    """Distance the car probably covered after its last reading, or None.
+def estimate_arrival_tail(last_snapshot: dict,
+                          close_ts: float | None) -> tuple[float, float] | None:
+    """(km, seconds) the car probably spent arriving after its last reading.
+
+    Both, not just the distance: the same assumption produces each, and taking
+    only the kilometres leaves a trip covering further in unchanged time — its
+    average speed RISING, when what it was doing was decelerating to a stop.
 
     None whenever the inputs cannot support a figure — no closing timestamp, no
     observed speed, or the car already reading stopped — because a zero here
@@ -908,12 +913,18 @@ def estimate_arrival_tail(last_snapshot: dict, close_ts: float | None) -> float 
     speed = last_snapshot.get("speed_kmh") or 0.0
     if not close_ts or speed <= 0 or speed > ARRIVAL_EST_MAX_SPEED_KMH:
         return None
-    unseen_sec = max(close_ts - last_snapshot["ts"], 0.0)
+    unseen_sec = min(max(close_ts - last_snapshot["ts"], 0.0),
+                     ARRIVAL_EST_MAX_MIN * 60.0)
     if unseen_sec <= 0:
         return None
-    unseen_h = min(unseen_sec, ARRIVAL_EST_MAX_MIN * 60.0) / 3600.0
-    est = speed / 2.0 * unseen_h
-    return round(min(est, ARRIVAL_EST_MAX_KM), 3) or None
+    est = speed / 2.0 * (unseen_sec / 3600.0)
+    if est > ARRIVAL_EST_MAX_KM:
+        # Capped distance means the window implied by it is shorter too, or
+        # the trip would gain time it did not gain kilometres for.
+        unseen_sec *= ARRIVAL_EST_MAX_KM / est
+        est = ARRIVAL_EST_MAX_KM
+    est = round(est, 3)
+    return (est, unseen_sec) if est else None
 
 
 def close_trip_on_sleep(open_trip: dict, last_snapshot: dict, capacity_kwh: float,
@@ -963,11 +974,17 @@ def close_trip_on_sleep(open_trip: dict, last_snapshot: dict, capacity_kwh: floa
     # place: a synthetic closing odometer plus end_folded_km, which
     # _drive_from already prices at the trip's own efficiency. Patching the
     # finished dict instead would leave those five to be kept in step by hand.
-    est = estimate_arrival_tail(last_snapshot, close_ts)
+    tail = estimate_arrival_tail(last_snapshot, close_ts)
+    est = tail[0] if tail else None
     close = {**last_snapshot, "end_lost_km": None}
-    if est:
+    if tail:
+        est, unseen_sec = tail
         close["odo_km"] = last_snapshot["odo_km"] + est
         close["end_folded_km"] = est
+        # The clock moves with the odometer. Same assumption, both halves of
+        # it: duration, and therefore average speed, stay consistent with a
+        # car that was slowing rather than one that suddenly went faster.
+        close["ts"] = last_snapshot["ts"] + unseen_sec
     d = _drive_from(open_trip, close, capacity_kwh, open_trip.get("max_speed", 0.0),
                     idle_min, idle_tracked=True, drive_min_km=drive_min_km)
     if d is not None:

@@ -764,10 +764,13 @@ def test_arrival_tail_is_estimated_only_for_a_car_that_was_arriving():
     so half that speed over the unseen window is a defensible tail. One last
     seen at 60 was mid-drive when signal died and how far it went afterwards is
     unbounded — an estimate there would be a number invented to fill a hole."""
-    from app.sync import ARRIVAL_EST_MAX_KM, estimate_arrival_tail
+    from app.sync import (ARRIVAL_EST_MAX_KM, ARRIVAL_EST_MAX_MIN,
+                          ARRIVAL_EST_MAX_SPEED_KMH, estimate_arrival_tail)
 
     slow = snap(T0, 8006.0, 78, shift="D", speed=15.0, range_km=394.0)
-    assert estimate_arrival_tail(slow, T0 + 120) == round(15.0 / 2 * (120 / 3600), 3)
+    km, sec = estimate_arrival_tail(slow, T0 + 120)
+    assert km == round(15.0 / 2 * (120 / 3600), 3)
+    assert sec == 120                       # the window comes back too
 
     fast = snap(T0, 8006.0, 78, shift="D", speed=60.0, range_km=394.0)
     assert estimate_arrival_tail(fast, T0 + 120) is None      # not an arrival
@@ -778,8 +781,19 @@ def test_arrival_tail_is_estimated_only_for_a_car_that_was_arriving():
     # A car found asleep hours later still only parked minutes after the last
     # reading, so the window is capped before the speed is applied. Without
     # that every estimate pins to the cap regardless of the trip.
-    assert estimate_arrival_tail(slow, T0 + 36000) < ARRIVAL_EST_MAX_KM
+    assert estimate_arrival_tail(slow, T0 + 36000)[0] < ARRIVAL_EST_MAX_KM
     assert estimate_arrival_tail(slow, T0 + 36000) == estimate_arrival_tail(slow, T0 + 600)
+
+    # The three bounds agree by construction: the fastest arrival this will
+    # estimate for, over the longest window it will use, lands exactly on the
+    # distance cap. So no input can produce more than a kilometre, and the cap
+    # never has to truncate a figure the other two already allowed.
+    quick = snap(T0, 8006.0, 78, shift="D",
+                 speed=ARRIVAL_EST_MAX_SPEED_KMH, range_km=394.0)
+    km2, sec2 = estimate_arrival_tail(quick, T0 + 36000)
+    assert km2 == ARRIVAL_EST_MAX_KM
+    assert sec2 == ARRIVAL_EST_MAX_MIN * 60
+    assert km2 == round(ARRIVAL_EST_MAX_SPEED_KMH / 2 * (sec2 / 3600.0), 3)
 
 
 def test_a_sleep_close_folds_its_estimated_tail_in_and_records_it_as_estimated():
@@ -800,6 +814,10 @@ def test_a_sleep_close_folds_its_estimated_tail_in_and_records_it_as_estimated()
     est = close_trip_on_sleep(open_trip, last, 60.0, close_ts=T0 + 600 + 180)
     assert est["end_est_km"] == 0.5               # 20 km/h for half of 3 min
     assert est["distance_km"] == 6.5              # folded in
+    # The clock moved with it, so the trip reads as one that slowed to a stop
+    # rather than one that covered more ground in the same time.
+    assert est["duration_min"] == plain["duration_min"] + 3.0
+    assert est["avg_speed_kmh"] < plain["avg_speed_kmh"]
     assert est["end_lost_km"] is None             # still nothing measured
     # Energy came with it, so Wh/km doesn't collapse by the folded share.
     assert est["energy_used_kwh"] > plain["energy_used_kwh"]
