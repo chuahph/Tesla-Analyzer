@@ -3009,7 +3009,13 @@ def push_test(session: Session = Depends(get_session)):
     return {"sent": sent}
 
 
-@router.post("/repair-trip-boundary")
+# GET as well as POST: these are hand-run repair tools, and the person
+# running them is on a phone where the only way to issue a request is the
+# address bar — which sends GET. POST-only made them look like they had
+# run while returning 405 and changing nothing. Mutating on GET is
+# normally wrong; here nothing writes without an explicit apply=true that
+# no prefetcher will ever guess, and the app is passcode-gated.
+@router.api_route("/repair-trip-boundary", methods=["GET", "POST"])
 def repair_trip_boundary(
     closed_id: int = Query(...),
     open_id: int = Query(...),
@@ -3095,7 +3101,13 @@ def repair_trip_boundary(
     return {"applied": apply, **plan}
 
 
-@router.post("/backfill-start-locations")
+# GET as well as POST: these are hand-run repair tools, and the person
+# running them is on a phone where the only way to issue a request is the
+# address bar — which sends GET. POST-only made them look like they had
+# run while returning 405 and changing nothing. Mutating on GET is
+# normally wrong; here nothing writes without an explicit apply=true that
+# no prefetcher will ever guess, and the app is passcode-gated.
+@router.api_route("/backfill-start-locations", methods=["GET", "POST"])
 def backfill_start_locations(
     apply: bool = Query(False),
     session: Session = Depends(get_session),
