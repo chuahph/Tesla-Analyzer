@@ -2098,6 +2098,10 @@ def test_confirming_a_trip_that_already_matches_is_a_result_not_an_error(monkeyp
             assert r.status_code == 200
             assert body["outcome"] == "already_matches"
             assert body["retracted_km"] == 0.0
+            # Not -0.0: this endpoint gives a negative difference the meaning
+            # "shorter than the car says", so a match must not wear that sign.
+            import math
+            assert not math.copysign(1, body["difference_km"]) < 0
             assert body["after"]["distance_km"] == dist      # nothing rewritten
             assert body["after"]["end_est_km"] == 0.32
 

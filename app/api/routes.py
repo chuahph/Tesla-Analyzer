@@ -3346,7 +3346,13 @@ def repair_arrival_tail(
     span = (drive.end_odo_km - drive.start_odo_km
             if drive.end_odo_km is not None and drive.start_odo_km is not None
             else drive.distance_km)
-    km = round(span - true_distance_km, 3)
+    # `or 0.0` collapses negative zero, which float subtraction produces
+    # whenever the two agree exactly (28957.009 - 28943.109 lands a hair under
+    # 13.9). It is arithmetically fine and reads terribly: this endpoint uses
+    # the sign of this number to mean "the trip is SHORTER than the car says",
+    # so reporting a match as -0.0 shows the reader the one symbol that has
+    # been given the opposite meaning.
+    km = round(span - true_distance_km, 3) or 0.0
     # "It already matches" is a real outcome of checking a trip, and the common
     # one — most estimates are close, and this tool is how a trip gets checked
     # at all. Refusing it as an error left trip 332 stuck: repaired before
