@@ -3021,6 +3021,7 @@ def repair_trip_boundary(
     open_id: int = Query(...),
     boundary_odo_km: float = Query(...),
     closed_end_time: str | None = Query(None),
+    closed_end_coords: str | None = Query(None),
     apply: bool = Query(False),
     session: Session = Depends(get_session),
 ):
@@ -3071,6 +3072,7 @@ def repair_trip_boundary(
             "distance_km": [closed.distance_km, closed_new_dist],
             "energy_kwh": [closed.energy_used_kwh, rescaled(closed, closed_new_dist)],
             "end_odo_km": [closed.end_odo_km, boundary_odo_km],
+            "end_coords": [closed.end_coords, closed_end_coords or closed.end_coords],
         },
         "open": {
             "id": opened.id, "route": f"{opened.start_location} → {opened.end_location}",
@@ -3089,6 +3091,14 @@ def repair_trip_boundary(
         if delta < 0:
             opened.start_recovered_km = round(
                 (opened.start_recovered_km or 0.0) - delta, 3)
+        # The fault also restamped the arrival with whichever place it matched,
+        # which is how a trip home came to read "-> QBM". Coordinates are what
+        # the label is derived from, so restoring them and re-deriving is the
+        # only way to put the name back without asserting it directly.
+        if closed_end_coords:
+            closed.end_coords = closed_end_coords
+            closed.end_location, closed.end_area = _place_and_area(
+                closed_end_coords, session)
         if closed_end_time:
             closed.end_time = datetime.fromisoformat(closed_end_time)
             start = closed.start_time

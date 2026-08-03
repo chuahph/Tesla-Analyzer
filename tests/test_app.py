@@ -1528,7 +1528,8 @@ def test_repair_moves_a_boundary_and_the_figures_that_follow_from_it(monkeypatch
 
             preview = repair_trip_boundary(
                 closed_id=cid, open_id=oid, boundary_odo_km=28912.782,
-                closed_end_time=None, apply=False, session=s)
+                closed_end_time=None, closed_end_coords=None,
+                apply=False, session=s)
             assert preview["delta_km"] == -1.311
             assert preview["closed"]["distance_km"] == [5.4, 4.1]
             assert preview["open"]["distance_km"] == [8.0, 9.3]
@@ -1541,7 +1542,8 @@ def test_repair_moves_a_boundary_and_the_figures_that_follow_from_it(monkeypatch
 
             repair_trip_boundary(
                 closed_id=cid, open_id=oid, boundary_odo_km=28912.782,
-                closed_end_time="2026-08-02T19:25", apply=True, session=s)
+                closed_end_time="2026-08-02T19:25",
+                closed_end_coords="5.3427, 100.3106", apply=True, session=s)
             s.expire_all()
             c2, o2 = s.get(Drive, cid), s.get(Drive, oid)
             assert (c2.distance_km, c2.end_odo_km) == (4.1, 28912.782)
@@ -1550,13 +1552,17 @@ def test_repair_moves_a_boundary_and_the_figures_that_follow_from_it(monkeypatch
             # The stretch handed back arrived with no reading of its own.
             assert o2.start_recovered_km == 1.826
             assert o2.avg_speed_kmh == round(9.3 / (22.0 / 60.0), 1)
+            # The fault restamped the arrival with the place it matched, so a
+            # trip home read "-> QBM". Coordinates are what the label derives
+            # from, so restoring them puts the name back.
+            assert c2.end_coords == "5.3427, 100.3106"
 
             # A boundary that would leave a trip with no distance at all is
             # refused rather than written as a negative.
             with pytest.raises(Exception):
                 repair_trip_boundary(closed_id=cid, open_id=oid,
                                      boundary_odo_km=28900.0, closed_end_time=None,
-                                     apply=False, session=s)
+                                     closed_end_coords=None, apply=False, session=s)
     finally:
         with SessionLocal() as s:
             v = s.query(Vehicle).filter(Vehicle.vin == "TESTVIN-REPAIR").first()
