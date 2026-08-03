@@ -1,4 +1,6 @@
 """Tests for the snapshot session state machine (app/sync.py)."""
+import pytest
+
 from app.sync import (_energy_kwh, close_trip_on_sleep, is_driving,
                       process_snapshot, snapshot_from_vehicle_data)
 
@@ -767,10 +769,14 @@ def test_arrival_tail_is_estimated_only_for_a_car_that_was_arriving():
     from app.sync import (ARRIVAL_EST_MAX_KM, ARRIVAL_EST_MAX_MIN,
                           ARRIVAL_EST_MAX_SPEED_KMH, estimate_arrival_tail)
 
+    from app.sync import ARRIVAL_STOP_DECEL_MS2
+
     slow = snap(T0, 8006.0, 78, shift="D", speed=15.0, range_km=394.0)
     km, sec = estimate_arrival_tail(slow, T0 + 120)
-    assert km == round(15.0 / 2 * (120 / 3600), 3)
-    assert sec == 120                       # the window comes back too
+    # The window is how long a car at 15 km/h can still have left, not how
+    # long we took to notice — 28 s, not the 120 s that elapsed.
+    assert sec == pytest.approx(15.0 / 3.6 / ARRIVAL_STOP_DECEL_MS2)
+    assert km == round(15.0 / 2 * (sec / 3600), 3)
 
     fast = snap(T0, 8006.0, 78, shift="D", speed=60.0, range_km=394.0)
     assert estimate_arrival_tail(fast, T0 + 120) is None      # not an arrival
@@ -784,15 +790,32 @@ def test_arrival_tail_is_estimated_only_for_a_car_that_was_arriving():
     assert estimate_arrival_tail(slow, T0 + 36000)[0] < ARRIVAL_EST_MAX_KM
     assert estimate_arrival_tail(slow, T0 + 36000) == estimate_arrival_tail(slow, T0 + 600)
 
-    # The three bounds agree by construction: the fastest arrival this will
-    # estimate for, over the longest window it will use, lands exactly on the
-    # distance cap. So no input can produce more than a kilometre, and the cap
-    # never has to truncate a figure the other two already allowed.
+    # The estimate must shrink with the speed, and steeply — that is the whole
+    # difference between a car that lost signal mid-approach and one whose last
+    # reading was already the arrival. Quadratically, in fact: halving the
+    # speed halves both the window and the pace within it.
+    def tail(v):
+        return estimate_arrival_tail(
+            snap(T0, 8006.0, 78, shift="D", speed=v, range_km=394.0), T0 + 36000)[0]
+
+    assert tail(30) > tail(15) > tail(7.5)
+    assert tail(30) == pytest.approx(4 * tail(15), rel=0.02)
+    # A car at a walking-pace crawl is within metres of stopped, and must be
+    # credited accordingly. Trip 332: last seen at 6.5 km/h, its odometer
+    # already the final one to the metre, yet given 0.163 km by the flat
+    # three-minute window.
+    assert tail(6.5) < 0.02
+
+    # The speed-scaled window is the binding one across the entire range of
+    # speeds this will estimate for, so the other two bounds are backstops
+    # rather than the usual answer. The fastest arrival it accepts still lands
+    # well inside both — no input can reach the distance cap, which is what
+    # makes that cap a guard rather than a shaping parameter.
     quick = snap(T0, 8006.0, 78, shift="D",
                  speed=ARRIVAL_EST_MAX_SPEED_KMH, range_km=394.0)
     km2, sec2 = estimate_arrival_tail(quick, T0 + 36000)
-    assert km2 == ARRIVAL_EST_MAX_KM
-    assert sec2 == ARRIVAL_EST_MAX_MIN * 60
+    assert km2 < ARRIVAL_EST_MAX_KM
+    assert sec2 < ARRIVAL_EST_MAX_MIN * 60
     assert km2 == round(ARRIVAL_EST_MAX_SPEED_KMH / 2 * (sec2 / 3600.0), 3)
 
 
@@ -812,11 +835,13 @@ def test_a_sleep_close_folds_its_estimated_tail_in_and_records_it_as_estimated()
     assert plain["distance_km"] == 6.0
 
     est = close_trip_on_sleep(open_trip, last, 60.0, close_ts=T0 + 600 + 180)
-    assert est["end_est_km"] == 0.5               # 20 km/h for half of 3 min
-    assert est["distance_km"] == 6.5              # folded in
+    # 20 km/h for the 37 s a car at 20 km/h can still have left, not for the
+    # 3 minutes we took to notice (see ARRIVAL_STOP_DECEL_MS2).
+    assert est["end_est_km"] == 0.103
+    assert est["distance_km"] == 6.1              # folded in
     # The clock moved with it, so the trip reads as one that slowed to a stop
     # rather than one that covered more ground in the same time.
-    assert est["duration_min"] == plain["duration_min"] + 3.0
+    assert est["duration_min"] == pytest.approx(plain["duration_min"] + 0.6)
     assert est["avg_speed_kmh"] < plain["avg_speed_kmh"]
     assert est["end_lost_km"] is None             # still nothing measured
     # Energy came with it, so Wh/km doesn't collapse by the folded share.

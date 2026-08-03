@@ -1083,6 +1083,12 @@ def analyze(drives: list[Drive], rated_wh_per_km: float = 150.0,
                 # that reads short on distance but not on energy points here
                 # rather than at the start anchor, which loses both together.
                 "end_lost_km": getattr(d, "end_lost_km", None),
+                # How much of distance_km at that end is an ESTIMATE rather
+                # than a reading (see Drive.end_est_km) — the one number that
+                # separates "the car drove this" from "we think it did". A
+                # trip that reads long against the car's own screen by exactly
+                # this much has been answered without deriving anything.
+                "end_est_km": getattr(d, "end_est_km", None),
                 # What the departure recovery pulled back in, which is what
                 # tells a "nothing was lost" 0.0 apart from a "the recovery
                 # reclaimed it" 0.0 (see Drive.start_recovered_km).

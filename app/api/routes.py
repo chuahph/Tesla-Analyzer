@@ -1351,7 +1351,15 @@ def _process_vehicle(
         # claim on part of it, and this is the first moment anything can check
         # that claim against a measurement.
         raw_moved = snap["odo_km"] - marker["odo_km"]
-        if prev.get("odo_km") == marker["odo_km"] and 0 < raw_moved:
+        # Zero is a measurement, not the absence of one, and it is the single
+        # most common one on this path: a car that parks and sleeps is next
+        # read still parked, at the odometer it stopped on. Requiring strictly
+        # positive movement here excluded exactly the case the estimate most
+        # needs checking against — an estimated tail the car never drove would
+        # stand forever, because nothing else ever revisits it. Confirmed live
+        # (trip 332): 0.163 km estimated into a multi-storey arrival the car's
+        # own trip meter never recorded, unreachable by every correction here.
+        if prev.get("odo_km") == marker["odo_km"] and raw_moved >= 0:
             closed_drive = session.get(Drive, marker["drive_id"])
             # An estimate larger than the ground the car actually covered is
             # simply wrong, and wrong in the direction that matters: left
@@ -1434,7 +1442,13 @@ def _process_vehicle(
                 # case on this path rather than the exception. Duration is what
                 # separates an arrival from a stale anchor.
                 extra_kwh = sync_mod._energy_kwh(prev, snap, capacity_kwh)
-                if (extra_kwh * 1000.0 / raw_moved <= sync_mod.MAX_PLAUSIBLE_WH_PER_KM
+                # raw_moved can now legitimately be zero — the car parked where
+                # it was last read and never moved again. There is no distance
+                # to price and no implied efficiency to test, so the whole
+                # question is moot rather than failed: fall through, where a
+                # blind distance of zero leaves the energy exactly as it is.
+                if (raw_moved > 0
+                        and extra_kwh * 1000.0 / raw_moved <= sync_mod.MAX_PLAUSIBLE_WH_PER_KM
                         and elapsed_min <= sync_mod.STALE_ANCHOR_MAX_MIN):
                     closed_drive.energy_used_kwh = round(
                         closed_drive.energy_used_kwh + extra_kwh, 2)
