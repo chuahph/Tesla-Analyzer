@@ -737,14 +737,15 @@ def test_blind_gap_close_folds_parking_creep_into_the_trip_that_ended():
     assert drives2[0]["distance_km"] == 8.4
 
 
-def test_close_trip_on_sleep_records_end_lost_km_as_zero():
-    """A trip closed on confirmed sleep has no further tail to have lost
-    distance in — sleep is only reachable once the car has genuinely stopped
-    moving — so end_lost_km must read a real 0.0 rather than the null a raw
-    snapshot would otherwise leave, which is indistinguishable from a row that
-    predates the field. tail_trim_sec stays null: this path runs no pace-based
-    stop estimate, so it genuinely never evaluates one, which is exactly what
-    null means for that field."""
+def test_close_trip_on_sleep_leaves_the_lost_tail_unknown():
+    """This asserted a real 0.0, on the reasoning that sleep is only reachable
+    once the car has stopped so nothing can follow the last reading. Sleep does
+    prove the car stopped; it says nothing about where the last reading sits
+    relative to that stop. Measured on a car parking on level 1 of a
+    multi-storey: signal dies at the ramp, and the closing reading is the
+    street outside with 0.05-0.36 km still to drive. Unknown is what this path
+    can support. tail_trim_sec stays null for its own reason — no pace-based
+    stop estimate is ever evaluated here."""
     open_trip = {
         "ts": T0, "odo_km": 8000.0, "soc": 80, "range_km": 400.0,
         "max_speed": 50.0, "idle_min": 0.0, "still_run": 0.0, "still_since": None,
@@ -754,7 +755,7 @@ def test_close_trip_on_sleep_records_end_lost_km_as_zero():
     d = close_trip_on_sleep(open_trip, last_snapshot, 60.0)
     assert d is not None
     assert d["distance_km"] == 6.0
-    assert d["end_lost_km"] == 0.0
+    assert d["end_lost_km"] is None        # unknown, not a measured zero
     assert d["tail_trim_sec"] is None
 
 

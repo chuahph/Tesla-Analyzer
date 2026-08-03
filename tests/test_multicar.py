@@ -1152,7 +1152,9 @@ def test_asleep_close_does_not_swallow_a_later_separate_trip(monkeypatch):
         monkeypatch, _AsleepThenDrivesAgainClient)
     closed = next(d for d in drives if d.id == closed_id)
     assert closed.distance_km == dist_before   # untouched by the 3 km
-    assert closed.end_lost_km == 0.0           # and not reported as its loss
+    # Must not be stamped with the later trip's 3 km. Unknown rather than a
+    # measured zero: this path cannot see the tail, only decline to invent one.
+    assert closed.end_lost_km is None
 
 
 class _AsleepThenWakesHoursLaterClient(_AsleepThenParksWithCreepClient):
@@ -1525,7 +1527,9 @@ def test_sustained_offline_close_records_a_gap_too_late_to_merge(monkeypatch):
             assert len(drives) == 2
             closed = next(d for d in drives if d.id == closed_id)
             assert closed.distance_km == 12.0                # unchanged, not guessed at
-            assert closed.end_lost_km == 0.0                  # and not double-reported
+            # Not double-reported. Unknown, not a measured zero — the close
+            # can't see past its own last reading.
+            assert closed.end_lost_km is None
             # The 1.5 km is accounted for exactly once — on the drive that
             # actually covers it, not as a phantom loss on the one before.
             later = next(d for d in drives if d.id != closed_id)

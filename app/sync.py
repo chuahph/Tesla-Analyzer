@@ -875,19 +875,32 @@ def close_trip_on_sleep(open_trip: dict, last_snapshot: dict, capacity_kwh: floa
     this specific transition.
     """
     idle_min = _confirmed_idle_min(open_trip, last_snapshot["ts"])
-    # last_snapshot is the *intended* true end: sleep is only reachable once
-    # the car has actually stopped moving, so under a genuine "asleep" report
-    # there is no further tail to have lost distance in. A real 0.0, not the
-    # null a raw snapshot would otherwise leave (see Drive.end_lost_km). This
-    # is provisional, not guaranteed, for the caller closing on sustained
-    # "offline" instead — that report doesn't carry the same guarantee (a dead
-    # zone right at arrival can leave this reading genuinely short), so the
-    # caller re-checks against the next real poll and corrects end_lost_km
-    # then if it turns out to be wrong (see LAST_SLEEP_CLOSE_KEY in routes.py).
-    # tail_trim_sec stays unset here regardless — this path runs no
+    # end_lost_km is UNKNOWN here, not zero. This used to claim a real 0.0 on
+    # the reasoning that sleep is only reachable once the car has stopped, so
+    # nothing can follow the last reading. Sleep does prove the car stopped; it
+    # says nothing about where the last reading was taken relative to that stop
+    # — the same distinction routes.py already draws for the arrival top-up,
+    # and the one this claim quietly contradicted.
+    #
+    # Measured on a car that parks on level 1 of a multi-storey: it loses
+    # signal at the ramp, drives up and along to its slot, and sleeps there.
+    # The closing reading is the street outside, and the tail is real —
+    # 0.05, 0.19 and 0.36 km across three arrivals, invisible in position
+    # (35-78 m of displacement) because a ramp climbs rather than travels.
+    # Asserting 0.0 there is not a conservative default, it is a wrong
+    # measurement: it tells odometer_continuity nothing is missing and leaves
+    # a reader unable to tell a confirmed-clean arrival from an unseen one.
+    #
+    # None restores that distinction. The caller still corrects it to a real
+    # figure when a later poll can measure the tail (see LAST_SLEEP_CLOSE_KEY
+    # in routes.py); when no such poll ever comes — which is what a permanent
+    # dead zone at the destination means — unknown is the honest answer and
+    # the only one this path can support.
+    #
+    # tail_trim_sec stays unset for a different reason: this path runs no
     # pace-based stop estimate, so it genuinely never evaluates one, which is
     # exactly what null means for that field.
-    return _drive_from(open_trip, {**last_snapshot, "end_lost_km": 0.0}, capacity_kwh,
+    return _drive_from(open_trip, {**last_snapshot, "end_lost_km": None}, capacity_kwh,
                        open_trip.get("max_speed", 0.0),
                        idle_min, idle_tracked=True, drive_min_km=drive_min_km)
 
