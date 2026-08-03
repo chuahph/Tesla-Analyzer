@@ -2064,3 +2064,57 @@ def test_a_verified_estimate_leaves_the_review_list(monkeypatch):
     finally:
         settings.app_passcode = old
         _reset_to_demo()
+
+
+def test_confirming_a_trip_that_already_matches_is_a_result_not_an_error(monkeypatch):
+    """"It already agrees with the car" is the common outcome of checking a
+    trip, and this endpoint is how a trip gets checked. Refusing it as an error
+    left trip 332 stranded: repaired before end_est_verified existed, it could
+    never be marked, because asking again produced a difference of exactly zero
+    and got a 409. A check that cannot return "correct" is not a check."""
+    from app.models import Drive
+
+    settings = get_settings()
+    old = settings.app_passcode
+    settings.app_passcode = ""
+    try:
+        with SessionLocal() as s:
+            d = s.query(Drive).order_by(Drive.id).first()
+            # Already reconciled: distance matches the car, tail still recorded.
+            d.distance_km, d.end_est_km, d.end_est_verified = 13.9, 0.32, None
+            d.start_odo_km, d.end_odo_km = 28943.109, 28957.009
+            d.energy_used_kwh, d.duration_min = 1.74, 18.0
+            s.commit()
+            did, energy, dist = d.id, d.energy_used_kwh, d.distance_km
+
+        with TestClient(app) as client:
+            assert did in [t["drive_id"] for t in
+                           client.get("/api/estimated-tails").json()["trips"]]
+
+            r = client.get("/api/repair-arrival-tail",
+                           params={"drive_id": did, "true_distance_km": 13.9,
+                                   "apply": "true"})
+            body = r.json()
+            assert r.status_code == 200
+            assert body["outcome"] == "already_matches"
+            assert body["retracted_km"] == 0.0
+            assert body["after"]["distance_km"] == dist      # nothing rewritten
+            assert body["after"]["end_est_km"] == 0.32
+
+            # Still a real check that can fail: a car figure that disagrees by
+            # more than the screen's own resolution is not "already matches".
+            assert client.get("/api/repair-arrival-tail",
+                              params={"drive_id": did,
+                                      "true_distance_km": 15.0}).status_code == 409
+
+            assert did not in [t["drive_id"] for t in
+                               client.get("/api/estimated-tails").json()["trips"]]
+
+        with SessionLocal() as s:
+            done = s.get(Drive, did)
+            assert done.end_est_verified is True
+            assert done.distance_km == dist
+            assert done.energy_used_kwh == energy
+    finally:
+        settings.app_passcode = old
+        _reset_to_demo()

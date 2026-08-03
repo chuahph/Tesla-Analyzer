@@ -3347,14 +3347,26 @@ def repair_arrival_tail(
             if drive.end_odo_km is not None and drive.start_odo_km is not None
             else drive.distance_km)
     km = round(span - true_distance_km, 3)
-    if km <= 0:
+    # "It already matches" is a real outcome of checking a trip, and the common
+    # one — most estimates are close, and this tool is how a trip gets checked
+    # at all. Refusing it as an error left trip 332 stuck: repaired before
+    # end_est_verified existed, then unable to be marked, because asking again
+    # produced a difference of exactly zero and got a 409. A check that cannot
+    # return "correct" is not a check.
+    #
+    # The tolerance is half the car's own display resolution: the screen reads
+    # to 0.1 km, so anything inside 0.05 is agreement, not a discrepancy worth
+    # rewriting a row over.
+    ARRIVAL_MATCH_KM = 0.05
+    confirmed_only = abs(km) <= ARRIVAL_MATCH_KM
+    if km < -ARRIVAL_MATCH_KM:
         raise HTTPException(
-            409, f"Trip {drive_id} reads {drive.distance_km} km, which is not "
-                 f"longer than the {true_distance_km} km given. This tool only "
-                 f"removes estimated distance; a trip reading SHORT is a "
-                 f"different fault (see end_lost_km).")
+            409, f"Trip {drive_id} reads {drive.distance_km} km, SHORTER than "
+                 f"the {true_distance_km} km given. This tool only removes "
+                 f"estimated distance; a trip reading short is a different "
+                 f"fault (see end_lost_km).")
     est = drive.end_est_km or 0.0
-    if km > max(est, 0.0) + 0.002:
+    if not confirmed_only and km > max(est, 0.0) + 0.002:
         raise HTTPException(
             409, f"Trip {drive_id} carries {est} km of estimated tail but the "
                  f"correction asks for {km} km. The excess isn't the estimate's "
@@ -3372,17 +3384,18 @@ def repair_arrival_tail(
     # by the same code that would do the work rather than by a second
     # description of it that can drift from it.
     target = drive if apply else _DetachedDrive(before)
-    _retract_estimated_tail(target, km, sec)
-    # _retract_estimated_tail declines rather than raises when the retraction
-    # would consume the whole trip — right for the automatic caller, which
-    # should leave a row alone rather than mangle it, but wrong to report as a
-    # successful repair. Caught here so "applied: true" always means something
-    # changed.
-    if target.distance_km == before["distance_km"]:
-        raise HTTPException(
-            409, f"That would take {km} km off a {before['distance_km']} km "
-                 f"trip, which is the whole of it. Refusing rather than "
-                 f"leaving a trip with no distance.")
+    if not confirmed_only:
+        _retract_estimated_tail(target, km, sec)
+        # _retract_estimated_tail declines rather than raises when the
+        # retraction would consume the whole trip — right for the automatic
+        # caller, which should leave a row alone rather than mangle it, but
+        # wrong to report as a successful repair. Caught here so a repair that
+        # reports a change has made one.
+        if target.distance_km == before["distance_km"]:
+            raise HTTPException(
+                409, f"That would take {km} km off a {before['distance_km']} km "
+                     f"trip, which is the whole of it. Refusing rather than "
+                     f"leaving a trip with no distance.")
     after = {
         "distance_km": target.distance_km, "energy_used_kwh": target.energy_used_kwh,
         "duration_min": target.duration_min, "avg_speed_kmh": target.avg_speed_kmh,
@@ -3424,7 +3437,14 @@ def repair_arrival_tail(
     return {
         "applied": apply, "drive_id": drive_id,
         "route": f"{drive.start_location} → {drive.end_location}",
-        "retracted_km": km, "retracted_sec": sec,
+        "retracted_km": 0.0 if confirmed_only else km,
+        "retracted_sec": 0.0 if confirmed_only else sec,
+        # Which of the two outcomes this was. "The trip already agrees with the
+        # car" and "the trip was wrong and has been corrected" both end with a
+        # verified trip, and a caller reading only the numbers cannot tell them
+        # apart when the numbers did not move.
+        "outcome": "already_matches" if confirmed_only else "corrected",
+        "difference_km": km,
         # So a dry run says whether it is racing the automatic correction, and
         # an applied one says it stood it down.
         "pending_auto_correction": pending == drive_id,
