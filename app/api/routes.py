@@ -18,7 +18,7 @@ from .. import alerts, auth, notifications, pricing_prefs, services, state, tari
 # for the same module). Needed up here for now_local/to_epoch, which anything
 # comparing against a stored timestamp has to go through — see sync.now_local.
 from .. import sync as sync_mod
-from ..analysis import haversine_km
+from ..analysis import haversine_km, percentile
 from ..analysis import narrative as narrative_engine
 from ..analysis import battery as battery_analysis
 from ..analysis import charging as charging_analysis
@@ -29,8 +29,8 @@ from ..analysis import service as service_analysis
 from ..config import get_settings
 from ..database import get_session
 from ..importer import ImportError_, parse_upload
-from ..models import (BatteryReading, Charge, Drive, Place, SecurityEvent,
-                      ServiceRecord, Vehicle)
+from ..models import (ArrivalTailSample, BatteryReading, Charge, Drive, Place,
+                      SecurityEvent, ServiceRecord, Vehicle)
 from ..schemas import ChargeOut, DriveOut, VehicleOut
 
 router = APIRouter(prefix="/api", tags=["analytics"])
@@ -1346,6 +1346,12 @@ def _process_vehicle(
     if sleep_close_raw and prev:
         marker = _json.loads(sleep_close_raw)
         est_credited = marker.get("est_km") or 0.0
+        # Kept unclamped for the calibration sample below. est_credited is
+        # about to be trimmed to whatever the car actually covered, which is
+        # the right value for correcting the trip and exactly the wrong one for
+        # scoring the model — a prediction trimmed to fit the outcome always
+        # scores perfectly.
+        est_predicted = est_credited
         est_sec = marker.get("est_sec") or 0.0
         # Everything the odometer has done since the close. The estimate was a
         # claim on part of it, and this is the first moment anything can check
@@ -1539,6 +1545,26 @@ def _process_vehicle(
                     closed_drive.end_coords = end_coords
                     closed_drive.end_location, closed_drive.end_area = (
                         _place_and_area(end_coords, session))
+                # This branch, and only this branch, has both halves of a
+                # calibration pair: a prediction made when the car went dark,
+                # and a poll that has just measured the very stretch it was
+                # about. Recorded rather than acted on — the arrival model has
+                # a free parameter that shipped set to the poller's own timeout,
+                # and one trip's worth of evidence already proved enough to
+                # mis-tune it once (see ArrivalTailSample).
+                #
+                # raw_moved, not moved: the prediction was about the whole
+                # unseen stretch, so that is what it has to be scored against.
+                session.add(ArrivalTailSample(
+                    vehicle_id=vehicle.id, drive_id=marker.get("drive_id"),
+                    ts=sync_mod._dt(snap["ts"]),
+                    est_km=round(est_predicted, 3),
+                    measured_km=round(raw_moved, 3),
+                    speed_kmh=marker.get("speed_kmh"),
+                    est_sec=marker.get("est_sec"),
+                    elapsed_min=round(elapsed_min, 1) if close_ts else None,
+                    reason=marker.get("reason") or "",
+                ))
                 session.commit()
                 # Tell process_snapshot() this ground is already covered, so its
                 # own gap-reconstruction sees no movement here and stays quiet.
@@ -1995,6 +2021,17 @@ def sync_now(wake: bool = Query(False), session: Session = Depends(get_session))
                                     (sync_mod.estimate_arrival_tail(
                                         _json.loads(last_raw), close_ts) or (0.0, 0.0))[1]
                                 ),
+                                # The speed the estimate was computed from.
+                                # Carried purely so the calibration sample can
+                                # record it (see ArrivalTailSample): the model
+                                # is speed times window, so a pair of estimate
+                                # and measurement says nothing about the window
+                                # unless the speed is known too. Read here
+                                # rather than reconstructed later, because by
+                                # the time the measurement arrives this
+                                # snapshot is long gone.
+                                "speed_kmh": (
+                                    _json.loads(last_raw).get("speed_kmh") or 0.0),
                             }),
                         )
                         notifications.fire_webhook(
@@ -3247,6 +3284,78 @@ def repair_trip_boundary(
                 d.avg_speed_kmh = round(dist / (d.duration_min / 60.0), 1)
         session.commit()
     return {"applied": apply, **plan}
+
+
+@router.get("/arrival-estimates")
+def arrival_estimates(
+    limit: int = Query(100),
+    session: Session = Depends(get_session),
+):
+    """The arrival model's predictions scored against what was measured.
+
+    Exists to answer one question with evidence instead of argument: how long
+    does this car actually go on driving after the last reading that saw it?
+    That number is the model's only free parameter, it shipped set to the
+    poller's unreachable timeout (three minutes) because nothing better was
+    known, and the first trip to test it came back 51% long.
+
+    ``implied_sec`` is the whole point. The model is speed x window, so with
+    the last-seen speed and the measured distance the window the car really
+    took falls straight out — per sample, no fitting required. The suggested
+    parameter is the median of those, which is deliberately not the mean: a
+    single arrival into a long underground spiral would drag a mean anywhere,
+    and a few dozen ordinary arrivals should not be outvoted by it.
+
+    Reported only once there are enough samples to mean something. Below that
+    the rows are still returned — looking at them is fine, it is *acting* on
+    three of them that is the mistake this endpoint exists to prevent.
+    """
+    MIN_SAMPLES_TO_SUGGEST = 12
+    rows = session.scalars(
+        select(ArrivalTailSample).order_by(ArrivalTailSample.ts.desc()).limit(limit)
+    ).all()
+    out, implied = [], []
+    for r in rows:
+        # A window can only be implied where there was a speed to divide by.
+        # measured 0 is fine and meaningful (the car had arrived); speed 0 is
+        # not, since the model declined to predict at all.
+        sec = (r.measured_km / (r.speed_kmh / 2.0) * 3600.0
+               if r.speed_kmh else None)
+        if sec is not None:
+            implied.append(sec)
+        out.append({
+            "ts": r.ts.isoformat(timespec="minutes"),
+            "drive_id": r.drive_id,
+            "est_km": r.est_km,
+            "measured_km": r.measured_km,
+            "error_km": round(r.est_km - r.measured_km, 3),
+            "speed_kmh": r.speed_kmh,
+            "est_sec": round(r.est_sec, 1) if r.est_sec else r.est_sec,
+            "implied_sec": round(sec, 1) if sec is not None else None,
+            "elapsed_min": r.elapsed_min,
+            "reason": r.reason,
+        })
+    summary = {
+        "samples": len(out),
+        "with_speed": len(implied),
+        "current_window_sec": sync_mod.ARRIVAL_EST_MAX_MIN * 60.0,
+        "min_samples_to_suggest": MIN_SAMPLES_TO_SUGGEST,
+    }
+    if implied:
+        # 0.5, not 50 — percentile() takes a fraction (see analysis/__init__).
+        summary["median_implied_sec"] = round(percentile(implied, 0.5), 1)
+        summary["mean_error_km"] = round(
+            sum(r["error_km"] for r in out) / len(out), 3)
+        # Positive means the model predicts more ground than the car covers.
+        summary["over_predicting"] = summary["mean_error_km"] > 0
+    if len(implied) >= MIN_SAMPLES_TO_SUGGEST:
+        summary["suggested_window_sec"] = summary["median_implied_sec"]
+    else:
+        summary["note"] = (
+            f"{len(implied)} of {MIN_SAMPLES_TO_SUGGEST} samples needed before "
+            f"a window is suggested. One arrival re-tuned this model wrongly "
+            f"once already.")
+    return {"summary": summary, "samples": out}
 
 
 @router.get("/estimated-tails")

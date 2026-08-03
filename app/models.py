@@ -293,6 +293,57 @@ class SecurityEvent(Base):
     center_display_state: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
 
+class ArrivalTailSample(Base):
+    """One estimate of an unseen arrival, paired with what it turned out to be.
+
+    The arrival estimate (sync.estimate_arrival_tail) is a model with a free
+    parameter — how long a car goes on driving after the last reading that saw
+    it. It shipped set to three minutes, which is the poller's own unreachable
+    timeout rather than anything about the car, and the first trip that could
+    be checked said the model ran 51% long: 0.483 km predicted, 0.320 driven.
+
+    One trip is not a calibration. Re-tuning on it produced a model that read
+    70% short on that same trip, which is what re-tuning on a single point
+    tends to do. So this records the pairs instead, and the parameter waits
+    until there are enough of them to mean something.
+
+    Written only where the pairing is real: the moment a later poll can measure
+    that exact stretch (see the fold-in in routes._process_vehicle). If the car
+    is already driving again when next seen, the odometer covers the new trip
+    too and the tail is unmeasurable — no row, rather than a row that quietly
+    conflates the two.
+
+    ``measured_km`` of 0.0 is a genuine and important observation: the last
+    reading really was the arrival, and any estimate over it was invented. It
+    is not a missing value.
+    """
+
+    __tablename__ = "arrival_tail_samples"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    vehicle_id: Mapped[int] = mapped_column(ForeignKey("vehicles.id"), index=True)
+    drive_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
+    # When the measurement landed, not when the trip closed.
+    ts: Mapped[datetime] = mapped_column(DateTime, index=True)
+
+    # The two halves of the pair. est_km is 0.0 when the model declined to
+    # estimate at all — also a prediction, and one worth scoring: a declined
+    # estimate against a real tail is the model failing in the quiet direction.
+    est_km: Mapped[float] = mapped_column(Float, default=0.0)
+    measured_km: Mapped[float] = mapped_column(Float, default=0.0)
+
+    # The inputs the estimate was computed from, so a replacement parameter can
+    # be fitted offline against these rows without needing the raw snapshots
+    # back. speed_kmh is the one that matters: the model is speed times window,
+    # so with the pair and the speed the implied true window falls out.
+    speed_kmh: Mapped[float | None] = mapped_column(Float, nullable=True)
+    est_sec: Mapped[float | None] = mapped_column(Float, nullable=True)
+    # How long after the close the measuring poll arrived, and which report
+    # closed the trip — both bear on how much the measurement can be trusted.
+    elapsed_min: Mapped[float | None] = mapped_column(Float, nullable=True)
+    reason: Mapped[str] = mapped_column(String(16), default="")
+
+
 class Charge(Base):
     """A single charging session."""
 

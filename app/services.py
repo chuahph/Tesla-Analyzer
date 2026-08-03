@@ -5,7 +5,8 @@ from sqlalchemy import delete, update
 
 from . import pricing_prefs, state
 from .config import get_settings
-from .models import BatteryReading, Charge, Drive, ServiceRecord, Vehicle
+from .models import (ArrivalTailSample, BatteryReading, Charge, Drive,
+                     SecurityEvent, ServiceRecord, Vehicle)
 
 
 def _wipe(session) -> None:
@@ -17,6 +18,14 @@ def _wipe(session) -> None:
     session.execute(delete(Charge))
     session.execute(delete(BatteryReading))
     session.execute(delete(ServiceRecord))
+    # Both of these were added after the rule above was written and neither was
+    # added here, which is how a rule stated once and enforced nowhere fails.
+    # SecurityEvent carries the Sentry correlation experiment and
+    # ArrivalTailSample the arrival model's calibration set — a relink would
+    # have re-attached both to whichever car next landed on the freed id,
+    # quietly poisoning two datasets whose whole value is that they are real.
+    session.execute(delete(SecurityEvent))
+    session.execute(delete(ArrivalTailSample))
     session.execute(delete(Vehicle))
     session.commit()
 
