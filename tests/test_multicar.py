@@ -1190,7 +1190,13 @@ def test_a_stale_arrival_keeps_its_distance_but_not_the_parked_energy(monkeypatc
 
     The odometer is measured at any staleness, so the distance still folds in;
     the SoC drop across a two-hour park is not this drive's energy and must
-    not."""
+    not.
+
+    But "not the park's energy" is not "no energy". The 0.4 km is ground the
+    car really covered, and giving the trip those metres for free dilutes
+    Wh/km by exactly the folded share — the defect energy_for_blind_distance
+    exists to prevent. The right answer is the third one: the blind stretch
+    priced at the trip's OWN measured efficiency."""
     closed_id, dist_before, energy_before, drives, logged = _run_asleep_close(
         monkeypatch, _AsleepThenWakesHoursLaterClient)
     assert logged == 0
@@ -1198,7 +1204,15 @@ def test_a_stale_arrival_keeps_its_distance_but_not_the_parked_energy(monkeypatc
     closed = drives[0]
     assert closed.id == closed_id
     assert closed.distance_km == 12.4          # distance: measured, folds in
-    assert closed.energy_used_kwh == pytest.approx(energy_before, abs=0.011)
+    # 12.0 km measured at 3.0 kWh is 250 Wh/km; 0.4 km more of the same drive
+    # is +0.1 kWh. Held to the ratio rather than a literal so the assertion
+    # states the rule, not one arithmetic outcome.
+    assert closed.energy_used_kwh == pytest.approx(
+        energy_before * closed.distance_km / dist_before, abs=0.011)
+    # The point of the gate, still enforced: the measured SoC/range drop over
+    # those two parked hours is ~0.2 kWh — twice the drive's own rate for the
+    # same metres — and none of that standby drain may reach the trip.
+    assert closed.energy_used_kwh < energy_before + 0.15
 
 
 class _SlowlyArrivesThenDrivesAgainClient(_AsleepThenDrivesAgainClient):

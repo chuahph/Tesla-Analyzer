@@ -1403,12 +1403,8 @@ def _process_vehicle(
                 # revoked it, so the trip is short by the full stretch from the
                 # marker's anchor to here. Subtracting the estimate and then
                 # adding only the remainder credited the tail to nobody.
-                est_back = closed_drive.end_est_km or 0.0
-                est_kwh = 0.0
-                if est_back and closed_drive.energy_used_kwh and closed_drive.distance_km:
-                    est_kwh = (closed_drive.energy_used_kwh
-                               * est_back / closed_drive.distance_km)
-                _retract_estimated_tail(closed_drive, est_back, est_sec)
+                _retract_estimated_tail(
+                    closed_drive, closed_drive.end_est_km or 0.0, est_sec)
                 closed_drive.distance_km = round(closed_drive.distance_km + raw_moved, 1)
                 # Distance alone isn't the whole trip. wh_per_km is derived
                 # (energy / distance) and soc_used_pct is derived from the
@@ -1447,17 +1443,33 @@ def _process_vehicle(
                     # fresh end_soc against a stale energy figure would leave
                     # the two disagreeing about the same trip.
                     closed_drive.end_soc = snap["soc"]
-                elif est_kwh:
-                    # "Stays as measured at close time" has to be arranged now
-                    # that the retraction above took the estimated tail's share
-                    # of the energy out with its kilometres. Putting exactly
-                    # that share back leaves the figure where the close left
-                    # it, which is what this branch means to do: the tail was
-                    # priced at the trip's own Wh/km, and that remains a better
-                    # number than a measurement contaminated by hours of
-                    # standby drain.
+                else:
+                    # Refusing the measurement is not the same as refusing to
+                    # account for the kilometres. The distance folded in above
+                    # regardless — the odometer is measured at any staleness —
+                    # so leaving energy untouched here grows the numerator's
+                    # denominator and nothing else, diluting Wh/km by exactly
+                    # the folded share. That is the identical defect
+                    # energy_for_blind_distance was written for and that the
+                    # sustained-offline top-up already had once (+33% distance
+                    # against +0.00 kWh, Wh/km down a quarter); this path was
+                    # the last place still carrying it.
+                    #
+                    # So the blind stretch gets priced at the trip's own
+                    # measured efficiency, which is what "the SoC drop across a
+                    # two-hour park is not this drive's energy" actually calls
+                    # for: not zero, but the drive's own rate over ground the
+                    # drive really covered. The estimated tail's share, taken
+                    # out by the retraction above, comes back through the same
+                    # arithmetic rather than separately — it is blind distance
+                    # by the same definition. Refused outright once the blind
+                    # part is more than half the trip (BLIND_DISTANCE_MAX_SHARE),
+                    # where holding Wh/km constant would amplify an error
+                    # instead of extending a measurement.
                     closed_drive.energy_used_kwh = round(
-                        closed_drive.energy_used_kwh + est_kwh, 2)
+                        sync_mod.energy_for_blind_distance(
+                            closed_drive.energy_used_kwh,
+                            closed_drive.distance_km, raw_moved), 2)
                 # end_time was anchored to the marker's own timestamp — the
                 # last reading *before* the dead zone, same stale anchor
                 # distance had. Folding in the distance without also moving
