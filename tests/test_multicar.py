@@ -1985,3 +1985,39 @@ def test_repair_arrival_tail_takes_back_only_what_the_estimate_credited(monkeypa
     finally:
         settings.app_passcode = old
         _reset_to_demo()
+
+
+def test_estimated_tails_lists_what_to_check_ranked_by_distortion(monkeypatch):
+    """Making one trip's estimate visible was half the job: end_est_km answers
+    "is THIS trip estimated" and nothing answered "which of them are". Ranked
+    by share rather than kilometres, because a fixed tail on a short trip
+    distorts its Wh/km far more than the same tail on a long one, and Wh/km is
+    what these figures are read through."""
+    from app.models import Drive
+
+    settings = get_settings()
+    old = settings.app_passcode
+    settings.app_passcode = ""
+    try:
+        with SessionLocal() as s:
+            rows = s.query(Drive).order_by(Drive.id).limit(3).all()
+            big, small, clean = rows
+            big.distance_km, big.end_est_km = 25.0, 0.5        # 2.0%
+            small.distance_km, small.end_est_km = 2.0, 0.5     # 25.0%
+            clean.end_est_km = None
+            s.commit()
+            big_id, small_id, clean_id = big.id, small.id, clean.id
+
+        with TestClient(app) as client:
+            body = client.get("/api/estimated-tails").json()
+
+        ids = [t["drive_id"] for t in body["trips"]]
+        assert clean_id not in ids            # a measured arrival isn't listed
+        assert ids.index(small_id) < ids.index(big_id), (
+            "the same 0.5 km distorts the 2 km trip more, so it ranks first")
+        row = next(t for t in body["trips"] if t["drive_id"] == small_id)
+        assert row["estimated_share_pct"] == 25.0
+        assert row["distance_if_no_tail"] == 1.5
+    finally:
+        settings.app_passcode = old
+        _reset_to_demo()

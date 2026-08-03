@@ -3249,6 +3249,59 @@ def repair_trip_boundary(
     return {"applied": apply, **plan}
 
 
+@router.get("/estimated-tails")
+def estimated_tails(
+    limit: int = Query(50),
+    session: Session = Depends(get_session),
+):
+    """Every trip still carrying an estimated arrival tail, worst share first.
+
+    end_est_km made a single trip's estimate visible; this makes the set of
+    them visible. Without it the only way to ask "which of my trips read long?"
+    is to open them one at a time, which is how trip 332 went a day unnoticed.
+
+    Sorted by the share of the trip that is estimated rather than the raw
+    kilometres: 0.5 km on a 2 km trip distorts its Wh/km twelve times as much
+    as the same 0.5 km on a 25 km one, and Wh/km is what these figures are
+    mostly read through.
+
+    Read-only. Each row carries what repair_arrival_tail needs, so checking one
+    against the car's own trip meter and correcting it are the same two steps.
+    """
+    rows = session.scalars(
+        select(Drive).where(Drive.end_est_km.isnot(None))
+        .order_by(Drive.start_time.desc()).limit(max(limit, 1) * 4)
+    ).all()
+    out = []
+    for d in rows:
+        est = d.end_est_km or 0.0
+        if est <= 0 or not d.distance_km:
+            continue
+        out.append({
+            "drive_id": d.id,
+            "route": f"{d.start_location} → {d.end_location}",
+            "start_time": d.start_time.isoformat(timespec="minutes"),
+            "distance_km": d.distance_km,
+            "end_est_km": round(est, 3),
+            "estimated_share_pct": round(est / d.distance_km * 100.0, 1),
+            # What the trip would read if the whole estimate turned out to be
+            # wrong — the other end of the range the true figure sits in, so
+            # the car's own number can be placed against both.
+            "distance_if_no_tail": round(d.distance_km - est, 1),
+            "wh_per_km": (round(d.energy_used_kwh * 1000.0 / d.distance_km, 1)
+                          if d.energy_used_kwh else None),
+        })
+    out.sort(key=lambda r: r["estimated_share_pct"], reverse=True)
+    return {
+        "count": len(out[:limit]),
+        # An estimate is not a defect — it is the honest reading for an arrival
+        # no poll could see. This lists what to CHECK, not what to fix.
+        "note": "Estimated distance awaiting a measurement. Check against the "
+                "car's own trip meter; correct with /api/repair-arrival-tail.",
+        "trips": out[:limit],
+    }
+
+
 @router.api_route("/repair-arrival-tail", methods=["GET", "POST"])
 def repair_arrival_tail(
     drive_id: int = Query(...),
@@ -3319,6 +3372,16 @@ def repair_arrival_tail(
     # description of it that can drift from it.
     target = drive if apply else _DetachedDrive(before)
     _retract_estimated_tail(target, km, sec)
+    # _retract_estimated_tail declines rather than raises when the retraction
+    # would consume the whole trip — right for the automatic caller, which
+    # should leave a row alone rather than mangle it, but wrong to report as a
+    # successful repair. Caught here so "applied: true" always means something
+    # changed.
+    if target.distance_km == before["distance_km"]:
+        raise HTTPException(
+            409, f"That would take {km} km off a {before['distance_km']} km "
+                 f"trip, which is the whole of it. Refusing rather than "
+                 f"leaving a trip with no distance.")
     after = {
         "distance_km": target.distance_km, "energy_used_kwh": target.energy_used_kwh,
         "duration_min": target.duration_min, "avg_speed_kmh": target.avg_speed_kmh,
