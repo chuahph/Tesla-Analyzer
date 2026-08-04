@@ -213,6 +213,42 @@ def _degradation_pct(session: Session, vehicle: Vehicle, settings) -> float | No
     return health["degradation_pct"] if health.get("available") else None
 
 
+# Charges needed before their median may override the spec-minus-degradation
+# inference. Five is not a statistical threshold, it is the point at which a
+# median has something to be a median OF: one wrong session (interrupted and
+# resumed, an SoC jump while plugged in) can no longer sit in the middle.
+CAPACITY_MIN_CHARGES = 5
+
+
+def _capacity_disagrees(measured: dict, derived: float) -> bool:
+    """Whether the charges' median differs from the inference by more than the
+    charges themselves scatter.
+
+    The same test the UI uses to decide whether to warn (see
+    app.js capacityCheckLine), deliberately shared rather than restated: a
+    disagreement the app is prepared to flag in amber is a disagreement it
+    should be prepared to act on, and two copies of one threshold would
+    eventually let it warn about something it was quietly ignoring.
+    """
+    if measured["count"] < CAPACITY_MIN_CHARGES:
+        return False
+    return abs(measured["median_kwh"] - derived) > max(measured["spread_kwh"] / 2.0, 1.0)
+
+
+def _charge_measured_capacity(session: Session, vehicle: Vehicle) -> dict | None:
+    """What this car's own charge sessions say its usable pack is, or None.
+
+    Whole history rather than a recent window: a charge big enough to calibrate
+    from needs ~15% of SoC gain, and those are rare enough that a short window
+    usually has none.
+    """
+    charges = session.scalars(
+        select(Charge).where(Charge.vehicle_id == vehicle.id).order_by(Charge.start_time)
+    ).all()
+    out = battery_analysis.implied_capacity(list(charges))
+    return out if out.get("available") else None
+
+
 def _usable_capacity(session: Session, vehicle: Vehicle, settings) -> tuple[float, str]:
     """Usable pack capacity (kWh) for turning a drive's range/SoC delta into
     kWh, plus where it came from.
@@ -235,10 +271,33 @@ def _usable_capacity(session: Session, vehicle: Vehicle, settings) -> tuple[floa
         return settings.battery_capacity_kwh, "override"
     spec = battery_analysis.usable_capacity_for(
         vehicle.model, vehicle.trim, vin_mod.decode(vehicle.vin).get("year"))
+    measured = _charge_measured_capacity(session, vehicle)
     if spec:
         degradation = _degradation_pct(session, vehicle, settings)
         if degradation is not None:
-            return round(spec * (1 - degradation / 100.0), 1), "spec - degradation"
+            derived = round(spec * (1 - degradation / 100.0), 1)
+            # Spec minus degradation is an inference from two estimates: a
+            # factory figure for the variant, and a degradation percentage read
+            # off range projections. The charges are a measurement — Tesla's own
+            # charge meter against its own SoC — and owe nothing to any
+            # assumption of ours. Where enough of them agree closely and still
+            # disagree with the inference, the measurement wins.
+            #
+            # This used to compute that comparison, show it in amber, and then
+            # go on using the inference anyway. Measured live: four independent
+            # methods (two trips checked against the car's own screen, one
+            # charge's endpoints, the curve fit over five charges) landed in
+            # 67.4-67.9 kWh while the app ran on 69.2 and flagged itself.
+            #
+            # Guarded by the same test the flag uses, so the bar for acting is
+            # the bar already set for warning: the gap has to exceed the
+            # samples' own scatter. A wide spread means the evidence is not
+            # there yet however far the median sits from the inference — which
+            # is exactly the noisy-charge case this preference order was
+            # originally written to protect against.
+            if measured is not None and _capacity_disagrees(measured, derived):
+                return measured["median_kwh"], "measured charges"
+            return derived, "spec - degradation"
     if vehicle.battery_capacity_kwh and vehicle.battery_capacity_kwh != 75.0:
         return vehicle.battery_capacity_kwh, "measured"
     return (spec or vehicle.battery_capacity_kwh or 75.0), ("variant spec" if spec else "default")

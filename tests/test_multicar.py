@@ -2307,3 +2307,76 @@ def test_repair_trip_overlap_takes_back_only_the_doubled_ground(monkeypatch):
     finally:
         settings.app_passcode = old
         _reset_to_demo()
+
+
+def _capacity_charge(start_soc, end_soc, kwh, ctype="AC", implied=None):
+    from datetime import datetime as _dt
+
+    from app.models import Charge
+    return Charge(
+        start_time=_dt(2026, 8, 1, 2, 0), end_time=_dt(2026, 8, 1, 10, 0),
+        duration_min=480.0, start_soc=start_soc, end_soc=end_soc,
+        energy_added_kwh=kwh, charge_type=ctype, implied_capacity_kwh=implied,
+        capacity_samples=60 if implied else None, location="Home", cost=0.0,
+    )
+
+
+def test_measured_charges_override_the_inferred_capacity(monkeypatch):
+    """The app computed the charge-derived capacity, showed it in amber when it
+    disagreed, and then went on using spec-minus-degradation anyway. Four
+    independent methods put this car at 67.4-67.9 kWh while it ran on 69.2 and
+    flagged itself.
+
+    Spec minus degradation is an inference from two estimates; the charges are
+    Tesla's own charge meter against its own SoC. Where enough charges agree
+    closely and still disagree with the inference, the measurement wins."""
+    from app.api.routes import _usable_capacity
+    from app.models import Vehicle as _V
+
+    settings = get_settings()
+    old = settings.app_passcode
+    settings.app_passcode = ""
+    try:
+        with TestClient(app) as client:      # startup seeds the vehicle
+            assert client
+            with SessionLocal() as s:
+                v = s.query(_V).first()
+                v.model, v.trim = "Model 3", "74D Nova 19"
+                # The seeded demo history has charges of its own; this test is
+                # about which SOURCE wins, so the sample set has to be the one
+                # the test states.
+                from app.models import Charge as _C
+                s.query(_C).delete()
+                # Five tight curve fits around 67.9, against a 69.2 inference.
+                for i in range(5):
+                    c = _capacity_charge(19, 100, 57.7, implied=67.5 + i * 0.2)
+                    c.vehicle_id = v.id
+                    s.add(c)
+                s.commit()
+                monkeypatch.setattr(
+                    "app.api.routes._degradation_pct", lambda *a, **k: 7.7)
+                kwh, source = _usable_capacity(s, v, settings)
+                assert source == "measured charges"
+                assert kwh == pytest.approx(67.9, abs=0.05)
+
+                # Same median, but scattered: the evidence is not there and the
+                # inference stands. This is the noisy-charge case the original
+                # preference order was written to protect against.
+                s.query(_C).delete()
+                for cap in (60.0, 64.0, 67.9, 72.0, 76.0):
+                    c = _capacity_charge(19, 100, 57.7, implied=cap)
+                    c.vehicle_id = v.id
+                    s.add(c)
+                s.commit()
+                _, source = _usable_capacity(s, v, settings)
+                assert source == "spec - degradation"
+
+                # And an explicit override still beats everything.
+                settings.battery_capacity_kwh = 70.0
+                try:
+                    assert _usable_capacity(s, v, settings)[1] == "override"
+                finally:
+                    settings.battery_capacity_kwh = 0.0
+    finally:
+        settings.app_passcode = old
+        _reset_to_demo()
