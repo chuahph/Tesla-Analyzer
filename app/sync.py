@@ -664,9 +664,34 @@ def _idle_adjusted_kwh(energy_kwh, idle_min, out_temp_c=None):
 # extended.
 BLIND_DISTANCE_MAX_SHARE = 0.5
 
+# How much more energy a blind stretch at the DEPARTURE takes than the trip's
+# own average, because it is not an average piece of the trip: it is the first
+# minutes of one. The cabin is being pulled down from a hot parked car, the
+# drivetrain is cold, and the car is crawling out of a car park — all of it
+# front-loaded, and none of it captured by a rate averaged over the whole drive.
+#
+# Measured against the car's own screen, comparing FRACTION of pack consumed
+# rather than kWh, so the figure owes nothing to the capacity constant:
+#
+#   trip 332   0% blind   +0.6%   (control: no blind distance, no deficit)
+#   trip 334   1.7%       -0.9%   implies 1.54x
+#   trip 333   9.2%       -5.2%   implies 1.56x
+#
+# Two independent trips agreeing to two decimal places, monotonic in the blind
+# share, with a zero-blind control that shows no deficit at all. 334's figure
+# is a lower bound, since part of its shortfall is an uncounted arrival tail.
+#
+# Deliberately NOT applied at the arrival end. A blind arrival is the last
+# minutes of a drive, where the same physics runs the other way: cabin already
+# cool, drivetrain warm, and the car rolling to a stop. Holding the trip
+# average there is the conservative choice and there is no measurement yet
+# saying otherwise.
+DEPARTURE_BLIND_LOAD = 1.55
+
 
 def energy_for_blind_distance(energy_kwh: float, distance_km: float,
-                              blind_km: float) -> float:
+                              blind_km: float,
+                              departure_blind_km: float = 0.0) -> float:
     """Trip energy with the folded-in distance's own consumption added back.
 
     Both trip boundaries can pull odometer distance into a trip without the
@@ -688,12 +713,26 @@ def energy_for_blind_distance(energy_kwh: float, distance_km: float,
     holding Wh/km constant. That assumes the blind stretch was driven like the
     rest of the trip, which is why it is refused once the blind part is a
     large share of the whole.
+
+    ``departure_blind_km`` is the portion of ``blind_km`` that sits at the
+    START of the trip, and it is priced higher (DEPARTURE_BLIND_LOAD) because a
+    trip's opening minutes genuinely cost more than its average. Pass it and
+    the rest is treated as arrival-side, at the flat average.
+
+    The refusal threshold still looks at the total blind distance, not the
+    weighted one: the question it asks is how much of the trip is being
+    inferred rather than measured, and weighting cannot add measurements.
     """
     measured = distance_km - blind_km
     if (not energy_kwh or energy_kwh <= 0 or blind_km <= 0
             or measured <= 0 or blind_km > distance_km * BLIND_DISTANCE_MAX_SHARE):
         return energy_kwh
-    return energy_kwh * distance_km / measured
+    departure = min(max(departure_blind_km, 0.0), blind_km)
+    # The blind distance re-expressed as the equivalent amount of AVERAGE
+    # driving, so one flat rate can still price it: a departure kilometre
+    # counts for 1.55, an arrival kilometre for 1.
+    weighted = departure * DEPARTURE_BLIND_LOAD + (blind_km - departure)
+    return energy_kwh * (measured + weighted) / measured
 
 
 def trim_standby_kwh(energy_kwh: float, distance_km: float, trim_sec: float,
@@ -791,11 +830,14 @@ def _drive_from(start: dict, cur: dict, capacity_kwh: float, max_speed: float = 
     # priced at the trip's own efficiency rather than left at zero, which
     # would dilute Wh/km by exactly the folded share (see
     # energy_for_blind_distance).
+    # Split by which end it came from: the departure share costs more than the
+    # trip average (see DEPARTURE_BLIND_LOAD), the arrival share does not.
+    start_blind = (start.get("start_recovered_km") or 0.0
+                   if not start.get("start_energy_recovered") else 0.0)
     energy = energy_for_blind_distance(
         energy, distance,
-        (start.get("start_recovered_km") or 0.0
-         if not start.get("start_energy_recovered") else 0.0)
-        + (cur.get("end_folded_km") or 0.0),
+        start_blind + (cur.get("end_folded_km") or 0.0),
+        departure_blind_km=start_blind,
     )
     # A real drive can't average below ~40 Wh/km over its whole distance — that
     # means the range reading was refilled mid-trip (a charge or BMS recalibration

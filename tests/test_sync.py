@@ -2190,3 +2190,62 @@ def test_a_departure_recovery_keeps_a_known_fix_when_prev_has_none():
     _, _, trip, _ = step(p1, p2)
     assert trip["odo_km"] == p1["odo_km"]
     assert (trip["lat"], trip["lon"]) == (5.3494, 100.3095)
+
+
+def test_a_blind_departure_costs_more_than_the_trip_average():
+    """A blind stretch at the START of a trip is not an average piece of it —
+    it is the first minutes, with the cabin being pulled down from a hot park,
+    a cold drivetrain, and a crawl out of a car park. Pricing it at the trip's
+    average understates the trip by the blind share times the difference.
+
+    Measured against the car's own percent-consumed (which cancels the capacity
+    constant): a trip with no blind distance read +0.6%, one with 1.7% blind
+    read -0.9%, one with 9.2% blind read -5.2%. The last two independently
+    imply 1.54x and 1.56x."""
+    from app.sync import DEPARTURE_BLIND_LOAD, energy_for_blind_distance
+
+    # 10 km trip, 1 km of it blind, 2.0 kWh measured over the other 9.
+    flat = energy_for_blind_distance(2.0, 10.0, 1.0)
+    dep = energy_for_blind_distance(2.0, 10.0, 1.0, departure_blind_km=1.0)
+    assert flat == pytest.approx(2.0 * 10.0 / 9.0)          # unchanged default
+    assert dep == pytest.approx(2.0 * (9.0 + DEPARTURE_BLIND_LOAD) / 9.0)
+    assert dep > flat
+
+    # An arrival-side blind stretch keeps the flat rate: the same physics runs
+    # the other way at the end of a drive, and nothing has measured it.
+    assert energy_for_blind_distance(2.0, 10.0, 1.0, departure_blind_km=0.0) == flat
+
+    # Mixed: only the departure share is loaded.
+    both = energy_for_blind_distance(2.0, 10.0, 1.0, departure_blind_km=0.4)
+    assert both == pytest.approx(2.0 * (9.0 + 0.4 * DEPARTURE_BLIND_LOAD + 0.6) / 9.0)
+    assert flat < both < dep
+
+    # The refusal threshold still measures how much of the trip is INFERRED
+    # rather than measured, so it reads the real blind distance, not the
+    # weighted one — weighting cannot add measurements.
+    assert energy_for_blind_distance(1.0, 10.0, 6.0, departure_blind_km=6.0) == 1.0
+    # And a departure share can never exceed the blind distance it is part of.
+    assert (energy_for_blind_distance(2.0, 10.0, 1.0, departure_blind_km=99.0)
+            == pytest.approx(dep))
+
+
+def test_a_recovered_departure_prices_its_blind_kilometres_high():
+    """End to end through _drive_from: the departure recovery pulls the anchor
+    back over ground with no SoC/range reading of its own, and that ground now
+    costs 1.55x rather than the trip average. Trip 333 read 5.2% under the car
+    on exactly this shape."""
+    from app.sync import DEPARTURE_BLIND_LOAD, _drive_from
+
+    def trip(recovered):
+        start = {"ts": T0, "odo_km": 8000.0, "soc": 80, "range_km": 400.0,
+                 "max_speed": 60.0, "idle_min": 0.0, "still_run": 0.0,
+                 "still_since": None, "start_recovered_km": recovered,
+                 "start_energy_recovered": False}
+        stop = snap(T0 + 1800, 8010.0, 77, shift="P", speed=0.0, range_km=385.0)
+        return _drive_from(start, stop, 70.0, 60.0, 0.0, idle_tracked=True)
+
+    clean, blind = trip(0.0), trip(1.0)
+    assert clean["distance_km"] == blind["distance_km"] == 10.0
+    # 9 km carried a reading; the blind km is priced at 1.55 of that rate.
+    assert blind["energy_used_kwh"] == pytest.approx(
+        clean["energy_used_kwh"] * (9.0 + DEPARTURE_BLIND_LOAD) / 9.0, abs=0.01)
