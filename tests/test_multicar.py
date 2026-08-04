@@ -2383,3 +2383,62 @@ def test_a_gap_spanning_two_trips_is_not_charged_to_the_earlier_one(monkeypatch)
     finally:
         settings.app_passcode = old
         _reset_to_demo()
+
+
+def test_clearing_a_duplicated_loss_refuses_to_erase_a_real_one(monkeypatch):
+    """Trip 334 claimed end_lost_km 0.425 while trip 335 recovered the same
+    0.425. Clearing that is right; clearing a loss no one else accounts for
+    would destroy the only record of a genuine boundary error, which is the
+    opposite of what the field is for. So the tool re-derives the duplication
+    from the two rows and refuses when it does not hold."""
+    from app.models import Drive
+
+    settings = get_settings()
+    old = settings.app_passcode
+    settings.app_passcode = ""
+    try:
+        with TestClient(app) as client:
+            with SessionLocal() as s:
+                a, b = s.query(Drive).order_by(Drive.start_time).limit(2).all()
+                a.end_odo_km, a.end_lost_km = 28974.998, 0.425
+                b.start_odo_km, b.start_recovered_km = 28974.998, 0.425
+                s.commit()
+                aid, bid = a.id, b.id
+
+            listed = client.get("/api/clear-duplicated-loss").json()
+            row = next(c for c in listed["candidates"] if c["drive_id"] == aid)
+            assert row["next_drive_id"] == bid
+            assert row["end_lost_km"] == 0.425
+            with SessionLocal() as s:
+                assert s.get(Drive, aid).end_lost_km == 0.425   # listing writes nothing
+
+            # A genuine loss: the next trip did NOT recover it. Refused.
+            with SessionLocal() as s:
+                s.get(Drive, bid).start_recovered_km = 0.0
+                s.commit()
+            assert client.get("/api/clear-duplicated-loss",
+                              params={"drive_id": aid}).status_code == 409
+            # Nor when the two trips don't share a boundary at all.
+            with SessionLocal() as s:
+                nb = s.get(Drive, bid)
+                nb.start_recovered_km, nb.start_odo_km = 0.425, 28970.0
+                s.commit()
+            assert client.get("/api/clear-duplicated-loss",
+                              params={"drive_id": aid}).status_code == 409
+
+            with SessionLocal() as s:
+                nb = s.get(Drive, bid)
+                nb.start_odo_km = 28974.998
+                s.commit()
+            r = client.get("/api/clear-duplicated-loss",
+                           params={"drive_id": aid, "apply": "true"})
+            assert r.status_code == 200 and r.json()["applied"] is True
+
+        with SessionLocal() as s:
+            assert s.get(Drive, aid).end_lost_km is None
+            # The next trip keeps its record: the ground is still accounted
+            # for, once, by the trip that actually covered it.
+            assert s.get(Drive, bid).start_recovered_km == 0.425
+    finally:
+        settings.app_passcode = old
+        _reset_to_demo()

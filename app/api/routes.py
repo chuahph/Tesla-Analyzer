@@ -3324,6 +3324,82 @@ def repair_trip_boundary(
     return {"applied": apply, **plan}
 
 
+@router.api_route("/clear-duplicated-loss", methods=["GET", "POST"])
+def clear_duplicated_loss(
+    drive_id: int | None = Query(None),
+    apply: bool = Query(False),
+    session: Session = Depends(get_session),
+):
+    """Clear an end_lost_km that the FOLLOWING trip already accounts for.
+
+    A trip closed offline could be stamped with the whole odometer movement
+    since its last reading, even when the next contact caught the car already
+    driving — in which case that movement spans two trips and the next one's
+    departure recovery claims the same ground. Both then describe it, one as
+    lost and one as recovered. Fixed going forward in 41db2e3; rows written
+    before that keep the claim.
+
+    Deliberately not a field-blanker. It re-derives the duplication from the
+    two rows and refuses when it does not hold: the next trip must start
+    exactly where this one ended, and must have recovered at least as much as
+    this one claims to have lost. A trip that really did lose distance keeps
+    saying so — erasing that would destroy the only record of a genuine
+    boundary error, which is the opposite of what this instrumentation is for.
+
+    With no drive_id, reports every candidate and changes nothing.
+    """
+    def candidate(d: Drive) -> dict | None:
+        lost = d.end_lost_km or 0.0
+        if lost <= 0 or d.end_odo_km is None:
+            return None
+        nxt = session.scalars(
+            select(Drive).where(Drive.vehicle_id == d.vehicle_id,
+                                Drive.start_time > d.start_time)
+            .order_by(Drive.start_time).limit(1)
+        ).first()
+        if nxt is None or nxt.start_odo_km is None:
+            return None
+        # Same boundary, and the next trip pulled back over at least the
+        # stretch this one calls lost. Either failing means the two rows are
+        # describing different ground and this is not a duplication.
+        if abs(nxt.start_odo_km - d.end_odo_km) > 0.002:
+            return None
+        if (nxt.start_recovered_km or 0.0) + 0.002 < lost:
+            return None
+        return {
+            "drive_id": d.id,
+            "route": f"{d.start_location} → {d.end_location}",
+            "end_lost_km": lost,
+            "next_drive_id": nxt.id,
+            "next_start_recovered_km": nxt.start_recovered_km,
+            "shared_odo_km": d.end_odo_km,
+        }
+
+    if drive_id is None:
+        rows = session.scalars(
+            select(Drive).where(Drive.end_lost_km.isnot(None))
+            .order_by(Drive.start_time.desc()).limit(200)
+        ).all()
+        found = [c for c in (candidate(d) for d in rows) if c]
+        return {"applied": False, "count": len(found), "candidates": found,
+                "note": "Re-run with drive_id=<id>&apply=true to clear one."}
+
+    drive = session.get(Drive, drive_id)
+    if drive is None:
+        raise HTTPException(404, "No such trip.")
+    found = candidate(drive)
+    if found is None:
+        raise HTTPException(
+            409, f"Trip {drive_id}'s end_lost_km is not duplicated by the "
+                 f"following trip — either they don't share a boundary, or the "
+                 f"next trip didn't recover that ground. Refusing: this tool "
+                 f"clears a double-report, not a real loss.")
+    if apply:
+        drive.end_lost_km = None
+        session.commit()
+    return {"applied": apply, **found}
+
+
 @router.api_route("/repair-trip-overlap", methods=["GET", "POST"])
 def repair_trip_overlap(
     closed_id: int = Query(...),
