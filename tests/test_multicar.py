@@ -2307,3 +2307,79 @@ def test_repair_trip_overlap_takes_back_only_the_doubled_ground(monkeypatch):
     finally:
         settings.app_passcode = old
         _reset_to_demo()
+
+
+class _OfflineThenDrivingAgainClient(_OfflineThenParksWithCreepClient):
+    """The reconnect catches the car ALREADY DRIVING, 0.425 km on, half an hour
+    after the close — inside the merge window, but with the odometer covering
+    two trips at once and no reading between them to say where one ends."""
+
+    def vehicle_data(self, vid):
+        d = super().vehicle_data(vid)
+        if type(self).step >= 3:
+            d["drive_state"]["shift_state"] = "D"
+            d["drive_state"]["speed"] = 25
+            d["vehicle_state"]["odometer"] = ODO_KM_TO_MI(10012.425)
+        return d
+
+
+def test_a_gap_spanning_two_trips_is_not_charged_to_the_earlier_one(monkeypatch):
+    """Trips 334 and 335. The offline close logged end_lost_km 0.425 while the
+    next trip recorded start_recovered_km 0.425 for the same ground — the same
+    distance twice under two names, which is the defect this branch's own
+    comment exists to prevent. The time window did not catch it: the reconnect
+    was 27 minutes later, well inside the merge window.
+
+    What the window cannot see is that the car was already DRIVING. `moved`
+    then spans the arrival this trip was cut short of and the departure the
+    next one is in the middle of, and the real split (about 0.198 / 0.227) is
+    unknowable. None says that; a number asserts otherwise."""
+    import time as _time
+
+    from app import services, state
+    from app.models import Drive
+
+    settings = get_settings()
+    old = settings.app_passcode
+    settings.app_passcode = ""
+    _OfflineThenDrivingAgainClient.step = 0
+    try:
+        monkeypatch.setattr("app.tesla_client.TeslaClient", _FakeClient)
+        vin = "VINAAAAAAAAAAAAAA"
+        with SessionLocal() as s:
+            services.link_with_token(s, "tok")
+            vid = s.query(Vehicle).filter(Vehicle.vin == vin).first().id
+
+        monkeypatch.setattr("app.tesla_client.TeslaClient", _OfflineThenDrivingAgainClient)
+        with TestClient(app) as client:
+            client.post("/api/sync")
+            _OfflineThenDrivingAgainClient.step = 1
+            client.post("/api/sync")
+            _OfflineThenDrivingAgainClient.step = 2
+            client.post("/api/sync")
+        with SessionLocal() as s:
+            state.put(s, state.scoped(state.UNREACHABLE_SINCE_KEY, vin),
+                      str(_time.time() - 4 * 60))
+        with TestClient(app) as client:
+            client.post("/api/sync")                    # sustained offline -> closes
+        with SessionLocal() as s:
+            closed_id = s.query(Drive).filter(Drive.vehicle_id == vid).one().id
+
+        _OfflineThenDrivingAgainClient.step = 3
+        with TestClient(app) as client:
+            client.post("/api/sync")                    # back online, already driving
+
+        with SessionLocal() as s:
+            closed = s.get(Drive, closed_id)
+            assert closed.distance_km == 12.0           # untouched
+            assert closed.end_lost_km is None, (
+                "the 0.425 km spans two trips; charging all of it here "
+                "double-reports what the next trip is about to recover")
+            # The open trip anchors at the close, so the ground is carried
+            # exactly once — by the trip that is actually driving through it.
+            open_trip = _json.loads(state.get(
+                s, state.scoped(state.OPEN_TRIP_KEY, vin)) or "null")
+            assert open_trip and open_trip["odo_km"] == pytest.approx(10012.0, abs=0.002)
+    finally:
+        settings.app_passcode = old
+        _reset_to_demo()

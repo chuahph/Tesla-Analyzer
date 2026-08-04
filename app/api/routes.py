@@ -1585,6 +1585,7 @@ def _process_vehicle(
                 # own gap-reconstruction sees no movement here and stays quiet.
                 prev = {**prev, "odo_km": snap["odo_km"]}
             elif (closed_drive and not asleep_close
+                  and not sync_mod.is_driving(snap)
                   and elapsed_min <= sync_mod.SLEEP_CLOSE_MERGE_MAX_MIN):
                 # Never for an asleep close: that anchor is only ever a poll
                 # interval short, so movement big enough to be refused above
@@ -1603,6 +1604,28 @@ def _process_vehicle(
                 # Reporting the same distance twice under two names is exactly
                 # what the blind-gap fold-in avoids (see sync.py's
                 # GAP_CREEP_MAX_KM branch); this is the same rule.
+                #
+                # And never when the car is ALREADY DRIVING at this poll, which
+                # the time window alone did not catch. `moved` then spans two
+                # trips: the arrival this one was cut short of, and the
+                # departure the next one is in the middle of, with no reading
+                # between them to say where one ends. The whole of it is not
+                # this trip's tail, and the next trip's departure recovery is
+                # about to claim the same distance — which is precisely the
+                # double-report above, arriving through a door the window left
+                # open.
+                #
+                # Measured: trip 334 closed at 17:33, the next contact was
+                # 27 minutes later with the car already driving, and it logged
+                # end_lost_km 0.425 while trip 335 recorded start_recovered_km
+                # 0.425 for the same ground. The real tail was about 0.198; the
+                # rest was trip 335's own departure.
+                #
+                # Left as None — unknown — because that is what it is. The
+                # distance is not lost: the next trip carries it, and says so
+                # in start_recovered_km. What cannot be said is how much of it
+                # belonged to this trip, and a number here would be asserting
+                # exactly that.
                 closed_drive.end_lost_km = round(moved, 3)
                 session.commit()
             if not fold_in and est_credited:
