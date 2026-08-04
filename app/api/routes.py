@@ -1364,7 +1364,22 @@ def _process_vehicle(
         # that case — the one where the estimate is most wrong and where
         # nothing else will ever revisit it, since this block runs once and
         # then clears its marker.
-        if prev.get("odo_km") == marker["odo_km"] and raw_moved >= 0:
+        if marker.get("corrected"):
+            # Already reconciled by hand against the car's own trip meter, so
+            # the closed trip needs nothing from this poll — but the HAND-OVER
+            # still does. That is the half that was missed: this marker does
+            # two jobs, correcting the trip that closed and telling the next
+            # trip where to begin, and repair_arrival_tail used to clear it
+            # outright, which cancelled both. Measured on trip 333, which
+            # anchored to the pre-blackout reading and re-counted 0.320 km
+            # already credited to 332 — 11.0 km against the car's 10.7.
+            #
+            # No calibration sample either: the prediction was superseded by a
+            # human reading a screen, so scoring the model against what is left
+            # would score it against an answer it did not produce.
+            if est_credited and prev.get("odo_km") == marker["odo_km"]:
+                prev = {**prev, "odo_km": prev["odo_km"] + est_credited}
+        elif prev.get("odo_km") == marker["odo_km"] and raw_moved >= 0:
             closed_drive = session.get(Drive, marker["drive_id"])
             # An estimate larger than the ground the car actually covered is
             # simply wrong, and wrong in the direction that matters: left
@@ -3286,6 +3301,95 @@ def repair_trip_boundary(
     return {"applied": apply, **plan}
 
 
+@router.api_route("/repair-trip-overlap", methods=["GET", "POST"])
+def repair_trip_overlap(
+    closed_id: int = Query(...),
+    open_id: int = Query(...),
+    apply: bool = Query(False),
+    session: Session = Depends(get_session),
+):
+    """Pull a trip's start forward off ground the previous trip already holds.
+
+    repair_trip_boundary cannot do this and refuses to try: it MOVES a shared
+    boundary, conserving distance by giving one trip what it takes from the
+    other, and it checks the two anchors agree before touching anything. An
+    overlap is the case where they do not agree, and it is not a transfer —
+    the earlier trip is already correct, so the later trip's excess belongs to
+    nobody and simply leaves.
+
+    That is trip 333: it anchored to the last reading before the car park dead
+    zone, 0.320 km behind where trip 332 had already been verified to stop, and
+    so counted that stretch twice — 11.0 km against the car's own 10.7.
+
+    The closed trip is treated as the authority and is not touched. Only use
+    this when that is actually true; where the LATER trip is the trustworthy
+    one, its start is right and the earlier trip's end is what needs moving.
+
+    Dry run by default.
+    """
+    closed = session.get(Drive, closed_id)
+    opened = session.get(Drive, open_id)
+    if closed is None or opened is None:
+        raise HTTPException(404, "One of those trips doesn't exist.")
+    if closed.end_odo_km is None or opened.start_odo_km is None:
+        raise HTTPException(409, "Those trips predate odometer instrumentation.")
+    overlap = round(closed.end_odo_km - opened.start_odo_km, 3)
+    if overlap <= 0:
+        raise HTTPException(
+            409, f"Trip {open_id} starts at {opened.start_odo_km} and trip "
+                 f"{closed_id} ends at {closed.end_odo_km} — no overlap. "
+                 f"A gap between them is the opposite fault and needs "
+                 f"/api/repair-trip-boundary.")
+    if opened.end_odo_km is None:
+        raise HTTPException(409, "The later trip has no end odometer to measure from.")
+    new_dist = round(opened.end_odo_km - closed.end_odo_km, 1)
+    if new_dist <= 0:
+        raise HTTPException(
+            409, f"Removing {overlap} km would leave trip {open_id} with no "
+                 f"distance. These two are not simply overlapping.")
+    # Scaled on the odometer spans, not on distance_km. distance_km is stored
+    # to 0.1, so the ratio of two rounded figures carries rounding twice over —
+    # here it prices the trip at 1.91 kWh where the spans give 1.90, which is
+    # the car's own reading. Same argument repair_arrival_tail makes for
+    # measuring the difference from the anchors.
+    old_span = opened.end_odo_km - opened.start_odo_km
+    new_span = opened.end_odo_km - closed.end_odo_km
+    new_energy = (round(opened.energy_used_kwh * new_span / old_span, 2)
+                  if opened.energy_used_kwh and old_span > 0 else
+                  opened.energy_used_kwh)
+    # What the departure recovery reclaimed is measured from the anchor it
+    # reclaimed to, so moving the anchor moves this by the same amount. Left at
+    # its old value it would claim to have pulled back ground that now belongs
+    # to the previous trip.
+    new_recovered = (round(max((opened.start_recovered_km or 0.0) - overlap, 0.0), 3)
+                     if opened.start_recovered_km is not None else None)
+    new_speed = (round(new_dist / (opened.duration_min / 60.0), 1)
+                 if opened.duration_min else opened.avg_speed_kmh)
+    plan = {
+        "overlap_km": overlap,
+        "closed": {"id": closed.id, "end_odo_km": closed.end_odo_km,
+                   "note": "unchanged — treated as the authority"},
+        "open": {
+            "id": opened.id,
+            "route": f"{opened.start_location} → {opened.end_location}",
+            "start_odo_km": [opened.start_odo_km, closed.end_odo_km],
+            "distance_km": [opened.distance_km, new_dist],
+            "energy_kwh": [opened.energy_used_kwh, new_energy],
+            "avg_speed_kmh": [opened.avg_speed_kmh, new_speed],
+            "start_recovered_km": [opened.start_recovered_km, new_recovered],
+        },
+    }
+    if apply:
+        opened.start_odo_km = closed.end_odo_km
+        opened.distance_km = new_dist
+        opened.energy_used_kwh = new_energy
+        opened.avg_speed_kmh = new_speed
+        if new_recovered is not None:
+            opened.start_recovered_km = new_recovered
+        session.commit()
+    return {"applied": apply, **plan}
+
+
 @router.get("/arrival-estimates")
 def arrival_estimates(
     limit: int = Query(100),
@@ -3540,7 +3644,24 @@ def repair_arrival_tail(
             except ValueError:
                 pending = None
         if apply and pending == drive_id:
-            state.put(session, sleep_key, "")
+            # Updated, not cleared. Clearing it stopped the double-correction
+            # it was meant to stop and also threw away the hand-over — the
+            # instruction that tells the NEXT trip to start past the tail this
+            # one keeps. Trip 333 then anchored to the pre-blackout reading and
+            # re-counted 0.320 km that trip 332 already held.
+            #
+            # est_km becomes whatever survived the repair, which is exactly the
+            # amount the next trip must not claim. odo_km is left alone: it is
+            # the last reading the poller actually took, a fact no repair
+            # changes.
+            marker = _json.loads(raw)
+            old_est = marker.get("est_km") or 0.0
+            new_est = round(drive.end_est_km or 0.0, 3)
+            if old_est:
+                marker["est_sec"] = (marker.get("est_sec") or 0.0) * (new_est / old_est)
+            marker["est_km"] = new_est
+            marker["corrected"] = True
+            state.put(session, sleep_key, _json.dumps(marker))
     if apply:
         # Whatever estimate survives the retraction has now been checked
         # against the car's own trip meter and found right — still unseen by

@@ -1978,9 +1978,12 @@ def test_repair_arrival_tail_takes_back_only_what_the_estimate_credited(monkeypa
                        params={"drive_id": did, "true_distance_km": 13.9,
                                "true_duration_min": 18, "apply": "true"})
             with SessionLocal() as s:
-                # Stood down, so the next poll cannot re-apply the same fix.
-                assert state.get(
-                    s, state.scoped(state.LAST_SLEEP_CLOSE_KEY, veh.vin)) == ""
+                # Stood down, so the next poll cannot re-apply the same fix —
+                # but NOT cleared, or the hand-over it also carries dies with
+                # it and the next trip re-counts the tail (see trip 333).
+                m = _json.loads(state.get(
+                    s, state.scoped(state.LAST_SLEEP_CLOSE_KEY, veh.vin)))
+                assert m["corrected"] is True
                 fixed = s.get(Drive, did)
                 assert fixed.distance_km == 13.9
                 assert fixed.end_est_km is None
@@ -2199,6 +2202,108 @@ def test_arrival_estimates_withholds_a_suggestion_until_it_has_evidence(monkeypa
         assert "suggested_window_sec" not in body["summary"]
         assert "12" in body["summary"]["note"]
         assert body["samples"][0]["error_km"] == pytest.approx(0.389)
+    finally:
+        settings.app_passcode = old
+        _reset_to_demo()
+
+
+def test_a_hand_repaired_trip_still_hands_its_tail_over(monkeypatch):
+    """Trip 333. The sleep-close marker does two jobs — correct the trip that
+    closed, and tell the NEXT trip where to begin — and repair_arrival_tail
+    cleared it outright to stop the first. That cancelled the second too, so
+    the following trip anchored to the pre-blackout reading and re-counted
+    0.320 km trip 332 already held: 11.0 km against the car's 10.7.
+
+    The marker is now updated rather than dropped, carrying the estimate that
+    survived the repair, which is exactly the amount the next trip must start
+    past."""
+    from app import state
+    from app.models import Drive
+
+    settings = get_settings()
+    old = settings.app_passcode
+    settings.app_passcode = ""
+    try:
+        with TestClient(app) as client:
+            with SessionLocal() as s:
+                d = s.query(Drive).order_by(Drive.id).first()
+                d.distance_km, d.end_est_km, d.end_est_verified = 14.1, 0.483, None
+                d.start_odo_km, d.end_odo_km = 28943.109, 28957.172
+                d.energy_used_kwh, d.duration_min = 1.77, 20.8
+                d.end_time = d.start_time + timedelta(minutes=20.8)
+                veh = s.get(Vehicle, d.vehicle_id)
+                key = state.scoped(state.LAST_SLEEP_CLOSE_KEY, veh.vin)
+                state.put(s, key, _json.dumps(
+                    {"drive_id": d.id, "odo_km": 28956.689, "ts": 0.0,
+                     "est_km": 0.483, "est_sec": 180.0, "reason": "asleep"}))
+                s.commit()
+                did, vin = d.id, veh.vin
+
+            client.get("/api/repair-arrival-tail",
+                       params={"drive_id": did, "true_distance_km": 13.9,
+                               "true_duration_min": 18, "apply": "true"})
+
+        with SessionLocal() as s:
+            marker = _json.loads(state.get(s, state.scoped(
+                state.LAST_SLEEP_CLOSE_KEY, vin)))
+        # Alive, so the hand-over survives...
+        assert marker["corrected"] is True
+        # ...and carrying the corrected amount, not the original 0.483, which
+        # is what made keeping it dangerous before.
+        assert marker["est_km"] == pytest.approx(0.32)
+        assert marker["odo_km"] == 28956.689     # a reading, not a claim
+    finally:
+        settings.app_passcode = old
+        _reset_to_demo()
+
+
+def test_repair_trip_overlap_takes_back_only_the_doubled_ground(monkeypatch):
+    """repair_trip_boundary refuses this and is right to: it MOVES a shared
+    boundary, conserving distance between two trips whose anchors agree. An
+    overlap is where they disagree, and it is not a transfer — the earlier trip
+    is already verified, so the later trip's excess belongs to nobody."""
+    from app.models import Drive
+
+    settings = get_settings()
+    old = settings.app_passcode
+    settings.app_passcode = ""
+    try:
+        with TestClient(app) as client:
+            with SessionLocal() as s:
+                a, b = s.query(Drive).order_by(Drive.id).limit(2).all()
+                a.end_odo_km = 28957.009                    # verified arrival
+                b.start_odo_km, b.end_odo_km = 28956.689, 28967.696
+                b.distance_km, b.energy_used_kwh = 11.0, 1.96
+                b.duration_min, b.start_recovered_km = 34.0, 1.307
+                s.commit()
+                aid, bid = a.id, b.id
+
+            # The boundary tool declines, naming the reason.
+            clash = client.get("/api/repair-trip-boundary",
+                               params={"closed_id": aid, "open_id": bid,
+                                       "boundary_odo_km": 28957.009})
+            assert clash.status_code == 409
+
+            body = client.get("/api/repair-trip-overlap",
+                              params={"closed_id": aid, "open_id": bid}).json()
+            assert body["overlap_km"] == pytest.approx(0.32)
+            assert body["open"]["distance_km"] == [11.0, 10.7]   # the car's figure
+            assert body["open"]["energy_kwh"][1] == pytest.approx(1.9, abs=0.005)
+            # What the recovery reclaimed is measured from the anchor, so it
+            # moves with it or it claims ground the previous trip now holds.
+            assert body["open"]["start_recovered_km"] == [1.307, 0.987]
+            with SessionLocal() as s:
+                assert s.get(Drive, bid).distance_km == 11.0    # dry run only
+
+            client.get("/api/repair-trip-overlap",
+                       params={"closed_id": aid, "open_id": bid, "apply": "true"})
+
+        with SessionLocal() as s:
+            fixed, kept = s.get(Drive, bid), s.get(Drive, aid)
+            assert fixed.start_odo_km == pytest.approx(28957.009)
+            assert fixed.distance_km == 10.7
+            assert fixed.avg_speed_kmh == pytest.approx(10.7 / (34.0 / 60.0), abs=0.05)
+            assert kept.end_odo_km == pytest.approx(28957.009)   # authority untouched
     finally:
         settings.app_passcode = old
         _reset_to_demo()
