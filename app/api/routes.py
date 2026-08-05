@@ -3428,6 +3428,80 @@ def repair_trip_boundary(
     return {"applied": apply, **plan}
 
 
+@router.api_route("/repair-departure-start", methods=["GET", "POST"])
+def repair_departure_start(
+    drive_id: int = Query(...),
+    true_duration_min: float = Query(...),
+    apply: bool = Query(False),
+    session: Session = Depends(get_session),
+):
+    """Move a trip's start off a park it swallowed, and take the drain with it.
+
+    The mirror of the trimmed tail, and the same correction: a trip anchored
+    before the car actually set off carries both the standing time and the
+    standby drain of the interval it swallowed. Measured, trip 340: an
+    11-minute park fell just under the threshold that would have re-anchored
+    it, so the trip read 16 minutes against the car's own 5 and 0.50 kWh
+    against 0.38.
+
+    Fixed in sync for everything logged since, but a row already written keeps
+    it, and neither odometer repair can touch this: the distance and the
+    boundary are right, it is the clock that is wrong.
+
+    Distance is never altered — the odometer measured it and the park added
+    none of it. Energy is, because the swallowed minutes really did draw power,
+    and taking them off at this car's own measured parked rate is exactly what
+    trim_standby_kwh does at the other end.
+
+    Dry run by default.
+    """
+    drive = session.get(Drive, drive_id)
+    if drive is None:
+        raise HTTPException(404, "No such trip.")
+    shift_sec = round((drive.duration_min - true_duration_min) * 60.0, 1)
+    if shift_sec <= 0:
+        raise HTTPException(
+            409, f"Trip {drive_id} already runs {drive.duration_min} min, which "
+                 f"is not longer than the {true_duration_min} given. This moves "
+                 f"a start FORWARD off a swallowed park; a trip reading short "
+                 f"is a different fault.")
+    if true_duration_min <= 0:
+        raise HTTPException(409, "A trip cannot have no duration.")
+    past_drives = session.scalars(
+        select(Drive).where(Drive.vehicle_id == drive.vehicle_id)).all()
+    past_charges = session.scalars(
+        select(Charge).where(Charge.vehicle_id == drive.vehicle_id)).all()
+    vehicle = session.get(Vehicle, drive.vehicle_id)
+    capacity_kwh = _usable_capacity(session, vehicle, get_settings())[0]
+    rate_kw = _trim_rate_kw(list(past_drives), list(past_charges), capacity_kwh)
+    new_energy = sync_mod.trim_standby_kwh(
+        drive.energy_used_kwh, drive.distance_km, shift_sec, rate_kw)
+    new_start = drive.start_time + timedelta(seconds=shift_sec)
+    new_speed = round(drive.distance_km / (true_duration_min / 60.0), 1)
+    plan = {
+        "drive_id": drive_id,
+        "route": f"{drive.start_location} → {drive.end_location}",
+        "moved_sec": shift_sec,
+        "standby_rate_kw": round(rate_kw, 3) if rate_kw else None,
+        "start_time": [drive.start_time.isoformat(), new_start.isoformat()],
+        "duration_min": [drive.duration_min, true_duration_min],
+        "energy_kwh": [drive.energy_used_kwh, round(new_energy, 2)],
+        "avg_speed_kmh": [drive.avg_speed_kmh, new_speed],
+        # Untouched, and stated so rather than left to be noticed: the park
+        # added no distance, so none comes off.
+        "distance_km": drive.distance_km,
+    }
+    if apply:
+        drive.start_time = new_start
+        drive.duration_min = true_duration_min
+        drive.energy_used_kwh = round(new_energy, 2)
+        drive.avg_speed_kmh = new_speed
+        # Idle time cannot exceed a duration that just shrank.
+        drive.idle_min = round(min(drive.idle_min or 0.0, true_duration_min), 1)
+        session.commit()
+    return {"applied": apply, **plan}
+
+
 @router.api_route("/clear-duplicated-loss", methods=["GET", "POST"])
 def clear_duplicated_loss(
     drive_id: int | None = Query(None),

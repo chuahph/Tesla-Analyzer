@@ -2623,3 +2623,71 @@ def test_repairing_an_arrival_moves_the_next_trip_start_with_it(monkeypatch):
     finally:
         settings.app_passcode = old
         _reset_to_demo()
+
+
+def test_repairing_a_departure_takes_the_swallowed_park_s_drain_with_it(monkeypatch):
+    """Trip 340 read 16 minutes against the car's own 5, and 0.50 kWh against
+    0.38, because an 11-minute park fell under the re-anchoring threshold and
+    landed inside the trip. sync no longer lets that happen, but a row already
+    written keeps it, and neither odometer repair can touch it — the distance
+    and the boundary are right, the clock is wrong.
+
+    The park's drain has to leave with its minutes. Moving the clock alone
+    would leave a trip whose Wh/km still carries eleven minutes of standing
+    still, which is the whole reason the figure was wrong."""
+    from datetime import datetime as _dt
+
+    from app.models import Drive
+
+    settings = get_settings()
+    old = settings.app_passcode
+    settings.app_passcode = ""
+    # A known parked rate, so the arithmetic is the test's rather than the
+    # seeded history's. None is also valid — trim_standby_kwh subtracts nothing
+    # when a car cannot yet support a figure — and the response says so through
+    # standby_rate_kw, but then there is no subtraction to assert.
+    monkeypatch.setattr("app.api.routes._trim_rate_kw", lambda *a, **k: 0.5)
+    try:
+        with TestClient(app) as client:
+            with SessionLocal() as s:
+                d = s.query(Drive).order_by(Drive.start_time).first()
+                d.start_time = _dt(2026, 8, 5, 16, 59)
+                d.end_time = _dt(2026, 8, 5, 17, 15)
+                d.duration_min, d.distance_km = 16.0, 1.8
+                d.energy_used_kwh, d.avg_speed_kmh = 0.50, 6.0
+                d.idle_min = 12.0
+                s.commit()
+                did = d.id
+
+            # A trip reading SHORT is a different fault and must be refused.
+            assert client.get("/api/repair-departure-start",
+                              params={"drive_id": did,
+                                      "true_duration_min": 20}).status_code == 409
+
+            body = client.get("/api/repair-departure-start",
+                              params={"drive_id": did, "true_duration_min": 5}).json()
+            assert body["applied"] is False
+            assert body["moved_sec"] == pytest.approx(660.0)      # the 11 min park
+            assert body["start_time"][1].endswith("17:10:00")
+            assert body["distance_km"] == 1.8                     # never altered
+            # 11 min at 0.5 kW is 0.092 kWh, and it leaves with its minutes.
+            assert body["standby_rate_kw"] == 0.5
+            assert body["energy_kwh"][1] == pytest.approx(0.41)
+            with SessionLocal() as s:
+                assert s.get(Drive, did).duration_min == 16.0     # dry run only
+
+            client.get("/api/repair-departure-start",
+                       params={"drive_id": did, "true_duration_min": 5,
+                               "apply": "true"})
+
+        with SessionLocal() as s:
+            fixed = s.get(Drive, did)
+            assert fixed.start_time == _dt(2026, 8, 5, 17, 10)
+            assert fixed.duration_min == 5.0
+            assert fixed.distance_km == 1.8
+            assert fixed.avg_speed_kmh == pytest.approx(1.8 / (5.0 / 60.0), abs=0.05)
+            # Idle cannot outlast a duration that just shrank.
+            assert fixed.idle_min <= 5.0
+    finally:
+        settings.app_passcode = old
+        _reset_to_demo()
