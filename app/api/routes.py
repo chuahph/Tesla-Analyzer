@@ -189,13 +189,28 @@ def _place_tail_km(session: Session, place: str) -> float | None:
     if not place:
         return None
     vals = sorted(
-        s.measured_km for s in session.scalars(
-            select(ArrivalTailSample).where(ArrivalTailSample.place == place)
-        ).all() if s.measured_km is not None
+        v for v in (_sample_place(session, s) == place and s.measured_km or None
+                    for s in session.scalars(select(ArrivalTailSample)).all())
+        if v is not None
     )
     if len(vals) < PLACE_TAIL_MIN_SAMPLES:
         return None
     return round(percentile(vals, 0.5), 3)
+
+
+def _sample_place(session: Session, sample) -> str:
+    """A sample's place, falling back to its drive's arrival for older rows.
+
+    Samples written before place existed carry an empty one. The drive still
+    knows where it ended, so the measurement is not lost — only unlabelled, and
+    a read-time fallback recovers it without pretending the column was always
+    there. New rows store it directly, which is what keeps a measurement alive
+    after its trip is deleted.
+    """
+    if sample.place:
+        return sample.place
+    drive = session.get(Drive, sample.drive_id) if sample.drive_id else None
+    return (drive.end_location if drive else "") or ""
 
 
 def _record_tail_sample(session: Session, drive: Drive, est_km: float,
@@ -3572,36 +3587,25 @@ def arrival_estimates(
 ):
     """The arrival model's predictions scored against what was measured.
 
-    Exists to answer one question with evidence instead of argument: how long
-    does this car actually go on driving after the last reading that saw it?
-    That number is the model's only free parameter, it shipped set to the
-    poller's unreachable timeout (three minutes) because nothing better was
-    known, and the first trip to test it came back 51% long.
+    Every pair the app has: what it predicted a no-network arrival would still
+    cover, and what a later reading or a check against the car's own trip meter
+    showed it actually did.
 
-    ``implied_sec`` is the whole point. The model is speed x window, so with
-    the last-seen speed and the measured distance the window the car really
-    took falls straight out — per sample, no fitting required. The suggested
-    parameter is the median of those, which is deliberately not the mean: a
-    single arrival into a long underground spiral would drag a mean anywhere,
-    and a few dozen ordinary arrivals should not be outvoted by it.
+    The ``places`` block is the model itself rather than a summary of it. The
+    estimate runs on the median tail each car park has shown (see
+    _place_tail_km), so those medians ARE what a future arrival will be
+    credited, and ``in_use`` says whether a place has enough measurements to be
+    trusted yet.
 
-    Reported only once there are enough samples to mean something. Below that
-    the rows are still returned — looking at them is fine, it is *acting* on
-    three of them that is the mistake this endpoint exists to prevent.
+    There is no window left to suggest. The speed-and-window model this
+    replaced needed 17, 51, 119 and 868 seconds to fit four arrivals, so the
+    per-sample error here is a scorecard, not a parameter waiting to be tuned.
     """
-    MIN_SAMPLES_TO_SUGGEST = 12
     rows = session.scalars(
         select(ArrivalTailSample).order_by(ArrivalTailSample.ts.desc()).limit(limit)
     ).all()
-    out, implied = [], []
+    out = []
     for r in rows:
-        # A window can only be implied where there was a speed to divide by.
-        # measured 0 is fine and meaningful (the car had arrived); speed 0 is
-        # not, since the model declined to predict at all.
-        sec = (r.measured_km / (r.speed_kmh / 2.0) * 3600.0
-               if r.speed_kmh else None)
-        if sec is not None:
-            implied.append(sec)
         out.append({
             "ts": r.ts.isoformat(timespec="minutes"),
             "drive_id": r.drive_id,
@@ -3610,7 +3614,7 @@ def arrival_estimates(
             "error_km": round(r.est_km - r.measured_km, 3),
             "speed_kmh": r.speed_kmh,
             "est_sec": round(r.est_sec, 1) if r.est_sec else r.est_sec,
-            "implied_sec": round(sec, 1) if sec is not None else None,
+            "place": _sample_place(session, r) or "(unknown)",
             "elapsed_min": r.elapsed_min,
             "reason": r.reason,
         })
@@ -3620,7 +3624,8 @@ def arrival_estimates(
     by_place: dict[str, list[float]] = {}
     for r in rows:
         if r.measured_km is not None:
-            by_place.setdefault(r.place or "(unknown)", []).append(r.measured_km)
+            by_place.setdefault(_sample_place(session, r) or "(unknown)",
+                                []).append(r.measured_km)
     places = [{
         "place": p,
         "samples": len(v),
@@ -3630,25 +3635,16 @@ def arrival_estimates(
     } for p, v in sorted(by_place.items(), key=lambda kv: -len(kv[1]))]
     summary = {
         "samples": len(out),
-        "with_speed": len(implied),
-        "current_window_sec": sync_mod.ARRIVAL_EST_MAX_MIN * 60.0,
-        "min_samples_to_suggest": MIN_SAMPLES_TO_SUGGEST,
         "min_samples_per_place": PLACE_TAIL_MIN_SAMPLES,
+        "places_estimating": sum(1 for p in places if p["in_use"]),
+        "places_short_of_data": sum(1 for p in places if not p["in_use"]),
     }
-    if implied:
-        # 0.5, not 50 — percentile() takes a fraction (see analysis/__init__).
-        summary["median_implied_sec"] = round(percentile(implied, 0.5), 1)
+    if out:
+        # The model's scorecard, not a parameter: positive means it has been
+        # crediting more ground than the car covered.
         summary["mean_error_km"] = round(
             sum(r["error_km"] for r in out) / len(out), 3)
-        # Positive means the model predicts more ground than the car covers.
         summary["over_predicting"] = summary["mean_error_km"] > 0
-    if len(implied) >= MIN_SAMPLES_TO_SUGGEST:
-        summary["suggested_window_sec"] = summary["median_implied_sec"]
-    else:
-        summary["note"] = (
-            f"{len(implied)} of {MIN_SAMPLES_TO_SUGGEST} samples needed before "
-            f"a window is suggested. One arrival re-tuned this model wrongly "
-            f"once already.")
     return {"summary": summary, "places": places, "samples": out}
 
 

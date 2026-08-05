@@ -2172,11 +2172,13 @@ def test_no_sample_when_the_tail_cannot_be_measured(monkeypatch):
     assert rows == []
 
 
-def test_arrival_estimates_withholds_a_suggestion_until_it_has_evidence(monkeypatch):
-    """The endpoint's whole job is to stop the mistake that produced it. It
-    reports the implied window per sample from the start — looking is fine —
-    but names no replacement parameter until there are enough of them, because
-    acting on three is how this model got mis-tuned in the first place."""
+def test_arrival_estimates_reports_what_each_place_has_measured(monkeypatch):
+    """The places block is the model, not a summary of it: those medians are
+    what a future arrival at that car park will actually be credited, and
+    in_use says whether the place has enough measurements to be trusted.
+
+    A place short of data is reported but not used — no estimate at all is the
+    honest answer there, and the one that beat the speed model this replaced."""
     from datetime import datetime as _dt
 
     from app.models import ArrivalTailSample, Vehicle as _V
@@ -2185,31 +2187,33 @@ def test_arrival_estimates_withholds_a_suggestion_until_it_has_evidence(monkeypa
     old = settings.app_passcode
     settings.app_passcode = ""
     try:
-        # Inside the client: app startup is what seeds the demo vehicle these
-        # rows have to hang off.
         with TestClient(app) as client:
             with SessionLocal() as s:
                 vid = s.query(_V).first().id
-                # 20 km/h covering 0.111 km implies a 40 s window: 0.111 over
-                # (20/2) km/h is 40 seconds. Same shape every time, so the
-                # median is exact and the assertion is about the arithmetic
-                # rather than the fixture.
-                for i in range(3):
+                s.query(ArrivalTailSample).delete()
+                for i, (place, measured) in enumerate(
+                        (("Home", 0.320), ("Home", 0.111), ("Home", 0.053),
+                         ("Office", 0.015))):
                     s.add(ArrivalTailSample(
-                        vehicle_id=vid, drive_id=None, ts=_dt(2026, 8, 3, 12, i),
-                        est_km=0.5, measured_km=0.111, speed_kmh=20.0,
-                        est_sec=180.0, elapsed_min=4.0, reason="asleep"))
+                        vehicle_id=vid, drive_id=None, ts=_dt(2026, 8, 5, 12, i),
+                        est_km=0.4, measured_km=measured, place=place,
+                        reason="verified"))
                 s.commit()
 
             body = client.get("/api/arrival-estimates").json()
 
-        assert body["summary"]["samples"] == 3
-        assert body["summary"]["median_implied_sec"] == pytest.approx(40.0, abs=0.1)
-        # The model is over-predicting here (0.5 against 0.111), and says so.
+        home = next(p for p in body["places"] if p["place"] == "Home")
+        assert home["samples"] == 3
+        assert home["median_tail_km"] == pytest.approx(0.111)
+        assert home["in_use"] is True
+        office = next(p for p in body["places"] if p["place"] == "Office")
+        assert office["samples"] == 1 and office["in_use"] is False
+        assert body["summary"]["places_estimating"] == 1
+        assert body["summary"]["places_short_of_data"] == 1
+        # The scorecard: 0.4 credited against tails that averaged well under.
         assert body["summary"]["over_predicting"] is True
+        # And nothing about a window, because there is no longer one to tune.
         assert "suggested_window_sec" not in body["summary"]
-        assert "12" in body["summary"]["note"]
-        assert body["samples"][0]["error_km"] == pytest.approx(0.389)
     finally:
         settings.app_passcode = old
         _reset_to_demo()
