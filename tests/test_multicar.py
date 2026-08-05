@@ -2569,3 +2569,47 @@ def test_a_checked_trip_feeds_the_place_it_arrived_at(monkeypatch):
     finally:
         settings.app_passcode = old
         _reset_to_demo()
+
+
+def test_repairing_an_arrival_moves_the_next_trip_start_with_it(monkeypatch):
+    """A boundary is one position shared by two rows, so moving it in one is
+    never enough. Trip 341's end came back 0.269 km; trip 342 had been logged
+    hours earlier and kept starting where the estimate had wrongly put the car,
+    leaving 0.269 km of real driving belonging to no trip. It read 11.1 km
+    against the car's own 11.3."""
+    from app.models import Drive
+
+    settings = get_settings()
+    old = settings.app_passcode
+    settings.app_passcode = ""
+    try:
+        with TestClient(app) as client:
+            with SessionLocal() as s:
+                a, b = s.query(Drive).order_by(Drive.start_time).limit(2).all()
+                a.start_odo_km, a.end_odo_km = 29027.648, 29030.117
+                a.distance_km, a.end_est_km, a.end_location = 2.5, 0.322, "Home"
+                a.energy_used_kwh, a.duration_min = 0.51, 9.0
+                b.start_odo_km, b.end_odo_km = 29030.117, 29041.227
+                b.distance_km, b.energy_used_kwh = 11.1, 1.57
+                b.duration_min, b.start_recovered_km = 29.0, 0.125
+                s.commit()
+                aid, bid = a.id, b.id
+
+            client.get("/api/repair-arrival-tail",
+                       params={"drive_id": aid, "true_distance_km": 2.2,
+                               "apply": "true"})
+
+        with SessionLocal() as s:
+            fixed, nxt = s.get(Drive, aid), s.get(Drive, bid)
+            assert fixed.end_odo_km == pytest.approx(29029.848, abs=0.002)
+            # The successor starts where its predecessor now ends. No gap.
+            assert nxt.start_odo_km == pytest.approx(fixed.end_odo_km, abs=0.002)
+            assert nxt.distance_km == pytest.approx(11.4)
+            # Energy follows at the trip's own rate, and the ground it gained
+            # was unseen by any poll, which is what start_recovered_km records.
+            assert nxt.energy_used_kwh == pytest.approx(1.57 * 11.379 / 11.110, abs=0.01)
+            assert nxt.start_recovered_km == pytest.approx(0.394)
+            assert nxt.avg_speed_kmh == pytest.approx(11.4 / (29.0 / 60.0), abs=0.05)
+    finally:
+        settings.app_passcode = old
+        _reset_to_demo()

@@ -3862,6 +3862,42 @@ def repair_arrival_tail(
             marker["corrected"] = True
             state.put(session, sleep_key, _json.dumps(marker))
     if apply:
+        # A trip that already has a successor cannot have its end moved alone.
+        # The retraction proves the car parked EARLIER than recorded, so the
+        # next trip set off from there too — and if it was logged before this
+        # repair ran, its start still sits at the old, fictional end. Measured:
+        # trip 341's end came back 0.269 km and trip 342, logged hours earlier,
+        # kept starting where the estimate had wrongly put the car, leaving
+        # 0.269 km of real driving belonging to no trip at all. It read 11.1 km
+        # against the car's own 11.3.
+        #
+        # The mirror of repair_trip_overlap: there the later trip gives ground
+        # back, here it takes ground on. Both exist because a boundary is one
+        # position shared by two rows, and moving it in one is never enough.
+        if km > 0:
+            nxt = session.scalars(
+                select(Drive).where(Drive.vehicle_id == drive.vehicle_id,
+                                    Drive.start_time > drive.start_time)
+                .order_by(Drive.start_time).limit(1)
+            ).first()
+            if (nxt is not None and nxt.start_odo_km is not None
+                    and abs(nxt.start_odo_km - before["end_odo_km"]) <= 0.002):
+                new_span = nxt.end_odo_km - target.end_odo_km if nxt.end_odo_km else None
+                if new_span and new_span > 0 and nxt.distance_km > 0:
+                    if nxt.energy_used_kwh:
+                        nxt.energy_used_kwh = round(
+                            nxt.energy_used_kwh * new_span
+                            / (nxt.end_odo_km - nxt.start_odo_km), 2)
+                    nxt.start_odo_km = target.end_odo_km
+                    nxt.distance_km = round(new_span, 1)
+                    # The ground it gains was never seen by a poll — it is the
+                    # first metres of that trip's own departure, which is what
+                    # start_recovered_km is for.
+                    nxt.start_recovered_km = round(
+                        (nxt.start_recovered_km or 0.0) + km, 3)
+                    if nxt.duration_min:
+                        nxt.avg_speed_kmh = round(
+                            nxt.distance_km / (nxt.duration_min / 60.0), 1)
         # Whatever estimate survives the retraction has now been checked
         # against the car's own trip meter and found right — still unseen by
         # any poll, which is what end_est_km records, but no longer an open
