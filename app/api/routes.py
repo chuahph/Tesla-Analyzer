@@ -3371,6 +3371,9 @@ def repair_trip_boundary(
                  f"{opened.start_odo_km}. Repairing a gap needs a different fix.")
 
     delta = round(boundary_odo_km - closed.end_odo_km, 3)
+    # Where a poll last actually saw the car: the recorded end minus whatever
+    # of it the arrival model had estimated rather than read.
+    last_seen_odo = closed.end_odo_km - (closed.end_est_km or 0.0)
     closed_new_dist = round(closed.distance_km + delta, 1)
     opened_new_dist = round(opened.distance_km - delta, 1)
     if closed_new_dist <= 0 or opened_new_dist <= 0:
@@ -3424,6 +3427,25 @@ def repair_trip_boundary(
         for d, dist in ((closed, closed_new_dist), (opened, opened_new_dist)):
             if d.duration_min and d.duration_min > 0:
                 d.avg_speed_kmh = round(dist / (d.duration_min / 60.0), 1)
+        # Moving the boundary FORWARD measures the closed trip's arrival tail:
+        # the ground between the last reading a poll actually took and where
+        # the car turned out to have stopped. That is the quantity the arrival
+        # model now runs on (see _place_tail_km), and the only source of it at
+        # a place with no signal is a check like this one — so record it rather
+        # than let a measurement be spent on one row and thrown away.
+        #
+        # Measured from the last real reading, which is the old end minus
+        # whatever of it was estimated: 337 ended at 29008.311 with 0.04
+        # estimated, so a poll last saw 29008.271 and the true tail was 0.193.
+        if delta > 0:
+            seen = last_seen_odo
+            _record_tail_sample(session, closed, closed.end_est_km or 0.0,
+                                max(boundary_odo_km - seen, 0.0),
+                                reason="verified")
+            # And it is no longer a guess: still unseen by any poll, which is
+            # what end_est_km means, but now checked against the car itself.
+            closed.end_est_km = round(boundary_odo_km - seen, 3) or None
+            closed.end_est_verified = True
         session.commit()
     return {"applied": apply, **plan}
 

@@ -2691,3 +2691,58 @@ def test_repairing_a_departure_takes_the_swallowed_park_s_drain_with_it(monkeypa
     finally:
         settings.app_passcode = old
         _reset_to_demo()
+
+
+def test_moving_a_boundary_forward_records_the_tail_it_measured(monkeypatch):
+    """Trips 334 and 337 read SHORT, so repair_arrival_tail refuses them — it
+    only removes estimated distance. The boundary tool handles the other
+    direction, and in doing so it measures the very thing the arrival model now
+    runs on: the ground between the last reading a poll took and where the car
+    turned out to have stopped.
+
+    At a place with no signal that check is the only source of such a
+    measurement, so spending one on a single row and discarding it is waste."""
+    from app.api.routes import _place_tail_km
+    from app.models import ArrivalTailSample, Drive
+
+    settings = get_settings()
+    old = settings.app_passcode
+    settings.app_passcode = ""
+    try:
+        with TestClient(app) as client:
+            with SessionLocal() as s:
+                s.query(ArrivalTailSample).delete()
+                a, b = s.query(Drive).order_by(Drive.start_time).limit(2).all()
+                # Trip 337's shape: 0.04 estimated, so a poll last saw
+                # 29008.271, and the car actually stopped at 29008.464.
+                a.start_odo_km, a.end_odo_km = 28990.464, 29008.311
+                a.distance_km, a.end_est_km, a.end_location = 17.8, 0.04, "Home"
+                a.energy_used_kwh, a.duration_min = 2.70, 43.0
+                b.start_odo_km, b.end_odo_km = 29008.311, 29019.076
+                b.distance_km, b.energy_used_kwh = 10.8, 1.94
+                b.duration_min = 36.0
+                s.commit()
+                aid, bid = a.id, b.id
+
+            body = client.get("/api/repair-trip-boundary",
+                              params={"closed_id": aid, "open_id": bid,
+                                      "boundary_odo_km": 29008.464,
+                                      "apply": "true"}).json()
+            assert body["applied"] is True
+            assert body["closed"]["distance_km"] == [17.8, 18.0]
+            assert body["open"]["distance_km"] == [10.8, 10.6]
+
+        with SessionLocal() as s:
+            sample = s.query(ArrivalTailSample).one()
+            # 29008.464 minus the 29008.271 a poll last saw.
+            assert sample.measured_km == pytest.approx(0.193)
+            assert sample.est_km == pytest.approx(0.04)   # what had been guessed
+            assert sample.place == "Home"
+            closed = s.get(Drive, aid)
+            # Unseen by any poll still, but no longer a guess.
+            assert closed.end_est_km == pytest.approx(0.193)
+            assert closed.end_est_verified is True
+            assert _place_tail_km(s, "Home") is None      # one sample is not a median
+    finally:
+        settings.app_passcode = old
+        _reset_to_demo()
