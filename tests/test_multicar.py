@@ -2442,3 +2442,58 @@ def test_clearing_a_duplicated_loss_refuses_to_erase_a_real_one(monkeypatch):
     finally:
         settings.app_passcode = old
         _reset_to_demo()
+
+
+def test_an_estimated_arrival_cannot_end_after_the_next_trip_starts(monkeypatch):
+    """Trip 339 ended at 17:01 while trip 340 started at 16:59. The sleep-close
+    estimate moves the clock forward with the odometer, and nothing bounded it
+    by what happened next: it credited three minutes of arriving to a car that
+    was driving again within one.
+
+    services.edit_drive already refuses to let a person create overlapping
+    trips by hand, so the app was producing a state it will not accept."""
+    from datetime import datetime as _dt
+
+    from app.api.routes import _unoverlap_previous
+    from app.models import Drive, Vehicle as _V
+
+    settings = get_settings()
+    old = settings.app_passcode
+    settings.app_passcode = ""
+    try:
+        with TestClient(app) as client:
+            assert client
+            with SessionLocal() as s:
+                vid = s.query(_V).first().id
+                s.query(Drive).delete()
+                est = Drive(vehicle_id=vid, start_time=_dt(2026, 8, 5, 16, 26),
+                            end_time=_dt(2026, 8, 5, 17, 1), distance_km=7.1,
+                            duration_min=34.0, avg_speed_kmh=12.0, end_est_km=0.394)
+                s.add(est)
+                s.commit()
+                eid = est.id
+
+                _unoverlap_previous(s, vid, _dt(2026, 8, 5, 16, 59))
+                s.commit()
+                fixed = s.get(Drive, eid)
+                assert fixed.end_time == _dt(2026, 8, 5, 16, 59)
+                assert fixed.duration_min == 33.0
+                # Speed follows the clock, or the row contradicts itself.
+                assert fixed.avg_speed_kmh == pytest.approx(7.1 / (33.0 / 60.0), abs=0.05)
+                # The distance stays: the next trip already begins past it, so
+                # trimming it here would leave that ground belonging to nobody.
+                assert fixed.distance_km == 7.1
+
+                # A MEASURED end is never moved. If a real reading lands after
+                # the next start, something is wrong that a timestamp cannot fix.
+                meas = Drive(vehicle_id=vid, start_time=_dt(2026, 8, 5, 18, 0),
+                             end_time=_dt(2026, 8, 5, 18, 30), distance_km=5.0,
+                             duration_min=30.0, avg_speed_kmh=10.0, end_est_km=None)
+                s.add(meas)
+                s.commit()
+                _unoverlap_previous(s, vid, _dt(2026, 8, 5, 18, 20))
+                s.commit()
+                assert s.get(Drive, meas.id).end_time == _dt(2026, 8, 5, 18, 30)
+    finally:
+        settings.app_passcode = old
+        _reset_to_demo()

@@ -170,6 +170,42 @@ def _retract_estimated_tail(drive, km: float, sec: float) -> None:
         drive.avg_speed_kmh = round(new_dist / (drive.duration_min / 60.0), 1)
 
 
+def _unoverlap_previous(session: Session, vehicle_id: int, new_start) -> None:
+    """Pull an ESTIMATED arrival back so it cannot end after the next trip begins.
+
+    A sleep close moves the clock forward with the odometer, both from one
+    assumption about how long the car went on arriving (see
+    sync.estimate_arrival_tail). Nothing bounded that by reality: measured
+    live, trip 339 was credited three minutes of arriving while the car was
+    driving again within one, so it ended at 17:01 while trip 340 started at
+    16:59 — two trips overlapping in time, which services.edit_drive already
+    refuses to let a person create by hand.
+
+    Only ever an estimated end (end_est_km set) and only ever backwards. A
+    measured end is a reading, and if a reading really did land after the next
+    trip's start then something is wrong that moving a timestamp would hide.
+    """
+    prev = session.scalars(
+        select(Drive).where(Drive.vehicle_id == vehicle_id)
+        .order_by(Drive.start_time.desc()).limit(1)
+    ).first()
+    if prev is None or not prev.end_est_km or prev.end_time <= new_start:
+        return
+    if new_start <= prev.start_time:
+        return  # not an overlap this can fix — the two trips are tangled
+    prev.end_time = new_start
+    prev.duration_min = round(
+        (new_start - prev.start_time).total_seconds() / 60.0, 1)
+    if prev.duration_min > 0:
+        prev.avg_speed_kmh = round(
+            prev.distance_km / (prev.duration_min / 60.0), 1)
+    # The distance estimate is deliberately left alone. It was handed to this
+    # trip and the next one already starts past it (see LAST_SLEEP_CLOSE_KEY),
+    # so trimming it here would leave the ground belonging to neither — the
+    # exact failure the hand-over exists to prevent. What was wrong was the
+    # clock, and that is what this corrects.
+
+
 def _newest_readings(session: Session, vehicle_id: int, columns: tuple,
                      limit: int = 2000) -> list:
     """The most recent ``limit`` battery readings, returned oldest-first.
@@ -1667,6 +1703,7 @@ def _process_vehicle(
         d["start_coords"], d["end_coords"] = d["start_location"], d["end_location"]
         d["start_location"], d["start_area"] = _place_and_area(d["start_location"], session)
         d["end_location"], d["end_area"] = _place_and_area(d["end_location"], session)
+        _unoverlap_previous(session, vehicle.id, d["start_time"])
         session.add(Drive(vehicle_id=vehicle.id, **d))
         # Webhook-only (not routed through notify()'s push channel) — a
         # push alert per every single drive would be unwanted noise for
