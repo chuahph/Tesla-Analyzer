@@ -2549,6 +2549,12 @@ def test_a_checked_trip_feeds_the_place_it_arrived_at(monkeypatch):
                        params={"drive_id": ids[1], "true_distance_km": 2.3,
                                "apply": "true"})
 
+            # Run again: an arrival is one event, however many times it is
+            # checked. Re-confirming must not let it vote twice.
+            client.get("/api/repair-arrival-tail",
+                       params={"drive_id": ids[0], "true_distance_km": 2.2,
+                               "apply": "true"})
+
             body = client.get("/api/arrival-estimates").json()
 
         home = next(p for p in body["places"] if p["place"] == "Home")

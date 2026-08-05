@@ -215,7 +215,20 @@ def _sample_place(session: Session, sample) -> str:
 
 def _record_tail_sample(session: Session, drive: Drive, est_km: float,
                         measured_km: float, **extra) -> None:
-    """Keep one (predicted, measured) arrival pair, tagged with its place."""
+    """Keep one (predicted, measured) arrival pair, tagged with its place.
+
+    One per arrival, replacing rather than appending. An arrival is a single
+    event and can be measured more than once — the automatic fold-in may see
+    it, and a check against the car's own screen may confirm it again, and
+    that check can be repeated. Appending would let one car park's median be
+    voted on twice by the same afternoon, which is exactly the kind of quiet
+    double-count the boundary work has spent this long removing.
+    """
+    prior = session.scalars(
+        select(ArrivalTailSample).where(ArrivalTailSample.drive_id == drive.id)
+    ).all() if drive.id else []
+    for old in prior:
+        session.delete(old)
     session.add(ArrivalTailSample(
         vehicle_id=drive.vehicle_id, drive_id=drive.id,
         ts=sync_mod.now_local(), place=drive.end_location or "",
