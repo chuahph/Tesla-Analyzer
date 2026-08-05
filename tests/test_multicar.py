@@ -2746,3 +2746,51 @@ def test_moving_a_boundary_forward_records_the_tail_it_measured(monkeypatch):
     finally:
         settings.app_passcode = old
         _reset_to_demo()
+
+
+def test_confirming_a_trip_still_corrects_a_clock_the_estimate_inflated(monkeypatch):
+    """Trip 341 read 9 minutes against the car's 6 after its distance had been
+    fixed. The arrival estimate moves the odometer and the clock together, and
+    so does the retraction — but the retraction returns early once there is no
+    distance left to take off, so a duration given on a later call did nothing.
+
+    Distance and energy stay put: they already agree, and minutes that were
+    never driven have nothing to reprice."""
+    from datetime import datetime as _dt
+
+    from app.models import Drive
+
+    settings = get_settings()
+    old = settings.app_passcode
+    settings.app_passcode = ""
+    try:
+        with TestClient(app) as client:
+            with SessionLocal() as s:
+                d = s.query(Drive).order_by(Drive.start_time).first()
+                d.start_time = _dt(2026, 8, 5, 18, 5)
+                d.end_time = _dt(2026, 8, 5, 18, 14)
+                d.duration_min, d.avg_speed_kmh = 9.0, 14.7
+                d.start_odo_km, d.end_odo_km = 29027.648, 29029.848
+                d.distance_km, d.end_est_km = 2.2, 0.053
+                d.energy_used_kwh = 0.45
+                s.commit()
+                did = d.id
+
+            body = client.get("/api/repair-arrival-tail",
+                              params={"drive_id": did, "true_distance_km": 2.2,
+                                      "true_duration_min": 6,
+                                      "apply": "true"}).json()
+            assert body["outcome"] == "already_matches"
+            assert body["retracted_km"] == 0.0          # nothing to take off
+            assert body["after"]["duration_min"] == 6.0  # but the clock moves
+
+        with SessionLocal() as s:
+            fixed = s.get(Drive, did)
+            assert fixed.duration_min == 6.0
+            assert fixed.end_time == _dt(2026, 8, 5, 18, 11)
+            assert fixed.distance_km == 2.2             # untouched
+            assert fixed.energy_used_kwh == 0.45        # untouched
+            assert fixed.avg_speed_kmh == pytest.approx(2.2 / (6.0 / 60.0), abs=0.05)
+    finally:
+        settings.app_passcode = old
+        _reset_to_demo()

@@ -3898,6 +3898,21 @@ def repair_arrival_tail(
     # by the same code that would do the work rather than by a second
     # description of it that can drift from it.
     target = drive if apply else _DetachedDrive(before)
+    if confirmed_only and sec > 0:
+        # The distance already agrees, but the clock can still be carrying the
+        # minutes the estimate invented alongside it. Those are two halves of
+        # one assumption and the retraction below moves both — which is no help
+        # once the distance has been fixed by an earlier call, because it
+        # returns early when there is nothing left to take off. Trip 341 kept
+        # the three minutes its estimate added and read 9 against the car's 6.
+        #
+        # Distance and energy stay put: they already match, and the minutes
+        # being removed were never driven, so there is nothing to reprice.
+        target.end_time = target.end_time - timedelta(seconds=sec)
+        target.duration_min = round(true_duration_min, 1)
+        if target.duration_min > 0:
+            target.avg_speed_kmh = round(
+                target.distance_km / (target.duration_min / 60.0), 1)
     if not confirmed_only:
         _retract_estimated_tail(target, km, sec)
         # _retract_estimated_tail declines rather than raises when the
