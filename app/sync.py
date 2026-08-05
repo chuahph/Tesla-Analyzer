@@ -48,6 +48,11 @@ PARK_SPEED_KMH = 15.0
 # parked/asleep, not driving), a new drive must NOT be anchored to it — otherwise
 # the overnight idle time and its vampire drain get counted into the trip.
 STALE_ANCHOR_MIN = 15.0
+# Odometer movement below which a car simply has not gone anywhere — 50 m is
+# inside its own parking bay. Used to tell "still parked" from "already
+# departing" when the gear alone cannot: a car creeping out of a space has
+# covered ground, a car that has not moved has not left, however it reads.
+DEPARTURE_STILL_MAX_KM = 0.05
 # Most odometer movement a blind gap is allowed to fold into an adjacent trip
 # rather than being left as an unattributed loss — shared by both ends: a blind
 # gap's tail folding into the trip that just ended (Drive.end_lost_km), and an
@@ -1576,6 +1581,25 @@ def process_snapshot(
             gap_h = (cur["ts"] - prev["ts"]) / 3600.0
             implied_kmh = (cur["odo_km"] - prev["odo_km"]) / max(gap_h, 1e-9)
             was_parked = implied_kmh < PARK_SPEED_KMH
+        # And the odometer settles it outright when it has not moved at all.
+        # The exception above exists for a car easing out of a bay, still
+        # creeping, where the gap really does belong to the trip — but that
+        # car has COVERED GROUND. One that has not moved has not departed,
+        # whatever its gear reads, so the drive begins at cur and anchoring
+        # back at prev can only import parked time and its standby drain.
+        #
+        # Measured live, trip 340: an 11-minute park, no odometer movement
+        # across it, and a gap just under the 15-minute STALE_ANCHOR_MIN. It
+        # anchored at prev and read 16 minutes against the car's own 5, with
+        # 0.50 kWh against 0.38 — the extra being eleven minutes of standby
+        # drain counted as driving.
+        #
+        # Costless in the only currency at risk: anchoring at cur can lose
+        # distance, and here there is none to lose. That is why this needs no
+        # gap threshold, where the checks above do.
+        if (not was_parked and prev and not is_driving(prev)
+                and cur["odo_km"] - prev["odo_km"] < DEPARTURE_STILL_MAX_KM):
+            was_parked = True
         base = cur if was_parked else (prev or cur)
         open_trip = _open_trip_at(base, cur, prev)
         # Odometer movement that happened BEFORE this trip's anchor and is

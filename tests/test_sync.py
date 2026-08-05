@@ -2249,3 +2249,33 @@ def test_a_recovered_departure_prices_its_blind_kilometres_high():
     # 9 km carried a reading; the blind km is priced at 1.55 of that rate.
     assert blind["energy_used_kwh"] == pytest.approx(
         clean["energy_used_kwh"] * (9.0 + DEPARTURE_BLIND_LOAD) / 9.0, abs=0.01)
+
+
+def test_a_short_park_is_not_swallowed_by_the_next_trip():
+    """Trip 340. The car sat parked 11 minutes, then drove. The gap fell just
+    under STALE_ANCHOR_MIN (15 min) and cur read shift D at zero speed, so
+    neither existing check fired and the trip anchored back at the parked
+    reading: 16 minutes against the car's own 5, and 0.50 kWh against 0.38 —
+    the extra being eleven minutes of standby drain counted as driving.
+
+    The odometer settles it. The exception for a still-creeping departure is
+    about a car that has COVERED GROUND; one that has not moved has not left,
+    whatever its gear reads."""
+    from app.sync import DEPARTURE_STILL_MAX_KM
+
+    parked = snap(T0, 9000.0, 80, shift="P", speed=0.0, locked=True, range_km=400.0)
+    # 11 minutes later, in gear, not yet moving, odometer untouched.
+    rolling = snap(T0 + 660, 9000.0, 79, shift="D", speed=0.0, range_km=396.0)
+    drives, charges, trip, _c = process_snapshot(parked, rolling, None, None, 70.0, 0.5)
+    assert trip is not None
+    # Anchored at cur, so the park is outside the trip on both counts.
+    assert trip["ts"] == rolling["ts"]
+    assert trip["soc"] == rolling["soc"]
+    assert trip["range_km"] == rolling["range_km"]
+
+    # A car that HAS covered ground in the gap still anchors back at prev —
+    # that distance belongs to the trip and this must not discard it.
+    crept = snap(T0 + 660, 9000.0 + DEPARTURE_STILL_MAX_KM * 4, 79,
+                 shift="D", speed=0.0, range_km=396.0)
+    _d, _c2, trip2, _c3 = process_snapshot(parked, crept, None, None, 70.0, 0.5)
+    assert trip2 is not None and trip2["ts"] == parked["ts"]
