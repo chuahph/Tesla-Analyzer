@@ -2794,3 +2794,54 @@ def test_confirming_a_trip_still_corrects_a_clock_the_estimate_inflated(monkeypa
     finally:
         settings.app_passcode = old
         _reset_to_demo()
+
+
+def test_the_cars_own_wh_per_km_beats_charging_a_park_at_an_average(monkeypatch):
+    """Trip 340 still read 0.54 kWh against the car's 0.38 after its clock was
+    fixed. The drain correction charges a swallowed park at this car's MEAN
+    parked rate, and a specific park can be far from the mean: eleven minutes
+    in a 34 degree car park, awake with climate running, drew about 1.07 kW
+    where the average said 0.323.
+
+    Where the car has measured the drive itself, measurement wins — the same
+    principle as true_distance_km for an arrival. And a figure no real drive
+    could average is refused rather than written."""
+    from app.models import Drive
+
+    settings = get_settings()
+    old = settings.app_passcode
+    settings.app_passcode = ""
+    try:
+        with TestClient(app) as client:
+            with SessionLocal() as s:
+                d = s.query(Drive).order_by(Drive.start_time).first()
+                d.duration_min, d.distance_km = 5.0, 1.8
+                d.energy_used_kwh, d.avg_speed_kmh = 0.54, 21.6
+                s.commit()
+                did, started = d.id, d.start_time
+
+            # Neither figure given: nothing to correct from.
+            assert client.get("/api/repair-departure-start",
+                              params={"drive_id": did}).status_code == 409
+            # A rate no drive could average is refused, not written.
+            assert client.get("/api/repair-departure-start",
+                              params={"drive_id": did,
+                                      "true_wh_per_km": 5}).status_code == 409
+
+            body = client.get("/api/repair-departure-start",
+                              params={"drive_id": did, "true_wh_per_km": 223.8,
+                                      "apply": "true"}).json()
+            assert body["energy_source"] == "car"
+            # No modelled rate was used, so none is reported.
+            assert body["standby_rate_kw"] is None
+            assert body["energy_kwh"] == [0.54, pytest.approx(0.40)]
+            assert body["duration_min"] == [5.0, 5.0]      # clock left alone
+
+        with SessionLocal() as s:
+            fixed = s.get(Drive, did)
+            assert fixed.energy_used_kwh == pytest.approx(0.40)
+            assert fixed.start_time == started              # not moved
+            assert fixed.distance_km == 1.8
+    finally:
+        settings.app_passcode = old
+        _reset_to_demo()

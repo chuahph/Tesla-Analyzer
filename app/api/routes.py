@@ -3453,7 +3453,8 @@ def repair_trip_boundary(
 @router.api_route("/repair-departure-start", methods=["GET", "POST"])
 def repair_departure_start(
     drive_id: int = Query(...),
-    true_duration_min: float = Query(...),
+    true_duration_min: float | None = Query(None),
+    true_wh_per_km: float | None = Query(None),
     apply: bool = Query(False),
     session: Session = Depends(get_session),
 ):
@@ -3480,15 +3481,20 @@ def repair_departure_start(
     drive = session.get(Drive, drive_id)
     if drive is None:
         raise HTTPException(404, "No such trip.")
-    shift_sec = round((drive.duration_min - true_duration_min) * 60.0, 1)
-    if shift_sec <= 0:
+    if true_duration_min is None and true_wh_per_km is None:
+        raise HTTPException(
+            409, "Give true_duration_min, true_wh_per_km, or both — there is "
+                 "nothing to correct from otherwise.")
+    if true_duration_min is not None and true_duration_min <= 0:
+        raise HTTPException(409, "A trip cannot have no duration.")
+    shift_sec = (round((drive.duration_min - true_duration_min) * 60.0, 1)
+                 if true_duration_min is not None else 0.0)
+    if shift_sec < 0:
         raise HTTPException(
             409, f"Trip {drive_id} already runs {drive.duration_min} min, which "
-                 f"is not longer than the {true_duration_min} given. This moves "
-                 f"a start FORWARD off a swallowed park; a trip reading short "
-                 f"is a different fault.")
-    if true_duration_min <= 0:
-        raise HTTPException(409, "A trip cannot have no duration.")
+                 f"is shorter than the {true_duration_min} given. This moves a "
+                 f"start FORWARD off a swallowed park; a trip reading short is "
+                 f"a different fault.")
     past_drives = session.scalars(
         select(Drive).where(Drive.vehicle_id == drive.vehicle_id)).all()
     past_charges = session.scalars(
@@ -3496,17 +3502,41 @@ def repair_departure_start(
     vehicle = session.get(Vehicle, drive.vehicle_id)
     capacity_kwh = _usable_capacity(session, vehicle, get_settings())[0]
     rate_kw = _trim_rate_kw(list(past_drives), list(past_charges), capacity_kwh)
-    new_energy = sync_mod.trim_standby_kwh(
-        drive.energy_used_kwh, drive.distance_km, shift_sec, rate_kw)
+    if true_wh_per_km is not None:
+        # The car's own figure for the drive, which beats charging the park at
+        # an average rate. That rate is this car's mean across every park it
+        # has taken, and a specific one can be far from it: trip 340's eleven
+        # minutes in a 34 degree car park, awake with climate running, drew
+        # about 1.07 kW where the average said 0.323 — so the drain correction
+        # left it a third high. Where the car has measured the drive itself,
+        # measurement wins, exactly as true_distance_km does for the arrival.
+        if not (sync_mod.MIN_PLAUSIBLE_WH_PER_KM <= true_wh_per_km
+                <= sync_mod.MAX_PLAUSIBLE_WH_PER_KM):
+            raise HTTPException(
+                409, f"{true_wh_per_km} Wh/km is outside what a real drive can "
+                     f"average ({sync_mod.MIN_PLAUSIBLE_WH_PER_KM:.0f}-"
+                     f"{sync_mod.MAX_PLAUSIBLE_WH_PER_KM:.0f}). Refusing rather "
+                     f"than writing a figure no drive could produce.")
+        new_energy = true_wh_per_km * drive.distance_km / 1000.0
+    else:
+        new_energy = sync_mod.trim_standby_kwh(
+            drive.energy_used_kwh, drive.distance_km, shift_sec, rate_kw)
     new_start = drive.start_time + timedelta(seconds=shift_sec)
-    new_speed = round(drive.distance_km / (true_duration_min / 60.0), 1)
+    new_duration = (true_duration_min if true_duration_min is not None
+                    else drive.duration_min)
+    new_speed = (round(drive.distance_km / (new_duration / 60.0), 1)
+                 if new_duration else drive.avg_speed_kmh)
     plan = {
         "drive_id": drive_id,
         "route": f"{drive.start_location} → {drive.end_location}",
         "moved_sec": shift_sec,
-        "standby_rate_kw": round(rate_kw, 3) if rate_kw else None,
+        # Null when the car's own Wh/km was given instead — nothing was
+        # charged at a modelled rate, so reporting one would mislead.
+        "standby_rate_kw": (round(rate_kw, 3) if rate_kw and true_wh_per_km is None
+                            else None),
+        "energy_source": "car" if true_wh_per_km is not None else "standby model",
         "start_time": [drive.start_time.isoformat(), new_start.isoformat()],
-        "duration_min": [drive.duration_min, true_duration_min],
+        "duration_min": [drive.duration_min, new_duration],
         "energy_kwh": [drive.energy_used_kwh, round(new_energy, 2)],
         "avg_speed_kmh": [drive.avg_speed_kmh, new_speed],
         # Untouched, and stated so rather than left to be noticed: the park
@@ -3515,11 +3545,11 @@ def repair_departure_start(
     }
     if apply:
         drive.start_time = new_start
-        drive.duration_min = true_duration_min
+        drive.duration_min = new_duration
         drive.energy_used_kwh = round(new_energy, 2)
         drive.avg_speed_kmh = new_speed
         # Idle time cannot exceed a duration that just shrank.
-        drive.idle_min = round(min(drive.idle_min or 0.0, true_duration_min), 1)
+        drive.idle_min = round(min(drive.idle_min or 0.0, new_duration), 1)
         session.commit()
     return {"applied": apply, **plan}
 
