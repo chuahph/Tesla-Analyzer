@@ -927,56 +927,46 @@ def _drive_from(start: dict, cur: dict, capacity_kwh: float, max_speed: float = 
 # documents and understands; inventing distance a trip never drove is the one
 # that corrupted two trips in a morning.
 ARRIVAL_EST_MAX_KM = GAP_CREEP_MAX_KM
-# And the window is capped before the speed is applied, which matters more than
-# the distance cap does. The elapsed time to the *close* is not the time the car
-# spent driving: a car can be found asleep hours after it parked, and the naive
-# product then pins every estimate to the cap regardless of the trip. What the
-# car was actually doing is arriving — it stops within a couple of minutes of
-# the last reading whatever time we notice. Three minutes is the same window
-# routes.py waits before calling a car unreachable.
+# The window the tail is spread over. Not the poll timeout it used to be: a
+# car park manoeuvre runs at a crawl whatever the car was doing on the street,
+# so the seconds follow from the distance at that crawl rather than from how
+# long we took to notice. Capped so a large tail cannot invent minutes.
 ARRIVAL_EST_MAX_MIN = 3.0
-# And it only applies to a car that was plainly arriving. The whole model is
-# "it was slowing and had to reach zero", which is credible at 15 km/h on a
-# final approach and worthless at 60: a car still at speed when signal died was
-# mid-drive, and how far it went afterwards is genuinely unbounded — an
-# estimate there would be a number invented to fill a hole. Above this the tail
-# stays unknown, which is what end_lost_km: None already says.
-ARRIVAL_EST_MAX_SPEED_KMH = 40.0
+ARRIVAL_CRAWL_KMH = 10.0
 
 
-def estimate_arrival_tail(last_snapshot: dict,
-                          close_ts: float | None) -> tuple[float, float] | None:
-    """(km, seconds) the car probably spent arriving after its last reading.
+def arrival_tail_for_place(tail_km: float | None) -> tuple[float, float] | None:
+    """(km, seconds) for an arrival at a place whose tail has been MEASURED.
 
-    Both, not just the distance: the same assumption produces each, and taking
-    only the kilometres leaves a trip covering further in unchanged time — its
-    average speed RISING, when what it was doing was decelerating to a stop.
+    This replaces a model that guessed the tail from the last-seen speed. Four
+    arrivals measured against the car's own trip meter killed it: to fit them
+    all it needed a window of 17, 51, 119 and 868 seconds, and the two slowest
+    readings produced the largest and the smallest tails. Speed at the last
+    reading says nothing about what happens after it — a car at 1.6 km/h can be
+    halted at a gate with 190 m still to drive, or already in its bay.
 
-    None whenever the inputs cannot support a figure — no closing timestamp, no
-    observed speed, or the car already reading stopped — because a zero here
-    would be indistinguishable from a measured zero, which is exactly the
-    confusion end_lost_km was changed to avoid.
+    What does predict it is WHERE. The tail is a property of the car park: this
+    car's home multi-storey has measured 0.320, 0.193, 0.111 and 0.053 km,
+    while a surface car park with signal to the door measured 0.015. So the
+    caller supplies the median of what that place has actually shown, and this
+    only turns it into the pair the close needs.
+
+    None when the place has no measurements — an honest absence, which the
+    evidence says beats a guess: across those four arrivals the speed model
+    averaged 0.200 km of error against 0.208 km for not estimating at all.
     """
-    speed = last_snapshot.get("speed_kmh") or 0.0
-    if not close_ts or speed <= 0 or speed > ARRIVAL_EST_MAX_SPEED_KMH:
+    if not tail_km or tail_km <= 0:
         return None
-    unseen_sec = min(max(close_ts - last_snapshot["ts"], 0.0),
-                     ARRIVAL_EST_MAX_MIN * 60.0)
-    if unseen_sec <= 0:
+    km = round(min(tail_km, ARRIVAL_EST_MAX_KM), 3)
+    if not km:
         return None
-    est = speed / 2.0 * (unseen_sec / 3600.0)
-    if est > ARRIVAL_EST_MAX_KM:
-        # Capped distance means the window implied by it is shorter too, or
-        # the trip would gain time it did not gain kilometres for.
-        unseen_sec *= ARRIVAL_EST_MAX_KM / est
-        est = ARRIVAL_EST_MAX_KM
-    est = round(est, 3)
-    return (est, unseen_sec) if est else None
+    sec = min(km / ARRIVAL_CRAWL_KMH * 3600.0, ARRIVAL_EST_MAX_MIN * 60.0)
+    return km, sec
 
 
 def close_trip_on_sleep(open_trip: dict, last_snapshot: dict, capacity_kwh: float,
                         drive_min_km: float = DRIVE_MIN_KM,
-                        close_ts: float | None = None):
+                        place_tail_km: float | None = None):
     """Close a trip the moment the car is confirmed properly asleep.
 
     A car cannot reach true sleep while driving — it needs power to move, so
@@ -1021,7 +1011,7 @@ def close_trip_on_sleep(open_trip: dict, last_snapshot: dict, capacity_kwh: floa
     # place: a synthetic closing odometer plus end_folded_km, which
     # _drive_from already prices at the trip's own efficiency. Patching the
     # finished dict instead would leave those five to be kept in step by hand.
-    tail = estimate_arrival_tail(last_snapshot, close_ts)
+    tail = arrival_tail_for_place(place_tail_km)
     est = tail[0] if tail else None
     close = {**last_snapshot, "end_lost_km": None}
     if tail:

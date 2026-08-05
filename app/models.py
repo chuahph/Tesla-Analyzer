@@ -338,6 +338,11 @@ class ArrivalTailSample(Base):
     # so with the pair and the speed the implied true window falls out.
     speed_kmh: Mapped[float | None] = mapped_column(Float, nullable=True)
     est_sec: Mapped[float | None] = mapped_column(Float, nullable=True)
+    # WHERE the arrival happened, which turned out to be the only thing that
+    # predicts the tail at all. Stored rather than joined through drive_id so a
+    # deleted trip cannot take the measurement with it — this is the
+    # calibration set, and it has to outlive the rows it came from.
+    place: Mapped[str] = mapped_column(String(120), default="")
     # How long after the close the measuring poll arrived, and which report
     # closed the trip — both bear on how much the measurement can be trusted.
     elapsed_min: Mapped[float | None] = mapped_column(Float, nullable=True)

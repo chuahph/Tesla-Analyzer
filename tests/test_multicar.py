@@ -1087,8 +1087,14 @@ class _AsleepThenDrivesAgainClient(_AsleepThenParksWithCreepClient):
         return d
 
 
-def _run_asleep_close(monkeypatch, client_cls):
-    """Drive, fall genuinely asleep (closing the trip), then poll once more."""
+def _run_asleep_close(monkeypatch, client_cls, place_tail=None):
+    """Drive, fall genuinely asleep (closing the trip), then poll once more.
+
+    ``place_tail`` stands in for what the arrival place has been MEASURED to
+    cost (see routes._place_tail_km). Without it no estimate fires at all,
+    which is the new default and the honest one: a place with no measurements
+    has nothing to say about its tail.
+    """
     from app import services, state
     from app.models import Drive
 
@@ -1102,6 +1108,9 @@ def _run_asleep_close(monkeypatch, client_cls):
         with SessionLocal() as s:
             services.link_with_token(s, "tok")
             vid = s.query(Vehicle).filter(Vehicle.vin == vin).first().id
+        if place_tail is not None:
+            monkeypatch.setattr("app.api.routes._place_tail_km",
+                                lambda *a, **k: place_tail)
 
         monkeypatch.setattr("app.tesla_client.TeslaClient", client_cls)
         with TestClient(app) as client:
@@ -1242,7 +1251,7 @@ def test_an_estimated_tail_is_credited_once_not_to_both_trips(monkeypatch):
     ground twice — which is precisely how the reverted place-split corrupted
     two trips. Whatever the estimate takes, the next trip must start past."""
     closed_id, dist_before, _e, drives, _logged, _s = _run_asleep_close(
-        monkeypatch, _SlowlyArrivesThenDrivesAgainClient)
+        monkeypatch, _SlowlyArrivesThenDrivesAgainClient, place_tail=0.8)
     rows = sorted(drives, key=lambda d: d.id)
     assert len(rows) >= 2, "needs both trips to check the hand-over"
     assert rows[0].end_est_km, "the estimate must actually have fired here"
@@ -1256,8 +1265,7 @@ def test_an_estimated_tail_is_credited_once_not_to_both_trips(monkeypatch):
 
 
 class _SlowlyArrivesThenBarelyMovesClient(_AsleepThenParksWithCreepClient):
-    """Last seen crawling (20 mph) with the close 3 minutes past it, so the
-    tail is estimated at 0.805 km — but the car had very nearly arrived and the
+    """The place has measured a 0.8 km tail — but the car had very nearly arrived and the
     odometer, once a poll can read it again, has moved only 0.1 km. The
     estimate overshot the ground."""
 
@@ -1278,7 +1286,7 @@ def test_an_over_estimated_tail_is_trimmed_to_the_ground_actually_covered(monkey
     leaving the next trip free to re-count the same ground. The estimate must
     give way to the measurement in both directions."""
     closed_id, dist_before, _e, drives, logged, _s = _run_asleep_close(
-        monkeypatch, _SlowlyArrivesThenBarelyMovesClient)
+        monkeypatch, _SlowlyArrivesThenBarelyMovesClient, place_tail=0.8)
     assert dist_before == pytest.approx(12.8), "the estimate must have fired"
     assert logged == 0                       # topped up, not a phantom trip
     assert len(drives) == 1
@@ -1313,7 +1321,7 @@ def test_an_estimate_the_car_never_drove_is_taken_back_when_it_never_moves(monke
     measurement here, and the strongest one available: it does not merely fail
     to confirm the tail, it disproves it."""
     closed_id, dist_before, energy_before, drives, logged, _s = _run_asleep_close(
-        monkeypatch, _SlowlyArrivesThenNeverMovesClient)
+        monkeypatch, _SlowlyArrivesThenNeverMovesClient, place_tail=0.8)
     assert dist_before == pytest.approx(12.8), "the estimate must have fired"
     assert logged == 0
     assert len(drives) == 1
@@ -1331,7 +1339,7 @@ def test_an_estimate_the_car_never_drove_is_taken_back_when_it_never_moves(monke
 
 
 class _SlowlyArrivesThenParksFurtherOnClient(_AsleepThenParksWithCreepClient):
-    """The ordinary correction: the tail was estimated at 0.805 km and the car
+    """The ordinary correction: the place's measured tail is 0.8 km and the car
     turns out to have covered 0.9 — more than the guess, still a creep."""
 
     def vehicle_data(self, vid):
@@ -1346,11 +1354,11 @@ class _SlowlyArrivesThenParksFurtherOnClient(_AsleepThenParksWithCreepClient):
 def test_a_measured_tail_replaces_the_estimate_whole(monkeypatch):
     """The fold-in revokes the estimate and then has to put the *whole*
     measurement in its place. It was subtracting the estimate and adding only
-    what was left over after it — 0.805 km out, 0.095 km back, and the 0.805
-    the car genuinely drove credited to nobody. The trip must end up covering every
+    what was left over after it — 0.8 km out, 0.1 km back, and the 0.8 the car
+    genuinely drove credited to nobody. The trip must end up covering every
     metre between its anchor and the reading that could finally see it."""
     closed_id, dist_before, _e, drives, logged, _s = _run_asleep_close(
-        monkeypatch, _SlowlyArrivesThenParksFurtherOnClient)
+        monkeypatch, _SlowlyArrivesThenParksFurtherOnClient, place_tail=0.8)
     assert dist_before == pytest.approx(12.8), "the estimate must have fired"
     assert logged == 0
     assert len(drives) == 1
@@ -2144,10 +2152,10 @@ def test_a_measured_tail_is_recorded_as_a_calibration_sample(monkeypatch):
     always scores perfectly."""
     from app.models import ArrivalTailSample
 
-    *_, rows = _run_asleep_close(monkeypatch, _SlowlyArrivesThenParksFurtherOnClient)
+    *_, rows = _run_asleep_close(monkeypatch, _SlowlyArrivesThenParksFurtherOnClient, place_tail=0.8)
     assert len(rows) == 1
     r = rows[0]
-    assert r.est_km == pytest.approx(0.805)     # predicted, not clamped
+    assert r.est_km == pytest.approx(0.8)       # predicted, not clamped
     assert r.measured_km == pytest.approx(0.9)  # the whole unseen stretch
     assert r.speed_kmh == pytest.approx(32.19, abs=0.01)
     assert r.reason == "asleep"
@@ -2160,7 +2168,7 @@ def test_no_sample_when_the_tail_cannot_be_measured(monkeypatch):
     worth having if every pair in it is real."""
     from app.models import ArrivalTailSample
 
-    *_, rows = _run_asleep_close(monkeypatch, _SlowlyArrivesThenDrivesAgainClient)
+    *_, rows = _run_asleep_close(monkeypatch, _SlowlyArrivesThenDrivesAgainClient, place_tail=0.8)
     assert rows == []
 
 
@@ -2494,6 +2502,60 @@ def test_an_estimated_arrival_cannot_end_after_the_next_trip_starts(monkeypatch)
                 _unoverlap_previous(s, vid, _dt(2026, 8, 5, 18, 20))
                 s.commit()
                 assert s.get(Drive, meas.id).end_time == _dt(2026, 8, 5, 18, 30)
+    finally:
+        settings.app_passcode = old
+        _reset_to_demo()
+
+
+def test_a_checked_trip_feeds_the_place_it_arrived_at(monkeypatch):
+    """The automatic sample needs a poll that finds the car parked after a
+    no-network arrival — the exact case a multi-storey defeats, so at Home it
+    has never once fired. Checking a trip against the car's own screen is the
+    only measurement available there, and it now feeds the model rather than
+    only correcting one row.
+
+    Two measurements at a place, and the estimate starts using its median."""
+    from app.api.routes import PLACE_TAIL_MIN_SAMPLES, _place_tail_km
+    from app.models import ArrivalTailSample, Drive
+
+    settings = get_settings()
+    old = settings.app_passcode
+    settings.app_passcode = ""
+    try:
+        with TestClient(app) as client:
+            with SessionLocal() as s:
+                s.query(ArrivalTailSample).delete()
+                rows = s.query(Drive).order_by(Drive.id).limit(2).all()
+                for d, (span_end, est) in zip(rows, ((29030.117, 0.322),
+                                                     (29008.311, 0.394))):
+                    d.end_location = "Home"
+                    d.start_odo_km, d.end_odo_km = span_end - 2.469, span_end
+                    d.distance_km, d.end_est_km = 2.5, est
+                    d.energy_used_kwh, d.duration_min = 0.51, 9.0
+                s.commit()
+                ids = [d.id for d in rows]
+                assert _place_tail_km(s, "Home") is None      # nothing measured yet
+
+            # Trip 341's real figures: 2.2 km on the car against our 2.469 span
+            # with 0.322 estimated, so the tail it actually drove was 0.053.
+            client.get("/api/repair-arrival-tail",
+                       params={"drive_id": ids[0], "true_distance_km": 2.2,
+                               "apply": "true"})
+            client.get("/api/repair-arrival-tail",
+                       params={"drive_id": ids[1], "true_distance_km": 2.3,
+                               "apply": "true"})
+
+            body = client.get("/api/arrival-estimates").json()
+
+        home = next(p for p in body["places"] if p["place"] == "Home")
+        assert home["samples"] == PLACE_TAIL_MIN_SAMPLES
+        assert home["in_use"] is True
+        with SessionLocal() as s:
+            got = s.query(ArrivalTailSample).all()
+            assert sorted(round(g.measured_km, 3) for g in got) == [0.053, 0.225]
+            assert all(g.place == "Home" for g in got)
+            # And the estimate now runs on what the place showed, not a guess.
+            assert _place_tail_km(s, "Home") == pytest.approx(0.139, abs=0.001)
     finally:
         settings.app_passcode = old
         _reset_to_demo()

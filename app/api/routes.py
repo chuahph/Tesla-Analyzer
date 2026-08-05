@@ -170,12 +170,49 @@ def _retract_estimated_tail(drive, km: float, sec: float) -> None:
         drive.avg_speed_kmh = round(new_dist / (drive.duration_min / 60.0), 1)
 
 
+# Measured arrivals needed at a place before its median is trusted to estimate.
+# One is a reading, not a habit — and the whole point of this replacement is
+# that it uses what a car park has actually shown rather than what a model
+# supposes. Two is the smallest set a median can disagree with itself over.
+PLACE_TAIL_MIN_SAMPLES = 2
+
+
+def _place_tail_km(session: Session, place: str) -> float | None:
+    """The median arrival tail this place has actually shown, or None.
+
+    The tail is a property of the car park — a ramp and a slot, or a surface
+    bay with signal to the door — which is why this is keyed on place and not
+    on anything about the drive (see sync.arrival_tail_for_place). None until
+    a place has enough measurements, and None is a real answer: no estimate at
+    all beat the speed model it replaced.
+    """
+    if not place:
+        return None
+    vals = sorted(
+        s.measured_km for s in session.scalars(
+            select(ArrivalTailSample).where(ArrivalTailSample.place == place)
+        ).all() if s.measured_km is not None
+    )
+    if len(vals) < PLACE_TAIL_MIN_SAMPLES:
+        return None
+    return round(percentile(vals, 0.5), 3)
+
+
+def _record_tail_sample(session: Session, drive: Drive, est_km: float,
+                        measured_km: float, **extra) -> None:
+    """Keep one (predicted, measured) arrival pair, tagged with its place."""
+    session.add(ArrivalTailSample(
+        vehicle_id=drive.vehicle_id, drive_id=drive.id,
+        ts=sync_mod.now_local(), place=drive.end_location or "",
+        est_km=round(est_km, 3), measured_km=round(measured_km, 3), **extra))
+
+
 def _unoverlap_previous(session: Session, vehicle_id: int, new_start) -> None:
     """Pull an ESTIMATED arrival back so it cannot end after the next trip begins.
 
     A sleep close moves the clock forward with the odometer, both from one
     assumption about how long the car went on arriving (see
-    sync.estimate_arrival_tail). Nothing bounded that by reality: measured
+    sync.arrival_tail_for_place). Nothing bounded that by reality: measured
     live, trip 339 was credited three minutes of arriving while the car was
     driving again within one, so it ended at 17:01 while trip 340 started at
     16:59 — two trips overlapping in time, which services.edit_drive already
@@ -1606,16 +1643,12 @@ def _process_vehicle(
                 #
                 # raw_moved, not moved: the prediction was about the whole
                 # unseen stretch, so that is what it has to be scored against.
-                session.add(ArrivalTailSample(
-                    vehicle_id=vehicle.id, drive_id=marker.get("drive_id"),
-                    ts=sync_mod._dt(snap["ts"]),
-                    est_km=round(est_predicted, 3),
-                    measured_km=round(raw_moved, 3),
+                _record_tail_sample(
+                    session, closed_drive, est_predicted, raw_moved,
                     speed_kmh=marker.get("speed_kmh"),
                     est_sec=marker.get("est_sec"),
                     elapsed_min=round(elapsed_min, 1) if close_ts else None,
-                    reason=marker.get("reason") or "",
-                ))
+                    reason=marker.get("reason") or "")
                 session.commit()
                 # Tell process_snapshot() this ground is already covered, so its
                 # own gap-reconstruction sees no movement here and stays quiet.
@@ -2033,11 +2066,17 @@ def sync_now(wake: bool = Query(False), session: Session = Depends(get_session))
                 )
                 row_capacity_kwh = _usable_capacity(session, vehicle_row, settings)[0] if vehicle_row else 75.0
                 if trip_raw and last_raw and vehicle_row:
-                    close_ts = datetime.now().timestamp()
+                    # Where the car went dark decides the tail, so resolve the
+                    # place from the closing reading's own coordinates and ask
+                    # what that car park has actually shown.
+                    last_snap = _json.loads(last_raw)
+                    place_tail = _place_tail_km(
+                        session,
+                        _place_and_area(sync_mod._coords(last_snap) or "", session)[0])
                     d = sync_mod.close_trip_on_sleep(
-                        _json.loads(trip_raw), _json.loads(last_raw),
+                        _json.loads(trip_raw), last_snap,
                         row_capacity_kwh, settings.drive_min_km,
-                        close_ts=close_ts,
+                        place_tail_km=place_tail,
                     )
                     if d:
                         d["start_coords"], d["end_coords"] = d["start_location"], d["end_location"]
@@ -2093,8 +2132,8 @@ def sync_now(wake: bool = Query(False), session: Session = Depends(get_session))
                                 # it; the inputs here are the same ones, so
                                 # the answer is the same one.
                                 "est_sec": (
-                                    (sync_mod.estimate_arrival_tail(
-                                        _json.loads(last_raw), close_ts) or (0.0, 0.0))[1]
+                                    (sync_mod.arrival_tail_for_place(place_tail)
+                                     or (0.0, 0.0))[1]
                                 ),
                                 # The speed the estimate was computed from.
                                 # Carried purely so the calibration sample can
@@ -3575,11 +3614,26 @@ def arrival_estimates(
             "elapsed_min": r.elapsed_min,
             "reason": r.reason,
         })
+    # What each place has actually shown, which is what the estimate now runs
+    # on. The medians here ARE the model (see _place_tail_km), so this is not a
+    # summary of the samples but a readout of what they have decided.
+    by_place: dict[str, list[float]] = {}
+    for r in rows:
+        if r.measured_km is not None:
+            by_place.setdefault(r.place or "(unknown)", []).append(r.measured_km)
+    places = [{
+        "place": p,
+        "samples": len(v),
+        "median_tail_km": round(percentile(sorted(v), 0.5), 3),
+        "min_km": min(v), "max_km": max(v),
+        "in_use": len(v) >= PLACE_TAIL_MIN_SAMPLES,
+    } for p, v in sorted(by_place.items(), key=lambda kv: -len(kv[1]))]
     summary = {
         "samples": len(out),
         "with_speed": len(implied),
         "current_window_sec": sync_mod.ARRIVAL_EST_MAX_MIN * 60.0,
         "min_samples_to_suggest": MIN_SAMPLES_TO_SUGGEST,
+        "min_samples_per_place": PLACE_TAIL_MIN_SAMPLES,
     }
     if implied:
         # 0.5, not 50 — percentile() takes a fraction (see analysis/__init__).
@@ -3595,7 +3649,7 @@ def arrival_estimates(
             f"{len(implied)} of {MIN_SAMPLES_TO_SUGGEST} samples needed before "
             f"a window is suggested. One arrival re-tuned this model wrongly "
             f"once already.")
-    return {"summary": summary, "samples": out}
+    return {"summary": summary, "places": places, "samples": out}
 
 
 @router.get("/estimated-tails")
@@ -3720,7 +3774,7 @@ def repair_arrival_tail(
                  f"the {true_distance_km} km given. This tool only removes "
                  f"estimated distance; a trip reading short is a different "
                  f"fault (see end_lost_km).")
-    est = drive.end_est_km or 0.0
+    est = est_before = drive.end_est_km or 0.0
     if not confirmed_only and km > max(est, 0.0) + 0.002:
         raise HTTPException(
             409, f"Trip {drive_id} carries {est} km of estimated tail but the "
@@ -3805,6 +3859,19 @@ def repair_arrival_tail(
         # question. Marked so the review list can be worked down rather than
         # showing the same reconciled rows forever.
         drive.end_est_verified = True
+        # And it is a MEASUREMENT of that place's tail, which is the one thing
+        # that predicts the next one (see _place_tail_km). The automatic path
+        # needs a poll that finds the car parked after a no-network arrival —
+        # the exact case a car park defeats — so at Home it has never once
+        # fired. Checking a trip against the car's own screen is the only
+        # source there is, and this makes that check feed the model instead of
+        # only correcting one row.
+        _record_tail_sample(
+            session, drive, est_before,
+            # What the trip's own anchors say was never seen: the ground
+            # between the last reading and where the car really stopped.
+            max(true_distance_km - (span - est_before), 0.0),
+            reason="verified")
         session.commit()
     return {
         "applied": apply, "drive_id": drive_id,
