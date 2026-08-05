@@ -2595,9 +2595,19 @@ def test_repairing_an_arrival_moves_the_next_trip_start_with_it(monkeypatch):
                 s.commit()
                 aid, bid = a.id, b.id
 
-            client.get("/api/repair-arrival-tail",
-                       params={"drive_id": aid, "true_distance_km": 2.2,
-                               "apply": "true"})
+            r = client.get("/api/repair-arrival-tail",
+                           params={"drive_id": aid, "true_distance_km": 2.2,
+                                   "apply": "true"})
+            assert r.json()["next_trip"]["gap_km"] == pytest.approx(0.269)
+
+            # Checking it AGAIN retracts nothing — the first check already did
+            # — but must not undo or re-apply the successor's shift. A repair
+            # that only works the first time is a trap for anyone who reruns it.
+            again = client.get("/api/repair-arrival-tail",
+                               params={"drive_id": aid, "true_distance_km": 2.2,
+                                       "apply": "true"}).json()
+            assert again["outcome"] == "already_matches"
+            assert again["next_trip"] is None
 
         with SessionLocal() as s:
             fixed, nxt = s.get(Drive, aid), s.get(Drive, bid)
@@ -2608,7 +2618,7 @@ def test_repairing_an_arrival_moves_the_next_trip_start_with_it(monkeypatch):
             # Energy follows at the trip's own rate, and the ground it gained
             # was unseen by any poll, which is what start_recovered_km records.
             assert nxt.energy_used_kwh == pytest.approx(1.57 * 11.379 / 11.110, abs=0.01)
-            assert nxt.start_recovered_km == pytest.approx(0.394)
+            assert nxt.start_recovered_km == pytest.approx(0.394)  # 0.125 + 0.269
             assert nxt.avg_speed_kmh == pytest.approx(11.4 / (29.0 / 60.0), abs=0.05)
     finally:
         settings.app_passcode = old

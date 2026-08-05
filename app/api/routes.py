@@ -3861,43 +3861,59 @@ def repair_arrival_tail(
             marker["est_km"] = new_est
             marker["corrected"] = True
             state.put(session, sleep_key, _json.dumps(marker))
+    # A trip that already has a successor cannot have its end moved alone. The
+    # correction proves the car parked EARLIER than recorded, so the next trip
+    # set off from there too — and if it was logged before this repair ran, its
+    # start still sits at the old, fictional end. Measured: trip 341's end came
+    # back 0.269 km and trip 342, logged hours earlier, kept starting where the
+    # estimate had wrongly put the car, leaving 0.269 km of real driving
+    # belonging to no trip at all. It read 11.1 km against the car's own 11.3.
+    #
+    # Keyed on the gap that is actually there rather than on this call having
+    # created it. Checking a trip a second time retracts nothing — the first
+    # check already did — but the successor is just as misaligned, and a repair
+    # that only works the first time is a trap for anyone who runs it twice.
+    #
+    # The mirror of repair_trip_overlap: there the later trip gives ground back,
+    # here it takes ground on. Both exist because a boundary is one position
+    # shared by two rows, and moving it in one is never enough.
+    #
+    # Bounded by the largest tail this app will ever estimate: past that, a hole
+    # between two trips is not a misplaced boundary but a journey nobody logged,
+    # and quietly handing it to the next trip would bury that.
+    nxt = session.scalars(
+        select(Drive).where(Drive.vehicle_id == drive.vehicle_id,
+                            Drive.start_time > drive.start_time)
+        .order_by(Drive.start_time).limit(1)
+    ).first()
+    gap_plan = None
+    if (nxt is not None and nxt.start_odo_km is not None and nxt.end_odo_km
+            and nxt.distance_km > 0):
+        gap = round(nxt.start_odo_km - target.end_odo_km, 3)
+        new_span = nxt.end_odo_km - target.end_odo_km
+        if 0 < gap <= sync_mod.ARRIVAL_EST_MAX_KM and new_span > 0:
+            new_energy = (round(nxt.energy_used_kwh * new_span
+                                / (nxt.end_odo_km - nxt.start_odo_km), 2)
+                          if nxt.energy_used_kwh else nxt.energy_used_kwh)
+            gap_plan = {
+                "drive_id": nxt.id, "gap_km": gap,
+                "start_odo_km": [nxt.start_odo_km, round(target.end_odo_km, 3)],
+                "distance_km": [nxt.distance_km, round(new_span, 1)],
+                "energy_kwh": [nxt.energy_used_kwh, new_energy],
+            }
+            if apply:
+                nxt.energy_used_kwh = new_energy
+                nxt.start_odo_km = round(target.end_odo_km, 3)
+                nxt.distance_km = round(new_span, 1)
+                # The ground it gains was never seen by a poll — it is the first
+                # metres of that trip's own departure, which start_recovered_km
+                # is what records.
+                nxt.start_recovered_km = round(
+                    (nxt.start_recovered_km or 0.0) + gap, 3)
+                if nxt.duration_min:
+                    nxt.avg_speed_kmh = round(
+                        nxt.distance_km / (nxt.duration_min / 60.0), 1)
     if apply:
-        # A trip that already has a successor cannot have its end moved alone.
-        # The retraction proves the car parked EARLIER than recorded, so the
-        # next trip set off from there too — and if it was logged before this
-        # repair ran, its start still sits at the old, fictional end. Measured:
-        # trip 341's end came back 0.269 km and trip 342, logged hours earlier,
-        # kept starting where the estimate had wrongly put the car, leaving
-        # 0.269 km of real driving belonging to no trip at all. It read 11.1 km
-        # against the car's own 11.3.
-        #
-        # The mirror of repair_trip_overlap: there the later trip gives ground
-        # back, here it takes ground on. Both exist because a boundary is one
-        # position shared by two rows, and moving it in one is never enough.
-        if km > 0:
-            nxt = session.scalars(
-                select(Drive).where(Drive.vehicle_id == drive.vehicle_id,
-                                    Drive.start_time > drive.start_time)
-                .order_by(Drive.start_time).limit(1)
-            ).first()
-            if (nxt is not None and nxt.start_odo_km is not None
-                    and abs(nxt.start_odo_km - before["end_odo_km"]) <= 0.002):
-                new_span = nxt.end_odo_km - target.end_odo_km if nxt.end_odo_km else None
-                if new_span and new_span > 0 and nxt.distance_km > 0:
-                    if nxt.energy_used_kwh:
-                        nxt.energy_used_kwh = round(
-                            nxt.energy_used_kwh * new_span
-                            / (nxt.end_odo_km - nxt.start_odo_km), 2)
-                    nxt.start_odo_km = target.end_odo_km
-                    nxt.distance_km = round(new_span, 1)
-                    # The ground it gains was never seen by a poll — it is the
-                    # first metres of that trip's own departure, which is what
-                    # start_recovered_km is for.
-                    nxt.start_recovered_km = round(
-                        (nxt.start_recovered_km or 0.0) + km, 3)
-                    if nxt.duration_min:
-                        nxt.avg_speed_kmh = round(
-                            nxt.distance_km / (nxt.duration_min / 60.0), 1)
         # Whatever estimate survives the retraction has now been checked
         # against the car's own trip meter and found right — still unseen by
         # any poll, which is what end_est_km records, but no longer an open
@@ -3932,6 +3948,8 @@ def repair_arrival_tail(
         # So a dry run says whether it is racing the automatic correction, and
         # an applied one says it stood it down.
         "pending_auto_correction": pending == drive_id,
+        # The successor, when moving this end left a hole under it.
+        "next_trip": gap_plan,
         "before": before, "after": after,
     }
 
