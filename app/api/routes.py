@@ -1995,6 +1995,28 @@ def sync_now(wake: bool = Query(False), session: Session = Depends(get_session))
             state.put(session, state.REFRESH_KEY, tokens["refresh_token"])
         return tokens["access_token"]
 
+    # Nothing on this account can have changed while every car is asleep, so
+    # do not spend a request finding that out. The suspend window is set at the
+    # end of a tick that found everything quiet, and cleared the moment
+    # anything is not (see settings.sleep_recheck_min).
+    #
+    # A manual sync ignores it outright — the person pressing the button is
+    # the reason the button exists.
+    suspend_until = float(state.get(session, state.SUSPEND_KEY) or 0)
+    if not wake and suspend_until and now_ts < suspend_until:
+        last = _json.loads(state.get(
+            session, state.scoped(state.LAST_STATUS_KEY, active_target)) or "{}")
+        return {
+            "status": last.get("status") or "asleep",
+            "soc": last.get("soc"), "odo_km": last.get("odo_km"),
+            "speed_kmh": last.get("speed_kmh") or 0,
+            "trip_in_progress": False,
+            "poll_fast": False,
+            "skipped": "asleep",
+            "next_check_sec": round(suspend_until - now_ts),
+            "logged": {"drives": 0, "charges": 0},
+        }
+
     # List every car on the account (with a single token-refresh retry). Tesla
     # returns 401 for an expired access token, but sometimes 403 instead —
     # both are treated as "try refreshing" rather than a hard failure.
@@ -2277,6 +2299,27 @@ def sync_now(wake: bool = Query(False), session: Session = Depends(get_session))
             active_cfg = data.get("vehicle_config") or {}
 
     state.put(session, state.SOURCE_KEY, "linked")
+
+    # Arm or disarm the sleep back-off for the next tick. Quiet means every
+    # car on the account read as not online AND none has a trip or charge
+    # open — the two things that could still be moving underneath us. Any
+    # doubt clears the window rather than setting it: a missed departure
+    # costs boundary precision, and being wrong in that direction is the one
+    # this whole week was spent undoing.
+    # A pending LAST_SLEEP_CLOSE_KEY is deliberately NOT counted. It looks like
+    # unfinished business — an arrival waiting to be measured — but the poll it
+    # waits for needs vehicle_data, and a sleeping car is never read. Treating
+    # it as a reason to keep listing would hold the back-off off for exactly
+    # the hours it exists for: a car parked overnight carries that marker the
+    # whole time, and no amount of listing can act on it.
+    any_open = any(
+        state.get(session, state.scoped(k, v.get("vin")))
+        for v in vehicles for k in (state.OPEN_TRIP_KEY, state.OPEN_CHARGE_KEY)
+    )
+    all_quiet = bool(vehicles) and not any_open and not any(
+        v.get("state") == "online" for v in vehicles)
+    state.put(session, state.SUSPEND_KEY,
+              str(now_ts + settings.sleep_recheck_min * 60.0) if all_quiet else "")
 
     # The dashboard's live status reflects the active car specifically.
     if active_snap is None:

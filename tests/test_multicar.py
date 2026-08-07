@@ -42,7 +42,10 @@ def _reset_to_demo():
     with SessionLocal() as s:
         services._wipe(s)
         for key in (state.TOKEN_KEY, state.REFRESH_KEY, state.BASE_URL_KEY,
-                    state.ACTIVE_VIN_KEY, state.LINKED_VIN_KEY, state.SOURCE_KEY):
+                    state.ACTIVE_VIN_KEY, state.LINKED_VIN_KEY, state.SOURCE_KEY,
+                    # An armed sleep back-off outlives its account otherwise,
+                    # and the next test's first sync is silently skipped.
+                    state.SUSPEND_KEY):
             state.put(s, key, "")
         # Per-VIN scoped state (open trips, last snapshot, wake tracking) must
         # not leak into the next test's fresh link.
@@ -2844,4 +2847,109 @@ def test_the_cars_own_wh_per_km_beats_charging_a_park_at_an_average(monkeypatch)
             assert fixed.distance_km == 1.8
     finally:
         settings.app_passcode = old
+        _reset_to_demo()
+
+
+def test_polling_stands_down_while_every_car_is_asleep(monkeypatch):
+    """list_vehicles() runs on every /api/sync whether or not anything can have
+    changed, and a sleeping car cannot move. On a real account that was 60% of
+    a month's Fleet API requests — RM 105 projected against a RM 45 allowance,
+    with the billing limit reached around the 22nd and the app then blind.
+
+    Quiet means every car reads not-online AND none has a trip or charge open.
+    Any doubt clears the window rather than setting it: a missed departure
+    costs boundary precision, and that is the error this whole week undid."""
+    from app import services, state
+
+    settings = get_settings()
+    old_pass, old_win = settings.app_passcode, settings.sleep_recheck_min
+    settings.app_passcode = ""
+    settings.sleep_recheck_min = 20.0
+    _SleepsAfterDrivingClient.step = 0
+    try:
+        monkeypatch.setattr("app.tesla_client.TeslaClient", _FakeClient)
+        vin = "VINAAAAAAAAAAAAAA"
+        with SessionLocal() as s:
+            services.link_with_token(s, "tok")
+
+        calls = {"n": 0}
+        real = _SleepsAfterDrivingClient.list_vehicles
+
+        def counted(self):
+            calls["n"] += 1
+            return real(self)
+
+        monkeypatch.setattr(_SleepsAfterDrivingClient, "list_vehicles", counted)
+        monkeypatch.setattr("app.tesla_client.TeslaClient", _SleepsAfterDrivingClient)
+
+        with TestClient(app) as client:
+            client.post("/api/sync")                 # online, parked
+            _SleepsAfterDrivingClient.step = 1
+            client.post("/api/sync")                 # driving: opens a trip
+            _SleepsAfterDrivingClient.step = 2       # reports asleep
+            client.post("/api/sync")                 # closes the trip on sleep
+            armed = calls["n"]
+            with SessionLocal() as s:
+                assert state.get(s, state.SUSPEND_KEY), "a quiet tick must arm it"
+
+            body = client.post("/api/sync").json()   # cron tick inside the window
+            assert body["skipped"] == "asleep"
+            assert body["next_check_sec"] > 0
+            assert calls["n"] == armed, "the skipped tick must not call Tesla at all"
+
+            # The manual Sync button ignores it — the person pressing it is the
+            # reason the button exists. (wake=1 polls a waking car for ~30 s;
+            # the waiting is not what is under test.)
+            monkeypatch.setattr("time.sleep", lambda *_: None)
+            client.post("/api/sync?wake=1")
+            assert calls["n"] > armed
+    finally:
+        settings.app_passcode, settings.sleep_recheck_min = old_pass, old_win
+        _reset_to_demo()
+
+
+def test_a_trip_open_through_a_dead_zone_keeps_polling(monkeypatch):
+    """"Nothing is online" is not enough on its own. A car mid-drive through a
+    tunnel reads offline with its trip still open, and that is precisely when
+    the reconnect must be caught — standing down for the window would leave a
+    live drive unwatched and close it on stale readings.
+
+    So the open trip is checked as well as the reported state, and it is the
+    condition that saves this case."""
+    from app import services, state
+
+    settings = get_settings()
+    old_pass, old_win = settings.app_passcode, settings.sleep_recheck_min
+    settings.app_passcode = ""
+    settings.sleep_recheck_min = 20.0
+    _OfflineAfterDrivingClient.step = 0
+    try:
+        monkeypatch.setattr("app.tesla_client.TeslaClient", _FakeClient)
+        vin = "VINAAAAAAAAAAAAAA"
+        with SessionLocal() as s:
+            services.link_with_token(s, "tok")
+        monkeypatch.setattr("app.tesla_client.TeslaClient", _OfflineAfterDrivingClient)
+
+        with TestClient(app) as client:
+            client.post("/api/sync")
+            _OfflineAfterDrivingClient.step = 2      # offline mid-drive
+            with SessionLocal() as s:
+                state.put(s, state.scoped(state.OPEN_TRIP_KEY, vin),
+                          _json.dumps({"ts": 0.0, "odo_km": 10_000.0, "soc": 80}))
+                s.commit()
+            client.post("/api/sync")
+
+            with SessionLocal() as s:
+                assert state.get(s, state.SUSPEND_KEY) == "", (
+                    "a live trip through a dead zone must not be slept through")
+
+            # And with that trip gone, the same offline reading does arm it.
+            with SessionLocal() as s:
+                state.put(s, state.scoped(state.OPEN_TRIP_KEY, vin), "")
+                s.commit()
+            client.post("/api/sync")
+            with SessionLocal() as s:
+                assert state.get(s, state.SUSPEND_KEY)
+    finally:
+        settings.app_passcode, settings.sleep_recheck_min = old_pass, old_win
         _reset_to_demo()

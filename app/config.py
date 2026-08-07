@@ -38,6 +38,22 @@ class Settings(BaseSettings):
     # car that Sentry Mode is keeping awake, which is where the waste was.
     # The cost is up to ~2 min latency on the parked-car alerts.
     sync_poll_interval_min: float = 2.0
+    # How long to stop calling Tesla at all while every car is asleep or
+    # offline and nothing is open. list_vehicles() runs on every /api/sync
+    # whether or not anything can have changed, and a sleeping car cannot
+    # move — measured on a real account, 60% of a month's Fleet API requests
+    # were spent confirming the car was still asleep, at a projected RM 105
+    # against a RM 45 free allowance.
+    #
+    # The cost of a longer window is boundary PRECISION, not distance: a trip
+    # anchors its odometer at the last parked reading and a parked car's
+    # odometer does not drift, so the departure recovery reclaims the ground
+    # either way. What widens is the clock estimate for the start.
+    #
+    # Keep it well under sync.STALE_ANCHOR_MAX_MIN (45), which is where the
+    # departure recovery stops trusting the old SoC/range and a trip starts
+    # losing its opening energy as well as its opening minutes.
+    sleep_recheck_min: float = 20.0
     # Minimum odometer movement (km) treated as a real trip rather than
     # jitter — a car nudged while parked, GPS drift, a multi-point turn.
     # Lower it to catch genuinely short moves (e.g. a charger-to-parking-spot
