@@ -366,8 +366,8 @@ def test_summary_since_charge_window():
             assert lc is not None
             assert set(lc) == {
                 "id", "start_time", "end_time", "energy_added_kwh", "start_soc",
-                "end_soc", "cost", "charge_type", "location", "rate_per_kwh", "is_free",
-                "used_since_kwh", "source", "battery_kwh_at_end",
+                "end_soc", "cost", "charge_type", "location", "location_raw",
+                "rate_per_kwh", "is_free", "used_since_kwh", "source", "battery_kwh_at_end",
             }
             assert lc["used_since_kwh"] >= 0
             # Energy Charged/AC-DC Energy/Charging Cost (and Driving Cost,
@@ -2635,6 +2635,116 @@ def test_edit_charge_rate_recalculates_cost():
             }).status_code == 400   # negative rate
     finally:
         settings.app_passcode = old
+
+
+def test_edit_charge_location_renames_one_or_every_session_there():
+    """The geocoder names a charger after whatever it resolved at the time —
+    the shop next door, or bare coordinates when it resolved nothing. Renaming
+    fixes the label (and, on request, every session sharing it) without
+    touching what the session cost."""
+    settings = get_settings()
+    old = settings.app_passcode
+    settings.app_passcode = ""
+    from app.database import SessionLocal
+    from app.models import Charge
+
+    def _add(client, day, location):
+        return client.post("/api/charges/manual", json={
+            "start_time": f"2025-04-0{day}T20:00:00", "end_time": f"2025-04-0{day}T22:00:00",
+            "energy_added_kwh": 10.0, "charge_type": "AC", "location": location,
+        }).json()["id"]
+
+    try:
+        with TestClient(app) as client:
+            # Two sessions at the same badly-named spot, one elsewhere, and
+            # one the geocoder never resolved at all.
+            a = _add(client, 1, "Kedai Runcit Ali")
+            b = _add(client, 2, "Kedai Runcit Ali")
+            other = _add(client, 3, "Office")
+            blank = _add(client, 4, "")
+            with SessionLocal() as s:
+                cost_before = s.get(Charge, a).cost
+
+            # Renaming just this one leaves its twin alone.
+            resp = client.post("/api/charges/edit-location", json={
+                "id": a, "location": "Sunway Pyramid DC",
+            })
+            assert resp.status_code == 200
+            assert resp.json() == {"id": a, "location": "Sunway Pyramid DC", "updated": 1}
+            with SessionLocal() as s:
+                assert s.get(Charge, a).location == "Sunway Pyramid DC"
+                assert s.get(Charge, b).location == "Kedai Runcit Ali"
+                # A rename is not a repricing.
+                assert s.get(Charge, a).cost == cost_before
+
+            # apply_all sweeps up every session still carrying the old label,
+            # and nothing else.
+            resp = client.post("/api/charges/edit-location", json={
+                "id": b, "location": "Sunway Pyramid DC", "apply_all": True,
+            })
+            assert resp.status_code == 200
+            assert resp.json()["updated"] == 1   # only b still had the old name
+            with SessionLocal() as s:
+                assert s.get(Charge, b).location == "Sunway Pyramid DC"
+                assert s.get(Charge, other).location == "Office"
+
+            # Both now share a label, so apply_all from either renames both.
+            resp = client.post("/api/charges/edit-location", json={
+                "id": a, "location": "Pyramid Supercharger", "apply_all": True,
+            })
+            assert resp.json()["updated"] == 2
+            with SessionLocal() as s:
+                assert s.get(Charge, a).location == "Pyramid Supercharger"
+                assert s.get(Charge, b).location == "Pyramid Supercharger"
+
+            # A blank label isn't something sessions have "in common" — naming
+            # an unresolved charge must not drag every other unnamed one along.
+            blank2 = _add(client, 5, "")
+            resp = client.post("/api/charges/edit-location", json={
+                "id": blank, "location": "Back lane", "apply_all": True,
+            })
+            assert resp.json()["updated"] == 1
+            with SessionLocal() as s:
+                assert s.get(Charge, blank).location == "Back lane"
+                assert s.get(Charge, blank2).location == ""
+
+            # Validation: a name is required (clearing one would throw away
+            # the raw coordinates, the only geographic record a Charge keeps).
+            assert client.post("/api/charges/edit-location", json={
+                "id": a, "location": "   ",
+            }).status_code == 400
+            assert client.post("/api/charges/edit-location", json={
+                "location": "Home",
+            }).status_code == 400   # missing id
+            assert client.post("/api/charges/edit-location", json={
+                "id": 999999, "location": "Home",
+            }).status_code == 404   # unknown charge
+
+            with SessionLocal() as s:
+                for cid in (a, b, other, blank, blank2):
+                    s.delete(s.get(Charge, cid))
+                s.commit()
+    finally:
+        settings.app_passcode = old
+
+
+def test_recent_charges_carry_the_stored_location_alongside_the_shown_one():
+    """The Recent Charges rows expose location_raw so the rename button can
+    tell a charge's own label from one inferred for it from a nearby trip —
+    only the former can be bulk-renamed across sessions."""
+    from app.analysis import charging as charging_analysis
+    from app.models import Charge
+
+    charge = Charge(
+        vehicle_id=1,
+        start_time=datetime(2025, 4, 1, 20, 0), end_time=datetime(2025, 4, 1, 22, 0),
+        duration_min=120.0, start_soc=40.0, end_soc=80.0, energy_added_kwh=28.0,
+        charge_type="AC", max_power_kw=7.0, location="3.1234, 101.5678", cost=25.0,
+    )
+    stats = charging_analysis.analyze([charge], drives=[])
+    row = stats["recent_charges"][0]
+    assert row["location_raw"] == "3.1234, 101.5678"
+    assert row["location"] == "3.1234, 101.5678"   # nothing to infer from
 
 
 def test_pricing_prefs_home_defaults_before_first_save():

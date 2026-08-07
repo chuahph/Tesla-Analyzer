@@ -464,6 +464,7 @@
           rate_per_kwh: c.cost != null && c.energy_added_kwh
             ? round(c.cost / c.energy_added_kwh, 3) : null,
           location: placeOf(c),
+          location_raw: c.location || "",
           is_free: !!c.is_free,
         })),
     };

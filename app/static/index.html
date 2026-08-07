@@ -825,6 +825,33 @@
     </div>
   </div>
 
+  <!-- Modal: rename one charging session's location — the geocoder often
+       resolves a charger to the shop next door, or to bare coordinates when
+       it resolves nothing at all. Renaming touches the label only; the cost
+       and the rate it was priced at stay as they are. The ✏️ button on a
+       Recent Charges row opens this. -->
+  <div id="edit-charge-loc-modal" class="modal hidden">
+    <div class="modal-card">
+      <button class="modal-close" data-close>×</button>
+      <h2>✏️ Rename charging location</h2>
+      <p class="modal-sub" id="edit-charge-loc-summary"></p>
+      <form id="edit-charge-loc-form" class="service-form">
+        <label class="field">
+          <span class="field-label">Location name</span>
+          <input type="text" id="edit-charge-loc-name" maxlength="120" required>
+        </label>
+        <!-- Only offered for a session that carries a stored label of its
+             own — there's nothing to match other sessions against otherwise. -->
+        <label class="field field-checkbox hidden" id="edit-charge-loc-all-row">
+          <input type="checkbox" id="edit-charge-loc-all" checked>
+          <span class="field-label" id="edit-charge-loc-all-label"></span>
+        </label>
+        <button type="submit" class="btn btn-accent">Save</button>
+      </form>
+      <span id="edit-charge-loc-status" class="status"></span>
+    </div>
+  </div>
+
   <!-- Modal: manually correct one already-logged trip's start/end time — for
        a no-signal park or departure the sync-time estimate still got wrong.
        Distance and energy stay as recorded (they come from the odometer/

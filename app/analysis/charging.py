@@ -117,6 +117,12 @@ def analyze(charges: list[Charge], drives: list[Drive] | None = None) -> dict[st
                 round(c.cost / c.energy_added_kwh, 3) if c.energy_added_kwh else None
             ),
             "location": _place(c),
+            # The label actually stored on the row, as opposed to the one
+            # above (which may have been inferred from a nearby trip when
+            # the charge itself has none). The rename button edits this, and
+            # its "rename every session here too" option only makes sense
+            # for a session that has one of its own.
+            "location_raw": getattr(c, "location", "") or "",
             "is_free": bool(getattr(c, "is_free", False)),
             # Which of Public/Home/Office this was actually priced against,
             # persisted at charge-price time — None for a custom rate or a

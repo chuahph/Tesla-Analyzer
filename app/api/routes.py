@@ -2627,6 +2627,56 @@ def edit_charge_rate(payload: dict = Body(...), session: Session = Depends(get_s
     }
 
 
+@router.post("/charges/edit-location")
+def edit_charge_location(payload: dict = Body(...), session: Session = Depends(get_session)):
+    """Rename one charging session's location label.
+
+    A charge is labeled with whatever the geocoder resolved when it was
+    logged — sometimes the neighbouring shop rather than the charger, and
+    just "lat, lon" when nothing resolved at all. This renames it by hand.
+
+    With 'apply_all', every other session of the same vehicle carrying the
+    *same stored label* is renamed too, so naming one charger fixes its
+    whole history in one go. Matching is on the stored label, not the one on
+    screen: a charge whose card shows a name inferred from a nearby trip has
+    no stored label of its own, and a blank label isn't treated as something
+    sessions have in common, so apply_all can't sweep up unrelated rows.
+
+    A name is required — clearing one back to blank would throw away the
+    raw coordinates, which are the only geographic record a Charge keeps.
+
+    Cost and price source are left alone: what a place is called doesn't
+    change what the session was billed at.
+    """
+    charge_id = payload.get("id")
+    if not isinstance(charge_id, int):
+        raise HTTPException(400, "Missing or invalid 'id'.")
+    name = str(payload.get("location") or "").strip()[:120]
+    if not name:
+        raise HTTPException(400, "'location' must not be empty.")
+
+    charge = session.get(Charge, charge_id)
+    if charge is None:
+        raise HTTPException(404, "Charge not found.")
+
+    old = charge.location or ""
+    charge.location = name
+    updated = 1
+    if payload.get("apply_all") and old and old != name:
+        others = session.scalars(
+            select(Charge).where(
+                Charge.vehicle_id == charge.vehicle_id,
+                Charge.location == old,
+                Charge.id != charge.id,
+            )
+        ).all()
+        for other in others:
+            other.location = name
+        updated += len(others)
+    session.commit()
+    return {"id": charge.id, "location": charge.location, "updated": updated}
+
+
 @router.get("/pricing-prefs")
 def get_pricing_prefs(session: Session = Depends(get_session)):
     """Current Public/Home/Office AC+DC rates and which source new charges
@@ -4439,6 +4489,10 @@ def summary(
             "cost": last_charge.cost,
             "charge_type": last_charge.charge_type,
             "location": last_charge.location,
+            # Same string here (this summary doesn't infer a name from
+            # nearby trips the way recent_charges does), but the pinned row
+            # shares chargeRowHtml with that list, so it needs the field.
+            "location_raw": last_charge.location,
             "rate_per_kwh": (
                 round(last_charge.cost / last_charge.energy_added_kwh, 3)
                 if last_charge.energy_added_kwh else None

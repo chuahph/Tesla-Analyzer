@@ -1802,6 +1802,7 @@ function renderLists(d) {
     const rows = allCharges.map((c) => chargeRowHtml(c, d.currency)).join("");
     chargesEl.innerHTML = rows || '<li class="empty">No charging sessions in this window</li>';
     wireEditRateButtons(chargesEl);
+    wireRenameLocButtons(chargesEl);
     // Only offer the charge tools when there's a real (self-hosted) DB behind them.
     const chargeTools = document.getElementById("charge-tools");
     if (chargeTools) {
@@ -1914,6 +1915,13 @@ function matchedSource(c) {
   return "public";
 }
 
+// Text destined for a double-quoted HTML attribute that has to survive the
+// round trip back out through dataset — & before " so an ampersand in a
+// place name ("Shell & Go") doesn't come back as an entity.
+function attr(text) {
+  return String(text == null ? "" : text).replace(/&/g, "&amp;").replace(/"/g, "&quot;");
+}
+
 // One Recent Charges row — shared by the pinned "last charge" entry and
 // every session in charging.recent_charges, so both look and behave
 // identically (same buttons) instead of two different formats.
@@ -1933,6 +1941,16 @@ function chargeRowHtml(c, currency) {
   let buttons = "";
   if (!STATIC_MODE && c.id != null && !chargeSelectMode) {
     const escLoc = loc.replace(/"/g, "&quot;");
+    // Rename this session's location. The geocoder that named it had no way
+    // to know a charger from the shop beside it, and names nothing at all
+    // when it can't resolve the coordinates. Carries the *stored* label
+    // (location_raw) as well as the displayed one, since a charge showing a
+    // name inferred from a nearby trip has no label of its own to bulk-match
+    // other sessions against.
+    const rawLoc = c.location_raw != null ? c.location_raw : (c.location || "");
+    buttons += ` <button class="quick-rate-btn" data-rename-charge-id="${c.id}" ` +
+      `data-loc-raw="${attr(rawLoc)}" data-loc-shown="${attr(c.location || "")}" ` +
+      `title="Rename this charging location">✏️</button>`;
     // A home/office DC charger is unusual but real (an EVSE, a workplace fast
     // charger), so these apply to both types, not just AC. Whichever one
     // matches the session's current price is highlighted in bold color;
@@ -2020,6 +2038,66 @@ function wireEditRateButtons(root) {
         btn.dataset.quickRate, isOther && btn.dataset.isFree === "true", btn.dataset.source,
         btn.dataset.startTime);
     });
+  });
+}
+
+// The ✏️ button on a Recent Charges row. `rawLoc` is what the row stores,
+// `shownLoc` what it displays — the same string for most sessions, but a
+// charge with no label of its own shows one inferred from a nearby trip,
+// and there's nothing to bulk-match on in that case, so the "rename every
+// session here" option is only offered when a stored label exists.
+function openRenameChargeModal(chargeId, rawLoc, shownLoc) {
+  const form = document.getElementById("edit-charge-loc-form");
+  form.dataset.chargeId = chargeId;
+  const allRow = document.getElementById("edit-charge-loc-all-row");
+  const allCb = document.getElementById("edit-charge-loc-all");
+  document.getElementById("edit-charge-loc-name").value = rawLoc || shownLoc || "";
+  document.getElementById("edit-charge-loc-summary").textContent = rawLoc
+    ? `Currently: ${rawLoc}`
+    : `No location recorded${shownLoc ? ` (shown as "${shownLoc}", inferred from a nearby trip)` : ""}`;
+  allRow.classList.toggle("hidden", !rawLoc);
+  allCb.checked = !!rawLoc;
+  document.getElementById("edit-charge-loc-all-label").textContent =
+    `Rename every session recorded as "${rawLoc}" too`;
+  setStatus(document.getElementById("edit-charge-loc-status"), "", "");
+  openModal("edit-charge-loc-modal");
+}
+
+function wireRenameLocButtons(root) {
+  root.querySelectorAll("[data-rename-charge-id]").forEach((btn) => {
+    btn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      openRenameChargeModal(btn.dataset.renameChargeId, btn.dataset.locRaw,
+        btn.dataset.locShown);
+    });
+  });
+}
+
+function setupRenameChargeModal() {
+  const form = document.getElementById("edit-charge-loc-form");
+  if (!form) return;
+  form.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const statusEl = document.getElementById("edit-charge-loc-status");
+    const name = document.getElementById("edit-charge-loc-name").value.trim();
+    if (!name) {
+      setStatus(statusEl, "Enter a location name.", "err");
+      return;
+    }
+    const allRow = document.getElementById("edit-charge-loc-all-row");
+    const applyAll = !allRow.classList.contains("hidden")
+      && document.getElementById("edit-charge-loc-all").checked;
+    try {
+      const resp = await fetch("/api/charges/edit-location", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ id: +form.dataset.chargeId, location: name, apply_all: applyAll }),
+      });
+      if (!resp.ok) throw new Error((await resp.json()).detail || "Failed");
+      closeModal("edit-charge-loc-modal");
+      load();   // refresh the list (and the by-location charging card) at once
+    } catch (err) {
+      setStatus(statusEl, err.message, "err");
+    }
   });
 }
 
@@ -4104,6 +4182,7 @@ function setupAddChargeButton() {
 }
 if (!STATIC_MODE) setupAddChargeButton();
 if (!STATIC_MODE) setupEditChargeModal();
+if (!STATIC_MODE) setupRenameChargeModal();
 if (!STATIC_MODE) setupEditDriveModal();
 if (!STATIC_MODE) setupRatesModal();
 if (!STATIC_MODE) setupDefaultSourceButton();
