@@ -1939,16 +1939,18 @@ function chargeRowHtml(c, currency) {
   const check = chargeSelectMode && c.id != null
     ? `<input type="checkbox" class="charge-check" value="${c.id}" aria-label="Select charge" />` : "";
   let buttons = "";
+  // Rename this session's location — sits on the name line it edits, right
+  // after "<place> · AC/DC", rather than down among the pricing buttons.
+  // The geocoder that named it had no way to tell a charger from the shop
+  // beside it, and names nothing at all when it can't resolve the
+  // coordinates. Carries the *stored* label (location_raw) as well as the
+  // displayed one, since a charge showing a name inferred from a nearby
+  // trip has no label of its own to bulk-match other sessions against.
+  let renameBtn = "";
   if (!STATIC_MODE && c.id != null && !chargeSelectMode) {
     const escLoc = loc.replace(/"/g, "&quot;");
-    // Rename this session's location. The geocoder that named it had no way
-    // to know a charger from the shop beside it, and names nothing at all
-    // when it can't resolve the coordinates. Carries the *stored* label
-    // (location_raw) as well as the displayed one, since a charge showing a
-    // name inferred from a nearby trip has no label of its own to bulk-match
-    // other sessions against.
     const rawLoc = c.location_raw != null ? c.location_raw : (c.location || "");
-    buttons += ` <button class="quick-rate-btn" data-rename-charge-id="${c.id}" ` +
+    renameBtn = ` <button class="charge-rename-btn" data-rename-charge-id="${c.id}" ` +
       `data-loc-raw="${attr(rawLoc)}" data-loc-shown="${attr(c.location || "")}" ` +
       `title="Rename this charging location">✏️</button>`;
     // A home/office DC charger is unusual but real (an EVSE, a workplace fast
@@ -1972,7 +1974,7 @@ function chargeRowHtml(c, currency) {
     }
   }
   return `<li class="charge${chargeSelectMode && c.id != null ? " selectable" : ""}">` +
-    `<span class="charge-main">${check}<span class="charge-loc">${loc}</span>` +
+    `<span class="charge-main">${check}<span class="charge-loc">${loc}${renameBtn}</span>` +
     `<span class="charge-when">${when}</span></span>` +
     `<span class="charge-figs">${kwh}${soc} · ${cost}${rate}${buttons}</span></li>`;
 }
