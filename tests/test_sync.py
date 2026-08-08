@@ -642,6 +642,95 @@ def test_start_lost_km_records_distance_dropped_before_the_anchor():
     assert drives4[0]["distance_km"] + drives4[0]["start_lost_km"] == 9.5
 
 
+def test_closed_trip_at_prevs_odometer_unblocks_a_long_blackout_departure():
+    """One blackout can cost both ends of a boundary: it hides the arrival, so
+    prev stays frozen mid-drive, and that frozen prev then disarms the recovery
+    at the NEXT departure — past DEPARTURE_GAP_MAX_KM the trip starts wherever
+    the network came back.
+
+    Trip 359, measured against the car: arriving Home the park was never seen,
+    the next departure lost 10.092 km, and the trip read 17.2 km from a street
+    10 km downroad against the car's own 27.2 km from Home.
+
+    A closed trip ending at prev's odometer settles what is_driving(prev) could
+    only guess at — the earlier journey IS accounted for — so the cap doesn't
+    apply."""
+    home = (5.4100, 100.3000)
+    # Home, in Drive: the poll that would have seen P never arrived.
+    p = snap(T0, 29_318.155, 84, shift="D", speed=0.0, range_km=380.0,
+             lat=home[0], lon=home[1])
+    # 49 minutes later, seen driving 10.092 km away — implied 12 km/h, so the
+    # car sat for most of the gap and drove the rest.
+    c = snap(T0 + 2947.5, 29_328.247, 82, shift="D", speed=60.0, range_km=368.0,
+             lat=5.3754, lon=100.2980)
+    end = snap(T0 + 2947.5 + 2600, 29_345.414, 79.8, shift="P", speed=0.0,
+               locked=True, range_km=352.0)
+
+    # Without the closed trip's end there is nothing to distinguish this from an
+    # unlogged journey, so it must still decline — and, having declined, must
+    # not backdate the clock over the distance it just refused either.
+    _, _, strict, _ = process_snapshot(p, c, None, None, 60.0, 0.90)
+    assert strict["odo_km"] == 29_328.247
+    assert strict["start_lost_km"] == 10.092
+    assert strict["ts"] == c["ts"], "a declined recovery must not move the clock"
+
+    # With it, the departure is recovered whole: odometer, position and clock.
+    _, _, trip, _ = process_snapshot(p, c, None, None, 60.0, 0.90,
+                                     prev_close_odo_km=29_318.155)
+    assert trip["odo_km"] == 29_318.155
+    assert trip["start_lost_km"] == 0.0
+    assert trip["start_recovered_km"] == 10.092
+    assert (trip["lat"], trip["lon"]) == home, "start must move back to Home too"
+    assert trip["ts"] < c["ts"], "clock follows the distance it now owns"
+
+    drives, _, trip, _ = process_snapshot(c, end, trip, None, 60.0, 0.90)
+    assert trip is None and len(drives) == 1
+    # The car's own screen: 27.2 km. 29,345.414 - 29,318.155 = 27.259.
+    assert drives[0]["distance_km"] == pytest.approx(27.3, abs=0.05)
+    assert drives[0]["start_lost_km"] == 0.0
+
+
+def test_departure_recovery_anchors_past_an_estimated_tail_not_behind_it():
+    """When the closed trip took an estimated tail beyond prev's own reading,
+    ITS end is where unclaimed ground starts. Anchoring at prev's raw odometer
+    would hand this trip metres the previous one already counted — the same
+    double-count the boundary repairs exist to undo."""
+    p = snap(T0, 1000.0, 80, shift="D", speed=0.0, range_km=400.0)
+    c = snap(T0 + 2400, 1008.0, 78, shift="D", speed=50.0, range_km=392.0)
+    # The closed trip estimated 0.4 km of arrival tail past prev's reading.
+    _, _, trip, _ = process_snapshot(p, c, None, None, 60.0, 0.90,
+                                     prev_close_odo_km=1000.4)
+    assert trip["odo_km"] == 1000.4                 # not 1000.0
+    assert trip["start_recovered_km"] == 7.6        # 1008.0 - 1000.4
+
+
+def test_departure_premium_does_not_scale_with_a_long_blind_stretch():
+    """The opening-minutes premium is a fixed cost — hot cabin pulled down,
+    cold drivetrain, car park crawl — and is over long before a 10 km blind
+    stretch is. Applying 1.55x across the whole stretch prices a front-loaded
+    cost as if it scaled with distance.
+
+    Trip 359 against the car: 10.092 km blind of a 27.26 km drive, 2.91 kWh
+    measured over the rest, and the car's own 6.9% of a 69.5 kWh pack = 4.79
+    kWh."""
+    from app.sync import DEPARTURE_PREMIUM_MAX_KM, energy_for_blind_distance
+
+    priced = energy_for_blind_distance(2.91, 27.26, 10.092, departure_blind_km=10.092)
+    assert priced == pytest.approx(4.79, abs=0.10)
+
+    # Short departures — every trip the 1.55 was fitted on — are under the cap
+    # and must price exactly as they did before it existed.
+    short = energy_for_blind_distance(10.0, 20.0, 1.0, departure_blind_km=1.0)
+    assert short == pytest.approx(10.0 * (19.0 + 1.55) / 19.0, abs=1e-9)
+    assert DEPARTURE_PREMIUM_MAX_KM >= 1.0, "must not re-price the calibration set"
+
+    # And the premium never applies to more than the cap, however long the
+    # blind stretch: past it, extra distance is priced flat.
+    a = energy_for_blind_distance(5.0, 40.0, 8.0, departure_blind_km=8.0)
+    b = energy_for_blind_distance(5.0, 40.0, 8.0, departure_blind_km=DEPARTURE_PREMIUM_MAX_KM)
+    assert a == pytest.approx(b, abs=1e-9)
+
+
 def test_start_lost_km_is_never_null_on_a_reconstructed_drive():
     """A null start_lost_km must mean one thing only: the row predates the
     instrumentation. The gap-reconstruction paths build their own start dict

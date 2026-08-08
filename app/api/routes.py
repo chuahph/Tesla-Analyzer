@@ -1734,9 +1734,31 @@ def _process_vehicle(
                 prev = {**prev, "odo_km": prev["odo_km"] + est_credited}
         state.put(session, sleep_close_key, "")
 
+    # Where the last closed trip ended, for the departure recovery — see
+    # process_snapshot's prev_close_odo_km. Looked up only in the one shape
+    # that can use it (no trip open, the car driving now, and the last
+    # snapshot frozen mid-drive because a blackout hid its park), so an
+    # ordinary poll still touches no extra rows.
+    prev_close_odo = None
+    if (open_trip is None and prev is not None and sync_mod.is_driving(prev)
+            and sync_mod.is_driving(snap)):
+        last_closed = session.scalars(
+            select(Drive).where(Drive.vehicle_id == vehicle.id)
+            .order_by(Drive.start_time.desc()).limit(1)
+        ).first()
+        # It has to end at prev's own position to stand in for it: far enough
+        # back and it is some older trip with an unlogged journey since, which
+        # is exactly the case the strict guard should keep refusing. Never past
+        # where the car is now either — that ground is already claimed.
+        if (last_closed is not None and last_closed.end_odo_km is not None
+                and prev["odo_km"] - sync_mod.GAP_CREEP_MAX_KM
+                <= last_closed.end_odo_km <= snap["odo_km"]):
+            prev_close_odo = last_closed.end_odo_km
+
     drives, charges, open_trip, open_charge = sync_mod.process_snapshot(
         prev, snap, open_trip, open_charge,
         capacity_kwh, settings.energy_price_per_kwh, settings.drive_min_km,
+        prev_close_odo_km=prev_close_odo,
     )
     drives = recovered + drives  # include a drive recovered from the upgrade gap
     # A trimmed tail is time the car spent parked, so its standby draw is not
@@ -4204,6 +4226,117 @@ class _DetachedDrive:
         self.end_odo_km = before["end_odo_km"]
         self.end_est_km = before["end_est_km"]
         self.end_time = datetime.fromisoformat(before["end_time"])
+
+
+@router.api_route("/repair-lost-departure", methods=["GET", "POST"])
+def repair_lost_departure(
+    drive_id: int = Query(...),
+    true_distance_km: float = Query(...),
+    true_duration_min: float | None = Query(None),
+    apply: bool = Query(False),
+    session: Session = Depends(get_session),
+):
+    """Give a trip back the departure a blackout took, from the previous trip's
+    own end.
+
+    ``start_lost_km`` records distance the car really covered before this trip's
+    anchor. Sync recovers it where it can, but a row already written keeps
+    whatever it was given — and the case that most needs this is exactly the one
+    sync used to decline: a long blackout that hid the previous arrival AND the
+    departure after it (see process_snapshot's prev_close_odo_km).
+
+    Neither odometer repair fits. repair_trip_boundary trades distance between
+    two trips that share a boundary; here the ground belongs to nobody, sitting
+    in the hole between one trip's end and the next one's start.
+    repair_departure_start moves a start the other way, forward off a park it
+    swallowed.
+
+    ``true_distance_km`` is the car's own trip meter and is required, not
+    advisory: the repair is only allowed when moving the start back to the
+    previous trip's end reproduces the figure the car itself reports. That makes
+    it self-validating — the hole is proven to be this trip's missing head
+    rather than a journey nobody logged, which is the one thing two odometer
+    readings cannot tell apart.
+
+    Energy comes with the distance, priced by the same model sync would have
+    used (see energy_for_blind_distance), with the opening kilometres carrying
+    their departure premium. The clock moves only when the car's own duration
+    says so — a row written before this repair existed already had its start
+    back-estimated, and moving it twice would be worse than leaving it.
+
+    Dry run by default.
+    """
+    drive = session.get(Drive, drive_id)
+    if drive is None:
+        raise HTTPException(404, "No such trip.")
+    if drive.start_odo_km is None or drive.end_odo_km is None:
+        raise HTTPException(
+            409, f"Trip {drive_id} has no odometer anchors, so there is nothing "
+                 f"to measure the hole against.")
+    prev_d = session.scalars(
+        select(Drive).where(Drive.vehicle_id == drive.vehicle_id,
+                            Drive.start_time < drive.start_time)
+        .order_by(Drive.start_time.desc()).limit(1)
+    ).first()
+    if prev_d is None or prev_d.end_odo_km is None:
+        raise HTTPException(
+            409, "No previous trip with an odometer reading, so there is no "
+                 "origin to move this one back to.")
+    recovered = round(drive.start_odo_km - prev_d.end_odo_km, 3)
+    if recovered <= 0:
+        raise HTTPException(
+            409, f"Trip {drive_id} already starts where trip {prev_d.id} ended "
+                 f"(gap {recovered} km). Nothing was lost between them.")
+    new_span = round(drive.end_odo_km - prev_d.end_odo_km, 3)
+    # The car reads to 0.1 km and so does the span it is compared against, so
+    # allow both roundings — but no more. Past that the hole is not this trip's
+    # missing head and must not be handed to it.
+    if abs(new_span - true_distance_km) > 0.2:
+        raise HTTPException(
+            409, f"Moving the start back to trip {prev_d.id}'s end would make "
+                 f"trip {drive_id} {new_span} km, but the car reports "
+                 f"{true_distance_km} km. The hole between them is not this "
+                 f"trip's missing departure.")
+
+    new_energy = (round(sync_mod.energy_for_blind_distance(
+        drive.energy_used_kwh, new_span, recovered, departure_blind_km=recovered), 2)
+        if drive.energy_used_kwh else drive.energy_used_kwh)
+    new_duration = drive.duration_min if true_duration_min is None else true_duration_min
+    new_start_time = (drive.start_time if true_duration_min is None
+                      else drive.end_time - timedelta(minutes=true_duration_min))
+    new_distance = round(new_span, 1)
+    plan = {
+        "drive_id": drive.id,
+        "from_trip": {"id": prev_d.id, "end_location": prev_d.end_location,
+                      "end_odo_km": prev_d.end_odo_km},
+        "recovered_km": recovered,
+        "start_odo_km": [drive.start_odo_km, round(prev_d.end_odo_km, 3)],
+        "distance_km": [drive.distance_km, new_distance],
+        "energy_kwh": [drive.energy_used_kwh, new_energy],
+        "start_location": [drive.start_location, prev_d.end_location],
+        "start_time": [drive.start_time.isoformat(timespec="minutes"),
+                       new_start_time.isoformat(timespec="minutes")],
+        "duration_min": [drive.duration_min, new_duration],
+        "applied": apply,
+    }
+    if apply:
+        drive.start_odo_km = round(prev_d.end_odo_km, 3)
+        drive.distance_km = new_distance
+        drive.energy_used_kwh = new_energy   # wh_per_km derives from this
+        # The ground was real but no poll ever saw it, which is precisely what
+        # start_recovered_km means — and it is no longer lost.
+        drive.start_recovered_km = round((drive.start_recovered_km or 0.0) + recovered, 3)
+        drive.start_lost_km = 0.0
+        if prev_d.end_coords:
+            drive.start_coords = prev_d.end_coords
+            drive.start_location = prev_d.end_location
+            drive.start_area = prev_d.end_area
+        drive.start_time = new_start_time
+        drive.duration_min = new_duration
+        if new_duration:
+            drive.avg_speed_kmh = round(new_distance / (new_duration / 60.0), 1)
+        session.commit()
+    return plan
 
 
 # GET as well as POST: these are hand-run repair tools, and the person

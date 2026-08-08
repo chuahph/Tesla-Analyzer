@@ -693,6 +693,26 @@ BLIND_DISTANCE_MAX_SHARE = 0.5
 # saying otherwise.
 DEPARTURE_BLIND_LOAD = 1.55
 
+# How far into a trip the departure premium above still applies. Past this the
+# blind stretch is priced at the trip's own flat average like any other.
+#
+# The premium is a FIXED cost, not a proportional one: pulling a hot cabin
+# down, warming a cold drivetrain and crawling out of a car park all happen
+# once, in the opening minutes, and are finished long before a long blind
+# stretch is. Multiplying the whole stretch by 1.55 treats a front-loaded cost
+# as if it scaled with distance, which over-prices exactly as the blind share
+# grows — the case where the correction matters most.
+#
+# Every trip DEPARTURE_BLIND_LOAD was fitted on had under ~1 km of blind
+# departure, so this cap changes none of them; it only bounds extrapolation
+# past the range that was measured. Checked against the car on trip 359, which
+# lost 10.092 km of a 27.26 km drive to a network blackout: uncapped pricing
+# gave 5.56 kWh against the car's own 6.9% of pack (4.79 kWh), capped gives
+# 4.81. The answer is not sharp in this value — anything from ~1.5 to ~2.5 km
+# lands inside the car's own display rounding — so it is set at a round number
+# in the middle of that band rather than at whatever fits one trip best.
+DEPARTURE_PREMIUM_MAX_KM = 2.0
+
 
 def energy_for_blind_distance(energy_kwh: float, distance_km: float,
                               blind_km: float,
@@ -732,7 +752,10 @@ def energy_for_blind_distance(energy_kwh: float, distance_km: float,
     if (not energy_kwh or energy_kwh <= 0 or blind_km <= 0
             or measured <= 0 or blind_km > distance_km * BLIND_DISTANCE_MAX_SHARE):
         return energy_kwh
-    departure = min(max(departure_blind_km, 0.0), blind_km)
+    # Only the first DEPARTURE_PREMIUM_MAX_KM of a blind departure carries the
+    # premium — beyond that the opening-minutes costs it prices are over and
+    # the stretch is ordinary driving (see DEPARTURE_PREMIUM_MAX_KM).
+    departure = min(max(departure_blind_km, 0.0), blind_km, DEPARTURE_PREMIUM_MAX_KM)
     # The blind distance re-expressed as the equivalent amount of AVERAGE
     # driving, so one flat rate can still price it: a departure kilometre
     # counts for 1.55, an arrival kilometre for 1.
@@ -1343,6 +1366,7 @@ def process_snapshot(
     price_per_kwh: float,
     drive_min_km: float = DRIVE_MIN_KM,
     price_per_kwh_dc: float | None = None,
+    prev_close_odo_km: float | None = None,
 ) -> tuple[list[dict], list[dict], dict | None, dict | None]:
     """Advance the session state machine by one snapshot.
 
@@ -1356,6 +1380,14 @@ def process_snapshot(
     ``price_per_kwh_dc``: DC fast-charging rate, when it differs from
     ``price_per_kwh`` (the AC/default rate) — see energy_price_dc_kwh in
     config.py. None means both charger types share ``price_per_kwh``.
+
+    ``prev_close_odo_km``: the odometer where the most recently CLOSED trip
+    ended, when ``prev`` is that trip's own last snapshot. Only the caller can
+    know this — a closed trip is a database row, not something the snapshot
+    stream carries — and it is what lets the departure recovery treat a prev
+    still reading "in Drive" as the confirmed trip end it actually is (see the
+    recovery below). None whenever that can't be established, which keeps the
+    old, stricter behaviour.
 
     Returns (drives, charges, open_trip, open_charge) — the sessions completed
     at this snapshot plus the carried-over open sessions.
@@ -1621,6 +1653,7 @@ def process_snapshot(
         # negligible real movement (the genuine overnight-sleep case) still
         # estimates a start close to cur either way, so this doesn't regress
         # that case.
+        recovered_start = False
         if prev:
             gap_min = (cur["ts"] - prev["ts"]) / 60.0
             moved = cur["odo_km"] - prev["odo_km"]
@@ -1670,7 +1703,23 @@ def process_snapshot(
                 # small enough that a genuine separate unclosed trip's worth of
                 # distance still gets left alone as start_lost_km rather than
                 # silently merged in.
-                if was_parked and (not is_driving(prev) or moved <= DEPARTURE_GAP_MAX_KM):
+                # prev reads "in Drive", but a trip that is already CLOSED ends
+                # at its odometer — so the earlier journey the is_driving(prev)
+                # guard exists to protect is accounted for, and the ground after
+                # it belongs to nobody but this trip. That answers the guard's
+                # question directly rather than guessing at it by distance, so
+                # DEPARTURE_GAP_MAX_KM's cap doesn't apply.
+                #
+                # Measured, trip 359: arriving Home the network died before the
+                # poll that would have seen the car shift to P, freezing prev
+                # mid-drive at Home's odometer. The next departure lost 10.092
+                # km — 3.4x the cap — so recovery declined and the trip started
+                # 10 km downroad of the Home it left, reading 17.2 km against
+                # the car's own 27.2. One blackout cost the arrival AND then
+                # disarmed the departure recovery that would have fixed it.
+                prev_is_closed_end = prev_close_odo_km is not None
+                if was_parked and (not is_driving(prev) or prev_is_closed_end
+                                   or moved <= DEPARTURE_GAP_MAX_KM):
                     # base=cur anchored the trip's own odo/SoC to the *first
                     # driving* reading, which already reflects the "catch-up"
                     # distance/energy this block just proved happened before
@@ -1703,10 +1752,18 @@ def process_snapshot(
                     # Record what was reclaimed BEFORE zeroing the loss —
                     # otherwise the two zeros are indistinguishable, which is
                     # exactly the ambiguity start_recovered_km exists to end.
+                    # Anchor on the closed trip's own end rather than prev's raw
+                    # reading when one is offered: if that trip took an
+                    # estimated tail past prev, its end is where unclaimed
+                    # ground actually starts, and anchoring behind it would
+                    # hand this trip metres the previous one already counted.
+                    anchor_odo = (max(prev["odo_km"], prev_close_odo_km)
+                                  if prev_is_closed_end else prev["odo_km"])
                     open_trip["start_recovered_km"] = round(
-                        max(cur["odo_km"] - prev["odo_km"], 0.0), 3)
-                    open_trip["odo_km"] = prev["odo_km"]
+                        max(cur["odo_km"] - anchor_odo, 0.0), 3)
+                    open_trip["odo_km"] = anchor_odo
                     open_trip["start_lost_km"] = 0.0  # pulled back in, nothing lost
+                    recovered_start = True
                     # The start coordinates move with the odometer, or the trip
                     # says two contradictory things about where it began: an
                     # odometer reading from the parking spot and a position from
@@ -1764,12 +1821,32 @@ def process_snapshot(
                 # over the flat city-speed floor when it implies a faster
                 # start (e.g. already on a fast road when first seen). This
                 # part *is* just an estimate, so it keeps its own 60s "worth
-                # it" floor, independent of the odo/SoC recovery above.
-                pace = max((cur.get("speed_kmh") or 0.0) * 0.65, CITY_SPEED_KMH)
-                shift_sec = moved / pace * 3600.0
-                if shift_sec >= 60:
-                    est_start = cur["ts"] - shift_sec
-                    open_trip["ts"] = min(max(est_start, prev["ts"]), cur["ts"])
+                # it" floor on top of the recovery's own conditions.
+                #
+                # The estimate does two different jobs, and only one of them
+                # needs gating. Anchored at prev (not was_parked) the trip
+                # already owns the whole gap's distance, and this only moves
+                # its start FORWARD off a stale parked reading — it can never
+                # claim ground the trip doesn't have.
+                #
+                # Anchored at cur it runs the other way, backdating over the
+                # blind stretch — so it answers the SAME question the recovery
+                # just answered, from the same evidence: was that stretch the
+                # head of this trip, or something else? They must not answer
+                # it differently. Ungated, a declined recovery still backdated
+                # the clock over the very distance the odometer had refused,
+                # leaving a trip claiming to have driven through minutes in
+                # which, by its own distance, it covered no ground. Measured,
+                # trip 359: backdated ~21 min (landing within 2 min of the
+                # car's own start) while the 10.092 km that estimate was
+                # computed FROM stayed lost, so avg speed read 16 km/h against
+                # the car's 24.7.
+                if recovered_start or not was_parked:
+                    pace = max((cur.get("speed_kmh") or 0.0) * 0.65, CITY_SPEED_KMH)
+                    shift_sec = moved / pace * 3600.0
+                    if shift_sec >= 60:
+                        est_start = cur["ts"] - shift_sec
+                        open_trip["ts"] = min(max(est_start, prev["ts"]), cur["ts"])
     elif prev and split_drive:
         # A charge and a drive both happened in this gap — see
         # _split_gap_events for why the plain whole-gap drive reconstruction

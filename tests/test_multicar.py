@@ -2953,3 +2953,86 @@ def test_a_trip_open_through_a_dead_zone_keeps_polling(monkeypatch):
     finally:
         settings.app_passcode, settings.sleep_recheck_min = old_pass, old_win
         _reset_to_demo()
+
+
+def test_repair_lost_departure_gives_back_the_head_a_blackout_took():
+    """A row already written keeps whatever sync gave it, and the case that
+    most needs fixing is the one sync used to decline: a blackout that hid one
+    trip's arrival and then, through the prev it left frozen mid-drive,
+    disarmed the recovery at the next trip's departure.
+
+    Trip 359's real numbers: the car reported 27.2 km from Home, we logged
+    17.2 km from a street 10.092 km downroad, and start_lost_km recorded the
+    difference exactly.
+
+    Guarded by the car's own trip meter — the repair is only allowed when
+    moving the start back to the previous trip's end reproduces it, which is
+    what separates this trip's missing head from a journey nobody logged."""
+    from app.models import Drive
+
+    settings = get_settings()
+    old = settings.app_passcode
+    settings.app_passcode = ""
+    try:
+        with TestClient(app) as client:
+            with SessionLocal() as s:
+                a, b = s.query(Drive).order_by(Drive.id).limit(2).all()
+                a.end_odo_km = 29318.155
+                a.end_coords, a.end_location, a.end_area = "5.4100, 100.3000", "Home", "Home"
+                b.start_time = a.end_time + timedelta(minutes=28)
+                b.end_time = b.start_time + timedelta(minutes=64)
+                b.start_odo_km, b.end_odo_km = 29328.247, 29345.414
+                b.distance_km, b.energy_used_kwh = 17.2, 2.91
+                b.duration_min, b.avg_speed_kmh = 64.0, 16.0
+                b.start_lost_km, b.start_recovered_km = 10.092, 0.0
+                b.start_coords = "5.3754, 100.2980"
+                b.start_location = b.start_area = "63 Cangkat Bukit Gambir, Farlim"
+                s.commit()
+                did, prev_id = b.id, a.id
+
+            # A distance the move wouldn't reproduce means the hole is not this
+            # trip's head — refused, not absorbed.
+            wrong = client.get("/api/repair-lost-departure",
+                               params={"drive_id": did, "true_distance_km": 22.0})
+            assert wrong.status_code == 409
+            assert "not this trip's missing departure" in wrong.json()["detail"]
+
+            r = client.get("/api/repair-lost-departure",
+                           params={"drive_id": did, "true_distance_km": 27.2,
+                                   "true_duration_min": 66})
+            body = r.json()
+            assert r.status_code == 200
+            assert body["applied"] is False
+            assert body["recovered_km"] == 10.092
+            assert body["from_trip"]["id"] == prev_id
+            assert body["distance_km"] == [17.2, 27.3]
+            assert body["start_location"] == ["63 Cangkat Bukit Gambir, Farlim", "Home"]
+            # The car's own 6.9% of a 69.5 kWh pack is 4.79 kWh.
+            assert body["energy_kwh"][1] == pytest.approx(4.79, abs=0.10)
+
+            with SessionLocal() as s:
+                assert s.get(Drive, did).distance_km == 17.2   # dry run wrote nothing
+
+            client.get("/api/repair-lost-departure",
+                       params={"drive_id": did, "true_distance_km": 27.2,
+                               "true_duration_min": 66, "apply": "true"})
+            with SessionLocal() as s:
+                d = s.get(Drive, did)
+                assert d.start_odo_km == 29318.155
+                assert d.distance_km == 27.3
+                assert d.start_location == "Home"
+                assert d.start_coords == "5.4100, 100.3000"
+                # No longer lost, and recorded as the unseen ground it is.
+                assert d.start_lost_km == 0.0
+                assert d.start_recovered_km == 10.092
+                assert d.duration_min == 66.0
+                assert d.avg_speed_kmh == pytest.approx(24.8, abs=0.1)
+
+            # Run twice: the gap is gone, so there is nothing left to give back.
+            again = client.get("/api/repair-lost-departure",
+                               params={"drive_id": did, "true_distance_km": 27.2})
+            assert again.status_code == 409
+            assert "Nothing was lost" in again.json()["detail"]
+    finally:
+        settings.app_passcode = old
+        _reset_to_demo()
