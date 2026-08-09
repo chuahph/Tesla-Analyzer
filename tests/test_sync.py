@@ -2081,17 +2081,52 @@ def test_accessory_load_is_subtracted_as_well_as_climate():
     assert round(2.0 - with_acc, 3) >= round(ACCESSORY_KW, 3)
 
 
-def test_climate_strip_follows_measured_on_time():
-    """A trip driven with climate off must not be charged for it."""
+def test_climate_flag_gates_the_strip_rather_than_prorating_it():
+    """A trip driven with climate off must not be charged for it — but a trip
+    where the flag was seen on for only part of the drive must be charged in
+    full, not pro rata.
+
+    Prorating was measured against the car's own energy breakdown and read far
+    too low: on trips 363/359/360 the fraction came out 0.28/0.67/0.88, giving
+    0.85/1.32/1.37 kW against a car reporting 1.69/1.77/1.76 — a fraction that
+    tracked trip length rather than anything physical, since a cycling
+    compressor under a continuous cabin load reads as intermittent through a
+    boolean sampled at poll rate."""
     from app.sync import driving_only_kwh
 
     off = driving_only_kwh(1.73, 20.0, 29.0, climate_min=0.0)
     half = driving_only_kwh(1.73, 20.0, 29.0, climate_min=10.0)
     always = driving_only_kwh(1.73, 20.0, 29.0, climate_min=20.0)
-    assert always < half < off               # more climate time, more stripped
+    assert half == always < off      # seen on at all == on throughout
     # Not the full gross even with climate off: accessories run whenever the
     # car is on, and are not gated on the climate flag.
     assert off < 1.73
+
+
+def test_non_propulsion_load_matches_the_cars_own_breakdown():
+    """The three trips the gate was fixed against, checked end to end.
+
+    Each is (gross kWh, distance, our duration, ambient, the car's own
+    climate + battery conditioning + everything else in kWh). The car's figures
+    fit a flat 1.82 kW with a fixed term of -0.06 kWh — a pure rate — so the
+    model's own rate x duration shape is right and only the fraction was
+    wrong."""
+    from app.sync import driving_only_kwh
+
+    cases = [   # trip, gross, km, min, degC, car non-propulsion kWh, tolerance
+        ("363", 2.54, 17.843, 36.0, 33.0, 1.016, 0.05),
+        ("359", 4.81, 27.258, 66.0, 33.0, 1.946, 0.05),
+        # 30C is the loosest, and the residual is the temperature curve, not
+        # the gate: the car's own climate line reads 1.23 kW here against the
+        # 1.20 it read at 33C — flat — while CLIMATE_KW_PER_DEGREE swings the
+        # model 0.99 -> 1.23 across that span. One sample at 30C is not enough
+        # to re-fit a slope on, so it is left alone and pinned loose.
+        ("360", 4.74, 26.660, 80.0, 30.0, 2.353, 0.20),
+    ]
+    for name, gross, km, mins, temp, car, tol in cases:
+        ours = gross - driving_only_kwh(gross, mins, temp, climate_min=1.0, distance_km=km)
+        assert ours == pytest.approx(car, rel=tol), (
+            f"trip {name}: modelled {ours:.3f} kWh against the car's {car:.3f}")
 
 
 def test_climate_unknown_is_not_read_as_off():

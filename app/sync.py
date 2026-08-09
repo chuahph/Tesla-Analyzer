@@ -632,8 +632,25 @@ def driving_only_kwh(energy_kwh, duration_min, out_temp_c=None, climate_min=None
     """
     if not energy_kwh or energy_kwh <= 0:
         return energy_kwh
-    frac = 1.0 if climate_min is None else (
-        min(max(climate_min / duration_min, 0.0), 1.0) if duration_min > 0 else 1.0)
+    # ``climate_min`` says WHETHER climate ran, not for how much of the drive
+    # its load should be counted — so it gates the correction on or off and
+    # never prorates it. Prorating measured far too little: the car reports the
+    # flag on for only part of a drive its own energy breakdown bills for
+    # climate throughout, which is what a cycling compressor under a continuous
+    # cabin load looks like through a boolean sampled at poll rate. The
+    # fraction we were applying tracked nothing physical — it just rose with
+    # trip length, against a car whose own load barely moved:
+    #
+    #   trip 363   36 min   33C   frac 0.28   ours 0.85 kW   car 1.69 kW
+    #   trip 359   66 min   33C   frac 0.67   ours 1.32 kW   car 1.77 kW
+    #   trip 360   80 min   30C   frac 0.88   ours 1.37 kW   car 1.76 kW
+    #
+    # Those three fit a flat 1.82 kW with a fixed term of -0.06 kWh: a pure
+    # rate, no per-drive cost. Recorded because the residual against the old
+    # model looked like a clean fixed ~0.5 kWh offset holding across a 2.2x
+    # span of durations — which was this fraction's own drift seen from the
+    # other side, and a constant fitted to it would have been an artifact.
+    frac = 1.0 if climate_min is None or climate_min > 0 else 0.0
     modelled = climate_kwh(duration_min, out_temp_c, frac)
     modelled += ACCESSORY_KW * max(duration_min, 0.0) / 60.0
     floor = (max(distance_km, 0.0) * MIN_PLAUSIBLE_WH_PER_KM / 1000.0
