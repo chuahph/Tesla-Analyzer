@@ -146,6 +146,14 @@ class Drive(Base):
     # recorded. 0.0 means the recovery did not fire; None means the trip
     # predates the field.
     start_recovered_km: Mapped[float | None] = mapped_column(Float, nullable=True)
+    # Minutes of the pre-departure gap the car was still PARKED, when the
+    # departure recovery took the pre-gap SoC as this trip's baseline. Their
+    # standby drain sits in that reading and is not this drive's, so it is
+    # taken back out at this car's measured parked rate — the same
+    # correction tail_trim_sec drives at the other end. Kept because it is
+    # the evidence for a correction that already happened: without it, a
+    # trip whose energy was adjusted looks identical to one that never was.
+    start_park_min: Mapped[float | None] = mapped_column(Float, nullable=True)
 
     # The odometer at this trip's own start and stop anchors. distance_km is
     # their difference, so on its own it says how far the trip ran but not

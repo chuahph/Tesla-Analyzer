@@ -1545,6 +1545,11 @@ function tripDiagnostics(t, ctx) {
       // Disambiguates a 0.0 start_lost_km: nothing to lose, or the departure
       // recovery reclaimed it. Without this the two look identical.
       start_recovered_km: t.start_recovered_km,
+      // Parked minutes inside that departure gap whose standby drain was taken
+      // back off this trip's energy. Nonzero means the energy is a measurement
+      // minus a correction rather than a raw reading — which is exactly what an
+      // audit needs to know before comparing it to the car's own figure.
+      start_park_min: t.start_park_min,
       // Where the anchors sat, so the trip can be checked against the
       // odometer readings around it rather than taken on its own word.
       start_odo_km: t.start_odo_km, end_odo_km: t.end_odo_km,

@@ -731,6 +731,43 @@ def test_departure_premium_does_not_scale_with_a_long_blind_stretch():
     assert a == pytest.approx(b, abs=1e-9)
 
 
+def test_departure_energy_is_bounded_by_parked_minutes_not_the_whole_gap():
+    """Only the PARKED part of a departure gap carries standby drain, so that
+    is what the staleness bound was always trying to measure — the gap is just
+    a proxy, and a poor one once a real departure hides inside it.
+
+    Trip 366: a 48-minute gap of which ~38 were parked and ~10 were the drive
+    itself. Refused on the gap, the trip fell back to projecting its blind head
+    from the rest of the drive and came out 13.7% above the car's own figure —
+    a head that in fact cost 0.91x the trip average, against a premium assuming
+    1.55x. Measuring the whole drive and subtracting 38 minutes of this car's
+    own parked draw is a bounded correction where that was an unbounded guess.
+    """
+    from app.sync import STALE_ANCHOR_MAX_MIN
+
+    # 48-minute gap, 4.791 km covered before the car was first seen driving.
+    p = snap(T0, 29_406.714, 74, range_km=380.0)
+    c = snap(T0 + 2880, 29_411.505, 73, shift="D", speed=45.0, range_km=374.0)
+    _, _, trip, _ = step(p, c)
+    assert trip["start_recovered_km"] == 4.791
+    assert trip["start_energy_recovered"] is True
+    assert trip["soc"] == p["soc"]              # measured, not projected
+    # ~48 min gap less ~9.6 min of driving at the 30 km/h floor.
+    assert trip["start_park_min"] == pytest.approx(38.4, abs=0.5)
+    assert trip["start_park_min"] < STALE_ANCHOR_MAX_MIN
+
+    # Push the parked portion past the bound and it must refuse again: the
+    # correction stays small by construction, so a missing standby rate can
+    # never leave more than ~45 minutes of drain behind.
+    p2 = snap(T0, 9_000.0, 74, range_km=380.0)
+    c2 = snap(T0 + 4800, 9_004.791, 73, shift="D", speed=45.0, range_km=374.0)
+    _, _, trip2, _ = step(p2, c2)
+    assert trip2["start_recovered_km"] == 4.791      # distance still comes back
+    assert trip2["start_energy_recovered"] is False  # but not the SoC baseline
+    assert trip2["soc"] == c2["soc"]
+    assert trip2.get("start_park_min") is None
+
+
 def test_start_lost_km_is_never_null_on_a_reconstructed_drive():
     """A null start_lost_km must mean one thing only: the row predates the
     instrumentation. The gap-reconstruction paths build their own start dict

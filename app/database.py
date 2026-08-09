@@ -80,6 +80,7 @@ def init_db() -> None:
     _ensure_column("drives", "start_lost_km", "FLOAT", "NULL")
     _ensure_column("drives", "end_lost_km", "FLOAT", "NULL")
     _ensure_column("drives", "start_recovered_km", "FLOAT", "NULL")
+    _ensure_column("drives", "start_park_min", "FLOAT", "NULL")
     _ensure_column("drives", "climate_min", "FLOAT", "NULL")
     _ensure_column("drives", "start_gap_sec", "FLOAT", "NULL")
     _ensure_column("drives", "end_gap_sec", "FLOAT", "NULL")

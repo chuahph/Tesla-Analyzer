@@ -1768,7 +1768,15 @@ def _process_vehicle(
     # process_snapshot because the rate comes from this car's own history,
     # which needs the session; and looked up only when a trim actually fired,
     # so the ordinary poll still touches no extra rows.
-    if any((d.get("tail_trim_sec") or 0) > 0 for d in drives):
+    #
+    # The departure end needs the same correction for the mirror-image reason:
+    # a recovery that reaches back over a blackout takes prev's SoC as this
+    # trip's baseline, and the minutes the car was still parked in that gap
+    # (start_park_min) drained it without this drive turning a wheel. Same
+    # rate, same floor, same function — the only difference is which end of
+    # the trip the parked minutes sit at.
+    if any((d.get("tail_trim_sec") or 0) > 0 or (d.get("start_park_min") or 0) > 0
+           for d in drives):
         past_drives = session.scalars(
             select(Drive).where(Drive.vehicle_id == vehicle.id).order_by(Drive.start_time)
         ).all()
@@ -1780,7 +1788,8 @@ def _process_vehicle(
         for d in drives:
             d["energy_used_kwh"] = sync_mod.trim_standby_kwh(
                 d["energy_used_kwh"], d["distance_km"],
-                d.get("tail_trim_sec") or 0.0, rate_kw)
+                (d.get("tail_trim_sec") or 0.0) + (d.get("start_park_min") or 0.0) * 60.0,
+                rate_kw)
     for d in drives:
         # Keep the raw coords (for map links) before geocoding replaces them.
         d["start_coords"], d["end_coords"] = d["start_location"], d["end_location"]

@@ -1097,6 +1097,10 @@ def analyze(drives: list[Drive], rated_wh_per_km: float = 150.0,
                 # tells a "nothing was lost" 0.0 apart from a "the recovery
                 # reclaimed it" 0.0 (see Drive.start_recovered_km).
                 "start_recovered_km": getattr(d, "start_recovered_km", None),
+                # Parked minutes inside the departure gap whose standby
+                # drain was taken back off this trip (see
+                # Drive.start_park_min).
+                "start_park_min": getattr(d, "start_park_min", None),
                 # Where the two anchors sat on the odometer, so a trip can be
                 # reconciled against the readings around it without re-deriving
                 # its position from every trip before it.

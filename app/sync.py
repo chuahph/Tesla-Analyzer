@@ -938,6 +938,12 @@ def _drive_from(start: dict, cur: dict, capacity_kwh: float, max_speed: float = 
         # How much the departure recovery pulled back into this trip, which is
         # what disambiguates a 0.0 start_lost_km (see Drive.start_recovered_km).
         "start_recovered_km": start.get("start_recovered_km"),
+        # Minutes of the pre-departure gap the car was still parked, when the
+        # departure recovery took prev's SoC as this trip's baseline. Their
+        # standby drain is in that reading and is not this drive's, so the
+        # caller takes it back out at this car's measured parked rate — the
+        # same correction trim_standby_kwh makes at the other end.
+        "start_park_min": start.get("start_park_min"),
         # Where on the odometer the two anchors sat. distance_km is their
         # difference; these are what let a trip be checked against the readings
         # taken around it (see driving.odometer_continuity).
@@ -1703,6 +1709,14 @@ def process_snapshot(
                     _energy_kwh(prev, cur, capacity_kwh) * 1000.0 / moved
                     if moved > 0 else float("inf")
                 )
+                # How much of this gap the car spent driving, from the ground
+                # it covered at a plausible pace. Computed here rather than
+                # with the clock estimate below because the recovery needs its
+                # complement: the minutes it was still PARKED, which is the
+                # only part of prev's SoC drop that isn't this drive's.
+                pace = max((cur.get("speed_kmh") or 0.0) * 0.65, CITY_SPEED_KMH)
+                shift_sec = moved / pace * 3600.0
+                park_min = max(gap_min - shift_sec / 60.0, 0.0)
                 # is_driving(prev) blocks recovery below because prev isn't a
                 # *confirmed* park (shift P, zero speed) — it could be a
                 # genuinely separate, still-open earlier trip the gap simply
@@ -1826,12 +1840,37 @@ def process_snapshot(
                     # projects the full pack from the range/SoC pair, so a
                     # mismatched pair (prev's soc against cur's range) is worse
                     # than either end used consistently.
+                    # Bounded on the PARKED minutes, not the whole gap. Only
+                    # those carry standby drain, so they are what the limit was
+                    # always trying to measure — a gap is just their proxy, and
+                    # a poor one once a real departure hides inside it (trips
+                    # 359 and 366 were refused on 49- and 48-minute gaps whose
+                    # parked portions were 29 and 38). Keeping the same bound on
+                    # the right quantity also keeps the correction below small
+                    # by construction: at most 45 minutes of this car's ~0.3 kW,
+                    # so even a missing rate can only leave ~0.2 kWh behind,
+                    # where the projection it replaces was wrong by more than
+                    # that on trip 366 alone.
                     open_trip["start_energy_recovered"] = (
                         recovered_wh_per_km <= MAX_PLAUSIBLE_WH_PER_KM
-                        and gap_min <= STALE_ANCHOR_MAX_MIN)
+                        and park_min <= STALE_ANCHOR_MAX_MIN)
                     if open_trip["start_energy_recovered"]:
                         open_trip["soc"] = prev["soc"]
                         open_trip["range_km"] = prev.get("range_km")
+                        # The standby drain is the ONLY part of prev's SoC drop
+                        # that isn't this drive's, and its size is known: this
+                        # car's own measured parked draw over the minutes above.
+                        # Subtracting it (in the caller, which has the history
+                        # the rate comes from) beats refusing the whole reading,
+                        # which is what a flat gap limit used to do — and left
+                        # the alternative of projecting the unseen stretch from
+                        # the seen one, an assumption measured wrong in both
+                        # directions (trip 359's blind head cost 1.10x the rest
+                        # of its drive, trip 366's 0.91x). A measurement minus a
+                        # bounded correction beats an unbounded extrapolation:
+                        # the error here can never exceed the drain itself,
+                        # while the projection's grows with the blind share.
+                        open_trip["start_park_min"] = round(park_min, 1)
                 # Same pace model as the arrival-side estimate: ``cur`` is the
                 # first driving reading, so its instantaneous speed is real
                 # evidence of the pace, not just an assumption — prefer it
@@ -1859,8 +1898,6 @@ def process_snapshot(
                 # computed FROM stayed lost, so avg speed read 16 km/h against
                 # the car's 24.7.
                 if recovered_start or not was_parked:
-                    pace = max((cur.get("speed_kmh") or 0.0) * 0.65, CITY_SPEED_KMH)
-                    shift_sec = moved / pace * 3600.0
                     if shift_sec >= 60:
                         est_start = cur["ts"] - shift_sec
                         open_trip["ts"] = min(max(est_start, prev["ts"]), cur["ts"])
