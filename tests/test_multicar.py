@@ -3036,3 +3036,79 @@ def test_repair_lost_departure_gives_back_the_head_a_blackout_took():
     finally:
         settings.app_passcode = old
         _reset_to_demo()
+
+
+def test_repair_trip_energy_replaces_a_projection_not_a_measurement():
+    """A blackout departure brings its distance back but not always its energy:
+    past STALE_ANCHOR_MAX_MIN the far SoC carries the park's standby drain, so
+    the blind stretch is priced from the trip's own rate instead. That is an
+    extrapolation — trip 359's blind head cost 1.10x the rest of its drive,
+    trip 366's 0.91x — and where the car measured the whole drive its figure
+    wins.
+
+    Scoped to that fault: a trip whose energy was measured end to end is
+    refused, because there a disagreement means something else and burying it
+    would destroy the evidence."""
+    from app.models import Drive
+
+    settings = get_settings()
+    old = settings.app_passcode
+    settings.app_passcode = ""
+    try:
+        with TestClient(app) as client:
+            with SessionLocal() as s:
+                a, b = s.query(Drive).order_by(Drive.id).limit(2).all()
+                # Trip 366's real shape: 11.3 km with 4.791 km recovered.
+                b.distance_km, b.energy_used_kwh = 11.3, 1.66
+                b.start_recovered_km = 4.791
+                a.start_recovered_km = 0.0          # measured end to end
+                s.commit()
+                did, measured_id = b.id, a.id
+
+            # A trip with nothing projected is refused outright.
+            refused = client.get("/api/repair-trip-energy",
+                                 params={"drive_id": measured_id, "true_wh_per_km": 150})
+            assert refused.status_code == 409
+            assert "direct measurement" in refused.json()["detail"]
+
+            # Exactly one figure, and it has to be a possible one.
+            assert client.get("/api/repair-trip-energy", params={"drive_id": did}).status_code == 409
+            assert client.get("/api/repair-trip-energy", params={
+                "drive_id": did, "true_wh_per_km": 150, "true_consumed_pct": 2.1,
+            }).status_code == 409
+            silly = client.get("/api/repair-trip-energy",
+                               params={"drive_id": did, "true_wh_per_km": 1500})
+            assert silly.status_code == 409
+            assert "plausible" in silly.json()["detail"]
+
+            # The car's Current Drive readout: 131.5 Wh/km over 11.3 km.
+            r = client.get("/api/repair-trip-energy",
+                           params={"drive_id": did, "true_wh_per_km": 131.5})
+            body = r.json()
+            assert r.status_code == 200
+            assert body["applied"] is False
+            assert body["energy_kwh"] == [1.66, 1.49]
+            with SessionLocal() as s:
+                assert s.get(Drive, did).energy_used_kwh == 1.66   # dry run wrote nothing
+
+            client.get("/api/repair-trip-energy",
+                       params={"drive_id": did, "true_wh_per_km": 131.5, "apply": "true"})
+            with SessionLocal() as s:
+                d = s.get(Drive, did)
+                assert d.energy_used_kwh == 1.49
+                assert d.wh_per_km == pytest.approx(131.5, abs=0.6)   # derived, follows
+
+            # The percentage route goes through the capacity constant instead
+            # of the distance, so it scales with the percentage given rather
+            # than landing on the Wh/km answer (the two only coincide when the
+            # capacity in use is the one the car's own percentage implies).
+            one = client.get("/api/repair-trip-energy",
+                             params={"drive_id": did, "true_consumed_pct": 2.1})
+            two = client.get("/api/repair-trip-energy",
+                             params={"drive_id": did, "true_consumed_pct": 4.2})
+            assert one.status_code == two.status_code == 200
+            assert two.json()["energy_kwh"][1] == pytest.approx(
+                2 * one.json()["energy_kwh"][1], abs=0.02)
+    finally:
+        settings.app_passcode = old
+        _reset_to_demo()

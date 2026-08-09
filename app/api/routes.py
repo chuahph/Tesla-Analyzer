@@ -4228,6 +4228,78 @@ class _DetachedDrive:
         self.end_time = datetime.fromisoformat(before["end_time"])
 
 
+@router.api_route("/repair-trip-energy", methods=["GET", "POST"])
+def repair_trip_energy(
+    drive_id: int = Query(...),
+    true_wh_per_km: float | None = Query(None),
+    true_consumed_pct: float | None = Query(None),
+    apply: bool = Query(False),
+    session: Session = Depends(get_session),
+):
+    """Replace an ESTIMATED trip energy with the car's own measurement.
+
+    A departure recovered from a blackout brings its distance back but not
+    always its energy: when the gap is longer than STALE_ANCHOR_MAX_MIN the
+    SoC at the far end carries the park's standby drain, so taking it would
+    move hours of idling into the drive. The blind stretch is priced instead —
+    the trip's own measured rate, plus the departure premium over the opening
+    kilometres (see energy_for_blind_distance).
+
+    That is an extrapolation, and it is only as good as the assumption that the
+    unseen stretch drove like the rest. Measured, both ways: trip 359's blind
+    head cost 1.10x the rest of its drive, trip 366's 0.91x, against a premium
+    that assumes 1.55x over the opening kilometres. Where the car has measured
+    the whole drive, its figure beats any rate we can project.
+
+    Give ``true_wh_per_km`` (the car's Current Drive readout) or
+    ``true_consumed_pct`` (its energy-app percentage). Prefer the percentage
+    where the two disagree — Tesla's trip meter has read ~2% below its own
+    percentage on several trips here — though it is worth knowing that the
+    percentage route multiplies by the capacity constant while Wh/km does not.
+
+    Refuses a trip whose energy was measured end to end: there the reading is
+    not an estimate, and a disagreement is a different fault that this must not
+    bury. Dry run by default.
+    """
+    drive = session.get(Drive, drive_id)
+    if drive is None:
+        raise HTTPException(404, "No such trip.")
+    if not (drive.start_recovered_km and drive.start_recovered_km > 0):
+        raise HTTPException(
+            409, f"Trip {drive_id} has no recovered distance, so its energy is "
+                 f"a direct measurement rather than a projection. A "
+                 f"disagreement there is a different fault.")
+    if (true_wh_per_km is None) == (true_consumed_pct is None):
+        raise HTTPException(
+            409, "Give exactly one of 'true_wh_per_km' or 'true_consumed_pct'.")
+
+    if true_wh_per_km is not None:
+        new_energy = round(true_wh_per_km * drive.distance_km / 1000.0, 2)
+    else:
+        vehicle = session.get(Vehicle, drive.vehicle_id)
+        capacity_kwh = _usable_capacity(session, vehicle, get_settings())[0]
+        new_energy = round(true_consumed_pct / 100.0 * capacity_kwh, 2)
+
+    rate = new_energy * 1000.0 / drive.distance_km if drive.distance_km else 0.0
+    if not (sync_mod.MIN_PLAUSIBLE_WH_PER_KM <= rate <= sync_mod.MAX_PLAUSIBLE_WH_PER_KM):
+        raise HTTPException(
+            409, f"That works out to {rate:.0f} Wh/km over {drive.distance_km} km, "
+                 f"outside the plausible {sync_mod.MIN_PLAUSIBLE_WH_PER_KM:.0f}-"
+                 f"{sync_mod.MAX_PLAUSIBLE_WH_PER_KM:.0f} range. Check the figure.")
+
+    plan = {
+        "drive_id": drive.id,
+        "recovered_km": drive.start_recovered_km,
+        "energy_kwh": [drive.energy_used_kwh, new_energy],
+        "wh_per_km": [drive.wh_per_km, round(rate, 1)],
+        "applied": apply,
+    }
+    if apply:
+        drive.energy_used_kwh = new_energy   # wh_per_km and cost derive from this
+        session.commit()
+    return plan
+
+
 @router.api_route("/repair-lost-departure", methods=["GET", "POST"])
 def repair_lost_departure(
     drive_id: int = Query(...),
