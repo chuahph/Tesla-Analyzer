@@ -1,4 +1,5 @@
 """Tests for the analytics engine and helpers."""
+import pytest
 from sqlalchemy import select
 
 from app.analysis import linregress, mean, percentile
@@ -315,6 +316,56 @@ def test_vampire_drain_function_thresholds_and_excludes_charged_gaps():
     )
     r3 = vampire_drain(long_gap, [mid_gap_charge], 75.0)
     assert r3 == {"kwh": 0.0, "hours": 0.0, "gaps": 0, "gap_list": [], "longest": None}
+
+
+def test_drain_a_recovered_departure_gave_up_lands_on_the_gap_not_nowhere():
+    """Energy conserved across a trip boundary.
+
+    A departure recovered from a blackout takes the PRE-gap SoC as the trip's
+    baseline, so the gap before it measures only up to that reading while its
+    own clock runs on to the trip's start. The minutes in between
+    (Drive.start_park_min) had their standby drain subtracted from the trip's
+    energy — real drain that would otherwise be in neither, making trip kWh +
+    vampire kWh fall short of the battery actually used, which is the very
+    thing this function counts every short gap to avoid."""
+    from datetime import datetime
+
+    from app.analysis.driving import vampire_drain
+    from app.models import Drive
+
+    def d(start, end, ssoc, esoc, park_min=None):
+        return Drive(id=None, start_time=start, end_time=end, distance_km=3.0,
+                     duration_min=10.0, avg_speed_kmh=30, max_speed_kmh=45,
+                     start_soc=ssoc, end_soc=esoc, energy_used_kwh=0.0,
+                     outside_temp_c=28.0, start_park_min=park_min)
+
+    # Gaps long enough, and enough of them, that a rate can actually be fitted
+    # (STANDBY_MIN_GAP_HOURS 6, STANDBY_MIN_TOTAL_HOURS 24) — without one
+    # nothing is subtracted at sync time either, so there is nothing to hand
+    # back and this correction correctly does nothing.
+    times = [(4, 6), (4, 18), (5, 6), (5, 18)]
+    socs = [(90, 88), (86, 84), (82, 80), (78, 76)]
+    base = [d(datetime(2026, 7, day, hr, 0), datetime(2026, 7, day, hr, 10), s, e)
+            for (day, hr), (s, e) in zip(times, socs)]
+    plain = vampire_drain(base, [], 75.0)
+
+    # The last trip's departure gave up 30 parked minutes.
+    given_up = list(base)
+    given_up[-1] = d(datetime(2026, 7, 5, 18, 0), datetime(2026, 7, 5, 18, 10),
+                     78, 76, park_min=30.0)
+    restored = vampire_drain(given_up, [], 75.0)
+
+    # The same SoC readings, so the measured drops are identical — the whole
+    # difference is the drain handed back, and it can only be positive.
+    assert restored["kwh"] > plain["kwh"]
+    from app.analysis.driving import parked_rate_kw
+    rate = parked_rate_kw(given_up, [], 75.0)
+    assert rate, "this history should support a rate"
+    assert restored["kwh"] - plain["kwh"] == pytest.approx(rate * 0.5, abs=0.01)
+
+    # A window where nothing was given up is untouched, and never pays for
+    # fitting a rate it has no use for.
+    assert vampire_drain(base, [], 75.0) == plain
 
 
 def test_vampire_drain_longest_picks_the_biggest_gap_not_the_last():

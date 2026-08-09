@@ -51,17 +51,12 @@ def _trim_rate_kw(past_drives: list, past_charges: list,
                   capacity_kwh: float) -> float | None:
     """The standby rate to charge a trimmed tail at, in kW.
 
-    A trim covers minutes, not hours, and through those minutes the car is
-    still awake — screens up, Sentry arming — drawing roughly twice what it
-    settles to once asleep. So parked_awake_kw is the right rate and
-    standby_kw is only the fallback: it under-corrects a trim by about half,
-    but under-correcting beats not correcting, and until enough errand stops
-    have accumulated it is the only rate this car's history can support.
+    Delegates so that this and vampire_drain's own add-back share one
+    definition — see driving.parked_rate_kw. Energy taken off a trip here has
+    to be the energy put back on the gap there, and two rates would leak at
+    the boundary.
     """
-    awake = driving_analysis.parked_awake_kw(past_drives, past_charges, capacity_kwh)
-    if awake is not None:
-        return awake
-    return driving_analysis.standby_kw(past_drives, past_charges, capacity_kwh)
+    return driving_analysis.parked_rate_kw(past_drives, past_charges, capacity_kwh)
 
 # A vehicle_data() read is itself an activity signal to the car — it resets
 # Tesla's own inactivity countdown, delaying sleep, regardless of how the

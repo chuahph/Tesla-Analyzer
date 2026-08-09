@@ -186,6 +186,28 @@ def standby_kw(drives: list[Any], charges: list[Any] | None,
                         STANDBY_MIN_GAP_HOURS, None, STANDBY_MIN_TOTAL_HOURS)
 
 
+def parked_rate_kw(drives: list[Any], charges: list[Any] | None,
+                   capacity_kwh: float) -> float | None:
+    """The rate to charge a short parked stretch at, in kW.
+
+    Minutes, not hours, and through them the car is still awake — screens up,
+    Sentry arming — drawing roughly twice what it settles to once asleep. So
+    parked_awake_kw is the right rate and standby_kw is only the fallback: it
+    under-corrects by about half, but under-correcting beats not correcting,
+    and until enough errand stops have accumulated it is the only rate this
+    car's history can support.
+
+    One definition, because both ends of the same correction depend on it: the
+    minutes taken OFF a trip (a trimmed tail, or a departure gap's parked part)
+    and the same minutes added back to the parked gap that should carry them.
+    Two rates would leave energy created or destroyed at the boundary.
+    """
+    awake = parked_awake_kw(drives, charges, capacity_kwh)
+    if awake is not None:
+        return awake
+    return standby_kw(drives, charges, capacity_kwh)
+
+
 # Directional cost of a route. Elevation is the one term the car's own energy
 # breakdown reports that this app does not model at all, and it is the only
 # component that reverses sign when you drive a route the other way: the climb
@@ -375,6 +397,11 @@ def vampire_drain(
     if len(chain) < 2 or not capacity_kwh:
         return {"kwh": 0.0, "hours": 0.0, "gaps": 0, "gap_list": [], "longest": None}
     charge_starts = sorted(c.start_time for c in (charges or []))
+    # Only fitted when some trip actually gave drain up (see the add-back
+    # below) — the ordinary window has none and shouldn't pay for the fit.
+    park_rate_kw = (parked_rate_kw(drives, charges, capacity_kwh)
+                    if any(getattr(d, "start_park_min", None) for d in ordered)
+                    else None)
     total_kwh = 0.0
     total_hours = 0.0
     gap_list: list[dict[str, Any]] = []
@@ -395,6 +422,25 @@ def vampire_drain(
         # measured *kwh* for this gap, not that it didn't happen.
         drop_pct = max(a.end_soc - b.start_soc, 0.0)
         kwh = drop_pct / 100.0 * capacity_kwh
+        # Drain the following trip gave up, put back where it belongs. When
+        # b's departure was recovered across a blackout its start_soc is the
+        # PRE-gap reading, so the drop above stops there while this gap's own
+        # clock runs on to b.start_time. Those minutes (Drive.start_park_min)
+        # had their drain subtracted from b's energy — real standby that would
+        # otherwise be in neither, making trip kWh + vampire kWh fall short of
+        # the battery actually used, which is the very thing this function
+        # counts every short gap to avoid.
+        #
+        # Recomputed rather than stored, so a small residual survives: the rate
+        # here is fitted to the window's history, the one that did the
+        # subtracting to the history at sync time. Over <=45 minutes a 20%
+        # difference between them is ~0.03 kWh, against the ~0.17 being
+        # restored. Second-order, and cheaper than a column that exists only
+        # to bookkeep.
+        park_min = getattr(b, "start_park_min", None) or 0.0
+        if park_min > 0 and park_rate_kw:
+            kwh += park_rate_kw * park_min / 60.0
+            drop_pct = kwh / capacity_kwh * 100.0   # keep pct saying what kwh says
         total_kwh += kwh
         if gap_hours < VAMPIRE_MIN_GAP_HOURS:
             continue  # too short to count toward the "parked gaps/hours" narrative
