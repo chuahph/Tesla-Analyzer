@@ -731,6 +731,43 @@ def test_departure_premium_does_not_scale_with_a_long_blind_stretch():
     assert a == pytest.approx(b, abs=1e-9)
 
 
+def test_pulling_out_of_a_bay_is_reclaimed_even_below_the_trip_floor():
+    """Distance recovered at a departure is floored on whether the car MOVED,
+    not on whether the movement would have been a trip on its own. Nothing is
+    being created here — the trip already exists and already clears the trip
+    floor — so applying it a second time only strands real metres.
+
+    Trip 367: 0.09 km of pulling out of a parking bay, ten metres under
+    DRIVE_MIN_KM's 0.1. It was recorded as lost and never given back, so the
+    trip read 14.2 km against the car's own 14.3 and its start sat 90 m past
+    where the previous trip had ended."""
+    from app.sync import DEPARTURE_STILL_MAX_KM, DRIVE_MIN_KM
+
+    assert DEPARTURE_STILL_MAX_KM < 0.09 < DRIVE_MIN_KM, "the band this covers"
+
+    # 3-minute gap, 0.09 km of creep, then driving for real.
+    p = snap(T0, 29_418.046, 66, range_km=300.0)
+    c = snap(T0 + 180, 29_418.136, 66, shift="D", speed=20.0, range_km=300.0)
+    end = snap(T0 + 180 + 2160, 29_432.359, 63, shift="P", speed=0.0,
+               locked=True, range_km=286.0)
+
+    _, _, trip, _ = step(p, c)
+    assert trip["odo_km"] == 29_418.046          # back to where the last trip ended
+    assert trip["start_recovered_km"] == 0.09
+    assert trip["start_lost_km"] == 0.0
+    drives, _, trip, _ = step(c, end, trip)
+    assert trip is None and len(drives) == 1
+    # 29,432.359 - 29,418.046 = 14.313, which is the car's own 14.3.
+    assert drives[0]["distance_km"] == 14.3
+
+    # Still nothing to reclaim when the car genuinely hasn't moved: below the
+    # still threshold there is no departure, only a reading.
+    q = snap(T0, 5_000.0, 66, range_km=300.0)
+    r = snap(T0 + 180, 5_000.02, 66, shift="D", speed=20.0, range_km=300.0)
+    _, _, trip2, _ = step(q, r)
+    assert trip2["start_recovered_km"] == 0.0
+
+
 def test_departure_energy_is_bounded_by_parked_minutes_not_the_whole_gap():
     """Only the PARKED part of a departure gap carries standby drain, so that
     is what the staleness bound was always trying to measure — the gap is just

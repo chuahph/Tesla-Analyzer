@@ -1700,7 +1700,20 @@ def process_snapshot(
             min_gap = IDLE_STREAK_MIN if (cur.get("speed_kmh") or 0.0) > 0 else PARK_END_MIN
             if was_parked:
                 min_gap = 0.0
-            if gap_min >= min_gap and implied < CITY_SPEED_KMH and moved >= drive_min_km:
+            # Floored on "has the car moved at all" (DEPARTURE_STILL_MAX_KM),
+            # not on "is this a trip" (drive_min_km). The trip floor is the
+            # wrong instrument here: nothing is being created, and the trip
+            # this movement belongs to already exists and already clears it.
+            # Below the still threshold the car hasn't departed and there is
+            # genuinely nothing to reclaim; above it the movement is two real
+            # odometer readings apart, and an odometer does not jitter.
+            #
+            # Measured, trip 367: 0.09 km of pulling out of a parking bay, ten
+            # metres under DRIVE_MIN_KM's 0.1, so it was recorded as lost and
+            # never given back. The trip read 14.2 km against the car's own
+            # 14.3, and its start sat 90 m past where trip 366 had ended.
+            if (gap_min >= min_gap and implied < CITY_SPEED_KMH
+                    and moved >= DEPARTURE_STILL_MAX_KM):
                 # What pulling the energy baseline back to prev would add to
                 # the trip, per km of the distance it would add with it — the
                 # test for whether prev is still a departure reading or has
