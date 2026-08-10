@@ -45,7 +45,7 @@ def _reset_to_demo():
                     state.ACTIVE_VIN_KEY, state.LINKED_VIN_KEY, state.SOURCE_KEY,
                     # An armed sleep back-off outlives its account otherwise,
                     # and the next test's first sync is silently skipped.
-                    state.SUSPEND_KEY):
+                    state.SUSPEND_KEY, state.SYNC_LOG_KEY):
             state.put(s, key, "")
         # Per-VIN scoped state (open trips, last snapshot, wake tracking) must
         # not leak into the next test's fresh link.
@@ -2896,6 +2896,11 @@ def test_polling_stands_down_while_every_car_is_asleep(monkeypatch):
             assert body["skipped"] == "asleep"
             assert body["next_check_sec"] > 0
             assert calls["n"] == armed, "the skipped tick must not call Tesla at all"
+            # It must still record that it RAN. Spending nothing and never
+            # being called leave the same absence otherwise, and telling those
+            # two apart is the whole point of the tick log (see _log_tick).
+            assert "backoff" in [r["outcome"] for r in
+                                 client.get("/api/sync-log").json()["runs"]]
 
             # The manual Sync button ignores it — the person pressing it is the
             # reason the button exists. (wake=1 polls a waking car for ~30 s;
@@ -3109,6 +3114,70 @@ def test_repair_trip_energy_replaces_a_projection_not_a_measurement():
             assert one.status_code == two.status_code == 200
             assert two.json()["energy_kwh"][1] == pytest.approx(
                 2 * one.json()["energy_kwh"][1], abs=0.02)
+    finally:
+        settings.app_passcode = old
+        _reset_to_demo()
+
+
+def test_sync_log_names_the_cause_of_a_gap_including_no_tick_at_all():
+    """A gap in the record has several causes that look identical afterwards.
+    Trip 368 lost 12.4 hours containing two real drives, and nothing anywhere
+    said whether the loop was skipping on the sleep back-off, finding the car
+    unreadable, or simply not being called.
+
+    Each cause writes something — except the one that can't: a stretch with no
+    entry at all means the request never arrived, which is what makes absence
+    the diagnostic rather than a hole in it."""
+    import time as _time
+
+    from app import state
+    from app.api import routes
+
+    settings = get_settings()
+    old = settings.app_passcode
+    settings.app_passcode = ""
+    try:
+        with TestClient(app) as client:
+            empty = client.get("/api/sync-log").json()
+            assert empty["runs"] == []
+            assert "starts filling" in empty["note"]
+
+            # Hand-build a history: a long asleep stretch, a silence where
+            # nothing ran at all, then reads resuming.
+            now = _time.time()
+            with SessionLocal() as s:
+                state.put(s, state.SYNC_LOG_KEY, _json.dumps([
+                    {"o": "asleep", "n": 300, "a": now - 60000, "b": now - 45000},
+                    {"o": "read", "n": 4, "a": now - 600, "b": now - 300},
+                    {"o": "backoff", "n": 20, "a": now - 240, "b": now - 60},
+                ]))
+                s.commit()
+
+            body = client.get("/api/sync-log").json()
+            kinds = [r["outcome"] for r in body["runs"]]
+            # The silence is inserted between the runs that bracket it, and is
+            # not something any tick wrote.
+            assert kinds == ["asleep", "no-tick", "read", "backoff"]
+            hole = body["runs"][1]
+            assert hole["minutes"] == pytest.approx(45000 / 60 - 600 / 60, abs=1)
+            assert "not called at all" in hole["note"]
+            assert body["silences"] == 1
+            assert body["longest_silence_min"] == hole["minutes"]
+            # Runs the ticks did write carry their own counts.
+            assert body["runs"][0]["ticks"] == 300
+            assert body["runs"][3]["outcome"] == "backoff"
+
+            # Consecutive ticks doing the same thing coalesce rather than
+            # growing the log a row a minute; a different one starts a run.
+            with SessionLocal() as s:
+                state.put(s, state.SYNC_LOG_KEY, "")
+                s.commit()
+                routes._log_tick(s, "asleep")
+                routes._log_tick(s, "asleep")
+                routes._log_tick(s, "read")
+                s.commit()
+            runs = client.get("/api/sync-log").json()["runs"]
+            assert [(r["outcome"], r["ticks"]) for r in runs] == [("asleep", 2), ("read", 1)]
     finally:
         settings.app_passcode = old
         _reset_to_demo()

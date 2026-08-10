@@ -226,6 +226,7 @@ def unlink(session) -> dict:
         state.OPEN_CHARGE_KEY,
         state.LAST_ACTIVE_KEY,
         state.SUSPEND_KEY,
+        state.SYNC_LOG_KEY,
     )
     state.delete_scoped(
         session, state.SNAPSHOT_KEY, state.OPEN_TRIP_KEY, state.OPEN_CHARGE_KEY

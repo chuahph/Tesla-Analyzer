@@ -84,6 +84,52 @@ CRON_STALE_MIN = 10.0
 UNREACHABLE_CLOSE_MIN = 3.0
 
 
+# How many runs of the tick log to keep. Run-length encoded, so a run is an
+# unbroken stretch of ticks that all did the same thing — an overnight of
+# "found it asleep" is one entry, not five hundred. A hundred-odd runs is
+# comfortably days of history at that compression.
+SYNC_LOG_MAX_RUNS = 120
+
+# A hole between two runs longer than this means no tick ran at all — the app
+# never got the request. That is a different fault from every outcome the log
+# records (all of which mean the tick DID run), and the only one the log finds
+# by absence rather than by writing something. Same threshold the dashboard
+# already calls a stale status.
+SYNC_SILENCE_MIN = CRON_STALE_MIN
+
+
+def _log_tick(session: Session, outcome: str) -> None:
+    """Record what this /api/sync tick actually did.
+
+    LAST_STATUS_KEY is overwritten every tick, so after the fact there is no
+    way to tell a cron that stopped firing from a car that was quietly asleep
+    — both leave the same single row. Measured, trip 368: 12.4 hours with no
+    reading at all, containing two real drives, and nothing anywhere to say
+    whether the loop was skipping, sleeping, or simply not running.
+
+    Run-length encoded because the interesting thing is never one tick, it is
+    a stretch of them: {o: outcome, n: ticks, a: first ts, b: last ts}. One
+    row per tick either way, the same write LAST_STATUS_KEY already costs.
+
+    A GAP BETWEEN RUNS is the fourth outcome and the one no tick can write:
+    it means the request never arrived.
+    """
+    import json as _json
+
+    now = time.time()
+    try:
+        runs = _json.loads(state.get(session, state.SYNC_LOG_KEY) or "[]")
+    except ValueError:
+        runs = []
+    if runs and runs[-1].get("o") == outcome:
+        runs[-1]["n"] = (runs[-1].get("n") or 0) + 1
+        runs[-1]["b"] = now
+    else:
+        runs.append({"o": outcome, "n": 1, "a": now, "b": now})
+        del runs[:-SYNC_LOG_MAX_RUNS]
+    state.put(session, state.SYNC_LOG_KEY, _json.dumps(runs))
+
+
 def _save_last_status(session: Session, vin: str, **fields) -> None:
     """Persist the cron's own last determination of what the car was doing.
 
@@ -2030,6 +2076,10 @@ def sync_now(wake: bool = Query(False), session: Session = Depends(get_session))
     # the reason the button exists.
     suspend_until = float(state.get(session, state.SUSPEND_KEY) or 0)
     if not wake and suspend_until and now_ts < suspend_until:
+        # Logged like any other outcome: this tick DID run, it just chose to
+        # spend nothing. Without that the back-off is indistinguishable from
+        # the cron having stopped, which is the one thing the log is for.
+        _log_tick(session, "backoff")
         last = _json.loads(state.get(
             session, state.scoped(state.LAST_STATUS_KEY, active_target)) or "{}")
         return {
@@ -2346,6 +2396,13 @@ def sync_now(wake: bool = Query(False), session: Session = Depends(get_session))
         v.get("state") == "online" for v in vehicles)
     state.put(session, state.SUSPEND_KEY,
               str(now_ts + settings.sleep_recheck_min * 60.0) if all_quiet else "")
+
+    # What this tick did for the car the dashboard follows. Placed before both
+    # return paths below so every tick that reaches here is recorded exactly
+    # once. "idle" is the throttle declining to read an online car; "asleep"
+    # is the car being unreadable; "read" is a snapshot actually taken.
+    _log_tick(session, "read" if active_snap is not None
+              else ("idle" if active_seen_online else "asleep"))
 
     # The dashboard's live status reflects the active car specifically.
     if active_snap is None:
@@ -4230,6 +4287,61 @@ class _DetachedDrive:
         self.end_odo_km = before["end_odo_km"]
         self.end_est_km = before["end_est_km"]
         self.end_time = datetime.fromisoformat(before["end_time"])
+
+
+@router.get("/sync-log")
+def sync_log(session: Session = Depends(get_session)):
+    """What the polling loop has actually been doing, newest last.
+
+    Exists because a gap in the record has several causes that look identical
+    afterwards, and picking the wrong one wastes a day. Measured, trip 368:
+    12.4 hours with no reading, two real drives inside it, and no way to tell
+    whether the loop was skipping on the sleep back-off, finding the car
+    unreadable, or simply not being called.
+
+    Each run is an unbroken stretch of ticks that did the same thing:
+
+      read     a snapshot was taken (vehicle_data)
+      idle     the car was online but the read throttle declined it
+      asleep   the car reported asleep/offline — nothing to read
+      backoff  the sleep back-off skipped the tick before spending anything
+
+    And ``no-tick``, which is not an outcome but a HOLE — a stretch longer
+    than SYNC_SILENCE_MIN with nothing recorded at all. No tick can write
+    that, which is exactly what makes it diagnostic: it means the request
+    never arrived, so the fault is the cron or the host, not this app.
+    """
+    import json as _json
+
+    runs = _json.loads(state.get(session, state.SYNC_LOG_KEY) or "[]")
+    out: list[dict[str, Any]] = []
+    prev_end = None
+    for r in runs:
+        start, end = float(r.get("a") or 0), float(r.get("b") or 0)
+        if prev_end is not None and start - prev_end > SYNC_SILENCE_MIN * 60:
+            out.append({
+                "outcome": "no-tick",
+                "minutes": round((start - prev_end) / 60.0, 1),
+                "from": datetime.fromtimestamp(prev_end).isoformat(timespec="minutes"),
+                "to": datetime.fromtimestamp(start).isoformat(timespec="minutes"),
+                "note": "nothing ran — /api/sync was not called at all",
+            })
+        out.append({
+            "outcome": r.get("o"),
+            "ticks": r.get("n"),
+            "minutes": round((end - start) / 60.0, 1),
+            "from": datetime.fromtimestamp(start).isoformat(timespec="minutes"),
+            "to": datetime.fromtimestamp(end).isoformat(timespec="minutes"),
+        })
+        prev_end = end
+    silent = [r for r in out if r["outcome"] == "no-tick"]
+    return {
+        "runs": out,
+        "silences": len(silent),
+        "longest_silence_min": max((r["minutes"] for r in silent), default=0.0),
+        "note": ("No history yet — the log starts filling on the next tick."
+                 if not runs else None),
+    }
 
 
 @router.api_route("/repair-trip-energy", methods=["GET", "POST"])
