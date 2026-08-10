@@ -760,12 +760,24 @@ def test_pulling_out_of_a_bay_is_reclaimed_even_below_the_trip_floor():
     # 29,432.359 - 29,418.046 = 14.313, which is the car's own 14.3.
     assert drives[0]["distance_km"] == 14.3
 
-    # Still nothing to reclaim when the car genuinely hasn't moved: below the
-    # still threshold there is no departure, only a reading.
-    q = snap(T0, 5_000.0, 66, range_km=300.0)
-    r = snap(T0 + 180, 5_000.02, 66, shift="D", speed=20.0, range_km=300.0)
+    # Smaller still comes back too. Trip 369 lost 42 m to the 0.05 floor that
+    # replaced the 0.1 one, and started 42 m past where trip 370 had ended —
+    # the same boundary disagreement, one threshold further down. An odometer
+    # does not jitter, so any positive delta between two real readings is
+    # ground the car covered.
+    q = snap(T0, 29_448.024, 66, range_km=300.0)
+    r = snap(T0 + 124, 29_448.066, 66, shift="D", speed=20.0, range_km=300.0)
     _, _, trip2, _ = step(q, r)
-    assert trip2["start_recovered_km"] == 0.0
+    assert trip2["start_recovered_km"] == 0.042
+    assert trip2["odo_km"] == 29_448.024, "starts where the last trip ended"
+
+    # A car that truly has not moved still reclaims nothing — there is no
+    # ground, not merely a little of it.
+    u = snap(T0, 6_000.0, 66, range_km=300.0)
+    v = snap(T0 + 180, 6_000.0, 66, shift="D", speed=20.0, range_km=300.0)
+    _, _, trip3, _ = step(u, v)
+    assert trip3["start_recovered_km"] == 0.0
+    assert trip3["start_lost_km"] == 0.0
 
 
 def test_a_days_gap_is_not_one_departure_however_parked_it_looks():
