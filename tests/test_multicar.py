@@ -3209,6 +3209,7 @@ def test_repair_split_trip_cuts_one_row_into_the_two_journeys_it_was():
                 d.distance_km, d.energy_used_kwh = 15.7, 0.88
                 d.duration_min, d.avg_speed_kmh = 34.0, 28.0
                 d.start_recovered_km, d.start_lost_km = 9.448, 0.0
+                d.max_speed_kmh, d.end_gap_sec = 63.0, 118.3
                 d.start_location, d.end_location = "Office", "Penang Retirement Resort"
                 s.commit()
                 did = d.id
@@ -3271,6 +3272,13 @@ def test_repair_split_trip_cuts_one_row_into_the_two_journeys_it_was():
                 # A leg that was never watched must not report a SoC drop that
                 # would read as its consumption.
                 assert a.start_soc == a.end_soc
+                # Nor instrumentation belonging to the other leg: the arrival
+                # window was the OLD end's (now leg two's), and the peak speed
+                # was measured on leg two, not here.
+                assert a.end_gap_sec is None
+                assert a.max_speed_kmh == a.avg_speed_kmh
+                assert b.end_gap_sec == 118.3        # leg two keeps its own
+                assert b.max_speed_kmh == 63.0
     finally:
         settings.app_passcode = old
         _reset_to_demo()

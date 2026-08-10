@@ -4452,6 +4452,16 @@ def repair_split_trip(
         drive.end_soc = drive.start_soc
         drive.start_recovered_km, drive.start_lost_km = a_blind, 0.0
         drive.end_lost_km, drive.end_est_km, drive.tail_trim_sec = 0.0, None, None
+        # Its arrival instrumentation belonged to the trip's OLD end, which is
+        # now the second leg's — this leg ends at a repair boundary no poll
+        # ever saw, so there is no polling window to report.
+        drive.end_gap_sec = None
+        # And a peak speed nothing on this leg measured. When the whole leg was
+        # blind the observed maximum came from the other one, so fall back to
+        # the same honest floor _drive_from uses when no mid-drive snapshot
+        # exists: the average, which the car demonstrably reached.
+        if a_measured <= 0:
+            drive.max_speed_kmh = drive.avg_speed_kmh
         session.commit()
         plan["new_drive_id"] = second.id
     return plan
