@@ -768,6 +768,75 @@ def test_pulling_out_of_a_bay_is_reclaimed_even_below_the_trip_floor():
     assert trip2["start_recovered_km"] == 0.0
 
 
+def test_a_days_gap_is_not_one_departure_however_parked_it_looks():
+    """Trip 368, and the worst failure the departure recovery has produced.
+
+    prev was the previous trip's clean park at the Office, so is_driving(prev)
+    was false and DEPARTURE_GAP_MAX_KM never applied — the cap only guarded the
+    mid-drive case. The recovery reached back 9.448 km across 12.4 hours and
+    swallowed an entire Office->Home drive, the stop after it, and the first
+    half of Home->Penang Retirement Resort: one trip logged where two happened.
+
+    A confirmed park earns an uncapped reach only while the park was SHORT. The
+    longer the car sat unseen, the likelier the gap holds whole journeys rather
+    than this trip's opening minutes — and a day's worth of gap holds anything.
+
+    Then the energy: 9.448 km of a 15.665 km span is 60%, past what
+    energy_for_blind_distance will project across, so the distance was folded
+    in with no energy behind it. The measured part alone carried 0.88 kWh over
+    6.217 km — 142 Wh/km, ordinary — while the trip reported 56, which no car
+    does."""
+    # Parked at the Office overnight, 12.4 h unseen, then caught mid-drive
+    # 9.448 km along with two journeys already behind it.
+    p = snap(T0, 29_432.359, 74, shift="P", speed=0.0, locked=True, range_km=380.0)
+    c = snap(T0 + 44_509, 29_441.807, 73, shift="D", speed=40.0, range_km=375.0)
+    # 0.876 kWh over the 6.217 km actually watched — trip 368's own figures.
+    end = snap(T0 + 44_509 + 1300, 29_448.024, 71.5, shift="P", speed=0.0,
+               locked=True, range_km=367.5)
+
+    _, _, trip, _ = step(p, c)
+    assert trip["odo_km"] == c["odo_km"], "must not reach back across the day"
+    assert trip["start_recovered_km"] == 0.0
+    assert trip["start_lost_km"] == 9.448, "reported, not buried"
+
+    drives, _, trip, _ = step(c, end, trip)
+    assert trip is None and len(drives) == 1
+    # Only the stretch actually watched, at an efficiency that exists.
+    assert drives[0]["distance_km"] == 6.2
+    assert drives[0]["energy_used_kwh"] > 0
+    rate = drives[0]["energy_used_kwh"] * 1000.0 / drives[0]["distance_km"]
+    assert 100 < rate < 300, f"{rate:.0f} Wh/km should be an ordinary figure"
+
+
+def test_blind_distance_too_big_to_price_leaves_energy_unknown_not_diluted():
+    """When the blind stretch is too large a share of a trip to project across,
+    the pricing declines — but the distance has already been folded in, so the
+    trip keeps ground it has no energy for and Wh/km is diluted by exactly the
+    folded share. That is the artifact the pricing exists to prevent, produced
+    by the pricing declining.
+
+    A dash beats a number that looks like a reading: the distance is measured,
+    the energy genuinely isn't. Same answer this already gives to a mid-trip
+    range refill."""
+    from app.sync import BLIND_DISTANCE_MAX_SHARE, _drive_from
+
+    start = {"ts": T0, "odo_km": 1000.0, "soc": 80, "range_km": 400.0,
+             "start_recovered_km": 7.0, "start_energy_recovered": False,
+             "start_lost_km": 0.0}
+    cur = {"ts": T0 + 1800, "odo_km": 1010.0, "soc": 79, "range_km": 396.0,
+           "out_temp": 30.0, "lat": None, "lon": None}
+    assert 7.0 > 10.0 * BLIND_DISTANCE_MAX_SHARE      # 70% — past what it will project
+    d = _drive_from(start, cur, 60.0)
+    assert d["distance_km"] == 10.0                   # measured, kept
+    assert d["energy_used_kwh"] == 0.0                # unknown, not fabricated
+
+    # Inside the share it is priced as before, not blanked.
+    ok = dict(start, start_recovered_km=3.0)
+    d2 = _drive_from(ok, cur, 60.0)
+    assert d2["distance_km"] == 10.0
+    assert d2["energy_used_kwh"] > 0
+
+
 def test_departure_energy_is_bounded_by_parked_minutes_not_the_whole_gap():
     """Only the PARKED part of a departure gap carries standby drain, so that
     is what the staleness bound was always trying to measure — the gap is just
@@ -793,16 +862,30 @@ def test_departure_energy_is_bounded_by_parked_minutes_not_the_whole_gap():
     assert trip["start_park_min"] == pytest.approx(38.4, abs=0.5)
     assert trip["start_park_min"] < STALE_ANCHOR_MAX_MIN
 
-    # Push the parked portion past the bound and it must refuse again: the
-    # correction stays small by construction, so a missing standby rate can
-    # never leave more than ~45 minutes of drain behind.
+    # Push the parked portion past the bound and it must refuse — the SoC
+    # baseline, and past DEPARTURE_GAP_MAX_KM the distance with it. The longer
+    # the car sat unseen, the likelier the gap holds a whole journey rather
+    # than this trip's opening minutes, and 4.791 km is well past what a
+    # departure can hide (trip 368 lost an entire drive to exactly this).
+    from app.sync import DEPARTURE_GAP_MAX_KM
+
     p2 = snap(T0, 9_000.0, 74, range_km=380.0)
     c2 = snap(T0 + 4800, 9_004.791, 73, shift="D", speed=45.0, range_km=374.0)
     _, _, trip2, _ = step(p2, c2)
-    assert trip2["start_recovered_km"] == 4.791      # distance still comes back
-    assert trip2["start_energy_recovered"] is False  # but not the SoC baseline
+    assert 4.791 > DEPARTURE_GAP_MAX_KM
+    assert trip2["start_recovered_km"] == 0.0        # not folded in
+    assert trip2["start_lost_km"] == 4.791           # reported, not buried
+    assert trip2["start_energy_recovered"] is False  # nor the SoC baseline
     assert trip2["soc"] == c2["soc"]
     assert trip2.get("start_park_min") is None
+
+    # Under the cap it still comes back, however stale: that much really is
+    # the opening metres of one departure, and leaving it out only strands it.
+    p3 = snap(T0, 9_000.0, 74, range_km=380.0)
+    c3 = snap(T0 + 4800, 9_002.4, 73, shift="D", speed=45.0, range_km=374.0)
+    _, _, trip3, _ = step(p3, c3)
+    assert trip3["start_recovered_km"] == 2.4
+    assert trip3["start_energy_recovered"] is False  # still no SoC baseline
 
 
 def test_start_lost_km_is_never_null_on_a_reconstructed_drive():

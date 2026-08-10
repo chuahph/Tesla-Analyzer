@@ -879,11 +879,25 @@ def _drive_from(start: dict, cur: dict, capacity_kwh: float, max_speed: float = 
     # trip average (see DEPARTURE_BLIND_LOAD), the arrival share does not.
     start_blind = (start.get("start_recovered_km") or 0.0
                    if not start.get("start_energy_recovered") else 0.0)
+    blind = start_blind + (cur.get("end_folded_km") or 0.0)
     energy = energy_for_blind_distance(
-        energy, distance,
-        start_blind + (cur.get("end_folded_km") or 0.0),
-        departure_blind_km=start_blind,
+        energy, distance, blind, departure_blind_km=start_blind,
     )
+    # When that refuses — the blind stretch is too large a share of the trip to
+    # project across (BLIND_DISTANCE_MAX_SHARE) — the distance has still been
+    # folded in, so the trip keeps ground it has no energy for and Wh/km is
+    # diluted by exactly the folded share. That is the artifact the pricing
+    # exists to prevent, produced by the pricing declining, and it is worse
+    # than either honest answer: a fabricated efficiency reads as measured.
+    #
+    # Measured, trip 368: 9.448 km of a 15.665 km span (60%) folded in unpriced.
+    # The measured part alone carried 0.88 kWh over 6.217 km — 142 Wh/km, an
+    # ordinary figure — while the trip reported 56 Wh/km, which no car does.
+    # So say the energy is unknown instead, the same answer this already gives
+    # to a mid-trip range refill below: the distance is measured, the energy
+    # genuinely is not, and a dash beats a number that looks like a reading.
+    if blind > 0 and energy and blind > distance * BLIND_DISTANCE_MAX_SHARE:
+        energy = 0.0
     # A real drive can't average below ~40 Wh/km over its whole distance — that
     # means the range reading was refilled mid-trip (a charge or BMS recalibration
     # slipped into the session). Flag energy unknown so the trip shows "—" and is
@@ -1662,6 +1676,9 @@ def process_snapshot(
         # Nothing reclaimed unless the recovery below fires. A real 0.0, so a
         # trip can always be asked the question rather than answering None.
         open_trip["start_recovered_km"] = 0.0
+        # Same reason: a recovery that never ran and one that ran but declined
+        # the SoC baseline must not be told apart by a missing key.
+        open_trip["start_energy_recovered"] = False
         # Symmetric to the arrival case: if the first *driving* reading only came
         # through after an unpolled gap (poor signal at power-on), the last
         # parked reading is well before the car actually set off, so counting
@@ -1762,8 +1779,23 @@ def process_snapshot(
                 # the car's own 27.2. One blackout cost the arrival AND then
                 # disarmed the departure recovery that would have fixed it.
                 prev_is_closed_end = prev_close_odo_km is not None
-                if was_parked and (not is_driving(prev) or prev_is_closed_end
-                                   or moved <= DEPARTURE_GAP_MAX_KM):
+                # A stale anchor bounds the DISTANCE too, not only the energy.
+                # Reaching past DEPARTURE_GAP_MAX_KM needs a reason to believe
+                # every metre belongs to ONE departure, and a confirmed park is
+                # only that reason while the park was short: the longer the car
+                # sat unseen, the likelier the gap holds whole journeys rather
+                # than the opening minutes of this one.
+                #
+                # Measured, trip 368: prev was trip 367's clean park at Office,
+                # so is_driving(prev) was false and the cap never applied — the
+                # recovery reached back 9.448 km across 12.4 hours and swallowed
+                # an entire Office->Home drive, the stop after it, and the first
+                # half of Home->Penang Retirement Resort. One trip logged where
+                # two had happened.
+                stale_anchor = park_min > STALE_ANCHOR_MAX_MIN
+                trusted_anchor = (not is_driving(prev) or prev_is_closed_end)
+                if was_parked and (moved <= DEPARTURE_GAP_MAX_KM
+                                   or (trusted_anchor and not stale_anchor)):
                     # base=cur anchored the trip's own odo/SoC to the *first
                     # driving* reading, which already reflects the "catch-up"
                     # distance/energy this block just proved happened before
