@@ -142,18 +142,6 @@ MYT = timezone(timedelta(hours=8))  # Malaysia has no DST
 CITY_SPEED_KMH = 30.0  # assumed door-to-door pace when the real duration is unknown
 
 
-def _lock_unlocked(prev: dict | None, cur: dict) -> bool:
-    """True if the car transitioned from locked to unlocked between snapshots.
-
-    This is a strong signal of driving intent — the user explicitly unlocked
-    the car, so a following shift to D/R/N is almost certainly the start of a trip.
-    Used to confirm trip start when shift changes or speed increases.
-    """
-    if not prev:
-        return False
-    return bool(prev.get("locked")) and not bool(cur.get("locked"))
-
-
 def _was_parked_since(prev: dict | None, cur: dict) -> bool:
     """True if the last snapshot is stale — the car sat parked/asleep in between
     (a long wall-clock gap with almost no odometer movement), so a drive seen now
@@ -373,9 +361,6 @@ def _open_trip_at(base: dict[str, Any], cur: dict[str, Any], prev: dict[str, Any
         "max_speed": cur.get("speed_kmh") or 0.0,
         "lat": base.get("lat"),
         "lon": base.get("lon"),
-        # Lock event tracking: if the car was just unlocked, this trip is confirmed
-        # as intentional driving (not just a brief shift to P or accidental gear change).
-        "unlocked_before_drive": _lock_unlocked(prev, cur),
         # How wide the polling window was that the departure actually happened
         # inside. Every anchor at this end is an estimate placed somewhere in
         # this window, so its size IS the trip's start-side uncertainty — and

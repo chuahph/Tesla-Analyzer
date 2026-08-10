@@ -2070,26 +2070,30 @@ def test_trip_closes_immediately_when_car_locks():
     assert 0 < d[0]["energy_used_kwh"]  # Should have valid energy data
 
 
-def test_trip_tracks_unlock_event_sequence():
-    """Track door unlock → shift sequence to confirm driving intent.
+def test_a_trip_opens_on_the_shift_not_on_the_unlock():
+    """The ordinary departure sequence: locked, then unlocked and into D, then
+    moving. The trip opens at the SHIFT — unlocking is not consulted.
 
-    Unlock-before-drive flag signals high confidence that the trip is real
-    (not accidental gear shifting or brief driveway movement)."""
+    Worth pinning because the opposite is the intuitive guess, and the code
+    once carried an `unlocked_before_drive` flag whose docstring called it "a
+    strong signal of driving intent" while nothing read it. It could never
+    have worked either: the lock state lives in vehicle_data, which is not
+    called while the car is asleep, so an unlock is invisible until the car
+    wakes — at which point list_vehicles reports it online and the existing
+    wake escalation already forces a read."""
     s1 = snap(T0, 10_000.0, 80, locked=True)                   # locked at home
     s2 = snap(T0 + 60, 10_000.0, 80, locked=False, shift="D")  # unlocked → shift D
     s3 = snap(T0 + 300, 10_010.0, 77, shift="D", speed=70)     # driving
 
     _, _, trip, _ = step(None, s1)
-    assert trip is None
+    assert trip is None, "an unlocked-but-parked car is not a trip"
 
-    # Transition from locked to unlocked with shift change
     _, _, trip, _ = step(s1, s2)
-    assert trip is not None, "Trip should open on unlock + shift"
-    assert trip.get("unlocked_before_drive") is True, "Should detect unlock event"
+    assert trip is not None, "shifting into D opens it"
+    assert trip["odo_km"] == s2["odo_km"], "anchored where the car actually was"
 
     _, _, trip, _ = step(s2, s3, trip)
-    assert trip is not None
-    assert trip.get("unlocked_before_drive") is True, "Should preserve unlock flag"
+    assert trip is not None, "and stays open while it drives"
 
 
 def test_close_trip_on_sleep_uses_last_snapshot_as_the_end():
