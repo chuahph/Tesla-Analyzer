@@ -4289,6 +4289,174 @@ class _DetachedDrive:
         self.end_time = datetime.fromisoformat(before["end_time"])
 
 
+@router.api_route("/repair-split-trip", methods=["GET", "POST"])
+def repair_split_trip(
+    drive_id: int = Query(...),
+    boundary_odo_km: float = Query(...),
+    first_start: str | None = Query(None),
+    first_end: str | None = Query(None),
+    second_start: str | None = Query(None),
+    boundary_coords: str | None = Query(None),
+    apply: bool = Query(False),
+    session: Session = Depends(get_session),
+):
+    """Cut one logged trip into the two journeys it actually was.
+
+    A departure recovery that reached across a long blind gap can swallow a
+    whole separate drive, the stop after it, and the start of the next one —
+    measured, trip 368: Office->Home, a stop, and half of Home->Penang
+    Retirement Resort logged as a single 15.665 km trip. Sync no longer does
+    that, but a row already written keeps it, and no other repair can help:
+    the boundary tools trade distance BETWEEN two trips, and here there is
+    only one where two belong.
+
+    ``boundary_odo_km`` is the odometer at the intermediate stop — the one
+    quantity that is a measured fact rather than a guess, since it is where
+    the two legs actually meet.
+
+    TIMES cannot be derived. The gap is blind precisely because nothing was
+    recorded in it, so the first leg's clock exists only in your memory: give
+    ``first_start``/``first_end``/``second_start`` (ISO, e.g.
+    2026-08-10T16:40). Omitted, the trip's own span is divided by distance and
+    the result is an estimate wearing a measurement's clothes — fine for
+    ordering, not for auditing.
+
+    ENERGY follows what was actually watched. The leg with no measurement
+    behind it gets none: energy unknown, shown as a dash, rather than a share
+    invented by splitting a number that never covered it. The other keeps the
+    measured energy, re-priced over its own blind head the way sync would.
+
+    Dry run by default.
+    """
+    drive = session.get(Drive, drive_id)
+    if drive is None:
+        raise HTTPException(404, "No such trip.")
+    if drive.start_odo_km is None or drive.end_odo_km is None:
+        raise HTTPException(
+            409, f"Trip {drive_id} has no odometer anchors, so there is nothing "
+                 f"to cut against.")
+    if not (drive.start_odo_km < boundary_odo_km < drive.end_odo_km):
+        raise HTTPException(
+            409, f"The boundary must fall inside the trip: "
+                 f"{drive.start_odo_km} < {boundary_odo_km} < {drive.end_odo_km}.")
+
+    def _when(raw: str | None) -> datetime | None:
+        if not raw:
+            return None
+        try:
+            return datetime.fromisoformat(raw)
+        except ValueError:
+            raise HTTPException(409, f"'{raw}' is not an ISO datetime.")
+
+    a_start = _when(first_start) or drive.start_time
+    b_end = drive.end_time
+    a_km = round(boundary_odo_km - drive.start_odo_km, 3)
+    b_km = round(drive.end_odo_km - boundary_odo_km, 3)
+    # Only used when the real times aren't given: divide the trip's own span
+    # in proportion to distance, which at least orders the legs correctly.
+    span_sec = max((b_end - a_start).total_seconds(), 0.0)
+    a_end = _when(first_end) or (a_start + timedelta(
+        seconds=span_sec * a_km / max(a_km + b_km, 1e-9)))
+    b_start = _when(second_start) or a_end
+    if not (a_start < a_end <= b_start < b_end):
+        raise HTTPException(
+            409, "Times must run in order: first_start < first_end <= "
+                 "second_start < the trip's own end.")
+
+    # Blind distance splits by where it sat: it is all at the trip's start, so
+    # the first leg absorbs it until it runs out, and whatever is left belongs
+    # to the second leg's own departure.
+    blind = drive.start_recovered_km or 0.0
+    a_blind = round(min(blind, a_km), 3)
+    b_blind = round(max(blind - a_km, 0.0), 3)
+    a_measured, b_measured = a_km - a_blind, b_km - b_blind
+    # The trip's measured energy was carried entirely by whatever was watched,
+    # and with the blind stretch at the front that is the tail of the second
+    # leg. A leg with nothing measured gets no energy rather than a share of a
+    # figure that never covered it.
+    a_energy = 0.0 if a_measured <= 0 else round(
+        (drive.energy_used_kwh or 0.0) * a_measured / max(a_measured + b_measured, 1e-9), 2)
+    b_energy = round(sync_mod.energy_for_blind_distance(
+        (drive.energy_used_kwh or 0.0) - a_energy, b_km, b_blind,
+        departure_blind_km=b_blind), 2) if drive.energy_used_kwh else 0.0
+
+    mid_coords = (boundary_coords or "").strip()
+    mid_place, mid_area = (_place_and_area(mid_coords, session) if mid_coords
+                           else ("", ""))
+
+    def _mins(a: datetime, b: datetime) -> float:
+        return round(max((b - a).total_seconds(), 0.0) / 60.0, 1)
+
+    plan = {
+        "drive_id": drive.id,
+        "boundary_odo_km": round(boundary_odo_km, 3),
+        "legs": [
+            {"leg": 1, "route": [drive.start_location, mid_place or "(unknown)"],
+             "odo": [drive.start_odo_km, round(boundary_odo_km, 3)],
+             "distance_km": round(a_km, 1), "energy_kwh": a_energy or None,
+             "blind_km": a_blind,
+             "start_time": a_start.isoformat(timespec="minutes"),
+             "end_time": a_end.isoformat(timespec="minutes"),
+             "times_given": bool(first_start or first_end)},
+            {"leg": 2, "route": [mid_place or "(unknown)", drive.end_location],
+             "odo": [round(boundary_odo_km, 3), drive.end_odo_km],
+             "distance_km": round(b_km, 1), "energy_kwh": b_energy or None,
+             "blind_km": b_blind,
+             "start_time": b_start.isoformat(timespec="minutes"),
+             "end_time": b_end.isoformat(timespec="minutes"),
+             "times_given": bool(second_start)},
+        ],
+        "was": {"distance_km": drive.distance_km,
+                "energy_kwh": drive.energy_used_kwh,
+                "route": [drive.start_location, drive.end_location]},
+        "applied": apply,
+    }
+    if apply:
+        second = Drive(
+            vehicle_id=drive.vehicle_id,
+            start_time=b_start, end_time=b_end,
+            distance_km=round(b_km, 1), duration_min=_mins(b_start, b_end),
+            # The measured SoC pair belongs to the watched stretch, which is in
+            # this leg; energy_used_kwh above is the figure that actually gets
+            # read, and it is set explicitly.
+            start_soc=drive.start_soc, end_soc=drive.end_soc,
+            energy_used_kwh=b_energy,
+            avg_speed_kmh=round(b_km / max(_mins(b_start, b_end) / 60.0, 1e-9), 1),
+            max_speed_kmh=drive.max_speed_kmh,
+            outside_temp_c=drive.outside_temp_c,
+            start_location=mid_place, start_area=mid_area, start_coords=mid_coords,
+            end_location=drive.end_location, end_area=drive.end_area,
+            end_coords=drive.end_coords,
+            start_odo_km=round(boundary_odo_km, 3), end_odo_km=drive.end_odo_km,
+            start_lost_km=0.0, start_recovered_km=b_blind,
+            end_lost_km=drive.end_lost_km, end_est_km=drive.end_est_km,
+            tail_trim_sec=drive.tail_trim_sec, end_gap_sec=drive.end_gap_sec,
+            idle_tracked=False, tag=drive.tag,
+        )
+        session.add(second)
+        # The original becomes the FIRST leg: it already carries the correct
+        # start, so rewriting its end is the smaller change — and keeping its
+        # id means anything referring to this trip still points at a real one.
+        drive.end_time = a_end
+        drive.start_time = a_start
+        drive.distance_km = round(a_km, 1)
+        drive.duration_min = _mins(a_start, a_end)
+        drive.energy_used_kwh = a_energy
+        drive.avg_speed_kmh = round(a_km / max(_mins(a_start, a_end) / 60.0, 1e-9), 1)
+        drive.end_odo_km = round(boundary_odo_km, 3)
+        drive.end_location, drive.end_area = mid_place, mid_area
+        drive.end_coords = mid_coords
+        # Its own SoC pair no longer describes anything measured — this leg was
+        # never watched — so flatten it rather than leave a drop that would be
+        # read as this drive's consumption.
+        drive.end_soc = drive.start_soc
+        drive.start_recovered_km, drive.start_lost_km = a_blind, 0.0
+        drive.end_lost_km, drive.end_est_km, drive.tail_trim_sec = 0.0, None, None
+        session.commit()
+        plan["new_drive_id"] = second.id
+    return plan
+
+
 @router.get("/sync-log")
 def sync_log(session: Session = Depends(get_session)):
     """What the polling loop has actually been doing, newest last.

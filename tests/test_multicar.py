@@ -3181,3 +3181,96 @@ def test_sync_log_names_the_cause_of_a_gap_including_no_tick_at_all():
     finally:
         settings.app_passcode = old
         _reset_to_demo()
+
+
+def test_repair_split_trip_cuts_one_row_into_the_two_journeys_it_was():
+    """A departure recovery reaching across a long blind gap can swallow a
+    whole separate drive, the stop after it, and the start of the next one.
+    Trip 368: Office->Home, a stop, and half of Home->Penang Retirement Resort
+    logged as one 15.665 km trip. No other repair helps — the boundary tools
+    trade distance BETWEEN two trips, and here there is one where two belong.
+
+    The odometer boundary is the measured fact; the times are not, because the
+    gap is blind precisely because nothing was recorded in it."""
+    from datetime import datetime
+
+    from app.models import Drive
+
+    settings = get_settings()
+    old = settings.app_passcode
+    settings.app_passcode = ""
+    try:
+        with TestClient(app) as client:
+            with SessionLocal() as s:
+                d = s.query(Drive).order_by(Drive.id).first()
+                d.start_time = datetime.fromisoformat("2026-08-10T19:33")
+                d.end_time = datetime.fromisoformat("2026-08-10T20:07")
+                d.start_odo_km, d.end_odo_km = 29432.359, 29448.024
+                d.distance_km, d.energy_used_kwh = 15.7, 0.88
+                d.duration_min, d.avg_speed_kmh = 34.0, 28.0
+                d.start_recovered_km, d.start_lost_km = 9.448, 0.0
+                d.start_location, d.end_location = "Office", "Penang Retirement Resort"
+                s.commit()
+                did = d.id
+            # The stop's coordinates are named by the same geofence everything
+            # else uses, so the split's middle reads "Home" and not a lat/lon.
+            client.post("/api/places", json={
+                "name": "Home", "lat": 5.3428, "lon": 100.3106, "radius_km": 0.3})
+
+            # The boundary has to fall inside the trip.
+            for bad in (29432.0, 29450.0):
+                r = client.get("/api/repair-split-trip",
+                               params={"drive_id": did, "boundary_odo_km": bad})
+                assert r.status_code == 409
+                assert "must fall inside" in r.json()["detail"]
+
+            # Times out of order are refused rather than silently reordered.
+            assert client.get("/api/repair-split-trip", params={
+                "drive_id": did, "boundary_odo_km": 29436.724,
+                "first_start": "2026-08-10T16:40", "first_end": "2026-08-10T16:20",
+            }).status_code == 409
+
+            params = {
+                "drive_id": did, "boundary_odo_km": 29436.724,
+                "first_start": "2026-08-10T16:40", "first_end": "2026-08-10T16:55",
+                "second_start": "2026-08-10T19:43",
+                "boundary_coords": "5.3428, 100.3106",
+            }
+            body = client.get("/api/repair-split-trip", params=params).json()
+            assert body["applied"] is False
+            one, two = body["legs"]
+            assert one["distance_km"] == 4.4 and two["distance_km"] == 11.3
+            # All 9.448 km of blind distance sat at the front: the first leg is
+            # entirely unwatched, the rest lands on the second leg's departure.
+            assert one["blind_km"] == 4.365
+            assert two["blind_km"] == round(9.448 - 4.365, 3)
+            # Nothing was measured on leg one, so it gets no energy rather than
+            # a share of a figure that never covered it.
+            assert one["energy_kwh"] is None
+            assert two["energy_kwh"] > 0.88, "re-priced over its own blind head"
+
+            with SessionLocal() as s:
+                assert s.get(Drive, did).distance_km == 15.7   # dry run wrote nothing
+
+            applied = client.get("/api/repair-split-trip",
+                                 params={**params, "apply": "true"}).json()
+            new_id = applied["new_drive_id"]
+            with SessionLocal() as s:
+                a, b = s.get(Drive, did), s.get(Drive, new_id)
+                # One odometer, shared — the thing every boundary check needs.
+                assert a.end_odo_km == b.start_odo_km == 29436.724
+                assert a.start_odo_km == 29432.359 and b.end_odo_km == 29448.024
+                assert (a.distance_km, b.distance_km) == (4.4, 11.3)
+                assert a.energy_used_kwh == 0.0        # unknown, shows as a dash
+                assert b.energy_used_kwh > 0.88
+                assert a.end_location == b.start_location == "Home"
+                assert a.start_location == "Office"
+                assert b.end_location == "Penang Retirement Resort"
+                assert a.start_time.isoformat(timespec="minutes") == "2026-08-10T16:40"
+                assert b.end_time.isoformat(timespec="minutes") == "2026-08-10T20:07"
+                # A leg that was never watched must not report a SoC drop that
+                # would read as its consumption.
+                assert a.start_soc == a.end_soc
+    finally:
+        settings.app_passcode = old
+        _reset_to_demo()
