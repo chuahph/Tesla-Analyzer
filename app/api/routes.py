@@ -88,13 +88,20 @@ UNREACHABLE_CLOSE_MIN = 3.0
 # that all did the same thing, so an overnight of "found it asleep" is one
 # entry rather than five hundred.
 #
-# Bounded by SERIALISED SIZE, because that is the limit that actually exists:
-# Setting.value is VARCHAR(2048). Capping the run COUNT instead let 120 runs
-# of ~75 characters build a 9 KB value, and every write of it failed with
-# StringDataRightTruncation. _log_tick runs on the back-off path too, so that
-# took the whole of /api/sync down with it — thirteen hours of no polling,
-# caused by the instrument added to explain a gap in polling.
-SYNC_LOG_MAX_CHARS = 1800
+# Bounded by SERIALISED SIZE rather than run count. Capping the count instead
+# let 120 runs of ~75 characters build a 9 KB value against what was then a
+# VARCHAR(2048) column; every write failed, and since this is written on every
+# sync path it took /api/sync down for thirteen hours — the instrument added
+# to explain a gap in polling causing a much larger one.
+#
+# Setting.value is TEXT now, so this is no longer the database's limit but a
+# deliberate one: how much history is worth carrying. The first value chosen
+# after that outage, 1800, bought about 37 MINUTES — "read" and "idle"
+# alternate every tick while the car is awake and never coalesce, so active
+# polling burns runs fast. That is useless for diagnosing anything reported
+# later the same day, which is the normal case. A quiet car compresses to
+# almost nothing, so this is generous only in the window where it has to be.
+SYNC_LOG_MAX_CHARS = 40000
 
 # A hole between two runs longer than this means no tick ran at all — the app
 # never got the request. That is a different fault from every outcome the log

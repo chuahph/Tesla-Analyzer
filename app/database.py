@@ -63,11 +63,39 @@ def _ensure_column(table: str, column: str, ddl_type: str, default_sql: str) -> 
         conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {column} {ddl_type} DEFAULT {default_sql}"))
 
 
+def _widen_to_text(table: str, column: str) -> None:
+    """Relax a bounded VARCHAR to unbounded TEXT on an existing table.
+
+    The additive-only ``_ensure_column`` above can't do this: the column is
+    already there, just too small. Widening is the one ALTER that is always
+    safe — every value that fitted before still fits — and on Postgres a
+    varchar-to-text change is metadata-only. SQLite never enforced the bound
+    in the first place, so it is a no-op there.
+    """
+    from sqlalchemy import inspect, text
+
+    inspector = inspect(engine)
+    if not inspector.has_table(table):
+        return
+    if engine.dialect.name != "postgresql":
+        return
+    current = {c["name"]: c["type"] for c in inspector.get_columns(table)}
+    kind = current.get(column)
+    if kind is None or getattr(kind, "length", None) is None:
+        return  # missing, or already unbounded
+    with engine.begin() as conn:
+        conn.execute(text(f"ALTER TABLE {table} ALTER COLUMN {column} TYPE TEXT"))
+
+
 def init_db() -> None:
     """Create all tables. Models must be imported before calling this."""
     from . import models  # noqa: F401  (registers models on Base.metadata)
 
     Base.metadata.create_all(bind=engine)
+    # Runtime state values outgrew their original 2048-char bound (see
+    # models.Setting.value) — and the failure mode was a 500 on every sync,
+    # not a truncated string.
+    _widen_to_text("settings", "value")
     _ensure_column("drives", "idle_min", "FLOAT", "0.0")
     _ensure_column("drives", "idle_tracked", "BOOLEAN", "FALSE")
     _ensure_column("drives", "start_area", "VARCHAR(120)", "''")

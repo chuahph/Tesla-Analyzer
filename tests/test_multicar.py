@@ -3394,10 +3394,11 @@ def test_tick_log_stays_inside_the_column_it_is_stored_in():
     """The bug that took polling down for thirteen hours, and the worst kind:
     the instrument added to explain a gap in polling was what caused one.
 
-    Setting.value is VARCHAR(2048). The log capped its RUN COUNT at 120, which
-    at ~75 characters a run is a 9 KB value — so once enough history built up,
-    every write failed with StringDataRightTruncation. _log_tick runs on the
-    back-off path too, so that failure took the whole of /api/sync with it.
+    The log capped its RUN COUNT at 120, which at ~75 characters a run is a
+    9 KB value against what was then a VARCHAR(2048) column — so once enough
+    history built up, every write failed with StringDataRightTruncation.
+    _log_tick runs on the back-off path too, so that took the whole of
+    /api/sync with it.
 
     Bounded by serialised size now, and unable to propagate a write failure at
     all: observability must not break the thing it observes."""
@@ -3414,14 +3415,16 @@ def test_tick_log_stays_inside_the_column_it_is_stored_in():
             s.commit()
             # Far more history than the column could ever hold, alternating so
             # nothing coalesces into one run.
-            for i in range(400):
+            for i in range(4000):
                 routes._log_tick(s, "read" if i % 2 else "asleep")
             s.commit()
 
             stored = s.get(Setting, state.SYNC_LOG_KEY).value
-            column_limit = Setting.__table__.c.value.type.length
-            assert column_limit == 2048
-            assert len(stored) <= routes.SYNC_LOG_MAX_CHARS < column_limit
+            # The column is unbounded now, so the budget is the app's own
+            # choice about how much history to carry — but it must still be
+            # enforced, or nothing stops the value growing without limit.
+            assert getattr(Setting.__table__.c.value.type, "length", None) is None
+            assert len(stored) <= routes.SYNC_LOG_MAX_CHARS
 
             # It kept the NEWEST history, which is what a diagnosis needs.
             runs = _json.loads(stored)

@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Integer, String
+from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from .database import Base
@@ -15,7 +15,14 @@ class Setting(Base):
     __tablename__ = "settings"
 
     key: Mapped[str] = mapped_column(String(64), primary_key=True)
-    value: Mapped[str] = mapped_column(String(2048), default="")
+    # Text, not a bounded VARCHAR. A generic key/value store has no business
+    # guessing how long its longest value will ever be, and guessing 2048 cost
+    # thirteen hours of polling: the tick log grew past it, every write raised
+    # StringDataRightTruncation, and since that log is written on every sync
+    # path it took /api/sync down with it. Bounds belong in the code that
+    # knows what it is storing, not in a column shared by tokens, snapshots,
+    # open trips and diagnostics alike.
+    value: Mapped[str] = mapped_column(Text, default="")
 
 
 class Vehicle(Base):
