@@ -3310,6 +3310,8 @@ def test_a_crashed_tick_records_why_instead_of_looking_like_a_dead_cron(monkeypa
     The reason is kept, not just the fact: "a tick failed" is barely more use
     than the silence it replaces, and it has to be readable without host logs.
     """
+    from fastapi import HTTPException
+
     from app import services, state
     from app.api import routes
 
@@ -3336,6 +3338,25 @@ def test_a_crashed_tick_records_why_instead_of_looking_like_a_dead_cron(monkeypa
         assert body["silences"] == 0, "a crash is not a silence"
         assert "start_park_min does not exist" in body["last_error"]
         assert "RuntimeError" in body["runs"][0]["error"]
+
+        # A HANDLED failure is recorded too. A tick that returned 401 because
+        # the token expired achieved as little as one that crashed, and left
+        # the same absence — logging only crashes would make the tidiest
+        # failures the least visible.
+        with SessionLocal() as s:
+            state.put(s, state.SYNC_LOG_KEY, "")
+            s.commit()
+
+        def _refused(*a, **kw):
+            raise HTTPException(401, "Tesla error: token expired")
+
+        monkeypatch.setattr(routes, "_sync_now_impl", _refused)
+        with TestClient(app, raise_server_exceptions=False) as client:
+            assert client.post("/api/sync").status_code == 401
+            handled = client.get("/api/sync-log").json()
+        assert handled["errors"] == 1
+        assert "HTTP 401" in handled["last_error"]
+        assert "token expired" in handled["last_error"]
     finally:
         settings.app_passcode = old
         _reset_to_demo()

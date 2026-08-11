@@ -137,6 +137,25 @@ def _log_tick(session: Session, outcome: str, detail: str | None = None) -> None
     state.put(session, state.SYNC_LOG_KEY, _json.dumps(runs))
 
 
+def _log_tick_isolated(detail: str) -> None:
+    """Record a failed tick on a session of its own.
+
+    The session the request was using may be in a failed transaction and
+    unable to write anything at all, which is precisely the case where the log
+    entry matters most. Swallows its own failures: there is nothing useful
+    left to do if even this cannot write, and raising here would replace the
+    real error with a less interesting one.
+    """
+    try:
+        from ..database import SessionLocal
+
+        with SessionLocal() as log_session:
+            _log_tick(log_session, "error", detail=detail)
+            log_session.commit()
+    except Exception:
+        pass
+
+
 def _save_last_status(session: Session, vin: str, **fields) -> None:
     """Persist the cron's own last determination of what the car was doing.
 
@@ -2043,7 +2062,13 @@ def sync_now(wake: bool = Query(False), session: Session = Depends(get_session))
     """
     try:
         return _sync_now_impl(wake, session)
-    except HTTPException:
+    except HTTPException as exc:
+        # Logged too. A tick that returned 401 because the token expired, or
+        # 503 because Tesla was unreachable, achieved exactly as little as one
+        # that crashed — and left exactly the same absence. Recording only
+        # uncaught exceptions would leave the tidiest failures the least
+        # visible, which is backwards.
+        _log_tick_isolated(f"HTTP {exc.status_code}: {exc.detail}")
         raise
     except Exception as exc:
         # A tick that CRASHED and a tick that never happened leave the same
@@ -2052,16 +2077,7 @@ def sync_now(wake: bool = Query(False), session: Session = Depends(get_session))
         # the hard way: a run of 500s read exactly like a dead cron, and the
         # diagnosis went to the wrong place for two rounds.
         #
-        # On its own session, because the one that raised may be in a failed
-        # transaction and unable to write anything at all.
-        try:
-            from ..database import SessionLocal
-
-            with SessionLocal() as log_session:
-                _log_tick(log_session, "error", detail=f"{type(exc).__name__}: {exc}")
-                log_session.commit()
-        except Exception:      # nothing useful left to do if even that fails
-            pass
+        _log_tick_isolated(f"{type(exc).__name__}: {exc}")
         raise
 
 
