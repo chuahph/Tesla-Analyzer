@@ -4526,27 +4526,44 @@ def sync_log(session: Session = Depends(get_session)):
     runs = _json.loads(state.get(session, state.SYNC_LOG_KEY) or "[]")
     out: list[dict[str, Any]] = []
     prev_end = None
+
+    def _clock(ts: float) -> str:
+        # MYT, like every other timestamp this app stores or shows — see
+        # sync._dt. Rendered with the server's own timezone instead, this read
+        # eight hours off on the deployed host, and a night of back-off looked
+        # like an afternoon of it while a drive that WAS being polled looked
+        # like a gap. Exactly the confusion sync.now_local's docstring warns
+        # about, in the one place built to end confusion.
+        return datetime.fromtimestamp(ts, sync_mod.MYT).isoformat(timespec="minutes")
+
+    def _silence(a: float, b: float) -> dict[str, Any]:
+        return {
+            "outcome": "no-tick", "minutes": round((b - a) / 60.0, 1),
+            "from": _clock(a), "to": _clock(b),
+            "note": "nothing ran — /api/sync was not called at all",
+        }
+
     for r in runs:
         start, end = float(r.get("a") or 0), float(r.get("b") or 0)
         if prev_end is not None and start - prev_end > SYNC_SILENCE_MIN * 60:
-            out.append({
-                "outcome": "no-tick",
-                "minutes": round((start - prev_end) / 60.0, 1),
-                "from": datetime.fromtimestamp(prev_end).isoformat(timespec="minutes"),
-                "to": datetime.fromtimestamp(start).isoformat(timespec="minutes"),
-                "note": "nothing ran — /api/sync was not called at all",
-            })
+            out.append(_silence(prev_end, start))
         row = {
             "outcome": r.get("o"),
             "ticks": r.get("n"),
             "minutes": round((end - start) / 60.0, 1),
-            "from": datetime.fromtimestamp(start).isoformat(timespec="minutes"),
-            "to": datetime.fromtimestamp(end).isoformat(timespec="minutes"),
+            "from": _clock(start),
+            "to": _clock(end),
         }
         if r.get("e"):
             row["error"] = r["e"]
         out.append(row)
         prev_end = end
+    # A silence running up to NOW is the one that matters most — it is the
+    # fault still happening — and it was the only one this couldn't see,
+    # because a gap was only ever measured BETWEEN two runs. The log simply
+    # stopped, and stopping is what it was built to report.
+    if prev_end is not None and time.time() - prev_end > SYNC_SILENCE_MIN * 60:
+        out.append({**_silence(prev_end, time.time()), "ongoing": True})
     silent = [r for r in out if r["outcome"] == "no-tick"]
     failed = [r for r in out if r["outcome"] == "error"]
     return {

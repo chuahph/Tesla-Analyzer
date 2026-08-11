@@ -3129,6 +3129,7 @@ def test_sync_log_names_the_cause_of_a_gap_including_no_tick_at_all():
     entry at all means the request never arrived, which is what makes absence
     the diagnostic rather than a hole in it."""
     import time as _time
+    from datetime import datetime
 
     from app import state
     from app.api import routes
@@ -3161,11 +3162,26 @@ def test_sync_log_names_the_cause_of_a_gap_including_no_tick_at_all():
             hole = body["runs"][1]
             assert hole["minutes"] == pytest.approx(45000 / 60 - 600 / 60, abs=1)
             assert "not called at all" in hole["note"]
-            assert body["silences"] == 1
-            assert body["longest_silence_min"] == hole["minutes"]
+            assert body["silences"] >= 1
+            # Timestamps are MYT like every other one this app shows, not the
+            # server's zone — eight hours out on the deployed host otherwise.
+            from app.sync import MYT
+            assert body["runs"][0]["from"] == datetime.fromtimestamp(
+                now - 60000, MYT).isoformat(timespec="minutes")
             # Runs the ticks did write carry their own counts.
             assert body["runs"][0]["ticks"] == 300
             assert body["runs"][3]["outcome"] == "backoff"
+            # A silence running up to NOW is the fault still happening, and was
+            # invisible while gaps were only measured between two runs.
+            with SessionLocal() as s:
+                state.put(s, state.SYNC_LOG_KEY, _json.dumps([
+                    {"o": "read", "n": 2, "a": now - 9000, "b": now - 7200},
+                ]))
+                s.commit()
+            live = client.get("/api/sync-log").json()
+            assert live["runs"][-1]["outcome"] == "no-tick"
+            assert live["runs"][-1]["ongoing"] is True
+            assert live["runs"][-1]["minutes"] == pytest.approx(120, abs=1)
 
             # Consecutive ticks doing the same thing coalesce rather than
             # growing the log a row a minute; a different one starts a run.
