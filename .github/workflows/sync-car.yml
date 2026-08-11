@@ -1,14 +1,17 @@
 name: Sync car from Tesla
 
-# DISABLED by default — see "Keeping it in sync" in the README. GitHub Actions' schedule
-# trigger is documented by GitHub as best-effort and can be delayed several
+# A BACKSTOP for the external cron, not a replacement. GitHub Actions'
+# schedule trigger is documented as best-effort and can be delayed several
 # minutes (worse at the top of every hour), which is long enough to miss a
 # short trip's entire "driving" window and fall back to blind gap
 # reconstruction (wrong trip times). An external cron service hitting
-# /api/sync every 1-2 minutes is far more reliable for this, so that's now
-# the primary trigger. This workflow is kept only for workflow_dispatch (a
-# manual "Run workflow" button from the Actions tab) as a backup — re-enable
-# the schedule block below only if you're not using an external cron.
+# /api/sync every 1-2 minutes is far more reliable, so that stays primary.
+#
+# This runs anyway, every 15 minutes, because the primary has now stopped
+# twice — once for 12.4 hours and once for 7+ — and each time the app kept
+# working perfectly while learning nothing. A backup that is only as good as
+# a delayed 15-minute tick still turns a lost afternoon into a lost quarter
+# hour, and it fails independently of whatever took the primary down.
 #
 # Resolution boost when it does run: GitHub Actions can't schedule tighter
 # than 5 minutes, but a single run can poll several times internally.
@@ -27,9 +30,25 @@ name: Sync car from Tesla
 # Without both secrets this job simply does nothing, so it's safe in any fork.
 
 on:
-  # schedule:
-  #   - cron: "*/5 * * * *" # disabled — see note above; use an external cron instead
-  workflow_dispatch: {}   # manual "Run workflow" button — kept as a backup trigger
+  schedule:
+    # A BACKSTOP, not the primary trigger — deliberately every 15 minutes
+    # rather than every 5. The external cron remains the thing that gives
+    # minute resolution; this exists only so that when it dies, the blackout
+    # is a quarter of an hour instead of half a day.
+    #
+    # Measured twice: an external cron stopped for 12.4 hours (a whole
+    # Office->Home drive lost inside it, and a second trip swallowed by the
+    # recovery reaching across the gap) and again for 7+ hours. Neither was
+    # the sleep back-off, so no polling-cadence change in the app would have
+    # helped — only something else still calling.
+    #
+    # 15 minutes because the cost is real and this is insurance: a tick on a
+    # quiet car costs one list_vehicles, so ~96 a day on top of the primary,
+    # against ~288 at the 5-minute cadence. The app throttles itself either
+    # way (see sync_poll_interval_min) so a healthy primary means these ticks
+    # almost never trigger a vehicle_data read.
+    - cron: "*/15 * * * *"
+  workflow_dispatch: {}   # manual "Run workflow" button, unchanged
 
 # Never let two pings overlap (a wake can take ~30 s).
 concurrency:
