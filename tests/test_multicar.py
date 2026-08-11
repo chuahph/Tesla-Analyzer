@@ -3388,3 +3388,53 @@ def test_a_crashed_tick_records_why_instead_of_looking_like_a_dead_cron(monkeypa
     finally:
         settings.app_passcode = old
         _reset_to_demo()
+
+
+def test_tick_log_stays_inside_the_column_it_is_stored_in():
+    """The bug that took polling down for thirteen hours, and the worst kind:
+    the instrument added to explain a gap in polling was what caused one.
+
+    Setting.value is VARCHAR(2048). The log capped its RUN COUNT at 120, which
+    at ~75 characters a run is a 9 KB value — so once enough history built up,
+    every write failed with StringDataRightTruncation. _log_tick runs on the
+    back-off path too, so that failure took the whole of /api/sync with it.
+
+    Bounded by serialised size now, and unable to propagate a write failure at
+    all: observability must not break the thing it observes."""
+    from app import state
+    from app.api import routes
+    from app.models import Setting
+
+    settings = get_settings()
+    old = settings.app_passcode
+    settings.app_passcode = ""
+    try:
+        with SessionLocal() as s:
+            state.put(s, state.SYNC_LOG_KEY, "")
+            s.commit()
+            # Far more history than the column could ever hold, alternating so
+            # nothing coalesces into one run.
+            for i in range(400):
+                routes._log_tick(s, "read" if i % 2 else "asleep")
+            s.commit()
+
+            stored = s.get(Setting, state.SYNC_LOG_KEY).value
+            column_limit = Setting.__table__.c.value.type.length
+            assert column_limit == 2048
+            assert len(stored) <= routes.SYNC_LOG_MAX_CHARS < column_limit
+
+            # It kept the NEWEST history, which is what a diagnosis needs.
+            runs = _json.loads(stored)
+            assert len(runs) > 5, "should still hold useful history"
+            assert runs[-1]["o"] == "read"
+            # Whole seconds — sub-second precision says nothing about a poll
+            # loop and costs 15 characters a run.
+            assert all(isinstance(r["a"], int) for r in runs)
+
+            # A long error message can't blow the budget on its own either.
+            routes._log_tick(s, "error", detail="X" * 5000)
+            s.commit()
+            assert len(s.get(Setting, state.SYNC_LOG_KEY).value) <= routes.SYNC_LOG_MAX_CHARS
+    finally:
+        settings.app_passcode = old
+        _reset_to_demo()

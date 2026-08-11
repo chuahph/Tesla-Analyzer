@@ -84,11 +84,17 @@ CRON_STALE_MIN = 10.0
 UNREACHABLE_CLOSE_MIN = 3.0
 
 
-# How many runs of the tick log to keep. Run-length encoded, so a run is an
-# unbroken stretch of ticks that all did the same thing — an overnight of
-# "found it asleep" is one entry, not five hundred. A hundred-odd runs is
-# comfortably days of history at that compression.
-SYNC_LOG_MAX_RUNS = 120
+# The tick log is run-length encoded — a run is an unbroken stretch of ticks
+# that all did the same thing, so an overnight of "found it asleep" is one
+# entry rather than five hundred.
+#
+# Bounded by SERIALISED SIZE, because that is the limit that actually exists:
+# Setting.value is VARCHAR(2048). Capping the run COUNT instead let 120 runs
+# of ~75 characters build a 9 KB value, and every write of it failed with
+# StringDataRightTruncation. _log_tick runs on the back-off path too, so that
+# took the whole of /api/sync down with it — thirteen hours of no polling,
+# caused by the instrument added to explain a gap in polling.
+SYNC_LOG_MAX_CHARS = 1800
 
 # A hole between two runs longer than this means no tick ran at all — the app
 # never got the request. That is a different fault from every outcome the log
@@ -116,7 +122,9 @@ def _log_tick(session: Session, outcome: str, detail: str | None = None) -> None
     """
     import json as _json
 
-    now = time.time()
+    # Whole seconds. Sub-second precision says nothing about a poll loop and
+    # costs 15 characters a run against a budget measured in hundreds.
+    now = int(time.time())
     try:
         runs = _json.loads(state.get(session, state.SYNC_LOG_KEY) or "[]")
     except ValueError:
@@ -127,14 +135,32 @@ def _log_tick(session: Session, outcome: str, detail: str | None = None) -> None
         # which is barely more useful than the silence it replaces. The reason
         # is the whole point, and it has to be readable from a phone without
         # host logs.
-        entry["e"] = detail[:300]
+        # Short enough that one run can never on its own exceed the budget
+        # below, however long the exception text.
+        entry["e"] = detail[:200]
     if runs and runs[-1].get("o") == outcome and runs[-1].get("e") == entry.get("e"):
         runs[-1]["n"] = (runs[-1].get("n") or 0) + 1
         runs[-1]["b"] = now
     else:
         runs.append(entry)
-        del runs[:-SYNC_LOG_MAX_RUNS]
-    state.put(session, state.SYNC_LOG_KEY, _json.dumps(runs))
+    # Drop the oldest until it fits. The newest runs are the ones a diagnosis
+    # needs, and losing the far end of the history is a cost worth paying to
+    # keep this from ever failing a write again.
+    payload = _json.dumps(runs)
+    while len(payload) > SYNC_LOG_MAX_CHARS and len(runs) > 1:
+        del runs[0]
+        payload = _json.dumps(runs)
+    try:
+        state.put(session, state.SYNC_LOG_KEY, payload)
+    except Exception:
+        # Observability must not be able to break the thing it observes —
+        # that is the entire lesson of this bug. Start the history over rather
+        # than propagate: losing it costs a diagnosis, raising costs the sync.
+        try:
+            session.rollback()
+            state.put(session, state.SYNC_LOG_KEY, _json.dumps([entry]))
+        except Exception:
+            pass
 
 
 # How long the sleep back-off may keep suppressing work after the last tick
