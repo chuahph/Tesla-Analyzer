@@ -3282,3 +3282,44 @@ def test_repair_split_trip_cuts_one_row_into_the_two_journeys_it_was():
     finally:
         settings.app_passcode = old
         _reset_to_demo()
+
+
+def test_a_crashed_tick_records_why_instead_of_looking_like_a_dead_cron(monkeypatch):
+    """A tick that CRASHED and a tick that never happened leave the same
+    absence, because the recorder never runs on the failing path — and those
+    two want opposite fixes. Learned the hard way: a run of 500s from the app
+    read exactly like a stopped cron, and the diagnosis went to the wrong
+    place for two rounds.
+
+    The reason is kept, not just the fact: "a tick failed" is barely more use
+    than the silence it replaces, and it has to be readable without host logs.
+    """
+    from app import services, state
+    from app.api import routes
+
+    settings = get_settings()
+    old = settings.app_passcode
+    settings.app_passcode = ""
+    try:
+        monkeypatch.setattr("app.tesla_client.TeslaClient", _FakeClient)
+        with SessionLocal() as s:
+            services.link_with_token(s, "tok")
+            state.put(s, state.SYNC_LOG_KEY, "")
+            s.commit()
+
+        def _boom(*a, **kw):
+            raise RuntimeError("column start_park_min does not exist")
+
+        monkeypatch.setattr(routes, "_sync_now_impl", _boom)
+        with TestClient(app, raise_server_exceptions=False) as client:
+            assert client.post("/api/sync").status_code == 500
+            body = client.get("/api/sync-log").json()
+
+        assert [r["outcome"] for r in body["runs"]] == ["error"]
+        assert body["errors"] == 1
+        assert body["silences"] == 0, "a crash is not a silence"
+        assert "start_park_min does not exist" in body["last_error"]
+        assert "RuntimeError" in body["runs"][0]["error"]
+    finally:
+        settings.app_passcode = old
+        _reset_to_demo()

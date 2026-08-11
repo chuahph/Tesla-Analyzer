@@ -98,7 +98,7 @@ SYNC_LOG_MAX_RUNS = 120
 SYNC_SILENCE_MIN = CRON_STALE_MIN
 
 
-def _log_tick(session: Session, outcome: str) -> None:
+def _log_tick(session: Session, outcome: str, detail: str | None = None) -> None:
     """Record what this /api/sync tick actually did.
 
     LAST_STATUS_KEY is overwritten every tick, so after the fact there is no
@@ -121,11 +121,18 @@ def _log_tick(session: Session, outcome: str) -> None:
         runs = _json.loads(state.get(session, state.SYNC_LOG_KEY) or "[]")
     except ValueError:
         runs = []
-    if runs and runs[-1].get("o") == outcome:
+    entry = {"o": outcome, "n": 1, "a": now, "b": now}
+    if detail:
+        # Kept on the run, not just counted: "error" alone says a tick failed,
+        # which is barely more useful than the silence it replaces. The reason
+        # is the whole point, and it has to be readable from a phone without
+        # host logs.
+        entry["e"] = detail[:300]
+    if runs and runs[-1].get("o") == outcome and runs[-1].get("e") == entry.get("e"):
         runs[-1]["n"] = (runs[-1].get("n") or 0) + 1
         runs[-1]["b"] = now
     else:
-        runs.append({"o": outcome, "n": 1, "a": now, "b": now})
+        runs.append(entry)
         del runs[:-SYNC_LOG_MAX_RUNS]
     state.put(session, state.SYNC_LOG_KEY, _json.dumps(runs))
 
@@ -2034,6 +2041,31 @@ def sync_now(wake: bool = Query(False), session: Session = Depends(get_session))
     ``wake=1`` (the manual Sync button) nudges a sleeping car online first.
     The cron never wakes the car, so it can't drain the battery overnight.
     """
+    try:
+        return _sync_now_impl(wake, session)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        # A tick that CRASHED and a tick that never happened leave the same
+        # absence in the log otherwise, because the recorder further down
+        # never runs — and those two have completely different fixes. Learned
+        # the hard way: a run of 500s read exactly like a dead cron, and the
+        # diagnosis went to the wrong place for two rounds.
+        #
+        # On its own session, because the one that raised may be in a failed
+        # transaction and unable to write anything at all.
+        try:
+            from ..database import SessionLocal
+
+            with SessionLocal() as log_session:
+                _log_tick(log_session, "error", detail=f"{type(exc).__name__}: {exc}")
+                log_session.commit()
+        except Exception:      # nothing useful left to do if even that fails
+            pass
+        raise
+
+
+def _sync_now_impl(wake: bool, session: Session):
     import time
 
     from .. import sync as sync_mod
@@ -4504,19 +4536,28 @@ def sync_log(session: Session = Depends(get_session)):
                 "to": datetime.fromtimestamp(start).isoformat(timespec="minutes"),
                 "note": "nothing ran — /api/sync was not called at all",
             })
-        out.append({
+        row = {
             "outcome": r.get("o"),
             "ticks": r.get("n"),
             "minutes": round((end - start) / 60.0, 1),
             "from": datetime.fromtimestamp(start).isoformat(timespec="minutes"),
             "to": datetime.fromtimestamp(end).isoformat(timespec="minutes"),
-        })
+        }
+        if r.get("e"):
+            row["error"] = r["e"]
+        out.append(row)
         prev_end = end
     silent = [r for r in out if r["outcome"] == "no-tick"]
+    failed = [r for r in out if r["outcome"] == "error"]
     return {
         "runs": out,
         "silences": len(silent),
         "longest_silence_min": max((r["minutes"] for r in silent), default=0.0),
+        # Surfaced separately because a run of these looks exactly like a dead
+        # cron from the outside — the requests arrive and get a 500 — and the
+        # two want opposite fixes.
+        "errors": len(failed),
+        "last_error": failed[-1]["error"] if failed else None,
         "note": ("No history yet — the log starts filling on the next tick."
                  if not runs else None),
     }
