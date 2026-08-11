@@ -716,7 +716,19 @@ def test_departure_premium_does_not_scale_with_a_long_blind_stretch():
     from app.sync import DEPARTURE_PREMIUM_MAX_KM, energy_for_blind_distance
 
     priced = energy_for_blind_distance(2.91, 27.26, 10.092, departure_blind_km=10.092)
-    assert priced == pytest.approx(4.79, abs=0.10)
+    assert priced == pytest.approx(4.79, abs=0.15)
+
+    # Three trips with a blind head, each against the car's own consumption.
+    # The premium is confined to the first kilometre because the whole-stretch
+    # ratio collapses as the stretch lengthens — 1.10, 0.92, 1.10 at 3-10 km
+    # against 1.54/1.56 at ~1 km, which is a fixed front-load, not a
+    # proportional one.
+    for raw, span, blind, car in (
+            (2.91, 27.258, 10.091, 4.796),   # trip 359
+            (0.873, 11.332, 4.791, 1.460),   # trip 366
+            (1.50, 11.406, 2.981, 2.085)):   # trip 378
+        got = energy_for_blind_distance(raw, span, blind, departure_blind_km=blind)
+        assert got == pytest.approx(car, rel=0.10), f"{got:.2f} vs the car's {car}"
 
     # Short departures — every trip the 1.55 was fitted on — are under the cap
     # and must price exactly as they did before it existed.

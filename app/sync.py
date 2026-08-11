@@ -705,15 +705,27 @@ DEPARTURE_BLIND_LOAD = 1.55
 # as if it scaled with distance, which over-prices exactly as the blind share
 # grows — the case where the correction matters most.
 #
-# Every trip DEPARTURE_BLIND_LOAD was fitted on had under ~1 km of blind
-# departure, so this cap changes none of them; it only bounds extrapolation
-# past the range that was measured. Checked against the car on trip 359, which
-# lost 10.092 km of a 27.26 km drive to a network blackout: uncapped pricing
-# gave 5.56 kWh against the car's own 6.9% of pack (4.79 kWh), capped gives
-# 4.81. The answer is not sharp in this value — anything from ~1.5 to ~2.5 km
-# lands inside the car's own display rounding — so it is set at a round number
-# in the middle of that band rather than at whatever fits one trip best.
-DEPARTURE_PREMIUM_MAX_KM = 2.0
+# One kilometre, which is what the original calibration itself implies: both
+# trips DEPARTURE_BLIND_LOAD was fitted on had ~1 km of blind departure and
+# measured 1.54 and 1.56 across the whole of it, so a premium confined to the
+# first kilometre reproduces them exactly and changes nothing for that range.
+#
+# Set to 2.0 first, on trip 359 alone. Three trips with a blind head have since
+# been checked against the car, and the whole-stretch ratio they actually show
+# collapses as the stretch lengthens — the signature of a fixed front-load
+# rather than a proportional one:
+#
+#   trip 378   2.98 km blind   1.10
+#   trip 366   4.79 km blind   0.92
+#   trip 359  10.09 km blind   1.10
+#   trips 333/334  ~1 km       1.54, 1.56
+#
+# Against the car's own consumption those three came out +6.8%, +13.6% and
+# +0.2% at a 2.0 km cap (mean +6.9%) and +2.1%, +8.6% and -1.7% at 1.0 (mean
+# +3.0%). Dropping the premium altogether fits them better still (-0.9%), but
+# that contradicts two direct measurements at ~1 km, and one kilometre is the
+# only value that honours both ends of the evidence.
+DEPARTURE_PREMIUM_MAX_KM = 1.0
 
 
 def energy_for_blind_distance(energy_kwh: float, distance_km: float,
