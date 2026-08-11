@@ -3353,7 +3353,12 @@ def test_a_crashed_tick_records_why_instead_of_looking_like_a_dead_cron(monkeypa
 
         monkeypatch.setattr(routes, "_sync_now_impl", _boom)
         with TestClient(app, raise_server_exceptions=False) as client:
-            assert client.post("/api/sync").status_code == 500
+            failed = client.post("/api/sync")
+            assert failed.status_code == 500
+            # The reason travels in the RESPONSE too. A bare 500 with no body
+            # is all the dashboard could show for four rounds while the real
+            # error sat in host logs unreachable from a phone.
+            assert "start_park_min does not exist" in failed.json()["detail"]
             body = client.get("/api/sync-log").json()
 
         assert [r["outcome"] for r in body["runs"]] == ["error"]

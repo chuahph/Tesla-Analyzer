@@ -155,15 +155,27 @@ def _mark_full_tick(session: Session, now_ts: float) -> None:
     state.put(session, state.FULL_TICK_KEY, str(now_ts))
 
 
-def _log_tick_isolated(detail: str) -> None:
-    """Record a failed tick on a session of its own.
+def _log_tick_isolated(detail: str, session: Session | None = None) -> None:
+    """Record a failed tick, as robustly as this can be done.
 
-    The session the request was using may be in a failed transaction and
-    unable to write anything at all, which is precisely the case where the log
-    entry matters most. Swallows its own failures: there is nothing useful
-    left to do if even this cannot write, and raising here would replace the
-    real error with a less interesting one.
+    Tries the request's own session first, rolled back so a poisoned
+    transaction can't block the write. A brand new connection sounds safer and
+    is not: on a connection-capped host (Neon's free tier) opening a second
+    one mid-request is exactly when it may be refused, and this failing
+    silently is how a real 500 left no trace at all. So the extra connection
+    is the FALLBACK, for when the request had no usable session.
+
+    Swallows its own failures either way: there is nothing useful left to do
+    if neither can write, and raising here would replace the real error with a
+    less interesting one.
     """
+    if session is not None:
+        try:
+            session.rollback()
+            _log_tick(session, "error", detail=detail)
+            return
+        except Exception:
+            pass
     try:
         from ..database import SessionLocal
 
@@ -2086,7 +2098,7 @@ def sync_now(wake: bool = Query(False), session: Session = Depends(get_session))
         # that crashed — and left exactly the same absence. Recording only
         # uncaught exceptions would leave the tidiest failures the least
         # visible, which is backwards.
-        _log_tick_isolated(f"HTTP {exc.status_code}: {exc.detail}")
+        _log_tick_isolated(f"HTTP {exc.status_code}: {exc.detail}", session)
         raise
     except Exception as exc:
         # A tick that CRASHED and a tick that never happened leave the same
@@ -2094,9 +2106,18 @@ def sync_now(wake: bool = Query(False), session: Session = Depends(get_session))
         # never runs — and those two have completely different fixes. Learned
         # the hard way: a run of 500s read exactly like a dead cron, and the
         # diagnosis went to the wrong place for two rounds.
+        reason = f"{type(exc).__name__}: {exc}"
+        _log_tick_isolated(reason, session)
+        # And put it in the RESPONSE, not only the log. An uncaught exception
+        # returns FastAPI's bare 500 with no body, so the dashboard could only
+        # ever say "Sync unavailable (500)" — which is exactly what it said for
+        # four rounds while the real error sat in host logs unreachable from a
+        # phone. The banner already renders `detail` when there is one, so this
+        # puts the fault where the fault is noticed.
         #
-        _log_tick_isolated(f"{type(exc).__name__}: {exc}")
-        raise
+        # Type and message only, never a traceback: enough to fix from and
+        # nothing more, on an endpoint that is passcode-gated anyway.
+        raise HTTPException(500, f"sync failed — {reason}") from exc
 
 
 def _sync_now_impl(wake: bool, session: Session):
