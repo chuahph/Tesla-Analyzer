@@ -45,7 +45,8 @@ def _reset_to_demo():
                     state.ACTIVE_VIN_KEY, state.LINKED_VIN_KEY, state.SOURCE_KEY,
                     # An armed sleep back-off outlives its account otherwise,
                     # and the next test's first sync is silently skipped.
-                    state.SUSPEND_KEY, state.SYNC_LOG_KEY):
+                    state.SUSPEND_KEY, state.SYNC_LOG_KEY,
+                    state.FULL_TICK_KEY):
             state.put(s, key, "")
         # Per-VIN scoped state (open trips, last snapshot, wake tracking) must
         # not leak into the next test's fresh link.
@@ -2896,6 +2897,28 @@ def test_polling_stands_down_while_every_car_is_asleep(monkeypatch):
             assert body["skipped"] == "asleep"
             assert body["next_check_sec"] > 0
             assert calls["n"] == armed, "the skipped tick must not call Tesla at all"
+            # And it must not be able to hold the loop down. state.put commits
+            # immediately, so a tick that re-arms the window and then crashes
+            # leaves the re-arm behind and nothing else — measured live as 353
+            # consecutive skipped ticks over 6.2 hours, an unbroken run with
+            # not one check in it, against a 20-minute window. Past
+            # SUSPEND_MAX_QUIET_MIN with no tick completing, the window is
+            # ignored and the work happens anyway.
+            import time as _t
+
+            from app.api import routes as _routes
+            with SessionLocal() as s:
+                state.put(s, state.SUSPEND_KEY, str(_t.time() + 3600))
+                state.put(s, state.FULL_TICK_KEY,
+                          str(_t.time() - (_routes.SUSPEND_MAX_QUIET_MIN + 5) * 60))
+                s.commit()
+            revived = client.post("/api/sync").json()
+            assert revived.get("skipped") != "asleep", (
+                "a stale completion marker must override the back-off")
+            with SessionLocal() as s:
+                assert float(state.get(s, state.FULL_TICK_KEY)) > _t.time() - 60, (
+                    "a tick that completed must refresh the marker")
+
             # It must still record that it RAN. Spending nothing and never
             # being called leave the same absence otherwise, and telling those
             # two apart is the whole point of the tick log (see _log_tick).

@@ -25,6 +25,11 @@ SUSPEND_KEY = "suspend_until_ts"  # epoch until which cron polling stays quiet (
 SYNC_LOG_KEY = "sync_log"  # JSON: run-length record of what each /api/sync tick did —
 # the only place a blackout can be told from a quiet car after the fact, since
 # LAST_STATUS_KEY is overwritten every tick and keeps no history
+FULL_TICK_KEY = "last_full_tick_ts"  # epoch of the last /api/sync tick that ran
+# to completion. The sleep back-off is only allowed to suppress work while this
+# is recent: a tick that crashes after re-arming the window leaves the re-arm
+# committed and nothing else, so without a floor here the back-off can hold the
+# whole loop down indefinitely on a fault it did not cause.
 LAST_VSTATE_KEY = "last_vstate"  # last-seen list_vehicles() state per VIN (online/asleep/offline)
 WOKE_AT_KEY = "woke_at_ts"  # epoch a car was last seen waking on its own (not our manual wake)
 LAST_POLL_KEY = "last_poll_ts"  # epoch of the last actual vehicle_data() read per VIN

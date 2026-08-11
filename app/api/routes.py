@@ -137,6 +137,24 @@ def _log_tick(session: Session, outcome: str, detail: str | None = None) -> None
     state.put(session, state.SYNC_LOG_KEY, _json.dumps(runs))
 
 
+# How long the sleep back-off may keep suppressing work after the last tick
+# that actually ran to completion. Comfortably more than one suspend window
+# (settings.sleep_recheck_min, 20 min) so ordinary cycling is untouched, and
+# short enough that a crash loop costs one hour of polling rather than a day.
+SUSPEND_MAX_QUIET_MIN = 60.0
+
+
+def _mark_full_tick(session: Session, now_ts: float) -> None:
+    """Record that a tick reached the end without raising.
+
+    Written as late as possible on purpose: it is the evidence the sleep
+    back-off is checked against (see SUSPEND_MAX_QUIET_MIN), and a marker set
+    early would certify ticks that went on to crash — which is exactly the
+    condition it exists to break out of.
+    """
+    state.put(session, state.FULL_TICK_KEY, str(now_ts))
+
+
 def _log_tick_isolated(detail: str) -> None:
     """Record a failed tick on a session of its own.
 
@@ -2123,7 +2141,24 @@ def _sync_now_impl(wake: bool, session: Session):
     # A manual sync ignores it outright — the person pressing the button is
     # the reason the button exists.
     suspend_until = float(state.get(session, state.SUSPEND_KEY) or 0)
-    if not wake and suspend_until and now_ts < suspend_until:
+    # The back-off is an optimisation, and an optimisation must not be able to
+    # hold the loop down on a fault it did not cause. state.put commits
+    # immediately, so a tick that re-arms the window and THEN crashes leaves
+    # the re-arm behind and nothing else — every following tick skips, the
+    # next one to do real work crashes the same way, and the cycle is
+    # self-sustaining with no way out.
+    #
+    # Measured: 353 consecutive skipped ticks over 6.2 hours, an unbroken run
+    # with not one check in it, while the car sat unpolled. The suspend window
+    # is 20 minutes; it should never have survived one of them.
+    #
+    # So it only counts while a tick has actually COMPLETED recently. Past
+    # that, ignore it and do the work — which either succeeds and clears the
+    # condition, or fails and gets logged every tick instead of every
+    # twentieth. Noisier, and the only version that recovers by itself.
+    last_full = float(state.get(session, state.FULL_TICK_KEY) or 0)
+    backoff_trusted = (now_ts - last_full) <= SUSPEND_MAX_QUIET_MIN * 60 if last_full else False
+    if not wake and suspend_until and now_ts < suspend_until and backoff_trusted:
         # Logged like any other outcome: this tick DID run, it just chose to
         # spend nothing. Without that the back-off is indistinguishable from
         # the cron having stopped, which is the one thing the log is for.
@@ -2479,6 +2514,7 @@ def _sync_now_impl(wake: bool, session: Session):
             soc=resp.get("last", {}).get("soc"), odo_km=resp.get("last", {}).get("odo_km"),
             speed_kmh=None, note=resp["note"],
         )
+        _mark_full_tick(session, now_ts)
         return resp
 
     snap, open_trip, vehicle = active_snap, active_open_trip, active_vehicle
@@ -2525,6 +2561,7 @@ def _sync_now_impl(wake: bool, session: Session):
         soc=snap["soc"], odo_km=round(snap["odo_km"], 1),
         speed_kmh=round(snap.get("speed_kmh") or 0.0), note=None,
     )
+    _mark_full_tick(session, now_ts)
     return {
         "status": activity,
         "soc": snap["soc"],
