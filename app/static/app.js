@@ -777,18 +777,13 @@ function renderKpis(d) {
     cards.push(kpiCard("Drive Time", fmt(lt.duration_min) + " min",
       `avg ${fmt(lt.avg_speed_kmh)}${lt.max_speed_kmh > lt.avg_speed_kmh ? " · max " + fmt(lt.max_speed_kmh) : ""} km/h`, "amber"));
     if (lt.wh_per_km) {
-      const hasDrive = lt.driving_wh_per_km != null && lt.driving_wh_per_km < lt.wh_per_km - 3;
-      const dKwh = (hasDrive && lt.driving_energy_kwh != null) ? `${fmt(lt.driving_energy_kwh, 1)} kWh / ` : "";
-      // Named for what was subtracted, not for what it approximates. It is
-      // NOT the car's own "Driving" line — see the recent-trips renderer.
-      const dsub = hasDrive ? ` · less climate/idle ≈${dKwh}${fmt(lt.driving_wh_per_km)} Wh/km` : "";
       // Colour by how this drive's efficiency compares to rated (drive-only
       // figure when idle was stripped out, else the raw one).
       const rated = (eff && eff.rated_wh_per_km) || null;
       const liveEff = lt.driving_wh_per_km != null ? lt.driving_wh_per_km : lt.wh_per_km;
       const liveVs = rated ? (liveEff - rated) / rated * 100 : null;
       cards.push(kpiCard("Efficiency", fmt(lt.wh_per_km) + " Wh/km",
-        `${fmt(lt.energy_kwh, 1)} kWh this drive${dsub}`, effTone(liveVs)));
+        `${fmt(lt.energy_kwh, 1)} kWh this drive`, effTone(liveVs)));
     }
     // Battery use and km/1% in one box: % used as the headline, start→now
     // and the km/1% range figure on the sub-line.
@@ -1590,22 +1585,21 @@ function renderLists(d) {
         : "";
       const score = t.eco_score != null
         ? `<span class="trip-score tone-${scoreTone(t.eco_score)}">${t.eco_score}</span>` : "";
-      // Gross energy less the overheads we model — climate and accessory
-      // draw. Deliberately NOT labelled as the car's own "Driving" line, and
-      // not comparable to it: Tesla's Driving also nets out Elevation and
-      // "Everything Else", so ours sits above it by that residue on a flat
-      // route and can sit below it on a downhill one (audited both ways —
-      // 152 against ~86 one trip, 87 against ~97 the next). Naming the
-      // subtraction rather than the target is what stops the two being read
-      // as a score against each other. The gross total is the figure that
-      // matches Tesla's "Current Drive".
-      const hasDrive = t.driving_wh_per_km != null && t.wh_per_km != null
-        && t.driving_wh_per_km < t.wh_per_km - 3;
-      const driveKwh = (hasDrive && t.driving_energy_kwh != null)
-        ? `${t.driving_energy_kwh} kWh / ` : "";
-      const drv = hasDrive ? ` · less climate/idle ≈${driveKwh}${t.driving_wh_per_km} Wh/km` : "";
+      // The gross energy and Wh/km only. There used to be a "less
+      // climate/idle" figure beside them — gross minus the overheads we
+      // model — and it is not shown any more: what a trip actually cost is
+      // the number that matters, and the subtraction was the least reliable
+      // thing on the row. Audited against the car's own energy breakdown
+      // across nine trips it ran within about +/-16% on evening and morning
+      // drives but 35-45% low on hot daytime ones, where the cabin is being
+      // pulled down from a soak we do not model at all. A figure that good
+      // in some conditions and that wrong in others, sitting next to
+      // measurements, reads as if it were one.
+      //
+      // driving_wh_per_km is still computed and still feeds eco_score; only
+      // the display of it has gone.
       const kwh = t.energy_kwh != null ? ` · ${t.energy_kwh} kWh` : "";
-      const whkm = t.wh_per_km != null ? ` · ${t.wh_per_km} Wh/km${drv}` : "";
+      const whkm = t.wh_per_km != null ? ` · ${t.wh_per_km} Wh/km` : "";
       const soc = t.soc_used_pct != null ? ` · ${fmt(t.soc_used_pct, 1)}% battery` : "";
       // Cost blank means the charge-layer history couldn't price this trip
       // (every charge on record was already used up by earlier trips with
