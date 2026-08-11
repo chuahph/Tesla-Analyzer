@@ -3441,3 +3441,87 @@ def test_tick_log_stays_inside_the_column_it_is_stored_in():
     finally:
         settings.app_passcode = old
         _reset_to_demo()
+
+
+def test_repair_missing_trip_fills_a_hole_from_its_own_edges():
+    """Every other repair edits a trip that exists. This one fills a hole — a
+    stretch where the odometer moved between two logged trips and nothing was
+    written for it. Measured: a 4.15 km Home->Bayan Mutiara leg that left no
+    trip, and not even a start_lost_km on its successor.
+
+    Only the times are required, because the hole already implies everything
+    else: its edges are the neighbours' own boundary, which is also the only
+    way the result leaves the odometer continuous."""
+    from datetime import datetime, timedelta
+
+    from app.models import Drive
+
+    settings = get_settings()
+    old = settings.app_passcode
+    settings.app_passcode = ""
+    try:
+        with TestClient(app) as client:
+            with SessionLocal() as s:
+                a, b = s.query(Drive).order_by(Drive.id).limit(2).all()
+                a.start_time = datetime.fromisoformat("2026-08-11T16:15")
+                a.end_time = datetime.fromisoformat("2026-08-11T16:27")
+                a.start_odo_km, a.end_odo_km = 29502.106, 29508.700
+                a.end_location, a.end_area = "Home", "Home"
+                a.end_coords, a.end_soc, a.tag = "5.3430, 100.3111", 47.0, "work"
+                b.start_time = datetime.fromisoformat("2026-08-11T19:25")
+                b.end_time = datetime.fromisoformat("2026-08-11T20:12")
+                b.start_odo_km, b.end_odo_km = 29512.856, 29529.812
+                b.start_location, b.start_area = "Bayan Mutiara 7", "Bayan Mutiara 7"
+                b.start_coords = "5.3519, 100.3112"
+                s.commit()
+                prev_id, next_id = a.id, b.id
+                # Nothing else may sit between them, or the neighbour lookup
+                # finds the wrong edges.
+                for extra in s.query(Drive).filter(
+                        Drive.start_time > a.end_time, Drive.start_time < b.start_time).all():
+                    s.delete(extra)
+                s.commit()
+
+            params = {"start_time": "2026-08-11T18:30", "end_time": "2026-08-11T18:45"}
+            body = client.get("/api/repair-missing-trip", params=params).json()
+            assert body["applied"] is False
+            assert body["between"] == {"after": prev_id, "before": next_id}
+            # Every field derived from the hole's own edges.
+            assert body["hole_km"] == 4.156
+            assert body["odo"] == [29508.7, 29512.856]
+            assert body["route"] == ["Home", "Bayan Mutiara 7"]
+            assert body["distance_km"] == 4.2
+            assert body["duration_min"] == 15.0
+            assert body["leaves_gap_km"] == 0.0
+            assert body["energy_kwh"] is None      # never measured, never invented
+
+            # Times that collide with a real trip are refused: an overlap is the
+            # one thing no later repair can undo.
+            clash = client.get("/api/repair-missing-trip", params={
+                "start_time": "2026-08-11T19:30", "end_time": "2026-08-11T19:40"})
+            assert clash.status_code == 409
+            assert "overlap" in clash.json()["detail"]
+
+            with SessionLocal() as s:
+                before = s.query(Drive).count()
+            client.get("/api/repair-missing-trip", params={**params, "apply": "true"})
+            with SessionLocal() as s:
+                assert s.query(Drive).count() == before + 1
+                d = s.query(Drive).order_by(Drive.id.desc()).first()
+                # The whole point: one continuous odometer across all three.
+                assert s.get(Drive, prev_id).end_odo_km == d.start_odo_km == 29508.7
+                assert d.end_odo_km == s.get(Drive, next_id).start_odo_km == 29512.856
+                assert d.start_location == "Home" and d.end_location == "Bayan Mutiara 7"
+                assert d.start_coords == "5.3430, 100.3111"
+                assert d.energy_used_kwh == 0.0
+                # An unwatched leg must not report a SoC drop that reads as its
+                # own consumption.
+                assert d.start_soc == d.end_soc == 47.0
+                assert d.idle_tracked is False
+
+            # Run twice and the hole is gone, so there is nothing left to fill.
+            again = client.get("/api/repair-missing-trip", params=params)
+            assert again.status_code == 409
+    finally:
+        settings.app_passcode = old
+        _reset_to_demo()

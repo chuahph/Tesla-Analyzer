@@ -4428,6 +4428,146 @@ class _DetachedDrive:
         self.end_time = datetime.fromisoformat(before["end_time"])
 
 
+@router.api_route("/repair-missing-trip", methods=["GET", "POST"])
+def repair_missing_trip(
+    start_time: str = Query(...),
+    end_time: str = Query(...),
+    distance_km: float | None = Query(None),
+    energy_kwh: float | None = Query(None),
+    start_location: str | None = Query(None),
+    end_location: str | None = Query(None),
+    apply: bool = Query(False),
+    session: Session = Depends(get_session),
+):
+    """Record a drive that happened but was never seen.
+
+    Every other repair edits a trip that exists. This one fills a hole: a
+    stretch where the odometer moved between two logged trips and nothing was
+    written for it. Measured — a 4.15 km Home->Bayan Mutiara leg that left no
+    trip, and not even a start_lost_km on its successor.
+
+    Only the TIMES are required, because everything else is already implied by
+    the hole. The trip before it ended somewhere, at some odometer; the trip
+    after it began somewhere, at some odometer; and this drive is exactly what
+    joined them. So the odometer span, the distance and both place names all
+    default to the neighbours' own boundary, which is also the only way the
+    result can leave the odometer continuous — the property every trip-boundary
+    check downstream depends on.
+
+    ENERGY is unknown unless given. Nothing measured this drive, and a plausible
+    number here would be indistinguishable from a reading. Given one, the end
+    SoC follows from it; omitted, the SoC pair is flattened so the trip cannot
+    report a drop it can't account for, and the drain stays with the parked gap
+    after it — the same treatment repair_split_trip gives an unwatched leg.
+
+    Dry run by default.
+    """
+    def _when(raw: str) -> datetime:
+        try:
+            return datetime.fromisoformat(raw)
+        except ValueError:
+            raise HTTPException(409, f"'{raw}' is not an ISO datetime.")
+
+    begin, finish = _when(start_time), _when(end_time)
+    if finish <= begin:
+        raise HTTPException(409, "'end_time' must be after 'start_time'.")
+
+    vehicle = _first_vehicle(session)
+    # Checked FIRST, ahead of everything else. An overlap is the one thing no
+    # later repair can undo — two trips claiming the same minutes make every
+    # window total wrong — and it also produces the clearest message: times
+    # landing inside an existing trip would otherwise fail further down as
+    # "no trip on both sides", which describes the symptom, not the mistake.
+    clash = session.scalars(
+        select(Drive).where(Drive.vehicle_id == vehicle.id,
+                            Drive.start_time < finish, Drive.end_time > begin)
+        .limit(1)
+    ).first()
+    if clash is not None:
+        raise HTTPException(
+            409, f"Those times overlap trip {clash.id} "
+                 f"({clash.start_time:%Y-%m-%d %H:%M} - {clash.end_time:%H:%M}).")
+    prev_d = session.scalars(
+        select(Drive).where(Drive.vehicle_id == vehicle.id, Drive.end_time <= begin)
+        .order_by(Drive.end_time.desc()).limit(1)
+    ).first()
+    next_d = session.scalars(
+        select(Drive).where(Drive.vehicle_id == vehicle.id, Drive.start_time >= finish)
+        .order_by(Drive.start_time).limit(1)
+    ).first()
+    if prev_d is None or next_d is None:
+        raise HTTPException(
+            409, "Need a logged trip on both sides to place this one between — "
+                 "the hole is defined by its edges.")
+
+    gap_km = (round(next_d.start_odo_km - prev_d.end_odo_km, 3)
+              if prev_d.end_odo_km is not None and next_d.start_odo_km is not None
+              else None)
+    if gap_km is None:
+        raise HTTPException(
+            409, "The neighbouring trips have no odometer anchors, so there is "
+                 "no hole to measure.")
+    if gap_km <= 0:
+        raise HTTPException(
+            409, f"Trip {prev_d.id} ends where trip {next_d.id} begins "
+                 f"(gap {gap_km} km). There is no missing distance between them.")
+    span = round(distance_km if distance_km is not None else gap_km, 3)
+    if span <= 0 or span > gap_km + 0.05:
+        raise HTTPException(
+            409, f"{span} km doesn't fit the {gap_km} km hole between trips "
+                 f"{prev_d.id} and {next_d.id}.")
+
+    mins = round((finish - begin).total_seconds() / 60.0, 1)
+    start_odo = round(prev_d.end_odo_km, 3)
+    end_odo = round(start_odo + span, 3)
+    energy = round(energy_kwh, 2) if energy_kwh else 0.0
+    capacity_kwh = _usable_capacity(session, vehicle, get_settings())[0]
+    end_soc = (round(prev_d.end_soc - energy / capacity_kwh * 100.0, 1)
+               if energy and capacity_kwh else prev_d.end_soc)
+    start_place = start_location if start_location is not None else prev_d.end_location
+    end_place = end_location if end_location is not None else next_d.start_location
+
+    plan = {
+        "between": {"after": prev_d.id, "before": next_d.id},
+        "hole_km": gap_km,
+        "route": [start_place, end_place],
+        "odo": [start_odo, end_odo],
+        "distance_km": round(span, 1),
+        "duration_min": mins,
+        "energy_kwh": energy or None,
+        "start_time": begin.isoformat(timespec="minutes"),
+        "end_time": finish.isoformat(timespec="minutes"),
+        "leaves_gap_km": round(gap_km - span, 3),
+        "applied": apply,
+    }
+    if apply:
+        drive = Drive(
+            vehicle_id=vehicle.id, start_time=begin, end_time=finish,
+            distance_km=round(span, 1), duration_min=mins,
+            start_soc=prev_d.end_soc, end_soc=end_soc, energy_used_kwh=energy,
+            avg_speed_kmh=round(span / max(mins / 60.0, 1e-9), 1),
+            # No speed was ever observed, so the average is the honest floor —
+            # the same fallback _drive_from uses for a trip with no mid-drive
+            # reading.
+            max_speed_kmh=round(span / max(mins / 60.0, 1e-9), 1),
+            outside_temp_c=prev_d.outside_temp_c,
+            start_location=start_place, start_area=prev_d.end_area,
+            start_coords=prev_d.end_coords,
+            end_location=end_place, end_area=next_d.start_area,
+            end_coords=next_d.start_coords,
+            start_odo_km=start_odo, end_odo_km=end_odo,
+            # Nothing about this trip was polled, so every field that records
+            # how well a boundary was seen stays empty rather than claiming a
+            # window that never existed.
+            start_lost_km=0.0, start_recovered_km=0.0, end_lost_km=0.0,
+            idle_tracked=False, tag=prev_d.tag,
+        )
+        session.add(drive)
+        session.commit()
+        plan["drive_id"] = drive.id
+    return plan
+
+
 @router.api_route("/repair-split-trip", methods=["GET", "POST"])
 def repair_split_trip(
     drive_id: int = Query(...),
