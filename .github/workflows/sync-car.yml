@@ -69,13 +69,25 @@ jobs:
             echo "Add them as repository secrets to enable automatic syncing."
             exit 0
           fi
-          # Up to 6 pings, ~20s apart (~2 min worst case) — comfortably inside
-          # the 5-min tick so this run finishes before the next one is due.
-          # Stops the moment the server says poll_fast is false (trip over,
-          # or nothing happened during a bounded wake window), so a quiet car
-          # costs exactly one call, same as before.
+          # Up to 6 pings, ~20s apart — comfortably inside the 15-min tick so
+          # this run finishes before the next one is due. Stops the moment the
+          # server says poll_fast is false (trip over, or nothing happened
+          # during a bounded wake window), so a quiet car costs exactly one
+          # call, same as before.
+          #
+          # The FIRST ping gets a long timeout because it may have to wake a
+          # sleeping host. A free Render instance sleeps after ~15 minutes with
+          # no traffic and takes the better part of a minute to come back, and
+          # a backstop that gives up before then is worse than useless: it
+          # cannot recover the exact situation it exists for. Seen live — once
+          # the primary cron stopped, every attempt to restart it timed out on
+          # the cold start and left the host asleep for the next one.
+          #
+          # Later pings in the same run are hitting a host that just answered,
+          # so they keep the short timeout — no reason to hang on a stall.
           for i in $(seq 1 6); do
-            resp=$(curl -sS --max-time 15 -w $'\nHTTP %{http_code}' \
+            [ "$i" = "1" ] && t=90 || t=15
+            resp=$(curl -sS --max-time "$t" -w $'\nHTTP %{http_code}' \
               "${RENDER_URL%/}/api/sync?key=${SYNC_KEY}" || true)
             echo "$resp"
             case "$resp" in
