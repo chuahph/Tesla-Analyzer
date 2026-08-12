@@ -4428,6 +4428,88 @@ class _DetachedDrive:
         self.end_time = datetime.fromisoformat(before["end_time"])
 
 
+@router.get("/trip-gaps")
+def trip_gaps(
+    days: int = Query(30, ge=1, le=730),
+    min_km: float = Query(0.01, ge=0.001),
+    session: Session = Depends(get_session),
+):
+    """Where consecutive trips disagree about the odometer.
+
+    The odometer only counts forward, so one trip's end and the next one's
+    start must be the same reading. Every fault this project has spent weeks
+    on shows up here as a number: a departure recovered short (42 m, 90 m), a
+    departure never recovered at all (4.16 km), a drive that was never logged
+    (4.15 km), a trip that swallowed two journeys (an overlap). All of them
+    were found by scrolling the trip list days later, because nothing checked.
+
+    A HOLE is distance the car really covered that belongs to no trip. An
+    OVERLAP is the opposite and worse: two trips claiming the same ground, so
+    every window total counts it twice.
+
+    ``parked_min`` is the discriminator the numbers can't supply on their own.
+    A hole with minutes between the trips is almost always a departure the
+    poll missed; a hole with hours between them is more likely a whole drive
+    nobody logged. It is a hint, not a verdict — only the owner knows.
+    """
+    vehicle = _first_vehicle(session)
+    since = sync_mod.now_local() - timedelta(days=days)
+    drives = session.scalars(
+        select(Drive).where(Drive.vehicle_id == vehicle.id, Drive.start_time >= since)
+        .order_by(Drive.start_time)
+    ).all()
+
+    findings: list[dict[str, Any]] = []
+    for prev_d, nxt in zip(drives, drives[1:]):
+        if prev_d.end_odo_km is None or nxt.start_odo_km is None:
+            continue
+        gap = round(nxt.start_odo_km - prev_d.end_odo_km, 3)
+        if abs(gap) < min_km:
+            continue
+        parked_min = round(
+            max((nxt.start_time - prev_d.end_time).total_seconds(), 0.0) / 60.0, 1)
+        if gap < 0:
+            fix = ("overlap — two trips claim the same ground; "
+                   "repair-trip-overlap")
+        elif (nxt.start_lost_km or 0) > 0:
+            fix = ("the later trip measured this loss and didn't reclaim it; "
+                   "repair-lost-departure")
+        elif parked_min >= 45:
+            fix = ("hours parked between them — likely a drive that was never "
+                   "logged; repair-missing-trip")
+        else:
+            fix = ("minutes between them — likely a departure the poll missed; "
+                   "repair-lost-departure, or repair-missing-trip if it was a "
+                   "separate journey")
+        findings.append({
+            "gap_km": gap,
+            "parked_min": parked_min,
+            "after": {"id": prev_d.id, "at": prev_d.end_time.isoformat(timespec="minutes"),
+                      "place": prev_d.end_location, "odo_km": prev_d.end_odo_km},
+            "before": {"id": nxt.id, "at": nxt.start_time.isoformat(timespec="minutes"),
+                       "place": nxt.start_location, "odo_km": nxt.start_odo_km},
+            # What the later trip itself recorded about its own start, which is
+            # evidence about whether the loss was even noticed at the time.
+            "start_lost_km": nxt.start_lost_km,
+            "start_recovered_km": nxt.start_recovered_km,
+            "suggested": fix,
+        })
+
+    holes = [f for f in findings if f["gap_km"] > 0]
+    overlaps = [f for f in findings if f["gap_km"] < 0]
+    return {
+        "trips_checked": len(drives),
+        "days": days,
+        "holes": len(holes),
+        "overlaps": len(overlaps),
+        "unaccounted_km": round(sum(f["gap_km"] for f in holes), 3),
+        "double_counted_km": round(-sum(f["gap_km"] for f in overlaps), 3),
+        # Biggest first — the one worth fixing is rarely the most recent.
+        "findings": sorted(findings, key=lambda f: -abs(f["gap_km"]))[:50],
+        "note": ("Every trip boundary agrees." if not findings else None),
+    }
+
+
 @router.api_route("/repair-missing-trip", methods=["GET", "POST"])
 def repair_missing_trip(
     start_time: str = Query(...),

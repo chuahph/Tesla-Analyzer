@@ -3525,3 +3525,80 @@ def test_repair_missing_trip_fills_a_hole_from_its_own_edges():
     finally:
         settings.app_passcode = old
         _reset_to_demo()
+
+
+def test_trip_gaps_finds_every_boundary_the_odometer_disagrees_about():
+    """The odometer only counts forward, so one trip's end and the next one's
+    start must be the same reading. Every fault this project spent weeks on
+    shows up here as a number — and every one of them was found by scrolling
+    the trip list days later, because nothing checked.
+
+    The sizes alone can't say which repair applies, so parked_min carries the
+    hint: minutes between the trips means a departure the poll missed, hours
+    means a drive nobody logged."""
+    from datetime import datetime, timedelta
+
+    from app.models import Drive
+
+    settings = get_settings()
+    old = settings.app_passcode
+    settings.app_passcode = ""
+    try:
+        with TestClient(app) as client:
+            with SessionLocal() as s:
+                for d in s.query(Drive).all():
+                    s.delete(d)
+                s.flush()
+                veh = s.query(Vehicle).first()
+                base = datetime.fromisoformat("2026-08-11T08:00")
+
+                def add(i, s_odo, e_odo, start, mins, lost=0.0):
+                    s.add(Drive(vehicle_id=veh.id, start_time=start,
+                                end_time=start + timedelta(minutes=mins),
+                                distance_km=round(e_odo - s_odo, 1), duration_min=mins,
+                                start_soc=60, end_soc=59, energy_used_kwh=1.0,
+                                avg_speed_kmh=30, max_speed_kmh=30, outside_temp_c=30,
+                                start_location=f"A{i}", end_location=f"B{i}",
+                                start_odo_km=s_odo, end_odo_km=e_odo, start_lost_km=lost))
+
+                add(1, 1000.0, 1010.0, base, 20)
+                # A hole with minutes between: a departure the poll missed, and
+                # the later trip even measured it.
+                add(2, 1010.09, 1020.0, base + timedelta(minutes=25), 20, lost=0.09)
+                # A hole with hours between: a whole drive nobody logged.
+                add(3, 1024.15, 1040.0, base + timedelta(hours=4), 30)
+                # An overlap: two trips claiming the same ground.
+                add(4, 1039.5, 1050.0, base + timedelta(hours=6), 30)
+                s.commit()
+
+            body = client.get("/api/trip-gaps").json()
+            assert body["trips_checked"] == 4
+            assert body["holes"] == 2 and body["overlaps"] == 1
+            assert body["unaccounted_km"] == pytest.approx(0.09 + 4.15, abs=0.002)
+            assert body["double_counted_km"] == pytest.approx(0.5, abs=0.002)
+
+            # Biggest first — the one worth fixing is rarely the most recent.
+            big = body["findings"][0]
+            assert big["gap_km"] == pytest.approx(4.15, abs=0.002)
+            assert big["parked_min"] >= 45
+            assert "never logged" in big["suggested"]
+
+            small = next(f for f in body["findings"] if f["gap_km"] == pytest.approx(0.09))
+            assert small["start_lost_km"] == 0.09
+            assert "didn't reclaim it" in small["suggested"]
+
+            over = next(f for f in body["findings"] if f["gap_km"] < 0)
+            assert "overlap" in over["suggested"]
+
+            # A clean dataset says so rather than returning an empty list.
+            with SessionLocal() as s:
+                for d in s.query(Drive).all():
+                    if d.start_odo_km != 1000.0:
+                        s.delete(d)
+                s.commit()
+            clean = client.get("/api/trip-gaps").json()
+            assert clean["findings"] == []
+            assert clean["note"] == "Every trip boundary agrees."
+    finally:
+        settings.app_passcode = old
+        _reset_to_demo()
