@@ -626,6 +626,27 @@ MIN_PLAUSIBLE_WH_PER_KM = 40.0  # below this over a whole trip = contaminated da
 # What would settle it is repeat trips at ONE temperature: several at 33C
 # would separate a genuine curve from noise in a single afternoon, which no
 # amount of spreading samples across the band can do.
+#
+# Those repeats have started arriving, and they say something better than a
+# slope would have. Grouped by ambient, using each trip's own duration:
+#
+#   30C   0.98                 (ours 0.99, +1%)
+#   31C   1.04, 1.16, 1.30     (ours 1.07, within +3% of the nearest)
+#   32C   1.29                 (ours 1.15, -11%)
+#   33C   0.76, 0.80, 1.69, 1.77
+#   34C   2.78, 3.27
+#
+# The scatter is not uniform across the band — it EXPLODES with heat. Three
+# trips at 31C hold within +/-11% of each other; four at 33C span 2.3x. If
+# ambient were the whole story the spread would be alike at both, so what is
+# missing is a second load that stays dormant at the bottom of the band and
+# dominates at the top: sun on the glass, a soaked cabin, a compressor near
+# its duty limit. All plausible, none of them on the dashboard.
+#
+# That is also why the linear term is worth keeping rather than replacing.
+# It is not a bad fit everywhere — it is nearly exact from 30 to 31C, where
+# the missing load is quiet, and unreliable from 33C up, where it is not.
+# A steeper or convex slope would trade the accurate end for the vague one.
 ACCESSORY_KW = 0.5
 CLIMATE_BASE_KW = 0.35
 CLIMATE_KW_PER_DEGREE = 0.08
