@@ -155,27 +155,34 @@ CITY_SPEED_KMH = 30.0  # assumed door-to-door pace when the real duration is unk
 #
 #   trip 378   2.981 km blind   ~9.0 min   19.9 km/h
 #   trip 379   1.832 km blind   ~10.0 min  11.0 km/h
+#   trip 380   1.167 km blind   ~2.5 min   28.0 km/h
 #
 # The elapsed time is the TRUE one — from the car's own start to our first
 # sighting — not the error in our estimate. Dividing by the error instead
-# reads 379 as 18.3 km/h and makes the two samples look like they agree.
-# They don't: the spread is nearly two to one.
+# reads 379 as 18.3 km/h and makes the samples look like they agree.
 #
-# Assuming 30 made both starts late — by 3 and 6 minutes — and never early,
-# because over-estimating the pace always under-estimates the time. Set to the
-# faster of the two observations rather than their mean: the error stays
-# one-sided in the direction it already had, so this can only shorten it,
-# never overshoot into starting trips before they began. Eleven would fit 379
-# exactly and back-date 378 by seven minutes, which is the worse failure.
+# This was first set to 20 as the FASTER of 378 and 379, on the argument that
+# max-of-observations keeps the error one-sided: always late, never early,
+# so it could shorten the lag but never invent a start before the drive
+# began. Trip 380 falsified that. It departed at 28 km/h, we back-dated it
+# 3.5 min against a true 2.5, and the start came out roughly a minute EARLY —
+# the direction the argument said was unreachable. Two samples had simply not
+# found the top of the range yet.
 #
-# So 379 stays ~4.5 min late even at 20, and no single pace closes that.
-# It isn't really a pace problem: the sync log shows 379 departed at 16:16,
-# ten minutes into a nineteen-minute sleep-recheck window, and was first seen
-# at 16:26. The blind head is the recheck interval (settings.sleep_recheck_min),
-# and shortening THAT shrinks the ground this constant has to guess across —
-# which is the only real fix, and why that window went 20 -> 10.
+# So the guarantee is gone and 20 is now merely the mean of three (19.6),
+# which is where it stays: minimising expected error is the only claim left
+# that the data supports. Departure pace is not a constant to be discovered
+# — 11 to 28 km/h is a junction, a queue and a clear road, and no single
+# number fits all three. Raising it to 28 to restore never-early would put
+# 379 back where it was, which was worse.
 #
-# Two samples. The DIRECTION is what they establish; the value is provisional.
+# What actually bounds this is the blind distance, not the pace. 379 departed
+# ten minutes into a nineteen-minute sleep-recheck window and ran 1.832 km
+# unseen; 380, on the halved window, ran 1.167 km and landed within a minute
+# despite a pace error of 40%. Shrinking settings.sleep_recheck_min is the
+# real fix, and why that window went 20 -> 10.
+#
+# Three samples, no longer one-sided. The value is provisional.
 DEPARTURE_PACE_KMH = 20.0
 
 
@@ -598,6 +605,27 @@ MIN_PLAUSIBLE_WH_PER_KM = 40.0  # below this over a whole trip = contaminated da
 #
 # Revisit both with cold-weather data. Eight trips inside a 27-34 degree band
 # cannot say what happens at 5.
+#
+# A later set of audits nearly overturned that "does NOT track temperature"
+# finding, and the record is kept here because the near-miss is the useful
+# part. Six consecutive trips came in ordered perfectly by ambient — 30C 0.93,
+# 32C 1.29, 33C 1.69/1.77, 34C 2.78/3.27 — with our error monotonic across
+# all six, +6% at the bottom and -60% at the top. That is exactly the
+# signature of a slope too shallow, and it argued for replacing the linear
+# term with something convex.
+#
+# It does not survive contact with the trips above. Those put 33C at 0.76 and
+# 0.80; the newer ones put 33C at 1.69 and 1.77. Same temperature, 2.2x apart
+# — a spread at ONE point wider than the whole trend across four degrees. The
+# ordering in the newer six is real but it is a coincidence of which trips
+# happened to fall where, not a curve.
+#
+# So the model stays linear and stays shallow. Whatever drives climate load
+# here is not on the dashboard, and fitting a curve through six points that a
+# seventh contradicts would only launder the scatter into false precision.
+# What would settle it is repeat trips at ONE temperature: several at 33C
+# would separate a genuine curve from noise in a single afternoon, which no
+# amount of spreading samples across the band can do.
 ACCESSORY_KW = 0.5
 CLIMATE_BASE_KW = 0.35
 CLIMATE_KW_PER_DEGREE = 0.08
