@@ -171,9 +171,9 @@ CITY_SPEED_KMH = 30.0  # assumed door-to-door pace when the real duration is unk
 # So 379 stays ~4.5 min late even at 20, and no single pace closes that.
 # It isn't really a pace problem: the sync log shows 379 departed at 16:16,
 # ten minutes into a nineteen-minute sleep-recheck window, and was first seen
-# at 16:26. The blind head is the recheck interval (settings.sleep_recheck_min,
-# 20 min), and shortening THAT shrinks the ground this constant has to guess
-# across — which is the only real fix.
+# at 16:26. The blind head is the recheck interval (settings.sleep_recheck_min),
+# and shortening THAT shrinks the ground this constant has to guess across —
+# which is the only real fix, and why that window went 20 -> 10.
 #
 # Two samples. The DIRECTION is what they establish; the value is provisional.
 DEPARTURE_PACE_KMH = 20.0

@@ -172,7 +172,7 @@ def _log_tick(session: Session, outcome: str, detail: str | None = None) -> None
 
 # How long the sleep back-off may keep suppressing work after the last tick
 # that actually ran to completion. Comfortably more than one suspend window
-# (settings.sleep_recheck_min, 20 min) so ordinary cycling is untouched, and
+# (settings.sleep_recheck_min, 10 min) so ordinary cycling is untouched, and
 # short enough that a crash loop costs one hour of polling rather than a day.
 SUSPEND_MAX_QUIET_MIN = 60.0
 
@@ -2204,7 +2204,7 @@ def _sync_now_impl(wake: bool, session: Session):
     #
     # Measured: 353 consecutive skipped ticks over 6.2 hours, an unbroken run
     # with not one check in it, while the car sat unpolled. The suspend window
-    # is 20 minutes; it should never have survived one of them.
+    # was 20 minutes at the time; it should never have survived one of them.
     #
     # So it only counts while a tick has actually COMPLETED recently. Past
     # that, ignore it and do the work — which either succeeds and clears the

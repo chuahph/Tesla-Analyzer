@@ -50,10 +50,24 @@ class Settings(BaseSettings):
     # odometer does not drift, so the departure recovery reclaims the ground
     # either way. What widens is the clock estimate for the start.
     #
+    # That held up when it was finally measured. Trip 379 departed at 16:16,
+    # ten minutes into a nineteen-minute window, and was first seen at 16:26:
+    # distance came out exact (odometer 29568.159 against the car's 29568) and
+    # energy within rounding, while the START was six minutes late. Precision,
+    # not distance, exactly as claimed.
+    #
+    # Twenty minutes means an expected error of ten — half the window, for a
+    # departure landing anywhere in it. Both wakes in that day's sync log were
+    # in fact caught at the very end of one. Ten halves that for roughly 2,300
+    # extra list_vehicles a month, which is the cheap call and the one that
+    # does NOT reset Tesla's sleep countdown, so it costs quota and nothing
+    # else. Five was available for ~5,200; the returns diminish fast once the
+    # blind head is under a kilometre, and this account has a RM 45 ceiling.
+    #
     # Keep it well under sync.STALE_ANCHOR_MAX_MIN (45), which is where the
     # departure recovery stops trusting the old SoC/range and a trip starts
     # losing its opening energy as well as its opening minutes.
-    sleep_recheck_min: float = 20.0
+    sleep_recheck_min: float = 10.0
     # Minimum odometer movement (km) treated as a real trip rather than
     # jitter — a car nudged while parked, GPS drift, a multi-point turn.
     # Lower it to catch genuinely short moves (e.g. a charger-to-parking-spot
