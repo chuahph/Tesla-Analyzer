@@ -345,9 +345,14 @@ def test_parked_reanchor_carries_range_km_for_energy():
     assert trip["odo_km"] == 10_000.0
     assert trip["soc"] == 60
     assert trip["range_km"] == 270.0             # was left at 268.9 before
-    # Clock back-estimated from the 1.2 km at the city-pace floor (144 s),
-    # not left at the first driving reading.
-    assert trip["ts"] == s2["ts"] - 1.2 / 30.0 * 3600.0
+    # Clock back-estimated from the 1.2 km at the departure pace, not left at
+    # the first driving reading. Derived from the constant rather than a
+    # literal: what this pins is that the estimate RUNS, and pinning the pace
+    # here as well made it look like a second measurement of it.
+    from app.sync import DEPARTURE_PACE_KMH
+    pace = max(45 * 0.65, DEPARTURE_PACE_KMH)
+    assert trip["ts"] == pytest.approx(s2["ts"] - 1.2 / pace * 3600.0)
+    assert trip["ts"] < s2["ts"]
 
 
 def test_trailing_park_excluded_even_with_driver_aboard():

@@ -141,6 +141,30 @@ MYT = timezone(timedelta(hours=8))  # Malaysia has no DST
 
 CITY_SPEED_KMH = 30.0  # assumed door-to-door pace when the real duration is unknown
 
+# How fast a DEPARTURE actually goes, for back-estimating when a drive began
+# from the ground it had already covered when first seen.
+#
+# CITY_SPEED_KMH used to do this job too, and it is the wrong instrument —
+# the same mistake as reaching for drive_min_km to decide whether ground
+# exists. Thirty is an upper bound answering "could this gap have been
+# driving?", where a low implied speed proves the car was mostly parked. This
+# asks something else: "how fast were the opening minutes?" — and those are a
+# car park, a junction and a queue, not a steady city pace.
+#
+# Measured against the car, which knows exactly when each drive started:
+#
+#   trip 378   2.981 km blind   ~9 min   19.9 km/h
+#   trip 379   1.832 km blind   ~6 min   18.3 km/h
+#
+# Assuming 30 made both starts late — by 3 and 6 minutes — and never early,
+# because over-estimating the pace always under-estimates the time. Set to the
+# faster of the two observations rather than their mean: the error is then
+# still one-sided in the direction it already was, so this can only shorten it,
+# never overshoot into starting trips before they began.
+#
+# Two samples. The DIRECTION is what they establish; the value is provisional.
+DEPARTURE_PACE_KMH = 20.0
+
 
 def _was_parked_since(prev: dict | None, cur: dict) -> bool:
     """True if the last snapshot is stale — the car sat parked/asleep in between
@@ -1741,7 +1765,7 @@ def process_snapshot(
                 # with the clock estimate below because the recovery needs its
                 # complement: the minutes it was still PARKED, which is the
                 # only part of prev's SoC drop that isn't this drive's.
-                pace = max((cur.get("speed_kmh") or 0.0) * 0.65, CITY_SPEED_KMH)
+                pace = max((cur.get("speed_kmh") or 0.0) * 0.65, DEPARTURE_PACE_KMH)
                 shift_sec = moved / pace * 3600.0
                 park_min = max(gap_min - shift_sec / 60.0, 0.0)
                 # is_driving(prev) blocks recovery below because prev isn't a
