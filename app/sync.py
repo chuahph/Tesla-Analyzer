@@ -153,14 +153,27 @@ CITY_SPEED_KMH = 30.0  # assumed door-to-door pace when the real duration is unk
 #
 # Measured against the car, which knows exactly when each drive started:
 #
-#   trip 378   2.981 km blind   ~9 min   19.9 km/h
-#   trip 379   1.832 km blind   ~6 min   18.3 km/h
+#   trip 378   2.981 km blind   ~9.0 min   19.9 km/h
+#   trip 379   1.832 km blind   ~10.0 min  11.0 km/h
+#
+# The elapsed time is the TRUE one — from the car's own start to our first
+# sighting — not the error in our estimate. Dividing by the error instead
+# reads 379 as 18.3 km/h and makes the two samples look like they agree.
+# They don't: the spread is nearly two to one.
 #
 # Assuming 30 made both starts late — by 3 and 6 minutes — and never early,
 # because over-estimating the pace always under-estimates the time. Set to the
-# faster of the two observations rather than their mean: the error is then
-# still one-sided in the direction it already was, so this can only shorten it,
-# never overshoot into starting trips before they began.
+# faster of the two observations rather than their mean: the error stays
+# one-sided in the direction it already had, so this can only shorten it,
+# never overshoot into starting trips before they began. Eleven would fit 379
+# exactly and back-date 378 by seven minutes, which is the worse failure.
+#
+# So 379 stays ~4.5 min late even at 20, and no single pace closes that.
+# It isn't really a pace problem: the sync log shows 379 departed at 16:16,
+# ten minutes into a nineteen-minute sleep-recheck window, and was first seen
+# at 16:26. The blind head is the recheck interval (settings.sleep_recheck_min,
+# 20 min), and shortening THAT shrinks the ground this constant has to guess
+# across — which is the only real fix.
 #
 # Two samples. The DIRECTION is what they establish; the value is provisional.
 DEPARTURE_PACE_KMH = 20.0
