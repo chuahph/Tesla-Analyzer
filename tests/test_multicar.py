@@ -3573,6 +3573,7 @@ def test_trip_gaps_finds_every_boundary_the_odometer_disagrees_about():
 
             body = client.get("/api/trip-gaps").json()
             assert body["trips_checked"] == 4
+            assert body["boundaries_checked"] == 3 and body["boundaries_unchecked"] == 0
             assert body["holes"] == 2 and body["overlaps"] == 1
             assert body["unaccounted_km"] == pytest.approx(0.09 + 4.15, abs=0.002)
             assert body["double_counted_km"] == pytest.approx(0.5, abs=0.002)

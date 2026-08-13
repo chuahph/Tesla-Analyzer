@@ -4615,8 +4615,13 @@ def trip_gaps(
     ).all()
 
     findings: list[dict[str, Any]] = []
+    # See repair-all: a pair with no odometer at one end is never examined, and
+    # folding it into "every trip boundary agrees" makes an absence of evidence
+    # read as evidence of absence.
+    skipped = 0
     for prev_d, nxt in zip(drives, drives[1:]):
         if prev_d.end_odo_km is None or nxt.start_odo_km is None:
+            skipped += 1
             continue
         gap = round(nxt.start_odo_km - prev_d.end_odo_km, 3)
         if abs(gap) < min_km:
@@ -4654,6 +4659,8 @@ def trip_gaps(
     overlaps = [f for f in findings if f["gap_km"] < 0]
     return {
         "trips_checked": len(drives),
+        "boundaries_checked": max(len(drives) - 1, 0) - skipped,
+        "boundaries_unchecked": skipped,
         "days": days,
         "holes": len(holes),
         "overlaps": len(overlaps),
@@ -4661,7 +4668,9 @@ def trip_gaps(
         "double_counted_km": round(-sum(f["gap_km"] for f in overlaps), 3),
         # Biggest first — the one worth fixing is rarely the most recent.
         "findings": sorted(findings, key=lambda f: -abs(f["gap_km"]))[:50],
-        "note": ("Every trip boundary agrees." if not findings else None),
+        "note": (("Every trip boundary agrees."
+                  + (f" {skipped} had no odometer to check." if skipped else ""))
+                 if not findings else None),
     }
 
 
