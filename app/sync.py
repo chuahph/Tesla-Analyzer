@@ -1487,6 +1487,7 @@ def process_snapshot(
     drive_min_km: float = DRIVE_MIN_KM,
     price_per_kwh_dc: float | None = None,
     prev_close_odo_km: float | None = None,
+    last_quiet_ts: float | None = None,
 ) -> tuple[list[dict], list[dict], dict | None, dict | None]:
     """Advance the session state machine by one snapshot.
 
@@ -1508,6 +1509,14 @@ def process_snapshot(
     still reading "in Drive" as the confirmed trip end it actually is (see the
     recovery below). None whenever that can't be established, which keeps the
     old, stricter behaviour.
+
+    ``last_quiet_ts``: when a poll last CONFIRMED the car was not online (see
+    state.QUIET_SEEN_KEY). Also caller-only knowledge, because it comes from
+    the cheap list_vehicles calls that never produce a snapshot. It bounds how
+    long the car could have been moving unseen, which the gap between two
+    snapshots does not: a rechecked overnight park and a dead poller look
+    identical from the snapshots alone. None keeps the old behaviour of
+    measuring staleness by how long the car sat.
 
     Returns (drives, charges, open_trip, open_charge) — the sessions completed
     at this snapshot plus the carried-over open sessions.
@@ -1875,7 +1884,37 @@ def process_snapshot(
                 # an entire Office->Home drive, the stop after it, and the first
                 # half of Home->Penang Retirement Resort. One trip logged where
                 # two had happened.
-                stale_anchor = park_min > STALE_ANCHOR_MAX_MIN
+                # ...but "how long the car sat" is the wrong measure of that
+                # risk, and trip 382 is where the difference showed. An
+                # overnight park at Home, rechecked every ten minutes the whole
+                # time, then a departure first seen 3.4 km downroad. park_min
+                # read nine hours, stale_anchor fired, recovery declined, and
+                # the trip logged 5.9 km of a 9.3 km drive starting from a
+                # highway it had already been on for five minutes.
+                #
+                # Nothing about that gap was unobserved. The question the guard
+                # actually needs answered is how long the car could have been
+                # MOVING unseen, and a list_vehicles call reporting nothing
+                # online answers it directly — a driving car is online. So
+                # measure staleness from the last such confirmation rather than
+                # from the last snapshot: nine hours as an energy baseline, ten
+                # minutes as a distance one, from the same park.
+                #
+                # This keeps trip 368 blocked, which is what the guard is for.
+                # There the loop was DEAD for 12.4 hours, so no confirmation
+                # lands inside the gap, blind_min stays hours wide, and the
+                # recovery still refuses to reach across two journeys. A hole
+                # in the observations shows up as exactly that — a hole.
+                #
+                # It also makes the distance cap unnecessary in this branch:
+                # bounded blind TIME bounds the journey count on its own. A car
+                # cannot drive, park, and set off again inside a few minutes —
+                # Tesla's own sleep timer is longer than that — so however far
+                # it got, it got there in one go.
+                blind_min = park_min
+                if last_quiet_ts is not None and last_quiet_ts >= prev["ts"]:
+                    blind_min = max((cur["ts"] - last_quiet_ts) / 60.0, 0.0)
+                stale_anchor = blind_min > STALE_ANCHOR_MAX_MIN
                 trusted_anchor = (not is_driving(prev) or prev_is_closed_end)
                 if was_parked and (moved <= DEPARTURE_GAP_MAX_KM
                                    or (trusted_anchor and not stale_anchor)):

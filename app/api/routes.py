@@ -1889,6 +1889,7 @@ def _process_vehicle(
         prev, snap, open_trip, open_charge,
         capacity_kwh, settings.energy_price_per_kwh, settings.drive_min_km,
         prev_close_odo_km=prev_close_odo,
+        last_quiet_ts=float(state.get(session, state.QUIET_SEEN_KEY) or 0) or None,
     )
     drives = recovered + drives  # include a drive recovered from the upgrade gap
     # A trimmed tail is time the car spent parked, so its standby draw is not
@@ -2533,6 +2534,13 @@ def _sync_now_impl(wake: bool, session: Session):
         v.get("state") == "online" for v in vehicles)
     state.put(session, state.SUSPEND_KEY,
               str(now_ts + settings.sleep_recheck_min * 60.0) if all_quiet else "")
+    # Record that we LOOKED and found the car still, not merely that we intend
+    # to look again. list_vehicles reporting no car online is proof of absence
+    # of movement: a driving car is online. So each of these stamps closes the
+    # window in which an unseen departure could have started, and the departure
+    # recovery reads it to tell a rechecked overnight park from a blackout.
+    if all_quiet:
+        state.put(session, state.QUIET_SEEN_KEY, str(now_ts))
 
     # What this tick did for the car the dashboard follows. Placed before both
     # return paths below so every tick that reaches here is recorded exactly

@@ -2585,3 +2585,65 @@ def test_a_short_park_is_not_swallowed_by_the_next_trip():
                  shift="D", speed=0.0, range_km=396.0)
     _d, _c2, trip2, _c3 = process_snapshot(parked, crept, None, None, 70.0, 0.5)
     assert trip2 is not None and trip2["ts"] == parked["ts"]
+
+
+def test_rechecked_overnight_park_recovers_a_long_departure():
+    """Measured, trip 382: an overnight park at Home, polled every ten minutes
+    the whole night, then a departure first seen 3.4 km downroad on a highway.
+
+    The old guard measured staleness by how long the CAR SAT — nine hours — so
+    it refused to reach back, and the trip logged 5.9 km of a 9.3 km drive
+    beginning from a road it had already been on for five minutes. But nothing
+    about that gap was unobserved: every recheck reported the car not online,
+    and a driving car is online. What the guard needs to bound is how long the
+    car could have been MOVING unseen, which those rechecks pin to minutes.
+    """
+    park = T0
+    depart = T0 + 9 * 3600                        # nine hours later
+    s1 = snap(park, 29_597.086, 60, range_km=270.0)                   # parked Home
+    # First driving reading, already 3.4 km out — past DEPARTURE_GAP_MAX_KM,
+    # so this recovers only because the gap was confirmed quiet throughout.
+    s2 = snap(depart, 29_600.5, 58, shift="D", speed=60, range_km=261.0)
+
+    # Last confirmed-quiet poll landed 8 minutes before the car was seen moving.
+    _, _, trip, _ = process_snapshot(
+        s1, s2, None, None, 60.0, 0.90,
+        last_quiet_ts=depart - 8 * 60,
+    )
+    assert trip is not None
+    assert trip["odo_km"] == 29_597.086          # reached back to the Home anchor
+    assert trip["start_recovered_km"] == pytest.approx(3.414, abs=0.001)
+    assert trip["start_lost_km"] == 0.0
+    # The ENERGY baseline is a separate question and stays refused: the car
+    # really did sit nine hours, and that standby drain is not this trip's.
+    assert trip["start_energy_recovered"] is False
+    assert trip["soc"] == 58                      # cur's, not prev's
+
+
+def test_unobserved_long_gap_still_refuses_to_reach_back():
+    """The counterpart, and why the fix is not simply a wider distance cap.
+
+    Trip 368: the poller was DEAD for 12.4 hours, and the ground on the far
+    side held an entire Office->Home drive, the stop after it, and the first
+    half of the next journey. Recovering across it logged one trip where two
+    had happened.
+
+    Identical snapshots to the test above — same anchor, same shape — and the
+    only difference is that no poll confirmed the car still during the gap. A
+    hole in the observations has to read as a hole.
+    """
+    park = T0
+    depart = T0 + 9 * 3600
+    s1 = snap(park, 29_597.086, 60, range_km=270.0)
+    s2 = snap(depart, 29_600.5, 58, shift="D", speed=60, range_km=261.0)
+
+    for quiet in (None,                    # nothing ever recorded
+                  park - 600,              # a confirmation from BEFORE the gap
+                  park + 60):              # one early in it, then silence
+        _, _, trip, _ = process_snapshot(
+            s1, s2, None, None, 60.0, 0.90, last_quiet_ts=quiet,
+        )
+        assert trip is not None
+        assert trip["odo_km"] == 29_600.5, quiet          # anchored where seen
+        assert trip["start_recovered_km"] == 0.0, quiet
+        assert trip["start_lost_km"] == pytest.approx(3.414, abs=0.001), quiet

@@ -22,6 +22,12 @@ OPEN_TRIP_KEY = "open_trip"  # JSON of a trip in progress (car in gear)
 OPEN_CHARGE_KEY = "open_charge"  # JSON of a charge in progress
 LAST_ACTIVE_KEY = "last_active_ts"  # epoch of the last driving/charging/occupied snapshot
 SUSPEND_KEY = "suspend_until_ts"  # epoch until which cron polling stays quiet (car sleep window)
+QUIET_SEEN_KEY = "quiet_seen_ts"  # epoch a tick last CONFIRMED every car not online.
+# Distinct from SUSPEND_KEY, which says when to look again; this says when we
+# last actually looked and found the car still. It bounds how long the car
+# could have been MOVING unseen, which is not the same as how long it sat —
+# an overnight park that was rechecked every ten minutes is nine hours old as
+# an energy baseline and ten minutes old as a distance one.
 SYNC_LOG_KEY = "sync_log"  # JSON: run-length record of what each /api/sync tick did —
 # the only place a blackout can be told from a quiet car after the fact, since
 # LAST_STATUS_KEY is overwritten every tick and keeps no history
