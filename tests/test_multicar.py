@@ -3602,3 +3602,89 @@ def test_trip_gaps_finds_every_boundary_the_odometer_disagrees_about():
     finally:
         settings.app_passcode = old
         _reset_to_demo()
+
+
+def test_repair_all_reclaims_only_what_the_trips_measured_themselves():
+    """One pass over the whole history, replacing the trip-at-a-time repairs
+    that have been run by hand off the car's screen.
+
+    Its warrant is narrow on purpose. ``start_lost_km`` is the sync's own
+    record of ground it watched a trip cover before its anchor and then
+    declined to claim; where that matches the hole in front of the trip,
+    nothing is inferred and the reclaim just applies a decision the data
+    already holds. A drive nobody logged leaves a hole with NO such record,
+    and an overlap is a question about ownership — both are handed back.
+    """
+    from datetime import datetime, timedelta
+
+    from app.models import Drive
+
+    settings = get_settings()
+    old = settings.app_passcode
+    settings.app_passcode = ""
+    try:
+        with TestClient(app) as client:
+            with SessionLocal() as s:
+                for d in s.query(Drive).all():
+                    s.delete(d)
+                s.flush()
+                veh = s.query(Vehicle).first()
+                base = datetime.fromisoformat("2026-08-11T08:00")
+
+                def add(i, s_odo, e_odo, start, mins, lost=0.0):
+                    s.add(Drive(vehicle_id=veh.id, start_time=start,
+                                end_time=start + timedelta(minutes=mins),
+                                distance_km=round(e_odo - s_odo, 1), duration_min=mins,
+                                start_soc=60, end_soc=59, energy_used_kwh=1.0,
+                                avg_speed_kmh=30, max_speed_kmh=30, outside_temp_c=30,
+                                start_location=f"A{i}", end_location=f"B{i}",
+                                start_coords="5.34,100.31", end_coords="5.41,100.29",
+                                start_odo_km=s_odo, end_odo_km=e_odo, start_lost_km=lost))
+
+                add(1, 1000.0, 1010.0, base, 20)
+                # Trip 382's shape: the trip measured its own lost head.
+                add(2, 1013.366, 1030.0, base + timedelta(minutes=25), 20, lost=3.366)
+                # A drive nobody logged — a hole with nothing claiming it.
+                add(3, 1034.15, 1050.0, base + timedelta(hours=4), 30)
+                # An overlap: two trips claiming one stretch.
+                add(4, 1049.5, 1060.0, base + timedelta(hours=6), 30)
+                s.commit()
+
+            dry = client.get("/api/repair-all").json()
+            assert dry["repaired"] == 1 and dry["needs_a_human"] == 2
+            assert dry["reclaimed_km"] == pytest.approx(3.366, abs=0.002)
+            assert dry["applied"] is False
+            (fix,) = dry["repairs"]
+            assert fix["start_odo_km"] == [1013.366, 1010.0]
+            assert fix["distance_km"] == [16.6, 20.0]
+            assert fix["start_location"] == ["A2", "B1"]
+
+            # A dry run writes nothing.
+            with SessionLocal() as s:
+                assert s.query(Drive).filter(Drive.start_odo_km == 1013.366).count() == 1
+
+            # The two it declines carry the exact command to run by hand.
+            unlogged = next(m for m in dry["manual"] if m["gap_km"] > 0)
+            assert "never logged" in unlogged["why"]
+            assert "repair-missing-trip" in unlogged["run"]
+            over = next(m for m in dry["manual"] if m["gap_km"] < 0)
+            assert "overlap" in over["why"]
+
+            done = client.get("/api/repair-all?apply=true").json()
+            assert done["applied"] is True and done["repaired"] == 1
+            with SessionLocal() as s:
+                d = s.query(Drive).filter(Drive.start_location == "B1").one()
+                assert d.start_odo_km == 1010.0        # back to trip 1's end
+                assert d.distance_km == 20.0
+                assert d.start_lost_km == 0.0
+                assert d.start_recovered_km == pytest.approx(3.366, abs=0.002)
+                assert d.start_coords == "5.41,100.29"  # origin moved with it
+                # Energy grew with the ground, priced flat across the head.
+                assert d.energy_used_kwh > 1.0
+
+            # Idempotent: the boundary now agrees, so a second pass is a no-op.
+            again = client.get("/api/repair-all?apply=true").json()
+            assert again["repaired"] == 0
+            assert again["needs_a_human"] == 2
+    finally:
+        settings.app_passcode = old

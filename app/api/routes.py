@@ -4436,6 +4436,138 @@ class _DetachedDrive:
         self.end_time = datetime.fromisoformat(before["end_time"])
 
 
+@router.api_route("/repair-all", methods=["GET", "POST"])
+def repair_all(
+    days: int = Query(730, ge=1, le=3650),
+    min_km: float = Query(0.02, ge=0.001),
+    apply: bool = Query(False),
+    session: Session = Depends(get_session),
+):
+    """Reclaim every lost departure the trips themselves already measured.
+
+    The single-trip repairs each need a number off the car's screen, because
+    a hole in the odometer has two possible owners: the next trip's missing
+    head, or a whole journey nobody logged. Two odometer readings cannot tell
+    those apart, so a human has been reading the answer off the dash one trip
+    at a time.
+
+    For one class of hole that is unnecessary, and it is the class that keeps
+    recurring. ``start_lost_km`` is the sync's OWN record of distance it
+    watched this trip cover before its anchor and then declined to claim. When
+    that figure matches the hole in front of the trip, nothing is being
+    inferred: the loss was measured at the time, attributed to this trip at
+    the time, and merely not acted on. Reclaiming it applies a decision the
+    data already contains.
+
+    A drive nobody logged looks different and is left alone — measured, the
+    4.15 km Home->Bayan Mutiara leg left no trip AND no start_lost_km on its
+    successor, so the hole sits there with nothing claiming it. Overlaps are
+    left alone too: two trips claiming one stretch is a question about which
+    owns it, and guessing would bury the evidence.
+
+    ENERGY for the reclaimed stretch is priced at the trip's own flat average,
+    with no departure premium. That differs from the single-trip repair, and
+    deliberately. The premium prices a crawl (see DEPARTURE_BLIND_LOAD), the
+    single repair keeps it because a human is watching and can correct it
+    against the car, and this sweep has neither a pace to test nor anyone
+    reading the result. The measured heads long enough to reach this sweep
+    have come back at the flat average anyway — 378 at 1.10, 366 at 0.92, 359
+    at 1.10, 382 at ~1.0 — while the 1.55 the premium encodes was fitted on
+    two heads of about a kilometre. Flat is the better expectation unwatched.
+
+    Dry run by default. Everything it declines is returned with the exact
+    single-trip repair to run by hand.
+    """
+    vehicle = _first_vehicle(session)
+    since = sync_mod.now_local() - timedelta(days=days)
+    drives = session.scalars(
+        select(Drive).where(Drive.vehicle_id == vehicle.id, Drive.start_time >= since)
+        .order_by(Drive.start_time)
+    ).all()
+
+    repaired: list[dict[str, Any]] = []
+    manual: list[dict[str, Any]] = []
+    for prev_d, nxt in zip(drives, drives[1:]):
+        if prev_d.end_odo_km is None or nxt.start_odo_km is None:
+            continue
+        gap = round(nxt.start_odo_km - prev_d.end_odo_km, 3)
+        if abs(gap) < min_km:
+            continue
+        parked_min = round(
+            max((nxt.start_time - prev_d.end_time).total_seconds(), 0.0) / 60.0, 1)
+        lost = nxt.start_lost_km or 0.0
+        base = {"drive_id": nxt.id, "gap_km": gap, "parked_min": parked_min,
+                "at": nxt.start_time.isoformat(timespec="minutes")}
+        if gap < 0:
+            manual.append({**base, "why": "overlap — two trips claim this ground",
+                           "run": f"/api/repair-trip-overlap?drive_id={nxt.id}"})
+            continue
+        # The sweep's whole warrant: the trip measured this exact loss itself.
+        # Tolerance is the odometer's own rounding, not a margin for argument.
+        if abs(gap - lost) > 0.05:
+            manual.append({
+                **base, "start_lost_km": nxt.start_lost_km,
+                "why": ("no trip claims this ground — likely a drive that was "
+                        "never logged" if lost <= 0 else
+                        f"the hole ({gap} km) and the trip's own recorded loss "
+                        f"({lost} km) disagree"),
+                "run": (f"/api/repair-missing-trip?start_time="
+                        f"{prev_d.end_time.isoformat(timespec='minutes')}"
+                        f"&end_time={nxt.start_time.isoformat(timespec='minutes')}"
+                        if lost <= 0 else
+                        f"/api/repair-lost-departure?drive_id={nxt.id}"
+                        f"&true_distance_km=<car's figure>"),
+            })
+            continue
+
+        new_span = round(nxt.end_odo_km - prev_d.end_odo_km, 3)
+        new_distance = round(new_span, 1)
+        new_energy = (round(sync_mod.energy_for_blind_distance(
+            nxt.energy_used_kwh, new_span, gap), 2)
+            if nxt.energy_used_kwh else nxt.energy_used_kwh)
+        repaired.append({
+            **base,
+            "from_trip": {"id": prev_d.id, "end_location": prev_d.end_location},
+            "start_odo_km": [nxt.start_odo_km, round(prev_d.end_odo_km, 3)],
+            "distance_km": [nxt.distance_km, new_distance],
+            "energy_kwh": [nxt.energy_used_kwh, new_energy],
+            "start_location": [nxt.start_location, prev_d.end_location],
+        })
+        if apply:
+            nxt.start_odo_km = round(prev_d.end_odo_km, 3)
+            nxt.distance_km = new_distance
+            nxt.energy_used_kwh = new_energy      # wh_per_km derives from this
+            nxt.start_recovered_km = round((nxt.start_recovered_km or 0.0) + gap, 3)
+            nxt.start_lost_km = 0.0
+            if prev_d.end_coords:
+                nxt.start_coords = prev_d.end_coords
+                nxt.start_location = prev_d.end_location
+                nxt.start_area = prev_d.end_area
+            if nxt.duration_min:
+                nxt.avg_speed_kmh = round(new_distance / (nxt.duration_min / 60.0), 1)
+    if apply and repaired:
+        session.commit()
+
+    # The CLOCK is deliberately not touched. A start time is only wrong by the
+    # minutes the reclaimed stretch took, that duration was never observed, and
+    # the pace constant that would estimate it is itself under review (11 to 41
+    # km/h across four measured heads). Moving every start in the history on
+    # that basis would be the one change here that cannot be checked afterwards.
+    return {
+        "trips_checked": len(drives),
+        "days": days,
+        "applied": apply,
+        "repaired": len(repaired),
+        "reclaimed_km": round(sum(r["gap_km"] for r in repaired), 3),
+        "needs_a_human": len(manual),
+        "repairs": sorted(repaired, key=lambda r: -r["gap_km"]),
+        "manual": sorted(manual, key=lambda m: -abs(m["gap_km"])),
+        "note": ("Nothing to reclaim — every boundary the trips measured agrees."
+                 if not repaired and not manual else
+                 ("Dry run. Add &apply=true to write these." if not apply else None)),
+    }
+
+
 @router.get("/trip-gaps")
 def trip_gaps(
     days: int = Query(30, ge=1, le=730),
