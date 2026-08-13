@@ -4583,6 +4583,24 @@ def repair_all(
     }
 
 
+def _gaps_note(skipped: int, bad_blocks: int) -> str:
+    """The verdict, qualified by how much of the history it actually covers.
+
+    "Every trip boundary agrees" over a table half of which has no odometer is
+    true and useless. Where anchors are missing, the reconciliation between the
+    readings either side is what the sentence has to rest on instead.
+    """
+    if not skipped:
+        return "Every trip boundary agrees."
+    if bad_blocks:
+        return (f"Every anchored boundary agrees, but {skipped} had no odometer "
+                f"to check and {bad_blocks} of the spans they sit in do NOT "
+                f"reconcile against the readings either side.")
+    return (f"Every anchored boundary agrees, and though {skipped} had no "
+            f"odometer to check, the spans they sit in reconcile against the "
+            f"readings either side.")
+
+
 @router.get("/trip-gaps")
 def trip_gaps(
     days: int = Query(30, ge=1, le=730),
@@ -4655,6 +4673,47 @@ def trip_gaps(
             "suggested": fix,
         })
 
+    # The boundary check above can only speak for trips that carry odometer
+    # anchors, and start_odo_km/end_odo_km were added to an existing table
+    # (database.py) — so every trip written before that migration has none.
+    # Measured live: 61 of 131 boundaries, 47% of the history, unexaminable.
+    #
+    # Chaining odometers backwards through those from their distances would
+    # make the gap check pass by construction, since it would be ASSUMING the
+    # continuity the check exists to test. Worthless, and worse than worthless
+    # because it reads as a clean result.
+    #
+    # This is the check that does work on them. Between any two trips that do
+    # carry real readings, the odometer moved a known amount, and the trips in
+    # between claim a known total. Those must agree whatever the trips in the
+    # middle recorded about themselves — a shortfall is ground no trip claims,
+    # an excess is ground claimed twice. Nothing is assumed about the block;
+    # it is measured from outside.
+    blocks: list[dict[str, Any]] = []
+    anchored = [i for i, d in enumerate(drives)
+                if d.start_odo_km is not None and d.end_odo_km is not None]
+    for a, b in zip(anchored, anchored[1:]):
+        if b == a + 1:
+            continue                       # adjacent: the boundary check has it
+        between = drives[a + 1:b]
+        claimed = round(sum(d.distance_km or 0.0 for d in between), 3)
+        span = round(drives[b].start_odo_km - drives[a].end_odo_km, 3)
+        diff = round(span - claimed, 3)
+        if abs(diff) < min_km:
+            continue
+        blocks.append({
+            "trips": len(between),
+            "from": {"id": drives[a].id, "at": drives[a].end_time.isoformat(timespec="minutes"),
+                     "odo_km": drives[a].end_odo_km},
+            "to": {"id": drives[b].id, "at": drives[b].start_time.isoformat(timespec="minutes"),
+                   "odo_km": drives[b].start_odo_km},
+            "odometer_moved_km": span,
+            "trips_claim_km": claimed,
+            "difference_km": diff,
+            "reading": ("distance no trip claims" if diff > 0
+                        else "distance claimed twice"),
+        })
+
     holes = [f for f in findings if f["gap_km"] > 0]
     overlaps = [f for f in findings if f["gap_km"] < 0]
     return {
@@ -4668,9 +4727,11 @@ def trip_gaps(
         "double_counted_km": round(-sum(f["gap_km"] for f in overlaps), 3),
         # Biggest first — the one worth fixing is rarely the most recent.
         "findings": sorted(findings, key=lambda f: -abs(f["gap_km"]))[:50],
-        "note": (("Every trip boundary agrees."
-                  + (f" {skipped} had no odometer to check." if skipped else ""))
-                 if not findings else None),
+        # Reconciliation of the spans the boundary check cannot see into.
+        "unanchored_blocks": len(blocks),
+        "unanchored_difference_km": round(sum(b["difference_km"] for b in blocks), 3),
+        "blocks": sorted(blocks, key=lambda b: -abs(b["difference_km"]))[:50],
+        "note": (_gaps_note(skipped, len(blocks)) if not findings else None),
     }
 
 

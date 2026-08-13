@@ -3716,3 +3716,79 @@ def test_repair_all_reclaims_only_what_the_trips_measured_themselves():
             assert "no odometer to check" in blind["note"]
     finally:
         settings.app_passcode = old
+
+
+def test_trip_gaps_reconciles_spans_it_has_no_anchors_to_check():
+    """Measured live: 61 of 131 boundaries had no odometer at one end, because
+    start_odo_km/end_odo_km were added to an existing table. "Every trip
+    boundary agrees" over that is true and half-meaningless.
+
+    Chaining odometers backwards through the unanchored trips would make the
+    boundary check pass by construction — it would assume the very continuity
+    the check tests. This is the check that does work: between two trips that
+    DO carry readings, the odometer moved a known amount and the trips between
+    claim a known total, and those must agree whatever the middle recorded
+    about itself.
+    """
+    from datetime import datetime, timedelta
+
+    from app.models import Drive
+
+    settings = get_settings()
+    old_pass = settings.app_passcode
+    settings.app_passcode = ""
+    try:
+        with TestClient(app) as client:
+            with SessionLocal() as s:
+                for d in s.query(Drive).all():
+                    s.delete(d)
+                s.flush()
+                veh = s.query(Vehicle).first()
+                base = datetime.fromisoformat("2026-08-11T08:00")
+
+                def add(i, dist, mins, s_odo=None, e_odo=None):
+                    s.add(Drive(vehicle_id=veh.id, start_time=base + timedelta(hours=i),
+                                end_time=base + timedelta(hours=i, minutes=mins),
+                                distance_km=dist, duration_min=mins, start_soc=60,
+                                end_soc=59, energy_used_kwh=1.0, avg_speed_kmh=30,
+                                max_speed_kmh=30, outside_temp_c=30,
+                                start_location=f"A{i}", end_location=f"B{i}",
+                                start_odo_km=s_odo, end_odo_km=e_odo))
+
+                # Anchored at both ends, unanchored in the middle. The odometer
+                # moved 30.0 km between them; the three trips claim 25.0, so
+                # 5 km of real ground is claimed by nothing.
+                add(0, 10.0, 20, 1000.0, 1010.0)
+                add(1, 8.0, 20)
+                add(2, 9.0, 20)
+                add(3, 8.0, 20)
+                add(4, 10.0, 20, 1040.0, 1050.0)
+                s.commit()
+
+            body = client.get("/api/trip-gaps").json()
+            # The boundary check is blind here and says so rather than passing.
+            assert body["boundaries_checked"] == 0
+            assert body["boundaries_unchecked"] == 4
+            assert body["holes"] == 0 and body["overlaps"] == 0
+
+            # The reconciliation is not blind.
+            assert body["unanchored_blocks"] == 1
+            (blk,) = body["blocks"]
+            assert blk["trips"] == 3
+            assert blk["odometer_moved_km"] == pytest.approx(30.0, abs=0.002)
+            assert blk["trips_claim_km"] == pytest.approx(25.0, abs=0.002)
+            assert blk["difference_km"] == pytest.approx(5.0, abs=0.002)
+            assert blk["reading"] == "distance no trip claims"
+            assert "do NOT reconcile" in body["note"]
+
+            # And when the middle does add up, the verdict says the sentence
+            # rests on the reconciliation rather than on the missing anchors.
+            with SessionLocal() as s:
+                d = s.query(Drive).filter(Drive.start_location == "A2").one()
+                d.distance_km = 14.0            # 8 + 14 + 8 = 30
+                s.commit()
+            ok = client.get("/api/trip-gaps").json()
+            assert ok["unanchored_blocks"] == 0
+            assert "reconcile against the readings either side" in ok["note"]
+    finally:
+        settings.app_passcode = old_pass
