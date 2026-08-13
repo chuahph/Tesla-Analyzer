@@ -963,8 +963,36 @@ def _drive_from(start: dict, cur: dict, capacity_kwh: float, max_speed: float = 
     start_blind = (start.get("start_recovered_km") or 0.0
                    if not start.get("start_energy_recovered") else 0.0)
     blind = start_blind + (cur.get("end_folded_km") or 0.0)
+    # ...but only when the departure was actually the slow thing the premium
+    # describes. DEPARTURE_BLIND_LOAD prices a hot cabin being pulled down, a
+    # cold drivetrain, and a crawl out of a car park — costs that are about
+    # TIME, which is why they read as a high Wh/km only when little distance
+    # is covered while they run. A head that left quickly incurred them for
+    # correspondingly fewer minutes, and charging it 1.55x per kilometre
+    # anyway bills a car-park rate for an on-ramp.
+    #
+    # Measured, trip 382: 3.366 km recovered at 41 km/h against a trip average
+    # of 20.7 — twice the pace of the drive it opened. The premium added 0.088
+    # kWh and was essentially the whole error, 1.58 kWh against the car's
+    # 1.46; without it, 1.49.
+    #
+    # This also reconciles the two halves of the premium's own calibration,
+    # which have never sat together comfortably. The trips it was fitted on
+    # (333/334, ~1 km blind) measured 1.54 and 1.56; every longer head checked
+    # since — 378 at 1.10, 366 at 0.92, 359 at 1.10, now 382 at ~1.0 — has come
+    # back near the flat average, and the note below records that dropping the
+    # premium outright fits those better. A short head is short because it was
+    # slow, so the two groups are not disagreeing about a constant: they are
+    # measuring crawls and open roads. Pace says which is which.
+    #
+    # Unknown pace keeps the premium, which is the old behaviour: rows written
+    # before this was recorded, and the odometer repairs, have nothing to test.
+    head_kmh = start.get("start_blind_kmh") or 0.0
+    trip_kmh = distance / (dt_min / 60.0) if dt_min > 0 else 0.0
+    crawled = not (head_kmh and trip_kmh and head_kmh >= trip_kmh)
     energy = energy_for_blind_distance(
-        energy, distance, blind, departure_blind_km=start_blind,
+        energy, distance, blind,
+        departure_blind_km=start_blind if crawled else 0.0,
     )
     # When that refuses — the blind stretch is too large a share of the trip to
     # project across (BLIND_DISTANCE_MAX_SHARE) — the distance has still been
@@ -1961,6 +1989,11 @@ def process_snapshot(
                         max(cur["odo_km"] - anchor_odo, 0.0), 3)
                     open_trip["odo_km"] = anchor_odo
                     open_trip["start_lost_km"] = 0.0  # pulled back in, nothing lost
+                    # How fast the recovered stretch was covered, kept because
+                    # the departure premium that prices it is a claim about
+                    # CRAWLING and cannot be checked without this (see
+                    # DEPARTURE_BLIND_LOAD's use in _drive_from).
+                    open_trip["start_blind_kmh"] = round(pace, 1)
                     recovered_start = True
                     # The start coordinates move with the odometer, or the trip
                     # says two contradictory things about where it began: an

@@ -2647,3 +2647,65 @@ def test_unobserved_long_gap_still_refuses_to_reach_back():
         assert trip["odo_km"] == 29_600.5, quiet          # anchored where seen
         assert trip["start_recovered_km"] == 0.0, quiet
         assert trip["start_lost_km"] == pytest.approx(3.414, abs=0.001), quiet
+
+
+def _recovered_departure(speed_kmh, measured_min=22):
+    """Trip 382's shape: nine-hour park, rechecked throughout, first seen 3.366
+    km out. Returns (open_trip, closed_drive). ``speed_kmh`` sets the recovered
+    head's assumed pace; ``measured_min`` how long the WATCHED part took. Same
+    odometer and same energy in every combination — only the pace comparison
+    the premium is gated on changes.
+    """
+    park, depart = T0, T0 + 9 * 3600
+    s1 = snap(park, 29_597.086, 60, range_km=270.0)
+    s2 = snap(depart, 29_600.452, 58, shift="D", speed=speed_kmh, range_km=261.0)
+    s3 = snap(depart + measured_min * 60, 29_606.381, 56, range_km=255.0, locked=True)
+    _, _, trip, _ = process_snapshot(s1, s2, None, None, 60.0, 0.90,
+                                     last_quiet_ts=depart - 8 * 60)
+    drives, _, _, _ = process_snapshot(s2, s3, trip, None, 60.0, 0.90)
+    (drive,) = drives
+    return trip, drive
+
+
+def test_departure_premium_skipped_when_the_head_outran_the_trip():
+    """Measured, trip 382: 3.366 km recovered at 41 km/h while the watched part
+    of the same drive averaged 16. The premium prices a hot cabin, a cold
+    drivetrain and a crawl out of a car park — time-based costs that only read
+    as a high Wh/km when little ground is covered while they run. This head
+    left faster than the drive it opened, and billing it 1.55x per kilometre
+    added 0.088 kWh: 1.58 against the car's own 1.46, where dropping it gives
+    1.49.
+    """
+    trip, drive = _recovered_departure(63)
+    assert trip["start_recovered_km"] == pytest.approx(3.366, abs=0.001)
+    assert trip["start_blind_kmh"] == pytest.approx(41.0, abs=0.1)
+    assert trip["start_energy_recovered"] is False   # nine hours is still stale
+
+    measured = 29_606.381 - 29_600.452
+    base = _energy_kwh({"soc": 58, "range_km": 261.0},
+                       {"soc": 56, "range_km": 255.0}, 60.0)
+    # Flat average across the whole head: no premium term.
+    assert drive["energy_used_kwh"] == pytest.approx(
+        base * (measured + 3.366) / measured, abs=0.01)
+
+
+def test_departure_premium_kept_when_the_head_really_did_crawl():
+    """The other half, and why this is a gate rather than a deletion.
+
+    Same trip, same distance, same energy — only the pace of the head against
+    the pace of the drive it opened. A departure that dawdles out at the
+    DEPARTURE_PACE_KMH floor while the rest of the drive runs freely IS the
+    car-park crawl the premium was fitted on (trips 333/334, ~1 km blind,
+    measured 1.54 and 1.56), and it keeps it.
+    """
+    trip, drive = _recovered_departure(10, measured_min=6)   # 5.9 km in 6 min
+    assert trip["start_blind_kmh"] == pytest.approx(20.0, abs=0.1)
+
+    measured = 29_606.381 - 29_600.452
+    base = _energy_kwh({"soc": 58, "range_km": 261.0},
+                       {"soc": 56, "range_km": 255.0}, 60.0)
+    weighted = 1.0 * 1.55 + (3.366 - 1.0)          # premium on the first km only
+    assert drive["energy_used_kwh"] == pytest.approx(
+        base * (measured + weighted) / measured, abs=0.01)
+    # And it is strictly the dearer of the two readings.
+    assert drive["energy_used_kwh"] > _recovered_departure(63)[1]["energy_used_kwh"]
