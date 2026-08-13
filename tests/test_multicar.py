@@ -3652,6 +3652,10 @@ def test_repair_all_reclaims_only_what_the_trips_measured_themselves():
 
             dry = client.get("/api/repair-all").json()
             assert dry["repaired"] == 1 and dry["needs_a_human"] == 2
+            # Coverage is reported, not assumed: three boundaries between four
+            # trips, all with odometers at both ends, so none went unexamined.
+            assert dry["boundaries_checked"] == 3
+            assert dry["boundaries_unchecked"] == 0
             assert dry["reclaimed_km"] == pytest.approx(3.366, abs=0.002)
             assert dry["applied"] is False
             (fix,) = dry["repairs"]
@@ -3686,5 +3690,28 @@ def test_repair_all_reclaims_only_what_the_trips_measured_themselves():
             again = client.get("/api/repair-all?apply=true").json()
             assert again["repaired"] == 0
             assert again["needs_a_human"] == 2
+
+            # A boundary with no odometer is counted as UNCHECKED, never as
+            # agreeing — "nothing to reclaim" over trips nobody could measure
+            # is the reassurance this whole endpoint exists to avoid giving.
+            with SessionLocal() as sess:
+                for d in sess.query(Drive).all():
+                    if d.start_location != "A1":
+                        sess.delete(d)
+                sess.flush()
+                veh2 = sess.query(Vehicle).first()
+                sess.add(Drive(vehicle_id=veh2.id,
+                               start_time=datetime.fromisoformat("2026-08-11T12:00"),
+                               end_time=datetime.fromisoformat("2026-08-11T12:20"),
+                               distance_km=5.0, duration_min=20, start_soc=60,
+                               end_soc=59, energy_used_kwh=1.0, avg_speed_kmh=15,
+                               max_speed_kmh=30, outside_temp_c=30,
+                               start_location="A9", end_location="B9",
+                               start_odo_km=None, end_odo_km=None))
+                sess.commit()
+            blind = client.get("/api/repair-all").json()
+            assert blind["boundaries_checked"] == 0
+            assert blind["boundaries_unchecked"] == 1
+            assert "no odometer to check" in blind["note"]
     finally:
         settings.app_passcode = old

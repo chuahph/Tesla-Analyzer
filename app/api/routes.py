@@ -4487,8 +4487,16 @@ def repair_all(
 
     repaired: list[dict[str, Any]] = []
     manual: list[dict[str, Any]] = []
+    # Pairs with a missing odometer at either end are not checked, and saying
+    # "every boundary agrees" without saying how many were LOOKED at is the
+    # same false reassurance that cost this project a week elsewhere — a sync
+    # log that read silent while it was really erroring, a data_quality that
+    # said "measured" over a trip half inferred. An unchecked pair is not a
+    # clean one.
+    skipped = 0
     for prev_d, nxt in zip(drives, drives[1:]):
         if prev_d.end_odo_km is None or nxt.start_odo_km is None:
+            skipped += 1
             continue
         gap = round(nxt.start_odo_km - prev_d.end_odo_km, 3)
         if abs(gap) < min_km:
@@ -4553,8 +4561,13 @@ def repair_all(
     # the pace constant that would estimate it is itself under review (11 to 41
     # km/h across four measured heads). Moving every start in the history on
     # that basis would be the one change here that cannot be checked afterwards.
+    pairs = max(len(drives) - 1, 0)
     return {
         "trips_checked": len(drives),
+        "boundaries_checked": pairs - skipped,
+        # Not a footnote: a boundary with no odometer at one end was never
+        # examined, so it can be neither clean nor broken here.
+        "boundaries_unchecked": skipped,
         "days": days,
         "applied": apply,
         "repaired": len(repaired),
@@ -4562,7 +4575,9 @@ def repair_all(
         "needs_a_human": len(manual),
         "repairs": sorted(repaired, key=lambda r: -r["gap_km"]),
         "manual": sorted(manual, key=lambda m: -abs(m["gap_km"])),
-        "note": ("Nothing to reclaim — every boundary the trips measured agrees."
+        "note": (("Nothing to reclaim — every boundary the trips measured agrees."
+                  + (f" {skipped} boundary(s) had no odometer to check."
+                     if skipped else ""))
                  if not repaired and not manual else
                  ("Dry run. Add &apply=true to write these." if not apply else None)),
     }
