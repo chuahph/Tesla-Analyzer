@@ -4831,6 +4831,11 @@ def trip_gaps(
         # this moment. Anything earlier is pre-history and anchors nothing.
         "oldest_trip_at": (drives[0].start_time.isoformat(timespec="minutes")
                            if drives else None),
+        # ...and the upper bound. Trips from here on carry their own anchors,
+        # so a reading after this proves nothing that is not already proven.
+        # The pair turns "find an old photo" into a dated window to search.
+        "anchors_begin_at": (drives[anchored[0]].start_time.isoformat(timespec="minutes")
+                             if anchored and anchored[0] > 0 else None),
         # What the leading run's own distances imply the opening reading was.
         # NOT a verification — it is derived from the very trips in question,
         # so feeding it back would reconcile by construction. It is a figure to

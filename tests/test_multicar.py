@@ -3887,6 +3887,9 @@ def test_trip_gaps_admits_the_boundaries_nothing_can_reach():
             assert mid["unanchored_blocks"] == 0
             assert mid["boundaries_unreachable"] == 1     # the pre-cutoff one
             assert mid["oldest_trip_at"] == "2026-08-11T08:00"
+            # The pair bounds the search: a usable reading is dated between
+            # these two, and anything after the second proves nothing new.
+            assert mid["anchors_begin_at"] == "2026-08-11T10:00"
 
             # A malformed timestamp is refused rather than silently ignored,
             # which would reconcile against the wrong set of trips.
