@@ -7,11 +7,22 @@ name: Sync car from Tesla
 # reconstruction (wrong trip times). An external cron service hitting
 # /api/sync every 1-2 minutes is far more reliable, so that stays primary.
 #
-# This runs anyway, every 15 minutes, because the primary has now stopped
-# twice — once for 12.4 hours and once for 7+ — and each time the app kept
-# working perfectly while learning nothing. A backup that is only as good as
-# a delayed 15-minute tick still turns a lost afternoon into a lost quarter
-# hour, and it fails independently of whatever took the primary down.
+# This runs anyway, because the primary has now stopped twice — once for
+# 12.4 hours and once for 7+ — and each time the app kept working perfectly
+# while learning nothing. It fails independently of whatever took the primary
+# down, which is the whole point of it.
+#
+# It asks for every 15 minutes and does NOT get it. Measured over 12
+# consecutive scheduled runs, the gaps were 42 to 62 minutes, mean 55 — about
+# one firing in every 3.6 requested. GitHub drops scheduled runs under load
+# and throttles low-activity repositories, and the docs promise best-effort
+# only. So the honest figure for this backstop is roughly HOURLY: it turns a
+# lost afternoon into a lost hour, not a lost quarter hour. Still worth
+# having against a 12.4-hour blackout; just not what the schedule below says.
+#
+# Asking for */5 would not fix it — the throttle is on runs actually
+# dispatched, not on the interval requested — and would only inflate the
+# apparent promise further.
 #
 # Resolution boost when it does run: GitHub Actions can't schedule tighter
 # than 5 minutes, but a single run can poll several times internally.
@@ -47,6 +58,10 @@ on:
     # against ~288 at the 5-minute cadence. The app throttles itself either
     # way (see sync_poll_interval_min) so a healthy primary means these ticks
     # almost never trigger a vehicle_data read.
+    #
+    # In practice GitHub fires this about hourly (see above), so the real cost
+    # is nearer ~24 a day — cheaper than budgeted, and correspondingly less
+    # protection than budgeted.
     - cron: "*/15 * * * *"
   workflow_dispatch: {}   # manual "Run workflow" button, unchanged
 
