@@ -3849,6 +3849,10 @@ def test_trip_gaps_admits_the_boundaries_nothing_can_reach():
             assert "nothing has checked those" in body["note"]
             assert "reconcile against the readings either side" not in body["note"]
             assert "from_odo_km" in body["hint"]
+            # The figure to compare a real record against — derived from the
+            # trips in question, so useless as proof and useful as a target.
+            assert body["implied_start_odo_km"] == pytest.approx(982.0, abs=0.05)
+            assert "982" in body["hint"]
 
             # One reading from outside the app closes the whole leading run.
             # The two old trips claim 18.0 km and the first anchor sits at

@@ -4732,6 +4732,10 @@ def trip_gaps(
                 unbracketed += 1
     else:
         unbracketed = max(len(drives) - 1, 0)
+    implied = None
+    if anchored and anchored[0] > 0:
+        implied = round(drives[anchored[0]].start_odo_km
+                        - sum(d.distance_km or 0.0 for d in drives[:anchored[0]]), 1)
     if from_odo_km is not None and anchored and anchored[0] > 0:
         lead = drives[:anchored[0]]
         claimed = round(sum(d.distance_km or 0.0 for d in lead), 3)
@@ -4797,8 +4801,16 @@ def trip_gaps(
         "boundaries_unreachable": unbracketed,
         # How to make the unreachable ones reachable, when there are any.
         "hint": (None if not unbracketed else
-                 "Pass &from_odo_km=<the odometer when the oldest trip here "
-                 "began> to reconcile the leading run against a real reading."),
+                 f"Pass &from_odo_km=NUMBER (the odometer when the oldest trip "
+                 f"here began) to reconcile the leading run. Its own trips "
+                 f"imply {implied}; if a real record says otherwise, the "
+                 f"difference is the discrepancy."),
+        # What the leading run's own distances imply the opening reading was.
+        # NOT a verification — it is derived from the very trips in question,
+        # so feeding it back would reconcile by construction. It is a figure to
+        # COMPARE a delivery record or a dated photo of the dash against, which
+        # is the one thing the data cannot supply for itself.
+        "implied_start_odo_km": implied,
         "note": (_gaps_note(skipped, len(blocks), unbracketed)
                  if not findings else None),
     }
