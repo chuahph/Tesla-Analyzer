@@ -3897,3 +3897,108 @@ def test_trip_gaps_admits_the_boundaries_nothing_can_reach():
                               "&from_time=july+5").status_code == 400
     finally:
         settings.app_passcode = old_pass
+
+
+def test_place_lookup_never_caches_its_own_failure():
+    """_place_and_area falls back to the coordinate string when the geocoders
+    miss, which keeps the trip logged. Caching that fallback made a single
+    timeout permanent — the spot was named after its latitude forever, and
+    _cached_place_near handed the same failure to anything within GPS drift.
+
+    Measured live: two consecutive trips on 13 Aug both reading
+    "5.3354, 100.2974" for one physical stop, once as an arrival and once as
+    the next departure.
+    """
+    import app.api.routes as r
+
+    coords = "5.3354, 100.2974"
+    r._PLACE_CACHE.pop(coords, None)
+    calls = []
+
+    def boom(*a, **k):
+        calls.append(1)
+        raise RuntimeError("nominatim down")
+
+    old_get, old_key = r.httpx.get, get_settings().google_maps_api_key
+    get_settings().google_maps_api_key = ""
+    r.httpx.get = boom
+    try:
+        assert r._place_and_area(coords) == (coords, coords)
+        # The retry is the point: a second visit must try again, not be
+        # served the earlier failure out of the cache.
+        assert r._place_and_area(coords) == (coords, coords)
+        assert len(calls) == 2
+        assert coords not in r._PLACE_CACHE
+    finally:
+        r.httpx.get, get_settings().google_maps_api_key = old_get, old_key
+        r._PLACE_CACHE.pop(coords, None)
+
+
+def test_backfill_place_names_renames_rows_left_holding_coordinates():
+    """Rows already written keep whatever the failed lookup gave them. They
+    are recognisable without guessing — the label is exactly the coordinate
+    string it came from, which no successful geocode returns."""
+    from datetime import datetime, timedelta
+
+    from app.models import Drive
+
+    settings = get_settings()
+    old_pass = settings.app_passcode
+    settings.app_passcode = ""
+    try:
+        with TestClient(app) as client:
+            with SessionLocal() as s:
+                for d in s.query(Drive).all():
+                    s.delete(d)
+                s.flush()
+                veh = s.query(Vehicle).first()
+                base = datetime.fromisoformat("2026-08-13T21:22")
+                coords = "5.3354, 100.2974"
+                # One stop, two rows: an arrival then the next departure —
+                # exactly how a single failure surfaces twice.
+                s.add(Drive(vehicle_id=veh.id, start_time=base,
+                            end_time=base + timedelta(minutes=15),
+                            distance_km=11.9, duration_min=15, start_soc=60,
+                            end_soc=58, energy_used_kwh=1.44, avg_speed_kmh=49,
+                            max_speed_kmh=92, outside_temp_c=27,
+                            start_location="5.2819, 100.2787",
+                            start_coords="5.2819, 100.2787",
+                            end_location=coords, end_coords=coords,
+                            start_odo_km=1000.0, end_odo_km=1011.9))
+                s.add(Drive(vehicle_id=veh.id, start_time=base + timedelta(hours=1),
+                            end_time=base + timedelta(hours=1, minutes=6),
+                            distance_km=3.9, duration_min=6, start_soc=58,
+                            end_soc=57, energy_used_kwh=0.52, avg_speed_kmh=40,
+                            max_speed_kmh=93, outside_temp_c=27,
+                            start_location=coords, start_coords=coords,
+                            end_location="Home", end_coords="5.3431, 100.3111",
+                            start_odo_km=1011.9, end_odo_km=1015.8))
+                s.commit()
+
+            import app.api.routes as r
+            named = {"5.3354, 100.2974": ("Bak Kut Teh", "Bayan Baru")}
+            old = r._place_and_area
+            r._place_and_area = lambda c, sess=None: named.get(c, (c, c))
+            try:
+                dry = client.get("/api/backfill-place-names").json()
+                # Two distinct unnamed coordinates, one of which resolves.
+                assert dry["unnamed_coords"] == 2
+                assert dry["resolved"] == 1 and dry["still_unnamed"] == 1
+                assert len(dry["changes"]) == 2      # both rows share the stop
+                assert dry["applied"] is False
+
+                done = client.get("/api/backfill-place-names?apply=true").json()
+                assert done["applied"] is True
+            finally:
+                r._place_and_area = old
+
+            with SessionLocal() as s:
+                rows = s.query(Drive).order_by(Drive.start_time).all()
+                assert rows[0].end_location == "Bak Kut Teh"
+                assert rows[0].end_area == "Bayan Baru"
+                assert rows[1].start_location == "Bak Kut Teh"
+                # The one the geocoder still can't name is left as it was,
+                # not blanked — coordinates remain searchable in a maps app.
+                assert rows[0].start_location == "5.2819, 100.2787"
+    finally:
+        settings.app_passcode = old_pass

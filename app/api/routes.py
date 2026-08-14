@@ -817,7 +817,20 @@ def _place_and_area(coords: str, session: Session | None = None) -> tuple[str, s
             result = (label or coords, area or coords)
         except Exception:  # noqa: BLE001 — never let naming block trip logging
             result = (coords, coords)
-    _PLACE_CACHE[coords] = result
+    # Cache an ANSWER, never a failure. The fallback returns the coordinates
+    # themselves, and storing that made one timeout permanent: every later
+    # lookup of the spot — including _cached_place_near for anything within
+    # GPS drift of it — got the failure back without retrying.
+    #
+    # Measured live: two consecutive trips on 13 Aug reading "5.3354,
+    # 100.2974" for the same physical stop, one as an arrival and the next as
+    # a departure. One Nominatim timeout, two trips permanently unnamed, and
+    # every future visit to that spot too.
+    #
+    # Not caching a miss costs at most one retry per trip closed, which is a
+    # handful a day and already rate-limited above.
+    if result != (coords, coords):
+        _PLACE_CACHE[coords] = result
     return result
 
 
@@ -5435,6 +5448,83 @@ def repair_lost_departure(
 # run while returning 405 and changing nothing. Mutating on GET is
 # normally wrong; here nothing writes without an explicit apply=true that
 # no prefetcher will ever guess, and the app is passcode-gated.
+@router.api_route("/backfill-place-names", methods=["GET", "POST"])
+def backfill_place_names(
+    limit: int = Query(40, ge=1, le=200),
+    apply: bool = Query(False),
+    session: Session = Depends(get_session),
+):
+    """Name the stops whose geocode failed and left raw coordinates behind.
+
+    _place_and_area falls back to the coordinate string when both geocoders
+    miss, which keeps the trip logged and the spot searchable in a maps app —
+    the right call at the time. What was wrong was that the fallback got
+    CACHED, so a single Nominatim timeout named that spot after its latitude
+    forever, including every later visit within GPS drift of it.
+
+    That is fixed at the source, but rows already written keep what they were
+    given. They are recognisable without guessing: the label is exactly the
+    coordinate string it was derived from, which no successful geocode ever
+    returns. A geofence added since (Home, Office) resolves them for free.
+
+    Rate-limited by the geocoder itself, so this works in batches — ``limit``
+    caps how many distinct coordinates are looked up per call. Re-run until it
+    reports nothing left. Dry run by default.
+    """
+    vehicle = _first_vehicle(session)
+    drives = session.scalars(
+        select(Drive).where(Drive.vehicle_id == vehicle.id)
+        .order_by(Drive.start_time.desc())
+    ).all()
+
+    # One lookup per distinct coordinate, however many rows share it — the
+    # commonest case here is exactly that, one unnamed stop appearing as an
+    # arrival and then the next trip's departure.
+    wanted: list[str] = []
+    for d in drives:
+        for label, coords in ((d.start_location, d.start_coords),
+                              (d.end_location, d.end_coords)):
+            if coords and label and label.strip() == coords.strip():
+                if coords not in wanted:
+                    wanted.append(coords)
+    resolved: dict[str, tuple[str, str]] = {}
+    for coords in wanted[:limit]:
+        label, area = _place_and_area(coords, session)
+        if label.strip() != coords.strip():
+            resolved[coords] = (label, area)
+
+    changed: list[dict[str, Any]] = []
+    for d in drives:
+        for end in ("start", "end"):
+            coords = getattr(d, f"{end}_coords")
+            label = getattr(d, f"{end}_location")
+            if not (coords and label and label.strip() == coords.strip()):
+                continue
+            got = resolved.get(coords)
+            if not got:
+                continue
+            changed.append({"drive_id": d.id, "end": end, "coords": coords,
+                            "location": [label, got[0]]})
+            if apply:
+                setattr(d, f"{end}_location", got[0])
+                setattr(d, f"{end}_area", got[1])
+    if apply and changed:
+        session.commit()
+    return {
+        "unnamed_coords": len(wanted),
+        "looked_up": len(wanted[:limit]),
+        "resolved": len(resolved),
+        # A geocoder that misses twice will miss again; these are not errors so
+        # much as places OpenStreetMap has nothing for. A geofence names them.
+        "still_unnamed": len(wanted[:limit]) - len(resolved),
+        "remaining": max(len(wanted) - limit, 0),
+        "applied": apply,
+        "changes": changed[:100],
+        "note": ("Nothing to name — every stop has a place." if not wanted else
+                 ("Dry run. Add &apply=true to write these." if not apply else None)),
+    }
+
+
 @router.api_route("/backfill-start-locations", methods=["GET", "POST"])
 def backfill_start_locations(
     apply: bool = Query(False),
