@@ -3792,3 +3792,61 @@ def test_trip_gaps_reconciles_spans_it_has_no_anchors_to_check():
             assert "reconcile against the readings either side" in ok["note"]
     finally:
         settings.app_passcode = old_pass
+
+
+def test_trip_gaps_admits_the_boundaries_nothing_can_reach():
+    """The reconciliation needs a reading on BOTH sides of a block. A run of
+    unanchored trips at the START of the history has no earlier reading, so no
+    pair of anchors brackets it and nothing examines it.
+
+    Measured live and missed: 61 unchecked boundaries with zero failing blocks,
+    reported as "the spans they sit in reconcile" — when in fact the spans sat
+    before the first anchor and nothing had looked at them at all. Reporting no
+    failures across trips no check can see is the same false all-clear as
+    counting an unchecked boundary as a clean one, one level further in.
+    """
+    from datetime import datetime, timedelta
+
+    from app.models import Drive
+
+    settings = get_settings()
+    old_pass = settings.app_passcode
+    settings.app_passcode = ""
+    try:
+        with TestClient(app) as client:
+            with SessionLocal() as s:
+                for d in s.query(Drive).all():
+                    s.delete(d)
+                s.flush()
+                veh = s.query(Vehicle).first()
+                base = datetime.fromisoformat("2026-08-11T08:00")
+
+                def add(i, dist, s_odo=None, e_odo=None):
+                    s.add(Drive(vehicle_id=veh.id, start_time=base + timedelta(hours=i),
+                                end_time=base + timedelta(hours=i, minutes=20),
+                                distance_km=dist, duration_min=20, start_soc=60,
+                                end_soc=59, energy_used_kwh=1.0, avg_speed_kmh=30,
+                                max_speed_kmh=30, outside_temp_c=30,
+                                start_location=f"A{i}", end_location=f"B{i}",
+                                start_odo_km=s_odo, end_odo_km=e_odo))
+
+                # The live shape: unanchored history, then anchored from the
+                # migration onward. Nothing precedes the old trips to measure
+                # them from.
+                add(0, 10.0)
+                add(1, 8.0)
+                add(2, 9.0, 1000.0, 1010.0)
+                add(3, 10.0, 1010.0, 1020.0)
+                s.commit()
+
+            body = client.get("/api/trip-gaps").json()
+            assert body["holes"] == 0 and body["overlaps"] == 0
+            assert body["boundaries_unchecked"] == 2
+            # No block FAILED, because no block could be formed over them.
+            assert body["unanchored_blocks"] == 0
+            assert body["boundaries_unreachable"] == 2
+            # And the verdict must not read as an all-clear over them.
+            assert "nothing has checked those" in body["note"]
+            assert "reconcile against the readings either side" not in body["note"]
+    finally:
+        settings.app_passcode = old_pass

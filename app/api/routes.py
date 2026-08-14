@@ -4583,22 +4583,32 @@ def repair_all(
     }
 
 
-def _gaps_note(skipped: int, bad_blocks: int) -> str:
+def _gaps_note(skipped: int, bad_blocks: int, unreachable: int = 0) -> str:
     """The verdict, qualified by how much of the history it actually covers.
 
     "Every trip boundary agrees" over a table half of which has no odometer is
     true and useless. Where anchors are missing, the reconciliation between the
-    readings either side is what the sentence has to rest on instead.
+    readings either side is what the sentence has to rest on instead — and
+    where there is no reading on one side, nothing rests on anything and the
+    sentence has to say so. A run of unanchored trips at the start of the
+    history is the ordinary case for that, and silently reporting no failing
+    blocks across it would be the reassuring reading of an ambiguity again.
     """
     if not skipped:
         return "Every trip boundary agrees."
+    parts = ["Every anchored boundary agrees"]
+    reconciled = skipped - unreachable
     if bad_blocks:
-        return (f"Every anchored boundary agrees, but {skipped} had no odometer "
-                f"to check and {bad_blocks} of the spans they sit in do NOT "
-                f"reconcile against the readings either side.")
-    return (f"Every anchored boundary agrees, and though {skipped} had no "
-            f"odometer to check, the spans they sit in reconcile against the "
-            f"readings either side.")
+        parts.append(f"but {bad_blocks} of the spans without anchors do NOT "
+                     f"reconcile against the readings either side")
+    elif reconciled > 0:
+        parts.append(f"and {reconciled} boundary(s) without anchors sit in "
+                     f"spans that reconcile against the readings either side")
+    if unreachable:
+        parts.append(f"but {unreachable} boundary(s) have no anchor and no "
+                     f"reading on one side to reconcile against — nothing has "
+                     f"checked those")
+    return ", ".join(parts) + "."
 
 
 @router.get("/trip-gaps")
@@ -4689,9 +4699,29 @@ def trip_gaps(
     # middle recorded about themselves — a shortfall is ground no trip claims,
     # an excess is ground claimed twice. Nothing is assumed about the block;
     # it is measured from outside.
+    #
+    # It reconciles a block only when anchors exist on BOTH sides of it. A run
+    # of unanchored trips at the very start of the history — which is exactly
+    # what a migration that added the columns leaves behind — has no earlier
+    # reading to measure from, so no pair of anchors brackets it and it is
+    # never examined. Counted, never folded into the verdict: reporting zero
+    # failing blocks over trips nothing could look at is the same false
+    # all-clear as before, one level further in.
     blocks: list[dict[str, Any]] = []
     anchored = [i for i, d in enumerate(drives)
                 if d.start_odo_km is not None and d.end_odo_km is not None]
+    unbracketed = 0
+    if anchored:
+        for i in range(len(drives) - 1):
+            if (drives[i].start_odo_km is not None
+                    and drives[i].end_odo_km is not None
+                    and drives[i + 1].start_odo_km is not None
+                    and drives[i + 1].end_odo_km is not None):
+                continue
+            if i < anchored[0] or i > anchored[-1] - 1:
+                unbracketed += 1
+    else:
+        unbracketed = max(len(drives) - 1, 0)
     for a, b in zip(anchored, anchored[1:]):
         if b == a + 1:
             continue                       # adjacent: the boundary check has it
@@ -4731,7 +4761,12 @@ def trip_gaps(
         "unanchored_blocks": len(blocks),
         "unanchored_difference_km": round(sum(b["difference_km"] for b in blocks), 3),
         "blocks": sorted(blocks, key=lambda b: -abs(b["difference_km"]))[:50],
-        "note": (_gaps_note(skipped, len(blocks)) if not findings else None),
+        # Boundaries with no anchor AND no anchored trip on one side to
+        # reconcile against. Neither check reaches these; nothing here has
+        # ever looked at them.
+        "boundaries_unreachable": unbracketed,
+        "note": (_gaps_note(skipped, len(blocks), unbracketed)
+                 if not findings else None),
     }
 
 
