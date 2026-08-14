@@ -397,11 +397,22 @@ def vampire_drain(
     if len(chain) < 2 or not capacity_kwh:
         return {"kwh": 0.0, "hours": 0.0, "gaps": 0, "gap_list": [], "longest": None}
     charge_starts = sorted(c.start_time for c in (charges or []))
-    # Only fitted when some trip actually gave drain up (see the add-back
-    # below) — the ordinary window has none and shouldn't pay for the fit.
-    park_rate_kw = (parked_rate_kw(drives, charges, capacity_kwh)
+    # Fitted lazily: the add-back below needs it only when some trip gave
+    # drain up, and the short-gap substitution only when a gap is too brief to
+    # measure. Windows with neither shouldn't pay for the fit.
+    _rate: list[float | None] = []
+
+    def park_rate() -> float | None:
+        if not _rate:
+            _rate.append(parked_rate_kw(drives, charges, capacity_kwh))
+        return _rate[0]
+
+    park_rate_kw = (park_rate()
                     if any(getattr(d, "start_park_min", None) for d in ordered)
                     else None)
+    # SoC is stored to whole percent and nothing finer exists at a trip
+    # boundary, so one point is the smallest drain a gap can express.
+    soc_point_kwh = capacity_kwh / 100.0
     total_kwh = 0.0
     total_hours = 0.0
     gap_list: list[dict[str, Any]] = []
@@ -422,6 +433,34 @@ def vampire_drain(
         # measured *kwh* for this gap, not that it didn't happen.
         drop_pct = max(a.end_soc - b.start_soc, 0.0)
         kwh = drop_pct / 100.0 * capacity_kwh
+        # ...and the same integer precision reads far too HIGH on a short gap,
+        # which nothing guarded. One SoC point is 0.7 kWh here, while a parked
+        # car draws about 0.04 kW — so it takes roughly 18 hours to move a
+        # single point, and any gap shorter than that resolves the drain no
+        # better than "0 or 0.7 kWh". Where it lands is rounding, not
+        # measurement, and rounding that lands on 1 or 2 points is reported as
+        # real energy.
+        #
+        # Measured against the car's own screen: a 1.7-hour parked gap read 2
+        # points and was reported as 1.39 kWh — more, on its own, than the
+        # 1.3% (0.90 kWh) the car attributed to ALL parked drain since the
+        # last charge, a window holding that gap and many others.
+        #
+        # So when the expected drain over a gap is under one SoC point, the
+        # measurement carries no information about it and the fitted rate is
+        # strictly the better estimator. Longer gaps keep their measurement:
+        # the 18.5-hour park above read 1 point, 0.70 kWh, against 0.71
+        # modelled — at that length the two agree and the reading wins.
+        #
+        # The rate is itself fitted from gaps long enough to measure (see
+        # parked_rate_kw), so this substitutes measurement at a scale that
+        # works for measurement at a scale that doesn't. It is not a guess
+        # standing in for data.
+        if gap_hours > 0:
+            rate = park_rate()
+            if rate and rate * gap_hours < soc_point_kwh:
+                kwh = rate * gap_hours
+                drop_pct = kwh / capacity_kwh * 100.0
         # Drain the following trip gave up, put back where it belongs. When
         # b's departure was recovered across a blackout its start_soc is the
         # PRE-gap reading, so the drop above stops there while this gap's own

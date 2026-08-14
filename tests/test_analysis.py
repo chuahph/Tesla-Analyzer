@@ -1856,3 +1856,68 @@ def test_continuity_needs_odometer_anchors_and_readings():
     assert odometer_continuity(legacy, [_rd("2026-07-01T09:05", 10000.4)])["available"] is False
     good = [_drv(1, "2026-07-01T08:00", "2026-07-01T09:00", 10000.0)]
     assert odometer_continuity(good, [])["available"] is False
+
+
+def test_short_parked_gaps_are_modelled_not_read_off_integer_soc():
+    """SoC is stored to whole percent, so one point is the smallest drain a gap
+    can express — 0.7 kWh on a 69.5 kWh pack. A parked car draws about 0.04 kW,
+    which takes ~18 hours to move a single point, so anything shorter resolves
+    the drain no better than "0 or 0.7 kWh".
+
+    Measured against the car: a 1.7-hour gap read 2 points and was reported as
+    1.39 kWh — on its own more than the 0.90 kWh the car attributed to ALL
+    parked drain since the last charge, a window containing that gap and
+    others. Where a short gap lands is rounding, not measurement.
+    """
+    from datetime import datetime, timedelta
+    from types import SimpleNamespace
+
+    from app.analysis.driving import vampire_drain
+
+    cap = 69.5
+    base = datetime.fromisoformat("2026-08-13T08:00")
+
+    def drive(start, mins, s_soc, e_soc, odo, dist=10.0):
+        return SimpleNamespace(
+            id=int(odo), start_time=start, end_time=start + timedelta(minutes=mins),
+            start_soc=s_soc, end_soc=e_soc, distance_km=dist, duration_min=mins,
+            start_odo_km=odo, end_odo_km=odo + dist, start_park_min=None,
+            energy_used_kwh=1.4, avg_speed_kmh=30.0)
+
+    # Long gaps to fit the parked rate from (STANDBY_MIN_TOTAL_HOURS), each
+    # ~20 h apart losing 1 SoC point — about 0.035 kW.
+    drives = []
+    soc = 90.0
+    for i in range(5):
+        start = base + timedelta(hours=20 * i)
+        drives.append(drive(start, 20, soc, soc - 2, 1000.0 + 20 * i))
+        soc -= 3.0                       # 2 driving + 1 parked over the gap
+
+    long_only = vampire_drain(drives, [], cap)
+    assert long_only["kwh"] > 0
+
+    # Now insert a SHORT gap that happens to straddle two integer boundaries:
+    # 1.7 hours reading a 2-point drop, which no 1.7-hour park can really be.
+    short_start = drives[-1].end_time + timedelta(hours=1.7)
+    drives.append(drive(short_start, 20, drives[-1].end_soc - 2.0,
+                        drives[-1].end_soc - 4.0, 1200.0))
+    got = vampire_drain(drives, [], cap)
+
+    added = got["kwh"] - long_only["kwh"]
+    # The naive reading would add 2 points = 1.39 kWh. The modelled drain over
+    # 1.7 h is under a tenth of that.
+    assert added < 0.2, f"short gap contributed {added:.3f} kWh"
+    assert added > 0, "a real park still costs something"
+
+    # And a gap long enough to measure keeps its measurement rather than being
+    # replaced by the model — the substitution is about resolution, not a
+    # preference for the fit.
+    far = drives[-1].end_time + timedelta(hours=40)
+    drives.append(drive(far, 20, drives[-1].end_soc - 3.0,
+                        drives[-1].end_soc - 5.0, 1300.0))
+    with_long = vampire_drain(drives, [], cap)
+    added_long = with_long["kwh"] - got["kwh"]
+    # Its measured 3 points, not the ~1.5 kWh the fitted rate would give over
+    # 40 h. (Loose tolerance: adding this gap also re-fits the rate slightly,
+    # which nudges the modelled short gap above.)
+    assert added_long == pytest.approx(3.0 / 100.0 * cap, rel=0.05)
