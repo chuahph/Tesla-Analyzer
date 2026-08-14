@@ -4615,6 +4615,7 @@ def _gaps_note(skipped: int, bad_blocks: int, unreachable: int = 0) -> str:
 def trip_gaps(
     days: int = Query(30, ge=1, le=730),
     min_km: float = Query(0.01, ge=0.001),
+    from_odo_km: float | None = Query(None),
     session: Session = Depends(get_session),
 ):
     """Where consecutive trips disagree about the odometer.
@@ -4707,6 +4708,15 @@ def trip_gaps(
     # never examined. Counted, never folded into the verdict: reporting zero
     # failing blocks over trips nothing could look at is the same false
     # all-clear as before, one level further in.
+    # ``from_odo_km`` supplies the reading history does not have: the odometer
+    # when the oldest trip in this window began. One number off a delivery
+    # record or a dated photo of the dash, and the whole leading run becomes
+    # measurable — it is an anchor on the missing side, so reconciling against
+    # it assumes nothing the trips themselves recorded.
+    #
+    # This is the one legitimate version of "supply the missing odometer". The
+    # illegitimate one is deriving it from the trips' own distances, which
+    # would make every check downstream pass by construction.
     blocks: list[dict[str, Any]] = []
     anchored = [i for i, d in enumerate(drives)
                 if d.start_odo_km is not None and d.end_odo_km is not None]
@@ -4722,6 +4732,26 @@ def trip_gaps(
                 unbracketed += 1
     else:
         unbracketed = max(len(drives) - 1, 0)
+    if from_odo_km is not None and anchored and anchored[0] > 0:
+        lead = drives[:anchored[0]]
+        claimed = round(sum(d.distance_km or 0.0 for d in lead), 3)
+        span = round(drives[anchored[0]].start_odo_km - from_odo_km, 3)
+        diff = round(span - claimed, 3)
+        unbracketed = max(unbracketed - anchored[0], 0)
+        if abs(diff) >= min_km:
+            blocks.append({
+                "trips": len(lead),
+                "from": {"id": None, "at": "start of history (from_odo_km)",
+                         "odo_km": from_odo_km},
+                "to": {"id": drives[anchored[0]].id,
+                       "at": drives[anchored[0]].start_time.isoformat(timespec="minutes"),
+                       "odo_km": drives[anchored[0]].start_odo_km},
+                "odometer_moved_km": span,
+                "trips_claim_km": claimed,
+                "difference_km": diff,
+                "reading": ("distance no trip claims" if diff > 0
+                            else "distance claimed twice"),
+            })
     for a, b in zip(anchored, anchored[1:]):
         if b == a + 1:
             continue                       # adjacent: the boundary check has it
@@ -4765,6 +4795,10 @@ def trip_gaps(
         # reconcile against. Neither check reaches these; nothing here has
         # ever looked at them.
         "boundaries_unreachable": unbracketed,
+        # How to make the unreachable ones reachable, when there are any.
+        "hint": (None if not unbracketed else
+                 "Pass &from_odo_km=<the odometer when the oldest trip here "
+                 "began> to reconcile the leading run against a real reading."),
         "note": (_gaps_note(skipped, len(blocks), unbracketed)
                  if not findings else None),
     }

@@ -3848,5 +3848,27 @@ def test_trip_gaps_admits_the_boundaries_nothing_can_reach():
             # And the verdict must not read as an all-clear over them.
             assert "nothing has checked those" in body["note"]
             assert "reconcile against the readings either side" not in body["note"]
+            assert "from_odo_km" in body["hint"]
+
+            # One reading from outside the app closes the whole leading run.
+            # The two old trips claim 18.0 km and the first anchor sits at
+            # 1000.0, so an opening odometer of 982.0 reconciles exactly.
+            good = client.get("/api/trip-gaps?from_odo_km=982.0").json()
+            assert good["boundaries_unreachable"] == 0
+            assert good["unanchored_blocks"] == 0
+            assert good["hint"] is None
+            assert "nothing has checked those" not in good["note"]
+
+            # A wrong one is caught rather than absorbed: 5 km of the old
+            # trips' ground would belong to no trip at all.
+            bad = client.get("/api/trip-gaps?from_odo_km=977.0").json()
+            assert bad["boundaries_unreachable"] == 0
+            assert bad["unanchored_blocks"] == 1
+            (blk,) = bad["blocks"]
+            assert blk["trips"] == 2
+            assert blk["odometer_moved_km"] == pytest.approx(23.0, abs=0.002)
+            assert blk["trips_claim_km"] == pytest.approx(18.0, abs=0.002)
+            assert blk["difference_km"] == pytest.approx(5.0, abs=0.002)
+            assert "do NOT reconcile" in bad["note"]
     finally:
         settings.app_passcode = old_pass
