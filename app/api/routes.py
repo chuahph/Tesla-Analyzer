@@ -4616,6 +4616,7 @@ def trip_gaps(
     days: int = Query(30, ge=1, le=730),
     min_km: float = Query(0.01, ge=0.001),
     from_odo_km: float | None = Query(None),
+    from_time: str | None = Query(None),
     session: Session = Depends(get_session),
 ):
     """Where consecutive trips disagree about the odometer.
@@ -4737,15 +4738,33 @@ def trip_gaps(
         implied = round(drives[anchored[0]].start_odo_km
                         - sum(d.distance_km or 0.0 for d in drives[:anchored[0]]), 1)
     if from_odo_km is not None and anchored and anchored[0] > 0:
+        # ``from_time`` places the reading in history. Without it the reading is
+        # taken to be at the oldest trip's start; with it, only the trips after
+        # that moment are counted against the span.
+        #
+        # It matters because the readings people actually have are dated photos
+        # of the dash, and one from BEFORE the first recorded trip cannot
+        # anchor anything: the ground between it and the app's first trip was
+        # driven before the app existed, so it would surface as a hole that is
+        # not a fault. Measured: a photo reading 27,716 against an oldest trip
+        # starting at 28,291.4 — 575 km of pre-history that no record covers.
         lead = drives[:anchored[0]]
+        if from_time:
+            try:
+                cutoff = datetime.fromisoformat(from_time)
+            except ValueError:
+                raise HTTPException(
+                    400, "from_time must be ISO 8601, e.g. 2026-07-05T15:12")
+            lead = [d for d in lead if d.start_time >= cutoff]
         claimed = round(sum(d.distance_km or 0.0 for d in lead), 3)
         span = round(drives[anchored[0]].start_odo_km - from_odo_km, 3)
         diff = round(span - claimed, 3)
-        unbracketed = max(unbracketed - anchored[0], 0)
+        unbracketed = max(unbracketed - len(lead), 0)
         if abs(diff) >= min_km:
             blocks.append({
                 "trips": len(lead),
-                "from": {"id": None, "at": "start of history (from_odo_km)",
+                "from": {"id": None,
+                         "at": from_time or "start of history (from_odo_km)",
                          "odo_km": from_odo_km},
                 "to": {"id": drives[anchored[0]].id,
                        "at": drives[anchored[0]].start_time.isoformat(timespec="minutes"),
@@ -4804,7 +4823,14 @@ def trip_gaps(
                  f"Pass &from_odo_km=NUMBER (the odometer when the oldest trip "
                  f"here began) to reconcile the leading run. Its own trips "
                  f"imply {implied}; if a real record says otherwise, the "
-                 f"difference is the discrepancy."),
+                 f"difference is the discrepancy. A reading from BEFORE the "
+                 f"oldest trip anchors nothing — pass &from_time=ISO with it "
+                 f"if it sits mid-history."),
+        # Which reading would be usable, in the terms a person can go and look
+        # for one: a dated photo of the dash reading MORE than this, from AFTER
+        # this moment. Anything earlier is pre-history and anchors nothing.
+        "oldest_trip_at": (drives[0].start_time.isoformat(timespec="minutes")
+                           if drives else None),
         # What the leading run's own distances imply the opening reading was.
         # NOT a verification — it is derived from the very trips in question,
         # so feeding it back would reconcile by construction. It is a figure to

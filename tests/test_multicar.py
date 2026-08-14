@@ -3874,5 +3874,23 @@ def test_trip_gaps_admits_the_boundaries_nothing_can_reach():
             assert blk["trips_claim_km"] == pytest.approx(18.0, abs=0.002)
             assert blk["difference_km"] == pytest.approx(5.0, abs=0.002)
             assert "do NOT reconcile" in bad["note"]
+
+            # A dated reading from PART WAY through the unanchored run works
+            # too, and only the trips after it are counted against the span.
+            # This is the realistic case: the readings people actually have are
+            # photos of the dash, taken whenever, not at the first trip.
+            # Trip A1 ran 10 km from base, so a reading of 992.0 taken just
+            # before trip A1 leaves 8.0 km claimed against an 8.0 km span.
+            mid = client.get(
+                "/api/trip-gaps?from_odo_km=992.0"
+                "&from_time=2026-08-11T08:30").json()
+            assert mid["unanchored_blocks"] == 0
+            assert mid["boundaries_unreachable"] == 1     # the pre-cutoff one
+            assert mid["oldest_trip_at"] == "2026-08-11T08:00"
+
+            # A malformed timestamp is refused rather than silently ignored,
+            # which would reconcile against the wrong set of trips.
+            assert client.get("/api/trip-gaps?from_odo_km=992.0"
+                              "&from_time=july+5").status_code == 400
     finally:
         settings.app_passcode = old_pass
