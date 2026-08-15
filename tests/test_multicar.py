@@ -4309,9 +4309,16 @@ def test_capacity_evidence_reports_precision_rather_than_assuming_it():
             # DC 68.7, DC 68.7, AC 68.7*0.95 -> the median stays 68.7 and the
             # AC row sits below it, which is the correction doing its job.
             assert body["median_implied_kwh"] == pytest.approx(68.7, abs=0.05)
-            ac = next(r for r in body["charges"] if r["swing_pct"] == 50.0
-                      and r["implied_capacity_kwh"] < 68.0)
+            ac = next(r for r in body["charges"] if r["charge_type"] == "AC")
             assert ac["implied_capacity_kwh"] == pytest.approx(68.7 * 0.95, abs=0.05)
+            # Which correction was applied is reported, because mixing AC and
+            # DC rows without knowing which is which makes the figure
+            # uninterpretable.
+            assert {r["charge_type"] for r in body["charges"]} == {"AC", "DC"}
+            # The widest sessions are reported on their own — measured, the
+            # precision column predicts the scatter almost exactly.
+            assert body["widest_sessions"]["count"] == 4
+            assert body["widest_sessions"]["median_kwh"] == pytest.approx(68.7, abs=0.05)
 
             # Excluded, not hidden — with its precision on show.
             narrow = next(r for r in body["charges"] if r["swing_pct"] == 4.0)
