@@ -1347,7 +1347,30 @@ def close_charge_on_sleep(open_charge: dict, last_snapshot: dict, capacity_kwh: 
 # is inflated, which then inflates every trip's computed kWh by the same
 # proportion (confirmed against real Tesla-app Current Drive readings that
 # ran ~5% under the uncorrected figure across independent trips).
-AC_CHARGE_EFFICIENCY = 0.95
+#
+# 0.95 was that ~5%, taken as the generic figure for an onboard charger. This
+# car has since measured its own, from two sources that had to be combined
+# because neither sees both sides of the loss:
+#
+#   charger-side  three AC sessions of 56, 68 and 81 SoC points, agreeing to
+#                 0.75% — 71.28, 71.50, 71.82 kWh per 100%
+#   pack-side     four readings off the car's own energy screen — 68.14,
+#                 68.69, 68.82, 69.01, median 68.67
+#
+# The ratio is what the onboard charger actually loses: 0.960, not 0.950.
+# Rounded there and no further — the two medians carry about +/-0.7% between
+# them, so 0.9603 would be precision the evidence cannot support.
+#
+# At 0.95 this car's measured pack came out 67.9 against a screen saying
+# 68.67, an over-correction of 1.1%; at 0.96 it lands on 68.6.
+#
+# DC is still left unadjusted and that is now known to be slightly wrong. The
+# one wide Supercharger session on record implies 70.86 against the same
+# screen median — about 3% of loss the pack never received. One sample is not
+# a constant, and the median over sessions keeps it from moving the answer,
+# so it is recorded here rather than fitted. Revisit with three wide DC
+# sessions.
+AC_CHARGE_EFFICIENCY = 0.96
 
 
 def implied_capacity_kwh(charge: dict) -> float | None:

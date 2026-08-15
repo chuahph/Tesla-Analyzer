@@ -4309,8 +4309,14 @@ def test_capacity_evidence_reports_precision_rather_than_assuming_it():
             # DC 68.7, DC 68.7, AC 68.7*0.95 -> the median stays 68.7 and the
             # AC row sits below it, which is the correction doing its job.
             assert body["median_implied_kwh"] == pytest.approx(68.7, abs=0.05)
+            from app.sync import AC_CHARGE_EFFICIENCY
             ac = next(r for r in body["charges"] if r["charge_type"] == "AC")
-            assert ac["implied_capacity_kwh"] == pytest.approx(68.7 * 0.95, abs=0.05)
+            # Derived from the constant, not restated: this pins that the
+            # correction is APPLIED, and pinning its value here as well would
+            # look like a second measurement of it.
+            assert ac["implied_capacity_kwh"] == pytest.approx(
+                68.7 * AC_CHARGE_EFFICIENCY, abs=0.05)
+            assert ac["implied_capacity_kwh"] < 68.7
             # Which correction was applied is reported, because mixing AC and
             # DC rows without knowing which is which makes the figure
             # uninterpretable.
