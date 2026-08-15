@@ -1,0 +1,54 @@
+name: Reconcile short arrivals
+
+# A trip can close before the car has finished arriving — the poll that would
+# see the last few hundred metres is a minute late, or the car sleeps first.
+# The distance is not lost: the next trip's departure recovery reaches back
+# over it, so every odometer boundary still agrees and /api/trip-gaps passes
+# perfectly. The energy simply lands on the wrong side of the boundary.
+#
+# Only the readings taken while the car sat parked can see it, and measured on
+# a real month they saw it 10 times in 78 trips — 4.49 km, nine of them
+# clustered between 0.15 and 0.40 km, which is one mechanism firing repeatedly
+# rather than noise.
+#
+# The sync path has a fold-in meant to catch exactly this. It runs once and
+# then clears its marker, so a car that moves again a few minutes later is
+# never revisited, and the guards around it are there because widening them
+# once double-counted 2 km under two names. Rather than reopen that, this runs
+# the same repair the endpoint already applies by hand: idempotent, capped at
+# ARRIVAL_EST_MAX_KM, and refusing anything larger as a possible unlogged
+# drive for a person to judge.
+#
+# Daily, not hourly. Nothing here is urgent — the correction is just as valid a
+# day later — and the parked readings it needs accumulate over hours anyway.
+#
+# Needs the same two secrets as sync-car.yml (RENDER_URL, SYNC_KEY). Without
+# them it does nothing, so it is safe in any fork.
+
+on:
+  schedule:
+    - cron: "20 19 * * *"   # 03:20 MYT, after the day's driving is done
+  workflow_dispatch: {}
+
+concurrency:
+  group: repair-arrivals
+  cancel-in-progress: false
+
+jobs:
+  reconcile:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Apply arrival corrections the parked readings prove
+        env:
+          RENDER_URL: ${{ secrets.RENDER_URL }}
+          SYNC_KEY: ${{ secrets.SYNC_KEY }}
+        run: |
+          if [ -z "$RENDER_URL" ] || [ -z "$SYNC_KEY" ]; then
+            echo "RENDER_URL / SYNC_KEY not configured — nothing to do."
+            exit 0
+          fi
+          # Long timeout on the only call: a free Render instance sleeps after
+          # ~15 minutes and takes the better part of a minute to wake, and this
+          # runs at an hour when nothing else has touched it.
+          curl -sS --max-time 120 -w $'\nHTTP %{http_code}' \
+            "${RENDER_URL%/}/api/repair-arrivals?days=30&apply=true&key=${SYNC_KEY}"

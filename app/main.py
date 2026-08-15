@@ -114,10 +114,25 @@ async def _passcode_gate(request: Request, call_next):
     # /api/backup (scheduled webhook backups), /api/reports/monthly (scheduled
     # webhook reports) and /api/alerts/check (proactive alerts) with the secret
     # key instead of the passcode cookie.
+    #
+    # /api/repair-arrivals joins them, and it is the only one here that edits
+    # trips. The reason is that the correction it applies cannot be made in the
+    # sync path safely: the fold-in that should catch a short close runs once
+    # and clears its marker, and the guards around it exist because widening
+    # them once double-counted 2 km under two names. Running the tested,
+    # idempotent repair on a schedule reaches the same place without touching
+    # that logic.
+    #
+    # It is safe to expose because of what it can do rather than who calls it:
+    # it only ever moves a boundary to an odometer reading taken while the car
+    # sat parked, it refuses anything past ARRIVAL_EST_MAX_KM, and a second run
+    # changes nothing. There is no input to forge — the key holder cannot
+    # supply a figure, only ask that measurements already on record be applied.
     sync_key = settings.sync_key.strip()
     if (
         sync_key
-        and path in ("/api/sync", "/api/backup", "/api/reports/monthly", "/api/alerts/check")
+        and path in ("/api/sync", "/api/backup", "/api/reports/monthly",
+                     "/api/alerts/check", "/api/repair-arrivals")
         and hmac.compare_digest(request.query_params.get("key", ""), sync_key)
     ):
         return await call_next(request)

@@ -4350,3 +4350,30 @@ def test_capacity_evidence_reports_precision_rather_than_assuming_it():
             assert sum(vals) / len(vals) > 73.0
     finally:
         settings.app_passcode = old_pass
+
+
+def test_repair_arrivals_is_reachable_by_the_cron_key_and_nothing_else_new_is():
+    """The arrival correction has to run unattended or it will not run at all —
+    the whole finding was that nobody had looked at the check's output. It is
+    the only mutating repair on the key's whitelist, so the boundary of what
+    that key can reach is worth pinning.
+    """
+    settings = get_settings()
+    old_pass, old_key = settings.app_passcode, settings.sync_key
+    settings.app_passcode, settings.sync_key = "1234", "s3cret"
+    try:
+        with TestClient(app) as client:
+            # Reachable with the key, refused without it.
+            assert client.get("/api/repair-arrivals?days=7&key=s3cret").status_code == 200
+            assert client.get("/api/repair-arrivals?days=7").status_code == 401
+            assert client.get("/api/repair-arrivals?days=7&key=wrong").status_code == 401
+
+            # The other repairs stay behind the passcode: this one is exposed
+            # because it can only apply measurements already on record, with no
+            # figure for a caller to supply.
+            for path in ("/api/repair-all", "/api/repair-trip-boundary"
+                         "?closed_id=1&open_id=2&boundary_odo_km=1.0"):
+                assert client.get(f"{path}&key=s3cret" if "?" in path
+                                  else f"{path}?key=s3cret").status_code == 401
+    finally:
+        settings.app_passcode, settings.sync_key = old_pass, old_key
