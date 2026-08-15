@@ -67,11 +67,11 @@ def odometer_continuity(drives: list[Any], readings: list[Any]) -> dict[str, Any
         # before the next one set off. The highest is where the car came to
         # rest, whatever the trip recorded.
         until = nxt.start_time if nxt else None
-        resting = [o for t, o in obs
+        resting = [(t, o) for t, o in obs
                    if t >= d.end_time and (until is None or t <= until)]
         if not resting:
             continue
-        seen = max(resting)
+        seen = max(o for _, o in resting)
         missing = seen - d.end_odo_km - (getattr(d, "end_lost_km", None) or 0.0)
         if missing <= CONTINUITY_TOLERANCE_KM:
             continue
@@ -89,6 +89,19 @@ def odometer_continuity(drives: list[Any], readings: list[Any]) -> dict[str, Any
             "end_time": d.end_time.isoformat(timespec="minutes"),
             "recorded_end_odo_km": round(d.end_odo_km, 1),
             "observed_odo_km": round(seen, 1),
+            # WHEN the car was first seen at that reading, and when it was
+            # last seen still at the recorded one. A parked car's odometer
+            # cannot creep, so the movement happened between these two — and
+            # the only way to judge a large finding is to know when to
+            # remember. Measured: 1.82 km somewhere in an overnight park is a
+            # different question depending on whether it moved at 19:30 or
+            # 02:00.
+            "observed_at": min(t for t, o in resting
+                               if o >= seen - 0.001).isoformat(timespec="minutes"),
+            "last_at_recorded": (
+                max((t for t, o in resting if o <= d.end_odo_km + 0.001),
+                    default=None).isoformat(timespec="minutes")
+                if any(o <= d.end_odo_km + 0.001 for _, o in resting) else None),
             "unrecorded_km": round(missing, 2),
         })
     return {

@@ -4154,6 +4154,10 @@ def test_continuity_endpoint_catches_what_boundary_checks_cannot():
             assert gap["drive_id"] == ids[0]
             assert gap["next_drive_id"] == ids[1]
             assert gap["boundary_odo_km"] == pytest.approx(1010.6, abs=0.02)
+            # A parked odometer cannot creep, so the movement happened between
+            # these two — which is what makes a large finding judgeable.
+            assert gap["observed_at"].startswith(
+                (base + timedelta(minutes=40)).isoformat(timespec="minutes")[:13])
             assert "misattribution, not a hole" in body["note"]
 
             # And with no readings it says it could not look, rather than clean.
