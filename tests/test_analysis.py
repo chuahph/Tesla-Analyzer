@@ -1642,18 +1642,36 @@ def test_parked_awake_kw_skips_gaps_containing_a_charge():
     assert parked_awake_kw(drives, [charged], 70.0) is None
 
 
-def test_trim_is_charged_at_the_just_parked_rate_not_the_sleeping_one():
-    """A trimmed tail is the first minutes after arrival, so it must be priced
-    at the awake rate. Using the deep-sleep one leaves roughly half the parked
-    energy inside the trip."""
+def test_trim_rate_ignores_the_awake_fit_it_cannot_measure():
+    """This pinned the opposite for a while: a trimmed tail is the first
+    minutes after arrival, so it "must" be priced at the awake rate rather than
+    the deep-sleep one.
+
+    The physics is still right and the measurement was never possible. One
+    whole-percent SoC point is ~0.7 kWh, about eighteen hours of parked drain
+    on this car, while parked_awake_kw samples gaps of 0.15-2 h and asks for
+    only 6 h in total — under half a point of real signal. What it fits is
+    mostly rounding, and _gap_rate_kw's max(drop, 0) keeps the upward halves of
+    that noise while clipping the downward ones.
+
+    Measured live: the awake fit returned 0.348 kW while the car's own screen
+    put ALL parked drain since the last charge at 2.0%, about 0.034 kW. Ten
+    times over, and stated confidently, which is worse than the noisy zero it
+    replaced. So the trim is priced at standby_kw, thin but an order of
+    magnitude better placed against the quantum.
+    """
     from app.api.routes import _trim_rate_kw
+    from app.analysis.driving import parked_awake_kw, standby_kw
 
     short = _errands(1.5, 4)                       # awake sample only
     long_gaps = _errands(10.0, 3)                  # sleeping sample only
-    assert _trim_rate_kw(short, [], 70.0) == round(2.8 / 6.0, 3)
-    # And when only sleeping gaps exist, fall back rather than skip the
-    # correction entirely.
-    from app.analysis.driving import standby_kw
+
+    # The awake fit still returns a number for this sample — that is the trap.
+    assert parked_awake_kw(short, [], 70.0) is not None
+    # It is no longer what prices a trim: with no gap long enough to measure,
+    # there is no rate and therefore no correction.
+    assert _trim_rate_kw(short, [], 70.0) is None
+
     assert _trim_rate_kw(long_gaps, [], 70.0) == standby_kw(long_gaps, [], 70.0)
     assert _trim_rate_kw(long_gaps, [], 70.0) is not None
 

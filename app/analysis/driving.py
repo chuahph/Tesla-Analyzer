@@ -201,10 +201,27 @@ def parked_rate_kw(drives: list[Any], charges: list[Any] | None,
     minutes taken OFF a trip (a trimmed tail, or a departure gap's parked part)
     and the same minutes added back to the parked gap that should carry them.
     Two rates would leave energy created or destroyed at the boundary.
+
+    parked_awake_kw was preferred here and no longer is, because it cannot be
+    measured from this data. Its band is 0.15-2 h and it needs only 6 h of gap
+    time in total, while one whole-percent SoC point is 0.7 kWh — around 18
+    hours of parked drain on this car. Six hours of aggregate is under half a
+    point, so the fit is reading almost pure rounding, and _gap_rate_kw's
+    max(drop, 0) clips the downward halves of that noise while counting the
+    upward ones in full. Rectified noise has a mean, and it is not the truth.
+    Measuring 0.034 kW against a 0.7 kWh quantum needs on the order of a
+    hundred parked hours, not six.
+
+    Measured live: the awake fit returned 0.348 kW while the car's own screen
+    put ALL parked drain since the last charge at 2.0% — about 0.034 kW across
+    the window. Ten times over, and confidently so, which is worse than the
+    noisy zero it replaced.
+
+    standby_kw samples gaps of 6 h and up, needs 24 h in total, and carries a
+    plausibility band. Still thin, but an order of magnitude better placed
+    against the quantum. Its docstring's rule holds here too: None means do
+    not correct, never substitute a guess.
     """
-    awake = parked_awake_kw(drives, charges, capacity_kwh)
-    if awake is not None:
-        return awake
     return standby_kw(drives, charges, capacity_kwh)
 
 
