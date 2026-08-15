@@ -4284,25 +4284,34 @@ def test_capacity_evidence_reports_precision_rather_than_assuming_it():
                 veh = s.query(Vehicle).first()
                 base = sync_mod.now_local() - timedelta(days=10)
 
-                def charge(i, s_soc, e_soc, kwh):
+                def charge(i, s_soc, e_soc, kwh, kind="DC"):
                     s.add(Charge(vehicle_id=veh.id,
                                  start_time=base + timedelta(days=i),
                                  end_time=base + timedelta(days=i, hours=2),
                                  duration_min=120, start_soc=s_soc, end_soc=e_soc,
                                  energy_added_kwh=kwh, cost=10.0, location="Home",
-                                 outside_temp_c=30))
+                                 charge_type=kind, outside_temp_c=30))
 
-                # Two wide sessions that can measure, one narrow one that can't
-                # and would drag the median if it were counted.
+                # Two wide DC sessions that can measure, one narrow one that
+                # can't and would drag the median if it were counted.
                 charge(0, 30, 80, 34.35)      # 50 pts -> 68.7
                 charge(1, 20, 75, 37.79)      # 55 pts -> 68.7
                 charge(2, 60, 64, 4.00)       # 4 pts  -> 100.0, precision 25%
+                # And one AC session that would read 68.7 uncorrected — a
+                # charger reports what went in, not what reached the pack.
+                charge(3, 25, 75, 34.35, kind="AC")
+                charge(4, 35, 85, 34.35)      # a fourth wide one, so a median
                 s.commit()
 
             body = client.get("/api/capacity-evidence").json()
-            assert body["charges_seen"] == 3
-            assert body["charges_counted"] == 2          # the 4-point one is out
+            assert body["charges_seen"] == 5
+            assert body["charges_counted"] == 4          # the 4-point one is out
+            # DC 68.7, DC 68.7, AC 68.7*0.95 -> the median stays 68.7 and the
+            # AC row sits below it, which is the correction doing its job.
             assert body["median_implied_kwh"] == pytest.approx(68.7, abs=0.05)
+            ac = next(r for r in body["charges"] if r["swing_pct"] == 50.0
+                      and r["implied_capacity_kwh"] < 68.0)
+            assert ac["implied_capacity_kwh"] == pytest.approx(68.7 * 0.95, abs=0.05)
 
             # Excluded, not hidden — with its precision on show.
             narrow = next(r for r in body["charges"] if r["swing_pct"] == 4.0)
@@ -4310,14 +4319,21 @@ def test_capacity_evidence_reports_precision_rather_than_assuming_it():
             assert narrow["precision_pct"] == pytest.approx(25.0, abs=0.1)
             assert narrow["implied_capacity_kwh"] == pytest.approx(100.0, abs=0.1)
 
-            # And the direction of the known bias is stated, not buried.
-            assert "charging losses" in body["caveat"]
+            # The correction is named, not left for the reader to guess at.
+            assert "efficiency correction" in body["caveat"]
+            # And with four qualifying-ish sessions on record, the capacity in
+            # use now comes from the car rather than from the variant spec.
             assert body["in_use"]["kwh"] > 0
+            assert "measured from" in body["in_use"]["source"]
 
-            # Lowering the floor lets the unmeasurable one back in, which is
-            # exactly what the precision column is there to warn about.
+            # Lowering the floor lets the unmeasurable 4-point session back
+            # in — and the median does not move, which is the reason it is a
+            # median. Its own implied figure is 100 kWh; a MEAN over the same
+            # five would read about 74 and quietly wreck every kWh downstream.
             loose = client.get("/api/capacity-evidence?min_swing_pct=1").json()
-            assert loose["charges_counted"] == 3
-            assert loose["median_implied_kwh"] > body["median_implied_kwh"]
+            assert loose["charges_counted"] == 5
+            assert loose["median_implied_kwh"] == pytest.approx(68.7, abs=0.05)
+            vals = [r["implied_capacity_kwh"] for r in loose["charges"]]
+            assert sum(vals) / len(vals) > 73.0
     finally:
         settings.app_passcode = old_pass

@@ -444,6 +444,48 @@ def _degradation_pct(session: Session, vehicle: Vehicle, settings) -> float | No
     return health["degradation_pct"] if health.get("available") else None
 
 
+# Charges needed before the measured pack figure outranks spec-minus-degradation.
+# One wide session is a reading; a median wants enough to disagree with itself,
+# and the EMA the sync keeps is seeded at 75.0 and only converges after a dozen
+# or so — a median over stored rows carries no seed at all, which is why this
+# recomputes rather than reading vehicle.battery_capacity_kwh.
+MEASURED_CAPACITY_MIN_CHARGES = 4
+# How far the measured figure may sit from the variant spec before it is
+# treated as a bad reading rather than a small pack. Degradation of more than
+# a fifth would be a warranty case, not a calibration.
+MEASURED_CAPACITY_MAX_DRIFT = 0.20
+
+
+def _measured_capacity(session: Session, vehicle: Vehicle) -> tuple[float | None, int]:
+    """This car's usable pack as its own charging sessions measure it.
+
+    Same rules as sync.capacity_from_charge, applied to the stored rows rather
+    than one live session: a gain wide enough that whole-percent SoC does not
+    dominate, the AC efficiency correction because a charger reports what went
+    in rather than what reached the pack, and a sane clamp so one bad row
+    cannot move the answer.
+
+    Median, not mean: a single mis-recorded session should not shift the figure
+    every kWh and every ringgit is derived from.
+    """
+    charges = session.scalars(
+        select(Charge).where(Charge.vehicle_id == vehicle.id)
+    ).all()
+    vals: list[float] = []
+    for c in charges:
+        gain = (c.end_soc or 0) - (c.start_soc or 0)
+        if gain < 15 or not c.energy_added_kwh:
+            continue
+        cap = c.energy_added_kwh / (gain / 100.0)
+        if (c.charge_type or "AC") != "DC":
+            cap *= sync_mod.AC_CHARGE_EFFICIENCY
+        if 45.0 <= cap <= 95.0:
+            vals.append(cap)
+    if len(vals) < MEASURED_CAPACITY_MIN_CHARGES:
+        return None, len(vals)
+    return round(percentile(sorted(vals), 0.5), 1), len(vals)
+
+
 def _usable_capacity(session: Session, vehicle: Vehicle, settings) -> tuple[float, str]:
     """Usable pack capacity (kWh) for turning a drive's range/SoC delta into
     kWh, plus where it came from.
@@ -466,6 +508,20 @@ def _usable_capacity(session: Session, vehicle: Vehicle, settings) -> tuple[floa
         return settings.battery_capacity_kwh, "override"
     spec = battery_analysis.usable_capacity_for(
         vehicle.model, vehicle.trim, vin_mod.decode(vehicle.vin).get("year"))
+    # The car's own charging sessions outrank the spec-derived figure, because
+    # they measure THIS pack rather than infer it. Spec minus degradation was
+    # preferred while the charge-derived number was thought to be the noisy
+    # one; four readings off the car's own energy screen have since put the
+    # spec path about 1% high every time, which is the wrong direction for a
+    # figure every kWh and every ringgit is scaled by.
+    #
+    # Gated, not trusted blindly: enough sessions for a median to mean
+    # something, and within MEASURED_CAPACITY_MAX_DRIFT of spec so a run of bad
+    # rows cannot walk the constant away from physical sense. Below either bar
+    # it falls through to exactly what it did before.
+    measured, samples = _measured_capacity(session, vehicle)
+    if measured and (not spec or abs(measured - spec) <= spec * MEASURED_CAPACITY_MAX_DRIFT):
+        return measured, f"measured from {samples} charges"
     if spec:
         degradation = _degradation_pct(session, vehicle, settings)
         if degradation is not None:
@@ -4587,6 +4643,12 @@ def capacity_evidence(
         if swing <= 0 or not c.energy_added_kwh:
             continue
         implied = c.energy_added_kwh / (swing / 100.0)
+        # A charger reports what went IN; the AC efficiency correction is what
+        # reached the pack. sync.capacity_from_charge has always applied this,
+        # and reporting the uncorrected figure here made the evidence disagree
+        # with the estimator it is evidence for.
+        if (c.charge_type or "AC") != "DC":
+            implied *= sync_mod.AC_CHARGE_EFFICIENCY
         # One SoC point at each end, so the swing is +/-1 point in total.
         precision = 1.0 / swing * 100.0
         rows.append({
@@ -4611,8 +4673,9 @@ def capacity_evidence(
         # never reached the pack, so this reads HIGH by exactly that much —
         # which matters, because the constant it is being compared against is
         # already suspected of reading high.
-        "caveat": ("Charger-reported energy includes charging losses, so these "
-                   "run above the true pack figure by roughly that margin."),
+        "caveat": (f"AC sessions carry the {sync_mod.AC_CHARGE_EFFICIENCY} "
+                   f"efficiency correction, same as sync.capacity_from_charge, "
+                   f"so these are pack-side figures rather than charger-side."),
         "screen_readings": [69.01, 68.69, 68.14, 68.82],
         "charges": rows[:40],
         "note": ("No charge has a swing wide enough to measure with — raise the "
