@@ -4002,3 +4002,82 @@ def test_backfill_place_names_renames_rows_left_holding_coordinates():
                 assert rows[0].start_location == "5.2819, 100.2787"
     finally:
         settings.app_passcode = old_pass
+
+
+def test_energy_reconcile_separates_what_is_accounted_for_from_what_is_not():
+    """The car reports this two ways and they disagree: its battery meter read
+    38% while its energy screen's categories summed to 36.7%. Both are right —
+    one is a raw SoC delta, the other is attributed consumption — and the gap
+    is energy that left without being filed anywhere.
+
+    This app has the same two quantities and never compared them. Trips plus
+    vampire drain is the attributed side; the SoC the last charge ended on
+    minus the SoC now is the raw side. The residual catches a whole class of
+    fault at once without knowing in advance which one happened.
+    """
+    from datetime import datetime, timedelta
+
+    from app import state
+    from app.models import Charge, Drive
+
+    settings = get_settings()
+    old_pass = settings.app_passcode
+    settings.app_passcode = ""
+    try:
+        with TestClient(app) as client:
+            with SessionLocal() as s:
+                for row in s.query(Drive).all():
+                    s.delete(row)
+                for row in s.query(Charge).all():
+                    s.delete(row)
+                s.flush()
+                veh = s.query(Vehicle).first()
+                base = datetime.fromisoformat("2026-08-14T08:00")
+                s.add(Charge(vehicle_id=veh.id, start_time=base - timedelta(hours=2),
+                             end_time=base, duration_min=120, start_soc=40,
+                             end_soc=80, energy_added_kwh=28.0, cost=15.0,
+                             location="Home", outside_temp_c=30))
+                # Two trips, 5 kWh between them, and a parked gap after each.
+                for i, kwh in enumerate((3.0, 2.0)):
+                    st = base + timedelta(hours=3 + 6 * i)
+                    s.add(Drive(vehicle_id=veh.id, start_time=st,
+                                end_time=st + timedelta(minutes=30),
+                                distance_km=20.0, duration_min=30,
+                                start_soc=80 - i * 5, end_soc=76 - i * 5,
+                                energy_used_kwh=kwh, avg_speed_kmh=40,
+                                max_speed_kmh=80, outside_temp_c=30,
+                                start_location="A", end_location="B",
+                                start_odo_km=1000.0 + 20 * i,
+                                end_odo_km=1020.0 + 20 * i))
+                s.commit()
+                vin = veh.vin
+            # The live reading is the raw side and comes from the poll, not the
+            # trip rows — which is exactly what makes the comparison meaningful.
+            with SessionLocal() as s:
+                state.put(s, state.scoped(state.LAST_STATUS_KEY, vin),
+                          _json.dumps({"soc": 70.0}))
+                s.commit()
+
+            body = client.get("/api/energy-reconcile").json()
+            assert body["raw"]["start_soc"] == 80
+            assert body["raw"]["now_soc"] == 70.0
+            assert body["raw"]["pct"] == pytest.approx(10.0, abs=0.01)
+            assert body["attributed"]["trips"] == pytest.approx(5.0, abs=0.01)
+            assert body["attributed"]["trips_count"] == 2
+            # 10% of the pack against 5 kWh of trips plus whatever the parked
+            # gaps came to — the rest is the residual, and it is signed.
+            cap = body["capacity_kwh"]
+            expected = round(10.0 - (5.0 + body["attributed"]["parked"]) / cap * 100, 2)
+            assert body["residual"]["pct"] == pytest.approx(expected, abs=0.02)
+            assert "further than anything here accounts for" in body["residual"]["reading"]
+
+            # Claiming MORE than left the pack reads the other way round.
+            with SessionLocal() as s:
+                state.put(s, state.scoped(state.LAST_STATUS_KEY, vin),
+                          _json.dumps({"soc": 79.0}))
+                s.commit()
+            flipped = client.get("/api/energy-reconcile").json()
+            assert flipped["residual"]["pct"] < 0
+            assert "claims more energy than left the pack" in flipped["residual"]["reading"]
+    finally:
+        settings.app_passcode = old_pass

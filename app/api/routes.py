@@ -4449,6 +4449,89 @@ class _DetachedDrive:
         self.end_time = datetime.fromisoformat(before["end_time"])
 
 
+@router.get("/energy-reconcile")
+def energy_reconcile(session: Session = Depends(get_session)):
+    """Where the battery went since the last charge, and how much is unexplained.
+
+    The car reports this two ways and they do not agree. Its battery meter is a
+    raw SoC delta — 38% on the reading that prompted this. Its energy screen
+    sums attributed categories instead, driving on one tab and parked draw on
+    another, and those came to 36.7%. Both are correct; they answer different
+    questions, and the 1.3 points between them is energy the car measured
+    leaving the pack without filing it anywhere, plus the BMS quietly revising
+    its estimate of what was there.
+
+    This app has the same two quantities and has never compared them. Trips
+    plus vampire drain is the attributed side; the SoC the last charge ended
+    on, minus the SoC now, is the raw side. Their difference is the residual,
+    and it is the one number that can catch a whole class of fault at once —
+    a drive nobody logged, a parked gap mis-measured, an energy figure
+    modelled too high — without knowing in advance which happened.
+
+    A residual of a point or two is ordinary and is what the car itself shows.
+    Several points is a missing trip or a broken figure, and worth chasing.
+    Signed, because the direction says which way: positive means the battery
+    fell further than anything here accounts for, negative means this app has
+    claimed more energy than actually left the pack.
+    """
+    vehicle = _first_vehicle(session)
+    capacity_kwh = _usable_capacity(session, vehicle, get_settings())[0]
+    last_charge = session.scalar(
+        select(Charge).where(Charge.vehicle_id == vehicle.id)
+        .order_by(Charge.end_time.desc())
+    )
+    if last_charge is None or not capacity_kwh:
+        raise HTTPException(
+            409, "No charge on record to measure from, so there is no window.")
+    import json as _json
+    live = _json.loads(
+        state.get(session, state.scoped(state.LAST_STATUS_KEY, vehicle.vin)) or "{}")
+    now_soc = live.get("soc")
+    if now_soc is None:
+        raise HTTPException(
+            409, "No current SoC reading, so the raw side cannot be measured.")
+
+    drives_since = session.scalars(
+        select(Drive).where(Drive.vehicle_id == vehicle.id,
+                            Drive.start_time >= last_charge.end_time)
+        .order_by(Drive.start_time)
+    ).all()
+    # No charges list: by definition nothing has charged since the most recent
+    # charge, so every gap in this window is a pure-drain measurement.
+    vampire = driving_analysis.vampire_drain(
+        drives_since, [], capacity_kwh,
+        anchor=(last_charge.end_time, last_charge.end_soc))
+    trips_kwh = round(sum(d.energy_used_kwh or 0.0 for d in drives_since), 3)
+    parked_kwh = round(vampire["kwh"], 3)
+    attributed_kwh = round(trips_kwh + parked_kwh, 3)
+
+    raw_pct = round(last_charge.end_soc - float(now_soc), 2)
+    attributed_pct = round(attributed_kwh / capacity_kwh * 100.0, 2)
+    residual_pct = round(raw_pct - attributed_pct, 2)
+    return {
+        "since_charge_id": last_charge.id,
+        "since": last_charge.end_time.isoformat(timespec="minutes"),
+        "capacity_kwh": capacity_kwh,
+        "raw": {"start_soc": last_charge.end_soc, "now_soc": now_soc,
+                "pct": raw_pct, "kwh": round(raw_pct / 100.0 * capacity_kwh, 3)},
+        "attributed": {"trips": trips_kwh, "trips_count": len(drives_since),
+                       "parked": parked_kwh, "kwh": attributed_kwh,
+                       "pct": attributed_pct},
+        "residual": {"pct": residual_pct,
+                     "kwh": round(residual_pct / 100.0 * capacity_kwh, 3),
+                     "reading": ("battery fell further than anything here "
+                                 "accounts for" if residual_pct > 0 else
+                                 "this app claims more energy than left the pack"
+                                 if residual_pct < 0 else "exact")},
+        "distance_km": round(sum(d.distance_km or 0.0 for d in drives_since), 1),
+        # The car's own gap between its two figures was 1.3 points over a
+        # comparable window, so that is the bar, not zero.
+        "note": ("Within the car's own attribution gap." if abs(residual_pct) <= 2.0
+                 else "Larger than the car's own gap — worth checking "
+                      "/api/trip-gaps for a drive nobody logged."),
+    }
+
+
 @router.api_route("/repair-all", methods=["GET", "POST"])
 def repair_all(
     days: int = Query(730, ge=1, le=3650),
