@@ -4254,3 +4254,70 @@ def test_repair_arrivals_fixes_the_tails_and_refuses_the_journeys():
             assert again["repaired"] == 0
     finally:
         settings.app_passcode = old_pass
+
+
+def test_capacity_evidence_reports_precision_rather_than_assuming_it():
+    """Four screen readings disagreed with the constant the same way each time,
+    which is thin ground for changing a number every kWh and every ringgit
+    depends on. Every charge is an independent measurement of the same pack
+    and none had been looked at.
+
+    The precision is the point. SoC is whole percent, so a session's ratio is
+    only as sharp as its swing — a 40-point charge resolves the pack to ~1%, a
+    4-point charge to 25% and says nothing. Averaging the small ones in is how
+    the parked rate came out ten times over.
+    """
+    from datetime import timedelta
+
+    from app import sync as sync_mod
+    from app.models import Charge
+
+    settings = get_settings()
+    old_pass = settings.app_passcode
+    settings.app_passcode = ""
+    try:
+        with TestClient(app) as client:
+            with SessionLocal() as s:
+                for row in s.query(Charge).all():
+                    s.delete(row)
+                s.flush()
+                veh = s.query(Vehicle).first()
+                base = sync_mod.now_local() - timedelta(days=10)
+
+                def charge(i, s_soc, e_soc, kwh):
+                    s.add(Charge(vehicle_id=veh.id,
+                                 start_time=base + timedelta(days=i),
+                                 end_time=base + timedelta(days=i, hours=2),
+                                 duration_min=120, start_soc=s_soc, end_soc=e_soc,
+                                 energy_added_kwh=kwh, cost=10.0, location="Home",
+                                 outside_temp_c=30))
+
+                # Two wide sessions that can measure, one narrow one that can't
+                # and would drag the median if it were counted.
+                charge(0, 30, 80, 34.35)      # 50 pts -> 68.7
+                charge(1, 20, 75, 37.79)      # 55 pts -> 68.7
+                charge(2, 60, 64, 4.00)       # 4 pts  -> 100.0, precision 25%
+                s.commit()
+
+            body = client.get("/api/capacity-evidence").json()
+            assert body["charges_seen"] == 3
+            assert body["charges_counted"] == 2          # the 4-point one is out
+            assert body["median_implied_kwh"] == pytest.approx(68.7, abs=0.05)
+
+            # Excluded, not hidden — with its precision on show.
+            narrow = next(r for r in body["charges"] if r["swing_pct"] == 4.0)
+            assert narrow["counts"] is False
+            assert narrow["precision_pct"] == pytest.approx(25.0, abs=0.1)
+            assert narrow["implied_capacity_kwh"] == pytest.approx(100.0, abs=0.1)
+
+            # And the direction of the known bias is stated, not buried.
+            assert "charging losses" in body["caveat"]
+            assert body["in_use"]["kwh"] > 0
+
+            # Lowering the floor lets the unmeasurable one back in, which is
+            # exactly what the precision column is there to warn about.
+            loose = client.get("/api/capacity-evidence?min_swing_pct=1").json()
+            assert loose["charges_counted"] == 3
+            assert loose["median_implied_kwh"] > body["median_implied_kwh"]
+    finally:
+        settings.app_passcode = old_pass

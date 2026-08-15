@@ -4542,6 +4542,86 @@ def repair_arrivals(
     }
 
 
+@router.get("/capacity-evidence")
+def capacity_evidence(
+    min_swing_pct: float = Query(15.0, ge=1.0, le=90.0),
+    session: Session = Depends(get_session),
+):
+    """What this car's own charges say its usable pack is.
+
+    The constant in use comes from spec minus measured degradation, and four
+    readings off the car's energy screen have disagreed with it the same way
+    every time — 69.01, 68.69, 68.14, 68.82 against 69.5. Four screenshots is
+    a thin basis for changing a number every kWh and every ringgit depends on,
+    and the arithmetic behind them has already been revised twice.
+
+    Every charge is an independent measurement of the same quantity and none
+    have been looked at. A session adds a known energy and moves SoC a known
+    amount; the ratio is the pack. No screenshots, no window bookkeeping, and
+    the sample grows on its own.
+
+    The precision is the whole story, so it is reported rather than assumed.
+    SoC is whole percent, so a session's ratio is only as sharp as its SWING:
+    a 40-point charge resolves the pack to about +/-1%, a 5-point charge to
+    +/-10% and says nothing. That is the same quantisation lesson the parked
+    rate had to learn the hard way — a fit over samples too small to measure
+    returns a confident number built from rounding.
+
+    ``min_swing_pct`` sets the floor for the headline figure. Every session is
+    listed regardless, with its own precision, so the excluded ones can be
+    seen rather than silently dropped.
+
+    Read-only, and deliberately not wired into the capacity actually used:
+    this is evidence for a decision, not the decision.
+    """
+    vehicle = _first_vehicle(session)
+    in_use, source = _usable_capacity(session, vehicle, get_settings())
+    charges = session.scalars(
+        select(Charge).where(Charge.vehicle_id == vehicle.id)
+        .order_by(Charge.start_time.desc())
+    ).all()
+
+    rows: list[dict[str, Any]] = []
+    for c in charges:
+        swing = (c.end_soc or 0) - (c.start_soc or 0)
+        if swing <= 0 or not c.energy_added_kwh:
+            continue
+        implied = c.energy_added_kwh / (swing / 100.0)
+        # One SoC point at each end, so the swing is +/-1 point in total.
+        precision = 1.0 / swing * 100.0
+        rows.append({
+            "charge_id": c.id, "at": c.start_time.isoformat(timespec="minutes"),
+            "soc": [c.start_soc, c.end_soc], "swing_pct": round(swing, 1),
+            "energy_added_kwh": round(c.energy_added_kwh, 3),
+            "implied_capacity_kwh": round(implied, 2),
+            "precision_pct": round(precision, 1),
+            "counts": swing >= min_swing_pct,
+        })
+
+    good = sorted(r["implied_capacity_kwh"] for r in rows if r["counts"])
+    headline = round(percentile(good, 0.5), 2) if good else None
+    return {
+        "in_use": {"kwh": in_use, "source": source},
+        "min_swing_pct": min_swing_pct,
+        "charges_seen": len(rows),
+        "charges_counted": len(good),
+        "median_implied_kwh": headline,
+        "range_kwh": [good[0], good[-1]] if good else None,
+        # The energy a charger reports is what went IN. Any of it lost to heat
+        # never reached the pack, so this reads HIGH by exactly that much —
+        # which matters, because the constant it is being compared against is
+        # already suspected of reading high.
+        "caveat": ("Charger-reported energy includes charging losses, so these "
+                   "run above the true pack figure by roughly that margin."),
+        "screen_readings": [69.01, 68.69, 68.14, 68.82],
+        "charges": rows[:40],
+        "note": ("No charge has a swing wide enough to measure with — raise the "
+                 "sample by charging in bigger sessions, or lower min_swing_pct "
+                 "and read the precision column."
+                 if not good else None),
+    }
+
+
 @router.get("/continuity")
 def continuity(
     days: int = Query(30, ge=1, le=730),
