@@ -4166,3 +4166,87 @@ def test_continuity_endpoint_catches_what_boundary_checks_cannot():
             assert "nothing could be checked" in blind["note"]
     finally:
         settings.app_passcode = old_pass
+
+
+def test_repair_arrivals_fixes_the_tails_and_refuses_the_journeys():
+    """Ten findings is ten hand-built URLs, and the check's whole problem was
+    that nobody looked at its output — so making the fix tedious guarantees it
+    goes unused again.
+
+    The cap is the code's own ARRIVAL_EST_MAX_KM. Under it a short close is a
+    tail the poll missed. Over it the likelier story is a drive nobody logged
+    — measured, 1.82 km overnight at Home — and folding that into the arriving
+    trip would bury the evidence that it happened.
+    """
+    from datetime import timedelta
+
+    from app import sync as sync_mod
+    from app.models import ArrivalTailSample, BatteryReading, Drive
+
+    settings = get_settings()
+    old_pass = settings.app_passcode
+    settings.app_passcode = ""
+    try:
+        with TestClient(app) as client:
+            with SessionLocal() as s:
+                for model in (Drive, BatteryReading, ArrivalTailSample):
+                    for row in s.query(model).all():
+                        s.delete(row)
+                s.flush()
+                veh = s.query(Vehicle).first()
+                base = sync_mod.now_local() - timedelta(days=2)
+
+                def add(i, s_odo, e_odo, hours, est=None):
+                    st = base + timedelta(hours=hours)
+                    s.add(Drive(vehicle_id=veh.id, start_time=st,
+                                end_time=st + timedelta(minutes=20),
+                                distance_km=round(e_odo - s_odo, 1),
+                                duration_min=20, start_soc=70 - i, end_soc=68 - i,
+                                energy_used_kwh=2.0, avg_speed_kmh=30,
+                                max_speed_kmh=60, outside_temp_c=30,
+                                start_location=f"P{i}", end_location=f"P{i+1}",
+                                start_coords="5.34,100.31", end_coords="5.41,100.29",
+                                start_odo_km=s_odo, end_odo_km=e_odo,
+                                end_est_km=est))
+
+                # A short tail (0.30, under the cap) and a long one (1.82, over).
+                add(0, 1000.0, 1010.0, 0, est=0.15)
+                add(1, 1010.0, 1020.0, 6)
+                add(2, 1020.0, 1030.0, 12)
+                s.flush()
+                for ts_h, odo in ((1.0, 1010.30), (7.0, 1021.82)):
+                    s.add(BatteryReading(vehicle_id=veh.id,
+                                         ts=base + timedelta(hours=ts_h),
+                                         soc=68.0, range_km=250.0, odo_km=odo))
+                s.commit()
+
+            dry = client.get("/api/repair-arrivals?days=7").json()
+            assert dry["repaired"] == 1 and dry["needs_a_human"] == 1
+            assert dry["reclaimed_km"] == pytest.approx(0.30, abs=0.02)
+            assert dry["applied"] is False
+            assert "past ARRIVAL_EST_MAX_KM" in dry["manual"][0]["why"]
+
+            with SessionLocal() as s:
+                assert s.query(Drive).filter(Drive.end_odo_km == 1010.0).count() == 1
+
+            done = client.get("/api/repair-arrivals?days=7&apply=true").json()
+            assert done["applied"] is True and done["repaired"] == 1
+            with SessionLocal() as s:
+                rows = s.query(Drive).order_by(Drive.start_time).all()
+                assert rows[0].end_odo_km == pytest.approx(1010.30, abs=0.005)
+                assert rows[1].start_odo_km == pytest.approx(1010.30, abs=0.005)
+                # Distance moved between them; the odometer stays continuous.
+                assert rows[0].distance_km == pytest.approx(10.3, abs=0.05)
+                assert rows[1].distance_km == pytest.approx(9.7, abs=0.05)
+                # The long one is untouched, evidence intact.
+                assert rows[1].end_odo_km == pytest.approx(1020.0, abs=0.005)
+                # And the measurement is fed back to the model that caused it.
+                samples = s.query(ArrivalTailSample).all()
+                assert len(samples) == 1
+                assert samples[0].measured_km == pytest.approx(0.45, abs=0.02)
+
+            # Idempotent: the boundary now matches the reading.
+            again = client.get("/api/repair-arrivals?days=7&apply=true").json()
+            assert again["repaired"] == 0
+    finally:
+        settings.app_passcode = old_pass

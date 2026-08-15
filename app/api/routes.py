@@ -4449,6 +4449,99 @@ class _DetachedDrive:
         self.end_time = datetime.fromisoformat(before["end_time"])
 
 
+@router.api_route("/repair-arrivals", methods=["GET", "POST"])
+def repair_arrivals(
+    days: int = Query(30, ge=1, le=730),
+    apply: bool = Query(False),
+    session: Session = Depends(get_session),
+):
+    """Give every short arrival back the ground the parked readings saw.
+
+    /api/continuity finds these; repair-trip-boundary fixes one. Ten findings
+    is ten hand-built URLs, and the whole point of the check was that nobody
+    had ever looked at its output — so making the fix tedious is a good way to
+    ensure it goes unused again.
+
+    Measured live: 10 of 78 trips over 30 days, 4.49 km. Nine cluster tightly
+    at 0.15-0.40 km, median 0.32, which is one mechanism firing repeatedly
+    rather than scattered noise.
+
+    The cap is the code's own: ARRIVAL_EST_MAX_KM, how far an arrival can
+    plausibly go on after the last reading. Under it, a short close is a tail
+    the poll missed. Over it, the likelier story is a journey nobody logged —
+    measured, a 1.82 km overnight gap at Home — and quietly folding that into
+    the arriving trip would bury the evidence that it happened. Those are
+    reported for a person to judge, never applied.
+
+    Each repair also RECORDS the tail it measured (see repair_trip_boundary's
+    apply path), which matters more than the distance. The arrival model learns
+    only from arrivals a later poll could measure in time, so it never sees the
+    long ones and its median came out 0.152 km against a true ~0.47. Every fix
+    here feeds it a measurement from the unbiased source, so the estimate that
+    caused these stops being wrong in the same direction.
+
+    Dry run by default.
+    """
+    vehicle = _first_vehicle(session)
+    since = sync_mod.now_local() - timedelta(days=days)
+    drives = session.scalars(
+        select(Drive).where(Drive.vehicle_id == vehicle.id,
+                            Drive.start_time >= since)
+        .order_by(Drive.start_time)
+    ).all()
+    readings = session.scalars(
+        select(BatteryReading).where(BatteryReading.vehicle_id == vehicle.id,
+                                     BatteryReading.ts >= since)
+        .order_by(BatteryReading.ts)
+    ).all()
+    found = driving_analysis.odometer_continuity(list(drives), list(readings))
+
+    repaired: list[dict[str, Any]] = []
+    manual: list[dict[str, Any]] = []
+    for g in found.get("gaps", []):
+        closed_id, open_id = g.get("drive_id"), g.get("next_drive_id")
+        boundary = g.get("boundary_odo_km")
+        if not (closed_id and open_id and boundary):
+            continue
+        if g["unrecorded_km"] > sync_mod.ARRIVAL_EST_MAX_KM:
+            manual.append({
+                **g,
+                "why": (f"{g['unrecorded_km']} km is past ARRIVAL_EST_MAX_KM "
+                        f"({sync_mod.ARRIVAL_EST_MAX_KM}) — likelier a drive "
+                        f"nobody logged than an arrival tail"),
+                "run": (f"/api/repair-trip-boundary?closed_id={closed_id}"
+                        f"&open_id={open_id}&boundary_odo_km={boundary}"
+                        f"  (only if the car was merely repositioned)"),
+            })
+            continue
+        try:
+            plan = repair_trip_boundary(
+                closed_id=closed_id, open_id=open_id, boundary_odo_km=boundary,
+                closed_end_time=None, closed_end_coords=None,
+                apply=apply, session=session)
+        except HTTPException as exc:
+            manual.append({**g, "why": f"refused: {exc.detail}", "run": None})
+            continue
+        repaired.append(plan)
+
+    return {
+        "days": days,
+        "trips_checked": found.get("trips_checked", 0),
+        "readings_checked": len(readings),
+        "applied": apply,
+        "repaired": len(repaired),
+        "reclaimed_km": round(sum(r["delta_km"] for r in repaired), 3),
+        "needs_a_human": len(manual),
+        "repairs": repaired,
+        "manual": manual,
+        "note": ("No parked readings in this window — nothing could be checked."
+                 if not readings else
+                 "Every trip stopped where the car was seen resting."
+                 if not repaired and not manual else
+                 ("Dry run. Add &apply=true to write these." if not apply else None)),
+    }
+
+
 @router.get("/continuity")
 def continuity(
     days: int = Query(30, ge=1, le=730),
