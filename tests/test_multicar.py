@@ -4081,3 +4081,81 @@ def test_energy_reconcile_separates_what_is_accounted_for_from_what_is_not():
             assert "claims more energy than left the pack" in flipped["residual"]["reading"]
     finally:
         settings.app_passcode = old_pass
+
+
+def test_continuity_endpoint_catches_what_boundary_checks_cannot():
+    """A trip that closes short passes every boundary check, provided the next
+    departure recovery reaches back over the same ground: the odometer stays
+    continuous because each metre is claimed exactly once, just by the wrong
+    trip. Only the readings taken while the car sat parked expose it.
+
+    The check existed and was computed on every dashboard load, but app.js
+    never rendered it, so no one had ever seen the result.
+    """
+    from datetime import datetime, timedelta
+
+    from app import sync as sync_mod
+    from app.models import BatteryReading, Drive
+
+    settings = get_settings()
+    old_pass = settings.app_passcode
+    settings.app_passcode = ""
+    try:
+        with TestClient(app) as client:
+            with SessionLocal() as s:
+                for row in s.query(Drive).all():
+                    s.delete(row)
+                for row in s.query(BatteryReading).all():
+                    s.delete(row)
+                s.flush()
+                veh = s.query(Vehicle).first()
+                base = sync_mod.now_local() - timedelta(days=1)
+
+                # Trip A closes at 1010.0; trip B starts there too, so every
+                # boundary agrees. But the car was seen resting at 1010.6.
+                s.add(Drive(vehicle_id=veh.id, start_time=base,
+                            end_time=base + timedelta(minutes=20),
+                            distance_km=10.0, duration_min=20, start_soc=60,
+                            end_soc=58, energy_used_kwh=1.5, avg_speed_kmh=30,
+                            max_speed_kmh=60, outside_temp_c=30,
+                            start_location="A", end_location="B",
+                            start_odo_km=1000.0, end_odo_km=1010.0))
+                s.add(Drive(vehicle_id=veh.id,
+                            start_time=base + timedelta(hours=3),
+                            end_time=base + timedelta(hours=3, minutes=20),
+                            distance_km=10.6, duration_min=20, start_soc=58,
+                            end_soc=56, energy_used_kwh=1.6, avg_speed_kmh=32,
+                            max_speed_kmh=60, outside_temp_c=30,
+                            start_location="B", end_location="C",
+                            start_odo_km=1010.0, end_odo_km=1020.6))
+                for i in range(3):
+                    s.add(BatteryReading(
+                        vehicle_id=veh.id,
+                        ts=base + timedelta(minutes=40 + 20 * i),
+                        soc=58.0, range_km=250.0, odo_km=1010.6))
+                s.commit()
+
+            # The boundary check is satisfied: nothing is missing between them.
+            gaps = client.get("/api/trip-gaps?days=7").json()
+            assert gaps["holes"] == 0 and gaps["overlaps"] == 0
+
+            # The parked readings are not satisfied.
+            body = client.get("/api/continuity?days=7").json()
+            assert body["available"] is True
+            assert body["readings_checked"] == 3
+            assert body["unattributed_km"] == pytest.approx(0.6, abs=0.02)
+            (gap,) = body["gaps"]
+            assert gap["recorded_end_odo_km"] == pytest.approx(1010.0, abs=0.05)
+            assert gap["observed_odo_km"] == pytest.approx(1010.6, abs=0.05)
+            assert "misattribution, not a hole" in body["note"]
+
+            # And with no readings it says it could not look, rather than clean.
+            with SessionLocal() as s:
+                for row in s.query(BatteryReading).all():
+                    s.delete(row)
+                s.commit()
+            blind = client.get("/api/continuity?days=7").json()
+            assert blind["available"] is False
+            assert "nothing could be checked" in blind["note"]
+    finally:
+        settings.app_passcode = old_pass

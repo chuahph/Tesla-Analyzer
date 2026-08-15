@@ -4449,6 +4449,59 @@ class _DetachedDrive:
         self.end_time = datetime.fromisoformat(before["end_time"])
 
 
+@router.get("/continuity")
+def continuity(
+    days: int = Query(30, ge=1, le=730),
+    session: Session = Depends(get_session),
+):
+    """Each trip's recorded stop against where the car was actually seen resting.
+
+    The check trip-gaps cannot perform. Boundary continuity asks whether one
+    trip's end equals the next one's start, and a trip that closes short passes
+    that test perfectly whenever the following departure recovery reaches back
+    over the same ground: every metre is claimed exactly once, just by the
+    wrong trip. Distance stays continuous, totals stay right, and the energy
+    lands on the wrong side of a boundary.
+
+    Only the readings taken while the car sat parked can expose it, because
+    they are the one measurement here that no derived figure feeds. The car
+    came to rest where the odometer says it did, whatever the trip recorded.
+
+    This has been computed on every dashboard load since it was written and
+    never displayed, so nothing has ever looked at the result — which is why
+    it is an endpoint now. Measured live and pointing straight at it: trip 391
+    logged 0.56 km short at its arrival, and across 134 km the app accounted
+    for 1.9% less driving energy than the car did, while every odometer
+    boundary agreed.
+    """
+    vehicle = _first_vehicle(session)
+    since = sync_mod.now_local() - timedelta(days=days)
+    drives = session.scalars(
+        select(Drive).where(Drive.vehicle_id == vehicle.id,
+                            Drive.start_time >= since)
+        .order_by(Drive.start_time)
+    ).all()
+    readings = session.scalars(
+        select(BatteryReading).where(BatteryReading.vehicle_id == vehicle.id,
+                                     BatteryReading.ts >= since)
+        .order_by(BatteryReading.ts)
+    ).all()
+    out = driving_analysis.odometer_continuity(list(drives), list(readings))
+    out["days"] = days
+    out["readings_checked"] = len(readings)
+    # Same discipline as trip-gaps: a verdict has to say what it could see.
+    # With no parked readings this check is blind, and blind is not clean.
+    out["note"] = (
+        "No parked readings in this window — nothing could be checked."
+        if not readings else
+        "Every trip stopped where the car was seen resting."
+        if not out.get("gaps") else
+        f"{len(out['gaps'])} trip(s) recorded a stop short of where the car was "
+        f"actually seen. The distance is not missing — the next trip most "
+        f"likely claimed it — so this is misattribution, not a hole.")
+    return out
+
+
 @router.get("/energy-reconcile")
 def energy_reconcile(session: Session = Depends(get_session)):
     """Where the battery went since the last charge, and how much is unexplained.
