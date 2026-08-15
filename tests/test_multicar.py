@@ -4147,6 +4147,13 @@ def test_continuity_endpoint_catches_what_boundary_checks_cannot():
             (gap,) = body["gaps"]
             assert gap["recorded_end_odo_km"] == pytest.approx(1010.0, abs=0.05)
             assert gap["observed_odo_km"] == pytest.approx(1010.6, abs=0.05)
+            # Actionable without a second lookup: repair-trip-boundary needs
+            # both trip ids and where the boundary belongs.
+            with SessionLocal() as sess:
+                ids = [d.id for d in sess.query(Drive).order_by(Drive.start_time).all()]
+            assert gap["drive_id"] == ids[0]
+            assert gap["next_drive_id"] == ids[1]
+            assert gap["boundary_odo_km"] == pytest.approx(1010.6, abs=0.02)
             assert "misattribution, not a hole" in body["note"]
 
             # And with no readings it says it could not look, rather than clean.

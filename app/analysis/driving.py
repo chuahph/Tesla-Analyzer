@@ -78,6 +78,12 @@ def odometer_continuity(drives: list[Any], readings: list[Any]) -> dict[str, Any
         total += missing
         out.append({
             "drive_id": getattr(d, "id", None),
+            # The trip that most likely holds this ground now, because its
+            # departure recovery reached back over it. Reported so a finding
+            # is directly actionable: repair-trip-boundary needs both ids and
+            # the odometer the boundary belongs at, and all three are here.
+            "next_drive_id": getattr(nxt, "id", None) if nxt else None,
+            "boundary_odo_km": round(seen, 3),
             "route": f"{d.start_location} → {d.end_location}"
             if d.start_location and d.end_location else "",
             "end_time": d.end_time.isoformat(timespec="minutes"),
