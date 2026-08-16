@@ -1955,10 +1955,13 @@ def test_data_quality_will_not_call_a_reconstructed_trip_measured():
     from app.analysis.driving import _data_quality
 
     def trip(distance, recovered=0.0, est=None, idle=True, energy=1.5):
+        # wh_per_km is a computed property on the real model, so the stand-in
+        # has to carry it — has_valid_energy reads it before anything else.
         return SimpleNamespace(
             distance_km=distance, start_recovered_km=recovered, end_est_km=est,
             idle_tracked=idle, energy_used_kwh=energy, duration_min=25.0,
-            avg_speed_kmh=25.0)
+            avg_speed_kmh=25.0,
+            wh_per_km=(energy * 1000.0 / distance) if distance else 0.0)
 
     # Trip 397's shape: two thirds of it never observed.
     assert _data_quality(trip(10.339, recovered=7.078)) == "estimated"
