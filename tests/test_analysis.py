@@ -1939,3 +1939,35 @@ def test_short_parked_gaps_are_modelled_not_read_off_integer_soc():
     # 40 h. (Loose tolerance: adding this gap also re-fits the rate slightly,
     # which nudges the modelled short gap above.)
     assert added_long == pytest.approx(3.0 / 100.0 * cap, rel=0.05)
+
+
+def test_data_quality_will_not_call_a_reconstructed_trip_measured():
+    """Measured live and the reason this exists: trip 397 recovered 7.078 km of
+    a 10.339 km drive, had its energy replaced by hand from the car's own
+    screen, and still reported "measured" — because the label only ever looked
+    at whether idle was live-tracked.
+
+    Distance counts too. Ground no poll saw has its energy projected from the
+    rest of the trip, not read off it.
+    """
+    from types import SimpleNamespace
+
+    from app.analysis.driving import _data_quality
+
+    def trip(distance, recovered=0.0, est=None, idle=True, energy=1.5):
+        return SimpleNamespace(
+            distance_km=distance, start_recovered_km=recovered, end_est_km=est,
+            idle_tracked=idle, energy_used_kwh=energy, duration_min=25.0,
+            avg_speed_kmh=25.0)
+
+    # Trip 397's shape: two thirds of it never observed.
+    assert _data_quality(trip(10.339, recovered=7.078)) == "estimated"
+    # Ordinary boundary recovery of a few hundred metres is still a measured
+    # trip — the threshold has to leave room for the normal case.
+    assert _data_quality(trip(10.339, recovered=0.3)) == "measured"
+    # An estimated arrival counts the same way a recovered start does.
+    assert _data_quality(trip(4.0, est=1.2)) == "estimated"
+    assert _data_quality(trip(4.0, est=0.15)) == "measured"
+    # And the existing rules are untouched.
+    assert _data_quality(trip(10.0, idle=False)) == "estimated"
+    assert _data_quality(trip(10.0, energy=0.0)) == "incomplete"

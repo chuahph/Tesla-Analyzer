@@ -654,6 +654,13 @@ def _trip_conditions(d: Drive) -> str:
     return " · ".join(parts)
 
 
+# Share of a trip's distance that may be inferred before it stops counting as
+# a measurement. A labelling threshold, not a physical one: boundary recovery
+# of a few hundred metres on a 10 km trip is still a measured trip, while one
+# reconstructed for the most part is not, whatever its idle tracking says.
+INFERRED_SHARE_MAX = 0.10
+
+
 def _data_quality(d: Drive) -> str:
     """How trustworthy this trip's efficiency figures are, so the dashboard
     can show which trips are real measurements vs a fallback estimate:
@@ -665,9 +672,27 @@ def _data_quality(d: Drive) -> str:
         gap) — driving_wh_per_km falls back to the avg/max-speed heuristic.
       - "incomplete": no valid energy (a range-reading gap contaminated the
         trip) — Wh/km and cost are unavailable for it.
+
+    DISTANCE counts too, and for a long time it did not. A trip whose start
+    was recovered across a blackout, or whose arrival was estimated, carries
+    ground no poll ever saw — its energy over that stretch is projected from
+    the rest, not read. Measured live and the reason this changed: trip 397
+    recovered 7.078 km of a 10.339 km drive, had its energy replaced by hand
+    from the car's own screen, and still reported "measured".
+
+    So a trip is only "measured" if most of its distance actually was. The
+    threshold is a labelling choice, not a physical constant — a tenth is
+    small enough that ordinary boundary recovery of a few hundred metres
+    still reads as measured, and large enough that a trip mostly reconstructed
+    cannot.
     """
     if not has_valid_energy(d):
         return "incomplete"
+    distance = getattr(d, "distance_km", 0.0) or 0.0
+    inferred = ((getattr(d, "start_recovered_km", None) or 0.0)
+                + (getattr(d, "end_est_km", None) or 0.0))
+    if distance > 0 and inferred / distance > INFERRED_SHARE_MAX:
+        return "estimated"
     return "measured" if getattr(d, "idle_tracked", False) else "estimated"
 
 
