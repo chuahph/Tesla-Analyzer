@@ -1595,53 +1595,6 @@ def _errands(gap_hours, n, lost_pct=1):
     return out
 
 
-def test_parked_awake_kw_measures_the_short_gaps_standby_ignores():
-    """Four 90-minute errand stops, 1% of a 70 kWh pack lost at each: 2.8 kWh
-    over 6 h is ~0.47 kW — roughly double what the same car reads asleep."""
-    from app.analysis.driving import parked_awake_kw
-
-    rate = parked_awake_kw(_errands(1.5, 4), [], 70.0)
-    assert rate == round(2.8 / 6.0, 3)
-
-
-def test_parked_awake_kw_ignores_gaps_long_enough_to_have_slept():
-    """Past two hours the car is asleep and the average stops describing the
-    window a trim covers — those gaps belong to standby_kw."""
-    from app.analysis.driving import parked_awake_kw
-
-    assert parked_awake_kw(_errands(6.0, 4), [], 70.0) is None
-
-
-def test_parked_awake_kw_ignores_traffic_stops():
-    """A few minutes between drives is one journey the splitter cut in two, not
-    a park, and its SoC delta is rounding noise."""
-    from app.analysis.driving import parked_awake_kw
-
-    assert parked_awake_kw(_errands(0.05, 40), [], 70.0) is None
-
-
-def test_parked_awake_and_standby_read_disjoint_gaps():
-    """The two rates partition the history at the two-hour mark, so neither can
-    be quietly contaminated by the other's sample."""
-    from app.analysis.driving import parked_awake_kw, standby_kw
-
-    short = _errands(1.5, 4)
-    assert parked_awake_kw(short, [], 70.0) is not None
-    assert standby_kw(short, [], 70.0) is None
-
-
-def test_parked_awake_kw_skips_gaps_containing_a_charge():
-    """Same reason as standby_kw: a charge mid-gap moved SoC upward."""
-    from app.analysis.driving import parked_awake_kw
-    from types import SimpleNamespace
-    from datetime import timedelta
-
-    drives = _errands(1.5, 4)
-    # Inside the first gap — dropping it leaves 4.5 h, under the 6 h floor.
-    charged = SimpleNamespace(start_time=drives[0].end_time + timedelta(minutes=30))
-    assert parked_awake_kw(drives, [charged], 70.0) is None
-
-
 def test_trim_rate_ignores_the_awake_fit_it_cannot_measure():
     """This pinned the opposite for a while: a trimmed tail is the first
     minutes after arrival, so it "must" be priced at the awake rate rather than
@@ -1661,15 +1614,13 @@ def test_trim_rate_ignores_the_awake_fit_it_cannot_measure():
     magnitude better placed against the quantum.
     """
     from app.api.routes import _trim_rate_kw
-    from app.analysis.driving import parked_awake_kw, standby_kw
+    from app.analysis.driving import standby_kw
 
     short = _errands(1.5, 4)                       # awake sample only
     long_gaps = _errands(10.0, 3)                  # sleeping sample only
 
-    # The awake fit still returns a number for this sample — that is the trap.
-    assert parked_awake_kw(short, [], 70.0) is not None
-    # It is no longer what prices a trim: with no gap long enough to measure,
-    # there is no rate and therefore no correction.
+    # With no gap long enough to measure there is no rate, and therefore no
+    # correction — rather than a rate fitted from gaps that cannot resolve it.
     assert _trim_rate_kw(short, [], 70.0) is None
 
     assert _trim_rate_kw(long_gaps, [], 70.0) == standby_kw(long_gaps, [], 70.0)

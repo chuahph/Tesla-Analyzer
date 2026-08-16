@@ -140,19 +140,25 @@ STANDBY_MIN_TOTAL_HOURS = 24.0
 STANDBY_PLAUSIBLE_KW = (0.02, 1.5)
 
 
-# The first stretch after parking is a different animal from the hours that
-# follow. The car is still awake — screens up, HVAC settling, Sentry arming —
-# and draws several times what it settles to once asleep. Measured live on
-# trip 316: a 17-minute tail cost ~0.5 kW where this car's multi-hour gaps
-# average ~0.22.
+# There was a parked_awake_kw here, and the reasoning behind it still stands:
+# the first stretch after arriving is a different animal from the hours that
+# follow, with the car awake and drawing several times what it settles to.
 #
-# Individually these gaps say nothing: 17 minutes at 0.5 kW is 0.14 kWh, a
-# fifth of one whole-percent SoC point, so most read as an exact zero. The rate
-# only appears once enough of them are summed, which is why the totals required
-# here are about the aggregate rather than any single gap.
-AWAKE_MIN_GAP_HOURS = 0.15   # below this it's a traffic stop, not a park
-AWAKE_MAX_GAP_HOURS = 2.0    # past this the sleeping hours start to dominate
-AWAKE_MIN_TOTAL_HOURS = 6.0
+# It is gone because that rate CANNOT BE MEASURED from this data, not because
+# the physics is wrong. It sampled gaps of 0.15-2 h needing 6 h in total,
+# while one whole-percent SoC point is ~0.7 kWh — around eighteen hours of
+# parked drain on this car. Six hours of aggregate is under half a point, so
+# the fit read almost pure rounding, and _gap_rate_kw's max(drop, 0) keeps the
+# upward halves of that noise while clipping the downward ones.
+#
+# Measured live: it returned 0.348 kW while the car's own screen put ALL
+# parked drain since the last charge at 2.0%, about 0.034 kW. Ten times over,
+# stated confidently, and it had already been wired into short-gap vampire
+# drain before anyone checked it against the car.
+#
+# Deleted rather than left unused, because a well-documented function that
+# returns a plausible number from unmeasurable input is a trap for the next
+# caller. Bring it back when a finer SoC source exists to fit it from.
 
 
 def _gap_rate_kw(drives: list[Any], charges: list[Any] | None, capacity_kwh: float,
@@ -363,21 +369,6 @@ def route_asymmetry(drives: list[Any]) -> list[dict[str, Any]]:
         })
     out.sort(key=lambda r: abs(r["delta_wh_per_km"]), reverse=True)
     return out[:5]
-
-
-def parked_awake_kw(drives: list[Any], charges: list[Any] | None,
-                    capacity_kwh: float) -> float | None:
-    """Draw over the first stretch after parking, before the car sleeps.
-
-    The rate that belongs to a trimmed tail. standby_kw samples gaps of hours,
-    so it measures a sleeping car and understates the minutes just after
-    arrival by roughly half — applying it to a trim under-corrects by that
-    much. Errand stops are the sample: park, sit twenty minutes, drive on,
-    with the car awake throughout, which is exactly the window a trim covers.
-    """
-    return _gap_rate_kw(drives, charges, capacity_kwh,
-                        AWAKE_MIN_GAP_HOURS, AWAKE_MAX_GAP_HOURS,
-                        AWAKE_MIN_TOTAL_HOURS)
 
 
 def vampire_drain(
