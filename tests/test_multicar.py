@@ -4377,3 +4377,55 @@ def test_repair_arrivals_is_reachable_by_the_cron_key_and_nothing_else_new_is():
                                   else f"{path}?key=s3cret").status_code == 401
     finally:
         settings.app_passcode, settings.sync_key = old_pass, old_key
+
+
+def test_auto_logged_free_charge_is_labelled_free_not_paid_at_zero():
+    """Nothing in telemetry distinguishes a Tesla Destination Charger from a
+    paid AC one, so is_free could only ever be set by hand — and an automatic
+    session that priced at zero was stored as a PAID charge costing nothing.
+
+    The cost was right and the label was wrong, which is worse than either
+    being wrong alone: the charging analytics split free from paid on this
+    flag, so a free session sat in the paid group dragging its average to
+    zero. The edit path has always used this rule; the automatic one had not.
+    """
+    from app import sync as sync_mod
+    from app.analysis import charging as charging_analysis
+    from app.models import Charge
+
+    settings = get_settings()
+    old_pass = settings.app_passcode
+    settings.app_passcode = ""
+    try:
+        # TestClient runs startup, which is what seeds a vehicle to hang the
+        # charges off — without it there is nothing to attach them to.
+        with TestClient(app), SessionLocal() as s:
+            for row in s.query(Charge).all():
+                s.delete(row)
+            s.flush()
+            veh = s.query(Vehicle).first()
+            base = sync_mod.now_local() - timedelta(days=1)
+            # One paid, one free — the shape charge 68 arrived in.
+            for i, (rate, kind) in enumerate(((0.5701, "AC"), (0.0, "AC"))):
+                energy = 20.0
+                s.add(Charge(vehicle_id=veh.id,
+                             start_time=base + timedelta(hours=i * 3),
+                             end_time=base + timedelta(hours=i * 3 + 2),
+                             duration_min=120, start_soc=30, end_soc=59,
+                             energy_added_kwh=energy, charge_type=kind,
+                             location="Home", outside_temp_c=30,
+                             cost=round(energy * rate, 2),
+                             is_free=(rate == 0)))
+            s.commit()
+            out = charging_analysis.analyze(s.query(Charge).all(), [])
+            rows = out["recent_charges"]
+
+        free = [r for r in rows if r["is_free"]]
+        paid = [r for r in rows if not r["is_free"]]
+        assert len(free) == 1 and len(paid) == 1
+        assert free[0]["cost"] == 0
+        # The paid one keeps its own price rather than being averaged with a
+        # zero that was never a price.
+        assert paid[0]["cost"] > 0
+    finally:
+        settings.app_passcode = old_pass

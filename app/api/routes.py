@@ -2023,6 +2023,19 @@ def _process_vehicle(
             session, settings, raw_coords, c["charge_type"] == "DC", c["start_time"])
         c["cost"] = round(c["energy_added_kwh"] * rate, 2)
         c["price_source"] = source
+        # A rate of zero IS the free flag on an auto-logged session. Nothing in
+        # telemetry distinguishes a Tesla Destination Charger from a paid AC
+        # one (see the manual-entry path), so is_free could only ever be set by
+        # hand — and an automatic session that priced at zero was therefore
+        # stored as a PAID charge costing nothing. The cost came out right and
+        # the label came out wrong, which is worse than either: the charging
+        # analytics separate free from paid on this flag, so a free session sat
+        # in the paid group dragging its average toward zero.
+        #
+        # Reported live: a Tesla Destination Charger session logged rate 0,
+        # cost 0, is_free false. The edit path has always used exactly this
+        # rule (charge.is_free = rate == 0); only the automatic one did not.
+        c["is_free"] = rate == 0
         session.add(Charge(vehicle_id=vehicle.id, **c))
         notifications.notify(
             session, "Charging complete",
@@ -2511,6 +2524,7 @@ def _sync_now_impl(wake: bool, session: Session):
                             session, settings, raw_coords, c["charge_type"] == "DC", c["start_time"])
                         c["cost"] = round(c["energy_added_kwh"] * rate, 2)
                         c["price_source"] = source
+                        c["is_free"] = rate == 0   # see the same rule above
                         session.add(Charge(vehicle_id=vehicle_row.id, **c))
                         session.commit()
                         total["charges"] += 1
