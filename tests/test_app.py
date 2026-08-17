@@ -3055,3 +3055,71 @@ def test_departure_pace_is_per_place_and_survives_an_edit():
                 s.commit()
     finally:
         settings.app_passcode = old
+
+
+def test_drive_boundary_reports_both_facing_edges():
+    """A boundary question is about a PAIR of trips, so the endpoint has to
+    carry the previous trip's closing edge alongside this one's opening — the
+    browser-side diagnostics never did, which is why a misattributed handover
+    could not be checked without the car's own trip meter."""
+    from app.database import SessionLocal
+    from app.models import Drive, Vehicle
+
+    settings = get_settings()
+    old = settings.app_passcode
+    settings.app_passcode = ""
+    try:
+        with TestClient(app) as client:
+            with SessionLocal() as s:
+                # Its own vehicle: the endpoint scopes neighbours by
+                # vehicle_id, so this isolates the chain from the seeded demo
+                # history and from whatever other tests have logged.
+                car = Vehicle(vin="BOUNDARY-TEST", name="Boundary", model="Tesla")
+                s.add(car)
+                s.flush()
+                vid = car.id
+                base = datetime(2026, 8, 17, 9, 0)
+                rows = []
+                for i, (odo_a, odo_b) in enumerate(
+                        [(100.0, 110.0), (110.0, 121.0), (121.0, 130.0)]):
+                    d = Drive(
+                        vehicle_id=vid,
+                        start_time=base + timedelta(hours=2 * i),
+                        end_time=base + timedelta(hours=2 * i, minutes=20),
+                        distance_km=odo_b - odo_a, duration_min=20.0,
+                        start_odo_km=odo_a, end_odo_km=odo_b,
+                        end_gap_sec=900.0, start_recovered_km=6.4,
+                    )
+                    s.add(d)
+                    rows.append(d)
+                s.commit()
+                ids = [d.id for d in rows]
+
+            body = client.get(f"/api/drives/{ids[1]}/boundary").json()
+            assert body["trip"]["id"] == ids[1]
+            assert body["previous"]["id"] == ids[0]
+            assert body["next"]["id"] == ids[2]
+            # Conserved ground reads zero on both sides — the case the note
+            # exists to warn about, since the instrumentation beside it
+            # (a 15-min stale close, 6.4 km recovered) is the actual tell.
+            assert body["handover_km"] == {"previous_to_trip": 0.0, "trip_to_next": 0.0}
+            assert body["previous"]["end_gap_sec"] == 900.0
+            assert body["trip"]["start_recovered_km"] == 6.4
+
+            # The end of the chain has one neighbour, not an error. (These
+            # rows sit after the seeded demo history, so only the far side is
+            # genuinely empty.)
+            last = client.get(f"/api/drives/{ids[2]}/boundary").json()
+            assert last["next"] is None
+            assert last["handover_km"]["trip_to_next"] is None
+
+            assert client.get("/api/drives/999999/boundary").status_code == 404
+
+            with SessionLocal() as s:
+                s.query(Drive).filter(Drive.vehicle_id == vid).delete(
+                    synchronize_session=False)
+                s.query(Vehicle).filter(Vehicle.id == vid).delete(
+                    synchronize_session=False)
+                s.commit()
+    finally:
+        settings.app_passcode = old

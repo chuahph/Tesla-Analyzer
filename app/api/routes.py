@@ -2913,6 +2913,83 @@ def list_drives(
     return drives[-limit:]
 
 
+@router.get("/drives/{drive_id}/boundary")
+def drive_boundary(drive_id: int, session: Session = Depends(get_session)):
+    """One trip's boundary instrumentation, plus its neighbours' facing edges.
+
+    The dashboard's per-trip diagnostics (the copy button on a trip card) is
+    built in the browser from an already-rendered card, so it can only be read
+    for a trip currently on screen — and it carries none of the PREVIOUS
+    trip's edge, which is what a boundary question actually turns on. This
+    serves the same figures from the row itself, for any id, with both
+    neighbours attached.
+
+    What it answers: whether two adjacent trips agree about where one ended
+    and the next began. ``handover_km`` is the signed difference. Zero is the
+    normal case and is NOT proof of correctness — a stale arrival reading that
+    the next departure then recovered from also reads zero, because the ground
+    is conserved and merely attributed to the wrong trip (odometer_continuity
+    hunts gaps, so it cannot see that at all). The tell is a zero handover
+    next to a large ``end_gap_sec`` and a large ``start_recovered_km``:
+    together they say the earlier trip's last reading was old and the later
+    trip reached back across it.
+    """
+    drive = session.get(Drive, drive_id)
+    if drive is None:
+        raise HTTPException(404, f"No trip {drive_id}.")
+
+    def edge(d: Drive | None) -> dict | None:
+        if d is None:
+            return None
+        return {
+            "id": d.id,
+            "route": f"{d.start_location} → {d.end_location}",
+            "start_time": d.start_time.isoformat(timespec="minutes"),
+            "end_time": d.end_time.isoformat(timespec="minutes"),
+            "distance_km": d.distance_km,
+            "duration_min": d.duration_min,
+            "energy_kwh": d.energy_used_kwh,
+            "start_odo_km": d.start_odo_km,
+            "end_odo_km": d.end_odo_km,
+            "start_gap_sec": d.start_gap_sec,
+            "end_gap_sec": d.end_gap_sec,
+            "start_lost_km": d.start_lost_km,
+            "end_lost_km": d.end_lost_km,
+            "start_recovered_km": d.start_recovered_km,
+            "start_park_min": d.start_park_min,
+            "end_est_km": d.end_est_km,
+            "end_est_verified": d.end_est_verified,
+            "tail_trim_sec": d.tail_trim_sec,
+        }
+
+    def neighbour(before: bool) -> Drive | None:
+        q = session.query(Drive).filter(Drive.vehicle_id == drive.vehicle_id)
+        if before:
+            return (q.filter(Drive.start_time < drive.start_time)
+                     .order_by(Drive.start_time.desc()).first())
+        return (q.filter(Drive.start_time > drive.start_time)
+                 .order_by(Drive.start_time.asc()).first())
+
+    prev_d, next_d = neighbour(True), neighbour(False)
+
+    def handover(a: Drive | None, b: Drive | None) -> float | None:
+        if a is None or b is None or a.end_odo_km is None or b.start_odo_km is None:
+            return None
+        return round(b.start_odo_km - a.end_odo_km, 3)
+
+    return {
+        "previous": edge(prev_d),
+        "trip": edge(drive),
+        "next": edge(next_d),
+        "handover_km": {
+            "previous_to_trip": handover(prev_d, drive),
+            "trip_to_next": handover(drive, next_d),
+        },
+        "note": "handover 0 means no distance is missing, not that the "
+                "boundary is in the right place — see this endpoint's docs.",
+    }
+
+
 @router.get("/charges", response_model=list[ChargeOut])
 def list_charges(
     days: int = Query(30, ge=1, le=730),
