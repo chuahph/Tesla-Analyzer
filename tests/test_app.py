@@ -3123,3 +3123,66 @@ def test_drive_boundary_reports_both_facing_edges():
                 s.commit()
     finally:
         settings.app_passcode = old
+
+
+def test_standby_evidence_exposes_the_quantum_and_the_clipping():
+    """The standby rate is subtracted from real trip energy, so both ways the
+    fit can lie have to be visible: SoC readings that went UP being scored as
+    zero rather than negative, and gaps whose whole drop is one rounding step."""
+    from app import state
+    from app.database import SessionLocal
+    from app.models import Drive, Vehicle
+
+    settings = get_settings()
+    old = settings.app_passcode
+    settings.app_passcode = ""
+    try:
+        with TestClient(app) as client:
+            with SessionLocal() as s:
+                car = Vehicle(vin="STANDBY-TEST", name="Standby", model="Tesla",
+                              battery_capacity_kwh=68.4)
+                s.add(car)
+                s.flush()
+                vid = car.id
+                # The endpoint reads the car the dashboard follows, so point
+                # that at this one rather than wiping the seeded history.
+                state.put(s, state.ACTIVE_VIN_KEY, "STANDBY-TEST")
+                base = datetime(2026, 8, 17, 9, 0)
+                # Four drives 12 h apart, so every gap between them is one
+                # overnight park. Their SoCs give three gaps: a whole point
+                # dropped, another whole point, then one where the reading
+                # came back a point HIGHER than it went in.
+                pairs = [(81.0, 80.0), (79.0, 78.0), (77.0, 76.0), (77.0, 76.0)]
+                for i, (start_soc, end_soc) in enumerate(pairs):
+                    s.add(Drive(
+                        vehicle_id=vid,
+                        start_time=base + timedelta(hours=12 * i),
+                        end_time=base + timedelta(hours=12 * i, minutes=30),
+                        distance_km=10.0, duration_min=30.0,
+                        start_soc=start_soc, end_soc=end_soc,
+                        start_odo_km=100.0 * i, end_odo_km=100.0 * i + 10,
+                    ))
+                s.commit()
+
+            body = client.get("/api/standby-evidence").json()
+            # The rise is counted as a gap and flagged, not silently dropped.
+            assert body["clipped"] == 1
+            # ...and the two rates straddle it, which is the whole point of
+            # reporting both: one clips that gap to zero, the other doesn't.
+            assert body["rate_kw"] > body["rate_kw_unclipped"]
+            assert any(g["points"] < 0 for g in body["gaps"])
+            # A gap of exactly one point is the quantum, and the endpoint says
+            # how long a point would have to spread to look like this rate.
+            assert body["soc_point_kwh"] == pytest.approx(
+                body["capacity_kwh"] / 100.0, rel=0.01)
+            assert body["hours_per_point_at_this_rate"] > 0
+
+            with SessionLocal() as s:
+                state.delete(s, state.ACTIVE_VIN_KEY)
+                s.query(Drive).filter(Drive.vehicle_id == vid).delete(
+                    synchronize_session=False)
+                s.query(Vehicle).filter(Vehicle.id == vid).delete(
+                    synchronize_session=False)
+                s.commit()
+    finally:
+        settings.app_passcode = old

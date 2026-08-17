@@ -2990,6 +2990,95 @@ def drive_boundary(drive_id: int, session: Session = Depends(get_session)):
     }
 
 
+@router.get("/standby-evidence")
+def standby_evidence(session: Session = Depends(get_session)):
+    """Every parked gap the standby rate is fitted from, and what each says.
+
+    The rate this returns is subtracted from real trip energy (a trimmed
+    arrival tail, a departure\'s parked minutes) and decides whether
+    vampire_drain reports a measured SoC point or a modelled figure — so it
+    is worth being able to see it rather than infer it.
+
+    What to look for, because the fit has two known ways to lie:
+
+    ``clipped`` counts gaps where SoC went UP. _gap_rate_kw scores those as
+    zero drain rather than negative, which is right for a rate but rectifies
+    noise: if the readings scatter either side of the truth, clipping the
+    downward halves and keeping the upward ones in full lifts the mean above
+    it. This is the exact defect that got parked_awake_kw deleted, and the
+    same helper still does it here. ``rate_kw_unclipped`` is the same fit
+    without it — a large split between the two is the symptom.
+
+    ``points`` is the raw whole-percent SoC difference, and it is the harder
+    problem. One point is ~0.7 kWh on this pack; a night parked at home drains
+    a fifth of that. Measured against the car\'s own screen, an overnight park
+    that reported 1 point had actually used 0.2%, so the figure was the
+    quantum and not the drain. Gaps clustered on exactly 1 point mean the fit
+    is reading rounding, however many of them there are.
+    """
+    vehicle = _first_vehicle(session)
+    settings = get_settings()
+    capacity_kwh = _usable_capacity(session, vehicle, settings)[0]
+    drives = session.scalars(
+        select(Drive).where(Drive.vehicle_id == vehicle.id).order_by(Drive.start_time)
+    ).all()
+    charges = session.scalars(
+        select(Charge).where(Charge.vehicle_id == vehicle.id)
+    ).all()
+    charge_starts = sorted(c.start_time for c in charges)
+
+    gaps, total_kwh, total_kwh_signed, total_hours, clipped = [], 0.0, 0.0, 0.0, 0
+    for a, b in zip(drives, drives[1:]):
+        hours = (b.start_time - a.end_time).total_seconds() / 3600.0
+        if hours < driving_analysis.STANDBY_MIN_GAP_HOURS:
+            continue
+        if any(a.end_time < c < b.start_time for c in charge_starts):
+            continue
+        points = round(a.end_soc - b.start_soc, 1)
+        kwh = points / 100.0 * capacity_kwh
+        if points < 0:
+            clipped += 1
+        total_kwh += max(kwh, 0.0)
+        total_kwh_signed += kwh
+        total_hours += hours
+        gaps.append({
+            "after_drive_id": a.id,
+            "at": a.end_time.isoformat(timespec="minutes"),
+            "place": a.end_location,
+            "hours": round(hours, 2),
+            "points": points,
+            "kwh": round(kwh, 3),
+            "implied_kw": round(kwh / hours, 4) if hours else None,
+        })
+
+    def band(rate: float | None) -> float | None:
+        lo, hi = driving_analysis.STANDBY_PLAUSIBLE_KW
+        return rate if rate is not None and lo <= rate <= hi else None
+
+    rate = round(total_kwh / total_hours, 4) if total_hours else None
+    rate_signed = round(total_kwh_signed / total_hours, 4) if total_hours else None
+    point_kwh = capacity_kwh / 100.0
+    return {
+        "capacity_kwh": round(capacity_kwh, 1),
+        "soc_point_kwh": round(point_kwh, 3),
+        "min_gap_hours": driving_analysis.STANDBY_MIN_GAP_HOURS,
+        "min_total_hours": driving_analysis.STANDBY_MIN_TOTAL_HOURS,
+        "plausible_kw": list(driving_analysis.STANDBY_PLAUSIBLE_KW),
+        "gaps_used": len(gaps),
+        "total_hours": round(total_hours, 1),
+        "clipped": clipped,
+        "rate_kw": rate,
+        "rate_kw_unclipped": rate_signed,
+        "in_use_kw": band(driving_analysis.standby_kw(
+            list(drives), list(charges), capacity_kwh)),
+        # How many hours one whole SoC point would have to be spread over to
+        # produce the fitted rate. If that is close to a typical gap here, the
+        # fit is reading the quantum rather than the drain.
+        "hours_per_point_at_this_rate": round(point_kwh / rate, 1) if rate else None,
+        "gaps": gaps,
+    }
+
+
 @router.get("/charges", response_model=list[ChargeOut])
 def list_charges(
     days: int = Query(30, ge=1, le=730),

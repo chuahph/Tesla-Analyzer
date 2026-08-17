@@ -2318,6 +2318,11 @@ def test_non_propulsion_load_matches_the_cars_own_breakdown():
         # the car's own duration and ours agree exactly (24 min), so nothing
         # about the clock is standing in for the rate. -4%.
         ("408", 1.66, 12.533, 24.0, 32.0, 0.684, 0.05),
+        # 409 is why the temperature slope stays where it is. It is 30C, the
+        # same ambient as 360, and it reads +0.5% where 360 reads -16% — so
+        # the residual there was never the curve, and re-fitting a slope to
+        # close it would be fitting one trip's scatter.
+        ("409", 2.02, 11.215, 36.0, 30.0, 0.889, 0.05),
         # 30C is the loosest, and the residual is the temperature curve, not
         # the gate: the car's own climate line reads 1.23 kW here against the
         # 1.20 it read at 33C — flat — while CLIMATE_KW_PER_DEGREE swings the
