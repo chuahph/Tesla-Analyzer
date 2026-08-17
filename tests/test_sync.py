@@ -2314,6 +2314,10 @@ def test_non_propulsion_load_matches_the_cars_own_breakdown():
         # them rather than to the two trips the model already happens to suit.
         ("407", 1.78, 11.287, 19.0, 31.0, 0.616, 0.25),
         ("406", 1.65, 7.925, 25.0, 33.0, 0.889, 0.25),
+        # 408 is the cleanest case in the set and pinned tight because of it:
+        # the car's own duration and ours agree exactly (24 min), so nothing
+        # about the clock is standing in for the rate. -4%.
+        ("408", 1.66, 12.533, 24.0, 32.0, 0.684, 0.05),
         # 30C is the loosest, and the residual is the temperature curve, not
         # the gate: the car's own climate line reads 1.23 kW here against the
         # 1.20 it read at 33C — flat — while CLIMATE_KW_PER_DEGREE swings the

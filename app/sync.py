@@ -677,37 +677,30 @@ MIN_PLAUSIBLE_WH_PER_KM = 40.0  # below this over a whole trip = contaminated da
 #
 #   407   0.3% over 19 min at 31C   0.648 kW
 #   406   0.4% over 25 min at 33C   0.657 kW
+#   408   0.3% over 24 min at 32C   0.513 kW
 #
-# 1.4% apart across a 2C spread and a 1.3x span of durations, against the 0.5
-# assumed here. Taken alone that is what an actual constant looks like, and
-# 0.65 is even checkable end to end on 406 — the one trip where every figure
-# came off the car's own screen — where our propulsion energy goes from 0.881
-# kWh to 0.815 against the car's Driving+Elevation of 0.821, turning +7.3%
-# into -0.7%.
+# The first two are 1.4% apart and look exactly like a constant sitting 23%
+# above the 0.5 assumed here. 0.65 was tried on that basis — it is even
+# checkable end to end on 406, where our propulsion energy moves from 0.881
+# kWh to 0.815 against the car's own Driving+Elevation of 0.821.
 #
-# It was tried, and it is not shipped, because the model produces a TOTAL and
-# the total gets worse. Against all five trips whose non-propulsion the car
-# has reported (see test_non_propulsion_load_matches_the_cars_own_breakdown):
+# It is not shipped, for two reasons that arrived in that order.
 #
-#         33C  363   +2% -> +11%
-#         33C  359   -2% ->  +6%
-#         30C  360  -16% ->  -7%
-#         31C  407  -19% -> -12%
-#         33C  406  -19% -> -12%
+# First: the model produces a TOTAL, and the total got worse. Against every
+# trip whose non-propulsion the car has reported (see
+# test_non_propulsion_load_matches_the_cars_own_breakdown), 0.65 improved
+# three and broke the two the model already fits. The reason is in the same
+# table — 363 and 406 share an ambient of 33C while the car's own total reads
+# 1.69 kW for one and 2.13 for the other. A 26% spread at ONE temperature is
+# wider than any constant can absorb.
 #
-# Three improve and two break, and the two that break are the two the model
-# currently fits. The reason is visible in the same table: 363 and 406 are
-# both at 33C and the car's own total reads 1.69 kW for one and 2.13 for the
-# other. A 26% spread at ONE temperature is larger than anything a constant
-# can absorb, and it is the same scatter the climate record above documents
-# from the other side.
+# Second, and decisively: 408 arrived and read 0.513. The two-sample constant
+# was two samples, and 0.5 is within 3% of the third. Nothing needed changing.
 #
-# So the honest reading is that "Everything Else" holding still across two
-# trips does not mean the sum does, and re-fitting one term of a two-term
-# model while the other stays unmeasurable buys a better-looking component
-# and a worse answer. What would settle it is several trips at one ambient
-# with BOTH the car's split and the car's own duration read — 406 is the
-# first of those and it is one.
+# The general lesson is the one this whole block keeps relearning. Two
+# readings agreeing is not a constant, it is two readings; and re-fitting one
+# term of a two-term model while the other stays unmeasurable buys a
+# better-looking component and a worse answer.
 #
 # One thing worth knowing regardless: this error had been HIDDEN. Trip 407's
 # logged duration was 28 minutes against a true 19, and billing a rate 19% low
