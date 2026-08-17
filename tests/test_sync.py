@@ -2306,6 +2306,14 @@ def test_non_propulsion_load_matches_the_cars_own_breakdown():
     cases = [   # trip, gross, km, min, degC, car non-propulsion kWh, tolerance
         ("363", 2.54, 17.843, 36.0, 33.0, 1.016, 0.05),
         ("359", 4.81, 27.258, 66.0, 33.0, 1.946, 0.05),
+        # Two more read straight off the car's drive-level split. Both sit 19%
+        # under, and both are pinned loose for the reason ACCESSORY_KW's note
+        # sets out: 406 and 363 are the SAME ambient and the car's own total
+        # reads 2.13 kW for one against 1.69 for the other, so no single rate
+        # reaches both. Pinned at all so that a future re-fit has to answer to
+        # them rather than to the two trips the model already happens to suit.
+        ("407", 1.78, 11.287, 19.0, 31.0, 0.616, 0.25),
+        ("406", 1.65, 7.925, 25.0, 33.0, 0.889, 0.25),
         # 30C is the loosest, and the residual is the temperature curve, not
         # the gate: the car's own climate line reads 1.23 kW here against the
         # 1.20 it read at 33C — flat — while CLIMATE_KW_PER_DEGREE swings the

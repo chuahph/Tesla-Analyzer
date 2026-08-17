@@ -671,18 +671,49 @@ MIN_PLAUSIBLE_WH_PER_KM = 40.0  # below this over a whole trip = contaminated da
 # the missing load is quiet, and unreliable from 33C up, where it is not.
 # A steeper or convex slope would trade the accurate end for the vague one.
 #
-# ACCESSORY_KW has its own, much thinner record. Trip 407 is the first time
-# the car's drive-level split was read directly: "Everything Else" came to
-# 0.3% over 19 minutes, 0.648 kW, against the 0.5 assumed here. One sample,
-# and one that only bounds the total — the car's own categories and this
-# constant are not obliged to divide the same load the same way. Together the
-# pair read 1.57 kW against the car's 1.94 for the same trip, both low by a
-# similar margin and both inside the scatter above, so neither is moved on
-# this alone. What is worth knowing is that the error had been HIDDEN: the
-# trip's logged duration was 28 minutes against a true 19, and billing a rate
-# 19% low over a clock 47% long came out 19% high instead. Correcting the
-# clock (Place.departure_pace_kmh) removes that cancellation, so a rate that
-# was quietly compensating now has to stand on its own.
+# ACCESSORY_KW has its own record, and it reads nothing like the one above.
+# Two trips whose drive-level split was photographed off the car's own screen
+# put "Everything Else" at:
+#
+#   407   0.3% over 19 min at 31C   0.648 kW
+#   406   0.4% over 25 min at 33C   0.657 kW
+#
+# 1.4% apart across a 2C spread and a 1.3x span of durations, against the 0.5
+# assumed here. Taken alone that is what an actual constant looks like, and
+# 0.65 is even checkable end to end on 406 — the one trip where every figure
+# came off the car's own screen — where our propulsion energy goes from 0.881
+# kWh to 0.815 against the car's Driving+Elevation of 0.821, turning +7.3%
+# into -0.7%.
+#
+# It was tried, and it is not shipped, because the model produces a TOTAL and
+# the total gets worse. Against all five trips whose non-propulsion the car
+# has reported (see test_non_propulsion_load_matches_the_cars_own_breakdown):
+#
+#         33C  363   +2% -> +11%
+#         33C  359   -2% ->  +6%
+#         30C  360  -16% ->  -7%
+#         31C  407  -19% -> -12%
+#         33C  406  -19% -> -12%
+#
+# Three improve and two break, and the two that break are the two the model
+# currently fits. The reason is visible in the same table: 363 and 406 are
+# both at 33C and the car's own total reads 1.69 kW for one and 2.13 for the
+# other. A 26% spread at ONE temperature is larger than anything a constant
+# can absorb, and it is the same scatter the climate record above documents
+# from the other side.
+#
+# So the honest reading is that "Everything Else" holding still across two
+# trips does not mean the sum does, and re-fitting one term of a two-term
+# model while the other stays unmeasurable buys a better-looking component
+# and a worse answer. What would settle it is several trips at one ambient
+# with BOTH the car's split and the car's own duration read — 406 is the
+# first of those and it is one.
+#
+# One thing worth knowing regardless: this error had been HIDDEN. Trip 407's
+# logged duration was 28 minutes against a true 19, and billing a rate 19% low
+# over a clock 47% long came out 19% high instead. Correcting the clock
+# (Place.departure_pace_kmh) removes that cancellation, so whatever the rate
+# turns out to be, it has to stand on its own from here.
 ACCESSORY_KW = 0.5
 CLIMATE_BASE_KW = 0.35
 CLIMATE_KW_PER_DEGREE = 0.08
