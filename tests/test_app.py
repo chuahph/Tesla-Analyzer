@@ -2996,3 +2996,62 @@ def test_no_passcode_means_open():
             assert client.get(PEM_PATH).status_code == 200
     finally:
         settings.app_passcode = old
+
+
+def test_departure_pace_is_per_place_and_survives_an_edit():
+    """A place's departure pace is set from outside evidence (the car's own
+    Trips screen), so the two ways to lose it both matter: the editor must not
+    silently clear it by omission, and the geofence lookup must find it from
+    the parked coordinates alone."""
+    from app.database import SessionLocal
+    from app.models import Place
+
+    settings = get_settings()
+    old = settings.app_passcode
+    settings.app_passcode = ""
+    try:
+        with TestClient(app) as client:
+            client.post("/api/places", json={
+                "name": "Home", "lat": 5.3301, "lon": 100.3001, "radius_km": 0.2,
+            })
+            assert client.get("/api/places").json()[0]["departure_pace_kmh"] == 0.0
+
+            # Unknown place names fail loudly rather than setting nothing.
+            assert client.get("/api/set-departure-pace",
+                              params={"place": "Nowhere", "kmh": 45}).status_code == 404
+            # A typo'd unit (m/s, or mph read as km/h) is caught, not stored.
+            assert client.get("/api/set-departure-pace",
+                              params={"place": "Home", "kmh": 450}).status_code == 400
+
+            body = client.get("/api/set-departure-pace",
+                              params={"place": "home", "kmh": 45}).json()  # name is case-insensitive
+            assert body["place"] == "Home" and body["departure_pace_kmh"] == 45.0
+            assert body["was"] == 0.0
+
+            # Moving the geofence from the places editor — which posts no pace
+            # field at all — must leave the setting alone.
+            client.post("/api/places", json={
+                "name": "Home", "lat": 5.3302, "lon": 100.3002, "radius_km": 0.25,
+            })
+            assert client.get("/api/places").json()[0]["departure_pace_kmh"] == 45.0
+
+            # And the sync path finds it from coordinates inside the fence.
+            from app.api.routes import _place_departure_pace
+            with SessionLocal() as s:
+                inside = {"lat": 5.3301, "lon": 100.3001}
+                outside = {"lat": 5.5000, "lon": 100.5000}
+                assert _place_departure_pace(s, inside) == 45.0
+                assert _place_departure_pace(s, outside) is None
+                assert _place_departure_pace(s, None) is None
+                assert _place_departure_pace(s, {"lat": None, "lon": None}) is None
+
+            # 0 is how you go back to the global default.
+            assert client.get("/api/set-departure-pace",
+                              params={"place": "Home", "kmh": 0}).json()[
+                                  "departure_pace_kmh"] == 0.0
+            with SessionLocal() as s:
+                assert _place_departure_pace(s, {"lat": 5.3301, "lon": 100.3001}) is None
+                s.query(Place).delete()
+                s.commit()
+    finally:
+        settings.app_passcode = old

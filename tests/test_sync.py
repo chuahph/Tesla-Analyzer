@@ -2709,3 +2709,47 @@ def test_departure_premium_kept_when_the_head_really_did_crawl():
         base * (measured + weighted) / measured, abs=0.01)
     # And it is strictly the dearer of the two readings.
     assert drive["energy_used_kwh"] > _recovered_departure(63)[1]["energy_used_kwh"]
+
+
+def test_place_departure_pace_shortens_the_back_dated_head():
+    """A blind departure is back-dated by blind distance / an assumed pace, so
+    the pace is the only thing standing between the logged start and the real
+    one — and it is a property of the road out, not of cars in general.
+
+    Three Home departures (trips 397/402/407) ran their blind heads at 45-55
+    km/h while the default assumed 20, putting every start 9-12 minutes early.
+    Passing the place's own figure has to move the start, and by the ratio.
+    """
+    s1 = snap(T0, 1000.0, 80, range_km=400.0)
+    # Seen 40 min later, 6 km further on and already at speed: the car left at
+    # some point inside the window and nothing observed when.
+    s2 = snap(T0 + 2400, 1006.0, 78, shift="D", speed=50.0, range_km=392.0)
+
+    _, _, slow, _ = process_snapshot(s1, s2, None, None, 60.0, 0.90)
+    _, _, fast, _ = process_snapshot(s1, s2, None, None, 60.0, 0.90,
+                                     departure_pace_kmh=45.0)
+
+    # Same ground either way — the odometer anchor does not depend on the pace.
+    assert slow["odo_km"] == fast["odo_km"] == 1000.0
+    # 6 km at 32.5 (speed*0.65 beats the 20 floor) vs at 45: ~11.1 min vs 8.0.
+    assert round((s2["ts"] - slow["ts"]) / 60.0, 1) == 11.1
+    assert round((s2["ts"] - fast["ts"]) / 60.0, 1) == 8.0
+    assert fast["start_blind_kmh"] == 45.0
+
+    # 0 / None mean "no opinion", not "instantly", and fall back to the default.
+    _, _, unset, _ = process_snapshot(s1, s2, None, None, 60.0, 0.90,
+                                      departure_pace_kmh=0.0)
+    assert unset["ts"] == slow["ts"]
+
+
+def test_place_departure_pace_never_undercuts_the_observed_speed():
+    """The floor is a floor. A place set slower than the speed the car was
+    actually doing when first seen must not drag the estimate back down — that
+    reading is evidence and the setting is only a prior."""
+    s1 = snap(T0, 1000.0, 80, range_km=400.0)
+    s2 = snap(T0 + 2400, 1006.0, 78, shift="D", speed=60.0, range_km=392.0)
+
+    _, _, slow_place, _ = process_snapshot(s1, s2, None, None, 60.0, 0.90,
+                                           departure_pace_kmh=10.0)
+    # 60 * 0.65 = 39 wins over the 10.
+    assert slow_place["start_blind_kmh"] == 39.0

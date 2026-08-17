@@ -183,6 +183,24 @@ CITY_SPEED_KMH = 30.0  # assumed door-to-door pace when the real duration is unk
 # real fix, and why that window went 20 -> 10.
 #
 # Three samples, no longer one-sided. The value is provisional.
+#
+# It is also, on later evidence, only right for SOME places. Three departures
+# from Home with long blind heads — trips 397, 402 and 407 — ran the unseen
+# stretch at 47, 55 and 45 km/h against this 20, because that particular
+# driveway reaches a trunk road inside a kilometre. All three starts came out
+# 9 to 12 minutes early. The three samples this constant was fitted from
+# (11/20/28 km/h) were departures from other places, and they are not wrong
+# either; there is simply no single number, and the spread is the place, not
+# the noise.
+#
+# So a Place may carry its own ``departure_pace_kmh`` and this stays the
+# default for everywhere else. Note what that is NOT: it is a setting, not
+# something the app learns. The arrival tail is learnable because a later
+# poll observes where the car actually stopped; nothing whatsoever observes
+# when it actually STARTED, so no accumulation of history can score a
+# departure guess. max_speed_kmh gives no signal either — trip 397 recorded a
+# 37 km/h peak over a head that ran at 47, because the peak only covers the
+# part we saw.
 DEPARTURE_PACE_KMH = 20.0
 
 
@@ -1539,6 +1557,7 @@ def process_snapshot(
     price_per_kwh_dc: float | None = None,
     prev_close_odo_km: float | None = None,
     last_quiet_ts: float | None = None,
+    departure_pace_kmh: float | None = None,
 ) -> tuple[list[dict], list[dict], dict | None, dict | None]:
     """Advance the session state machine by one snapshot.
 
@@ -1568,6 +1587,13 @@ def process_snapshot(
     snapshots does not: a rechecked overnight park and a dead poller look
     identical from the snapshots alone. None keeps the old behaviour of
     measuring staleness by how long the car sat.
+
+    ``departure_pace_kmh``: how fast the car typically gets away from where
+    ``prev`` is parked, when that spot is a named Place carrying its own
+    figure (see Place.departure_pace_kmh) — a driveway onto a trunk road and
+    one onto a queue at a junction are minutes apart over the same blind
+    kilometre. Caller-only knowledge again: the geofence table is not in the
+    snapshot stream. None falls back to DEPARTURE_PACE_KMH.
 
     Returns (drives, charges, open_trip, open_charge) — the sessions completed
     at this snapshot plus the carried-over open sessions.
@@ -1887,7 +1913,8 @@ def process_snapshot(
                 # with the clock estimate below because the recovery needs its
                 # complement: the minutes it was still PARKED, which is the
                 # only part of prev's SoC drop that isn't this drive's.
-                pace = max((cur.get("speed_kmh") or 0.0) * 0.65, DEPARTURE_PACE_KMH)
+                floor_kmh = departure_pace_kmh or DEPARTURE_PACE_KMH
+                pace = max((cur.get("speed_kmh") or 0.0) * 0.65, floor_kmh)
                 shift_sec = moved / pace * 3600.0
                 park_min = max(gap_min - shift_sec / 60.0, 0.0)
                 # is_driving(prev) blocks recovery below because prev isn't a

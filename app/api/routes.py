@@ -804,6 +804,28 @@ def _geofence_name(
     return best_name
 
 
+def _place_departure_pace(session: Session, snap: dict | None) -> float | None:
+    """The departure pace set on the named Place this snapshot sits in, if any
+    — what sync.process_snapshot uses to back-date a start it never saw.
+
+    Nearest containing geofence wins, matching _geofence_name, so overlapping
+    places resolve the same way for the pace as for the name. A place with the
+    field left at 0 is not a match: it means "no opinion", and returning it
+    would shadow a smaller, further place that does have one.
+    """
+    coords = sync_mod._coords(snap) if snap else ""
+    if not coords:
+        return None
+    best_pace, best_km = None, None
+    for p in session.query(Place).all():
+        if not p.departure_pace_kmh:
+            continue
+        d = haversine_km(coords, f"{p.lat}, {p.lon}")
+        if d is not None and d <= p.radius_km and (best_km is None or d < best_km):
+            best_pace, best_km = p.departure_pace_kmh, d
+    return best_pace
+
+
 def _cached_place_near(coords: str) -> tuple[str, str] | None:
     """An already-resolved label for a coordinate within _SAME_PLACE_M of
     ``coords``, or None. Picks the closest match rather than the first, so a
@@ -1307,7 +1329,8 @@ def list_places(session: Session = Depends(get_session)):
     """User-defined geofences that override trip/charge location names."""
     places = session.scalars(select(Place).order_by(Place.name)).all()
     return [
-        {"id": p.id, "name": p.name, "lat": p.lat, "lon": p.lon, "radius_km": p.radius_km}
+        {"id": p.id, "name": p.name, "lat": p.lat, "lon": p.lon,
+         "radius_km": p.radius_km, "departure_pace_kmh": p.departure_pace_kmh}
         for p in places
     ]
 
@@ -1325,6 +1348,19 @@ def create_place(payload: dict = Body(...), session: Session = Depends(get_sessi
         raise HTTPException(400, "Missing or invalid 'lat'/'lon'.")
     radius_km = float(payload.get("radius_km") or 0.15)
     radius_km = max(0.02, min(radius_km, 5.0))  # sane bounds: 20 m to 5 km
+    # Absent means "unchanged", not "clear it" — the dashboard's place editor
+    # predates this field and posts without it, so reading a missing key as 0
+    # would silently wipe the pace every time a geofence was nudged.
+    pace = payload.get("departure_pace_kmh")
+    if pace is not None:
+        try:
+            pace = float(pace)
+        except (TypeError, ValueError):
+            raise HTTPException(400, "Invalid 'departure_pace_kmh'.")
+        # 0 clears it (back to the global default); otherwise a walking pace
+        # and a motorway average both mean someone typed the wrong thing.
+        if pace and not 5.0 <= pace <= 90.0:
+            raise HTTPException(400, "departure_pace_kmh must be 0, or between 5 and 90.")
 
     place = session.scalars(select(Place).where(Place.name == name)).first()
     if place:
@@ -1333,12 +1369,54 @@ def create_place(payload: dict = Body(...), session: Session = Depends(get_sessi
         place = Place(name=name, lat=lat, lon=lon, radius_km=radius_km,
                       created_at=sync_mod.now_local())
         session.add(place)
+    if pace is not None:
+        place.departure_pace_kmh = pace
     session.flush()
     relabeled = _relabel_existing(session, place)
     session.commit()
     _PLACE_CACHE.clear()  # a newly-named geofence can relabel already-cached coords
     return {"id": place.id, "name": place.name, "lat": place.lat, "lon": place.lon,
-            "radius_km": place.radius_km, "relabeled": relabeled}
+            "radius_km": place.radius_km,
+            "departure_pace_kmh": place.departure_pace_kmh, "relabeled": relabeled}
+
+
+@router.get("/set-departure-pace")
+def set_departure_pace(
+    place: str, kmh: float, session: Session = Depends(get_session)
+):
+    """Record how fast the car actually gets away from a named place, km/h.
+
+    Only affects departures the sleep-recheck window did not see: the trip's
+    distance and energy are anchored to the odometer and SoC either way, so
+    this moves the logged START TIME and nothing else. Pass kmh=0 to go back
+    to the global default (sync.DEPARTURE_PACE_KMH).
+
+    Where the number comes from, since the app cannot measure it: take a trip
+    whose diagnostics show a large ``start_lost_km``, read the car's own
+    duration for it off the Trips screen, and divide the blind distance by
+    the minutes the car was really driving before we first saw it. Three
+    such readings at Home gave 47, 55 and 45 km/h.
+
+    A GET so it can be run from the address bar, like the repair endpoints.
+    """
+    row = session.scalars(
+        select(Place).where(func.lower(Place.name) == place.strip().lower())
+    ).first()
+    if row is None:
+        known = [p.name for p in session.scalars(select(Place).order_by(Place.name))]
+        raise HTTPException(404, f"No place named {place!r}. Known places: {known}")
+    if kmh and not 5.0 <= kmh <= 90.0:
+        raise HTTPException(400, "kmh must be 0 (use the default), or between 5 and 90.")
+    was = row.departure_pace_kmh
+    row.departure_pace_kmh = round(kmh, 1)
+    session.commit()
+    return {
+        "place": row.name,
+        "departure_pace_kmh": row.departure_pace_kmh,
+        "was": was,
+        "default_kmh": sync_mod.DEPARTURE_PACE_KMH,
+        "applies_to": "future departures only — already-logged trips keep their times",
+    }
 
 
 @router.delete("/places/{place_id}")
@@ -1954,11 +2032,21 @@ def _process_vehicle(
                 <= last_closed.end_odo_km <= snap["odo_km"]):
             prev_close_odo = last_closed.end_odo_km
 
+    # How fast this car gets away from wherever it was last parked, if that
+    # spot is a Place with its own figure. Looked up only when the car is
+    # moving now — that is the only shape the departure recovery runs in, so
+    # an idle poll still touches no extra rows.
+    place_pace = (
+        _place_departure_pace(session, prev)
+        if prev is not None and sync_mod.is_driving(snap) else None
+    )
+
     drives, charges, open_trip, open_charge = sync_mod.process_snapshot(
         prev, snap, open_trip, open_charge,
         capacity_kwh, settings.energy_price_per_kwh, settings.drive_min_km,
         prev_close_odo_km=prev_close_odo,
         last_quiet_ts=float(state.get(session, state.QUIET_SEEN_KEY) or 0) or None,
+        departure_pace_kmh=place_pace,
     )
     drives = recovered + drives  # include a drive recovered from the upgrade gap
     # A trimmed tail is time the car spent parked, so its standby draw is not

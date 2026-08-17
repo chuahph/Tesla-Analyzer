@@ -432,6 +432,16 @@ class Place(Base):
     lon: Mapped[float] = mapped_column(Float)
     radius_km: Mapped[float] = mapped_column(Float, default=0.15)
     created_at: Mapped[datetime] = mapped_column(DateTime)
+    # How fast the car actually gets away from HERE, km/h, over the first few
+    # km — used only to back-date a departure the sleep window did not see
+    # (sync.DEPARTURE_PACE_KMH). 0 = use the global default.
+    #
+    # This is a setting and not a measurement, which is the honest part. The
+    # arrival tail could be learned because a later poll observes the true
+    # stop; nothing ever observes the true START, so no amount of history
+    # tells the app it guessed wrong. The evidence has to come from outside —
+    # the car's own Trips list — and then it lives here.
+    departure_pace_kmh: Mapped[float] = mapped_column(Float, default=0.0)
 
 
 class ServiceRecord(Base):
