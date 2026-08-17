@@ -648,11 +648,16 @@ MIN_PLAUSIBLE_WH_PER_KM = 40.0  # below this over a whole trip = contaminated da
 # Those repeats have started arriving, and they say something better than a
 # slope would have. Grouped by ambient, using each trip's own duration:
 #
-#   30C   0.98                 (ours 0.99, +1%)
-#   31C   1.04, 1.16, 1.30     (ours 1.07, within +3% of the nearest)
-#   32C   1.29                 (ours 1.15, -11%)
+#   30C   0.98                       (ours 0.99, +1%)
+#   31C   1.04, 1.16, 1.30, 1.30     (ours 1.07, -11% against their mean)
+#   32C   1.29                       (ours 1.15, -11%)
 #   33C   0.76, 0.80, 1.69, 1.77
 #   34C   2.78, 3.27
+#
+# The fourth 31C reading is trip 407, and it repeats the top of that group
+# exactly rather than widening it: four trips at one ambient now span 1.04 to
+# 1.30, still the tightest cluster in the band. The model sits at its floor,
+# not outside it.
 #
 # The scatter is not uniform across the band — it EXPLODES with heat. Three
 # trips at 31C hold within +/-11% of each other; four at 33C span 2.3x. If
@@ -665,6 +670,19 @@ MIN_PLAUSIBLE_WH_PER_KM = 40.0  # below this over a whole trip = contaminated da
 # It is not a bad fit everywhere — it is nearly exact from 30 to 31C, where
 # the missing load is quiet, and unreliable from 33C up, where it is not.
 # A steeper or convex slope would trade the accurate end for the vague one.
+#
+# ACCESSORY_KW has its own, much thinner record. Trip 407 is the first time
+# the car's drive-level split was read directly: "Everything Else" came to
+# 0.3% over 19 minutes, 0.648 kW, against the 0.5 assumed here. One sample,
+# and one that only bounds the total — the car's own categories and this
+# constant are not obliged to divide the same load the same way. Together the
+# pair read 1.57 kW against the car's 1.94 for the same trip, both low by a
+# similar margin and both inside the scatter above, so neither is moved on
+# this alone. What is worth knowing is that the error had been HIDDEN: the
+# trip's logged duration was 28 minutes against a true 19, and billing a rate
+# 19% low over a clock 47% long came out 19% high instead. Correcting the
+# clock (Place.departure_pace_kmh) removes that cancellation, so a rate that
+# was quietly compensating now has to stand on its own.
 ACCESSORY_KW = 0.5
 CLIMATE_BASE_KW = 0.35
 CLIMATE_KW_PER_DEGREE = 0.08
