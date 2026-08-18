@@ -1925,3 +1925,74 @@ def test_data_quality_will_not_call_a_reconstructed_trip_measured():
     # And the existing rules are untouched.
     assert _data_quality(trip(10.0, idle=False)) == "estimated"
     assert _data_quality(trip(10.0, energy=0.0)) == "incomplete"
+
+
+def _chain(legs, gap_hours: float = 10.0):
+    """Drives laid end to end with a fixed park between each pair.
+
+    ``legs`` is (place the drive ENDS at, start_soc, end_soc), so the gap
+    after drive i is worth ``legs[i].end_soc - legs[i+1].start_soc`` points and
+    belongs to legs[i]'s place. Written out explicitly because a helper that
+    built pairs left spurious gaps BETWEEN the pairs, with SoC deltas nobody
+    had chosen.
+    """
+    from datetime import datetime, timedelta
+    from types import SimpleNamespace
+
+    base = datetime(2026, 7, 1)
+    out = []
+    for i, (place, start_soc, end_soc) in enumerate(legs):
+        at = base + timedelta(hours=(gap_hours + 0.5) * i)
+        out.append(SimpleNamespace(
+            id=i, start_time=at, end_time=at + timedelta(minutes=30),
+            start_soc=start_soc, end_soc=end_soc,
+            end_location=place, start_park_min=None))
+    return out
+
+
+def test_standby_rate_is_fitted_per_place():
+    """A single whole-history rate described nowhere this car parks: Home
+    measured 0.035 kW and the places where Sentry stays armed 0.230, and the
+    blend of 0.079 was wrong in both directions. Each place gets its own."""
+    drives = _chain([
+        ("Home",   100.0, 99.0),
+        ("Resort",  99.0, 98.0),   # Home gap:   0 points
+        ("Home",    94.0, 93.0),   # Resort gap: 4 points
+        ("Resort",  92.0, 91.0),   # Home gap:   1 point
+        ("Home",    87.0, 86.0),   # Resort gap: 4 points
+        ("Resort",  86.0, 85.0),   # Home gap:   0 points
+        ("Home",    81.0, 80.0),   # Resort gap: 4 points
+    ])
+    home = driving_analysis.place_standby_kw(drives, [], 68.4, "Home")
+    resort = driving_analysis.place_standby_kw(drives, [], 68.4, "Resort")
+    blended = driving_analysis.standby_kw(drives, [], 68.4)
+
+    assert home is not None and resort is not None and blended is not None
+    assert resort > blended > home            # the blend fits neither
+    assert resort > home * 3
+
+    # A place with no history of its own is not given someone else's.
+    assert driving_analysis.place_standby_kw(drives, [], 68.4, "Nowhere") is None
+    assert driving_analysis.place_standby_kw(drives, [], 68.4, None) is None
+
+
+def test_a_soc_rise_disqualifies_a_gap_from_the_standby_fit():
+    """An unlogged charge shows up as SoC reading higher at the far end of a
+    park. max(drop, 0) used to score it as zero drain while keeping every one
+    of its hours in the denominator, so a missed charge diluted the rate
+    instead of being excluded the way a logged one is."""
+    legs = [("Home", 100.0 - 2 * i, 99.0 - 2 * i) for i in range(6)]
+    baseline = driving_analysis.standby_kw(_chain(legs), [], 68.4)
+    assert baseline is not None
+
+    # Same history, then a park that gained 15 points — a charge the log never
+    # saw (measured: a real one, 30 July at the Office, worth 68 points).
+    charged = driving_analysis.standby_kw(
+        _chain(legs + [("Home", 104.0, 103.0)]), [], 68.4)
+    assert charged == baseline
+
+    # A single point the other way is the pack's own estimate wandering, and
+    # is still a park: kept, and scored as no measurable drain.
+    wobble = driving_analysis.standby_kw(
+        _chain(legs + [("Home", 90.0, 89.0)]), [], 68.4)
+    assert wobble is not None and wobble < baseline

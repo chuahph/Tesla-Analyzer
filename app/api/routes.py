@@ -3027,6 +3027,7 @@ def standby_evidence(session: Session = Depends(get_session)):
     ).all()
     charge_starts = sorted(c.start_time for c in charges)
 
+    by_place: dict[str, list[float]] = {}
     gaps, total_kwh, total_kwh_signed, total_hours, clipped = [], 0.0, 0.0, 0.0, 0
     for a, b in zip(drives, drives[1:]):
         hours = (b.start_time - a.end_time).total_seconds() / 3600.0
@@ -3041,6 +3042,10 @@ def standby_evidence(session: Session = Depends(get_session)):
         total_kwh += max(kwh, 0.0)
         total_kwh_signed += kwh
         total_hours += hours
+        seen = by_place.setdefault(a.end_location or "?", [0.0, 0.0, 0])
+        seen[0] += max(points, 0.0)
+        seen[1] += hours
+        seen[2] += 1
         gaps.append({
             "after_drive_id": a.id,
             "at": a.end_time.isoformat(timespec="minutes"),
@@ -3075,6 +3080,22 @@ def standby_evidence(session: Session = Depends(get_session)):
         # produce the fitted rate. If that is close to a typical gap here, the
         # fit is reading the quantum rather than the drain.
         "hours_per_point_at_this_rate": round(point_kwh / rate, 1) if rate else None,
+        # The split that matters more than the duration band does: Sentry is
+        # excluded at home and work and armed everywhere else, so this car has
+        # two parked regimes about 6x apart and a single fit lands between
+        # them, describing neither. ``in_use_kw`` is what each place actually
+        # gets — its own figure where its history can carry one (see
+        # driving.place_standby_kw), the blended rate where it cannot.
+        "by_place": sorted(
+            ({"place": p,
+              "gaps": n,
+              "hours": round(h, 1),
+              "points": round(pts, 1),
+              "rate_kw": round(pts / 100.0 * capacity_kwh / h, 4) if h else None,
+              "in_use_kw": band(driving_analysis.place_standby_kw(
+                  list(drives), list(charges), capacity_kwh, p)) or rate}
+             for p, (pts, h, n) in by_place.items()),
+            key=lambda r: -r["hours"]),
         "gaps": gaps,
     }
 

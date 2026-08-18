@@ -138,6 +138,11 @@ STANDBY_MIN_TOTAL_HOURS = 24.0
 # Tesla idles somewhere near 100-500 W depending on Sentry, climate and how
 # long it takes to fall asleep.
 STANDBY_PLAUSIBLE_KW = (0.02, 1.5)
+# How far SoC may read HIGHER at the end of a parked gap than at its start
+# before the gap is thrown out as something other than a park. One whole point
+# of the pack's own estimate wandering overnight is ordinary; anything past
+# that is energy arriving from outside.
+SOC_RISE_TOLERANCE_PCT = 1.0
 
 
 # There was a parked_awake_kw here, and the reasoning behind it still stands:
@@ -163,12 +168,16 @@ STANDBY_PLAUSIBLE_KW = (0.02, 1.5)
 
 def _gap_rate_kw(drives: list[Any], charges: list[Any] | None, capacity_kwh: float,
                  min_gap_h: float, max_gap_h: float | None,
-                 min_total_h: float) -> float | None:
+                 min_total_h: float, place: str | None = None) -> float | None:
     """Average draw (kW) across the parked gaps falling in a duration band.
 
     Shared by the two rates that matter — the deep-sleep average and the
     just-parked one — because they differ only in which gaps they look at, and
     letting them drift apart in method would make them incomparable.
+
+    ``place`` restricts the fit to gaps that began where a trip ENDED there,
+    which turns out to matter more than the duration band does — see
+    place_standby_kw.
     """
     ordered = sorted(drives, key=lambda d: d.start_time)
     if len(ordered) < 2 or not capacity_kwh:
@@ -177,6 +186,8 @@ def _gap_rate_kw(drives: list[Any], charges: list[Any] | None, capacity_kwh: flo
     total_kwh = 0.0
     total_hours = 0.0
     for a, b in zip(ordered, ordered[1:]):
+        if place is not None and getattr(a, "end_location", None) != place:
+            continue
         gap_start, gap_end = a.end_time, b.start_time
         gap_hours = (gap_end - gap_start).total_seconds() / 3600.0
         if gap_hours < min_gap_h or (max_gap_h is not None and gap_hours >= max_gap_h):
@@ -185,6 +196,22 @@ def _gap_rate_kw(drives: list[Any], charges: list[Any] | None, capacity_kwh: flo
         # say nothing about drain. Scanned per gap rather than with a marching
         # index: the bands skip gaps, so a shared cursor would fall behind.
         if any(gap_start < c < gap_end for c in charge_starts):
+            continue
+        # ...and the charge log is not the only way to learn that. A gap whose
+        # SoC came out HIGHER than it went in did not measure drain either,
+        # whatever the log says: energy went in from somewhere.
+        #
+        # Measured, 30 July: a gap at the Office read -68 points across 8.1
+        # hours with no charge logged inside it. max(drop, 0) below scored
+        # that as zero drain and kept all 8.1 hours in the denominator, so a
+        # missed charge quietly diluted the rate rather than being excluded
+        # like every other charge. Dropping the gap outright is what the
+        # charge test above would have done had it seen it.
+        #
+        # The tolerance is a whole point because the pack's own estimate can
+        # wander one either way overnight; a real charge clears it by orders
+        # of magnitude, so nothing is riding on where exactly it sits.
+        if b.start_soc - a.end_soc > SOC_RISE_TOLERANCE_PCT:
             continue
         total_kwh += max(a.end_soc - b.start_soc, 0.0) / 100.0 * capacity_kwh
         total_hours += gap_hours
@@ -209,6 +236,46 @@ def standby_kw(drives: list[Any], charges: list[Any] | None,
     """
     return _gap_rate_kw(drives, charges, capacity_kwh,
                         STANDBY_MIN_GAP_HOURS, None, STANDBY_MIN_TOTAL_HOURS)
+
+
+def place_standby_kw(drives: list[Any], charges: list[Any] | None,
+                     capacity_kwh: float, place: str | None) -> float | None:
+    """The same standby fit, restricted to parks at ONE place.
+
+    A single whole-history rate turned out to describe nowhere this car
+    actually parks. Across 42 gaps and 450 parked hours:
+
+        Home        23 gaps   256 h   13 points   0.035 kW
+        Office       9 gaps    84 h    5 points   0.041 kW
+        elsewhere    9 gaps   101 h   34 points   0.230 kW
+
+    Six and a half times, and not noise — the split is Sentry Mode, which is
+    excluded at home and work and armed everywhere else. The blended 0.079 kW
+    the whole-history fit returns is 2.3x too high for the places this car
+    spends most of its nights and 3x too low for the rest.
+
+    That blend is what made an overnight park read wrong. vampire_drain
+    reports the fitted rate instead of a measured SoC point only while the
+    modelled drain is under one point, and 0.079 kW across 9.2 hours comes to
+    0.727 kWh against a 0.684 quantum — just over, so trip 409 reported a
+    whole point, 0.68 kWh, where the car's own screen said 0.137. At Home's
+    own 0.035 the same gap models 0.32 kWh and the substitution fires.
+
+    None when this place has too little history to carry its own figure, which
+    the caller should read as "use the whole-history rate": Home, Office and
+    the resort all clear the 24-hour minimum comfortably, while a hotel stayed
+    at once does not.
+
+    Note what this still cannot do. One point at Home's rate spreads over 19.7
+    hours, so no SINGLE overnight park here is measurable — the 13 points are
+    real only as a sum across 256 hours. The rate is a measurement; any one
+    gap it is applied to is not.
+    """
+    if not place:
+        return None
+    return _gap_rate_kw(drives, charges, capacity_kwh,
+                        STANDBY_MIN_GAP_HOURS, None, STANDBY_MIN_TOTAL_HOURS,
+                        place=place)
 
 
 def parked_rate_kw(drives: list[Any], charges: list[Any] | None,
@@ -427,16 +494,24 @@ def vampire_drain(
     # Fitted lazily: the add-back below needs it only when some trip gave
     # drain up, and the short-gap substitution only when a gap is too brief to
     # measure. Windows with neither shouldn't pay for the fit.
-    _rate: list[float | None] = []
+    _rate: dict[Any, float | None] = {}
 
-    def park_rate() -> float | None:
-        if not _rate:
-            _rate.append(parked_rate_kw(drives, charges, capacity_kwh))
-        return _rate[0]
+    def park_rate(place: str | None = None) -> float | None:
+        """What this car draws parked HERE, falling back to its whole history.
 
-    park_rate_kw = (park_rate()
-                    if any(getattr(d, "start_park_min", None) for d in ordered)
-                    else None)
+        Keyed by place because the two differ by 6.6x on this car (see
+        place_standby_kw) and every gap knows where it happened — the trip
+        that opened it ended somewhere. A place without enough parked hours of
+        its own returns the blended figure rather than nothing: it fits no
+        regime exactly, but it sits between them, which beats declining to
+        correct a gap at all.
+        """
+        if place not in _rate:
+            _rate[place] = (place_standby_kw(drives, charges, capacity_kwh, place)
+                            if place else parked_rate_kw(drives, charges, capacity_kwh))
+        if _rate[place] is None and place is not None:
+            return park_rate(None)
+        return _rate[place]
     # SoC is stored to whole percent and nothing finer exists at a trip
     # boundary, so one point is the smallest drain a gap can express.
     soc_point_kwh = capacity_kwh / 100.0
@@ -484,7 +559,7 @@ def vampire_drain(
         # works for measurement at a scale that doesn't. It is not a guess
         # standing in for data.
         if gap_hours > 0:
-            rate = park_rate()
+            rate = park_rate(getattr(a, "end_location", None))
             if rate and rate * gap_hours < soc_point_kwh:
                 kwh = rate * gap_hours
                 drop_pct = kwh / capacity_kwh * 100.0
@@ -504,6 +579,7 @@ def vampire_drain(
         # restored. Second-order, and cheaper than a column that exists only
         # to bookkeep.
         park_min = getattr(b, "start_park_min", None) or 0.0
+        park_rate_kw = park_rate(getattr(a, "end_location", None)) if park_min > 0 else None
         if park_min > 0 and park_rate_kw:
             kwh += park_rate_kw * park_min / 60.0
             drop_pct = kwh / capacity_kwh * 100.0   # keep pct saying what kwh says
