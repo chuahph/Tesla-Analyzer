@@ -826,6 +826,35 @@ def _place_departure_pace(session: Session, snap: dict | None) -> float | None:
     return best_pace
 
 
+def _departure_parked_rate_kw(session: Session, vehicle, prev: dict | None,
+                              capacity_kwh: float) -> float | None:
+    """What this car draws parked where ``prev`` is sitting, in kW.
+
+    Feeds process_snapshot\'s decision about how long a park may be before a
+    departure stops trusting its SoC as an energy baseline. Per place, because
+    the two regimes on this car are 6.6x apart (see driving.place_standby_kw)
+    and a bound sized on the blend would be wrong in both directions — which
+    is the whole reason that decision moved off a flat clock.
+
+    The place comes from the same geofence match every other Place-aware
+    feature uses, so it agrees with the ``end_location`` the fit is keyed on.
+    Falls back to the whole-history rate for anywhere unnamed, and to None if
+    even that cannot be fitted — which the caller reads as "keep the clock".
+    """
+    past_drives = session.scalars(
+        select(Drive).where(Drive.vehicle_id == vehicle.id).order_by(Drive.start_time)
+    ).all()
+    past_charges = session.scalars(
+        select(Charge).where(Charge.vehicle_id == vehicle.id)
+    ).all()
+    place = _geofence_name(sync_mod._coords(prev), session) if prev else None
+    rate = driving_analysis.place_standby_kw(
+        list(past_drives), list(past_charges), capacity_kwh, place)
+    if rate is not None:
+        return rate
+    return _trim_rate_kw(list(past_drives), list(past_charges), capacity_kwh)
+
+
 def _cached_place_near(coords: str) -> tuple[str, str] | None:
     """An already-resolved label for a coordinate within _SAME_PLACE_M of
     ``coords``, or None. Picks the closest match rather than the first, so a
@@ -2041,12 +2070,25 @@ def _process_vehicle(
         if prev is not None and sync_mod.is_driving(snap) else None
     )
 
+    # And what it draws sitting there, but only when the flat clock bound would
+    # otherwise decide the question on its own. Under STALE_ANCHOR_MAX_MIN the
+    # baseline is accepted either way, so the fit — which reads the whole trip
+    # and charge history — is not worth paying for; a departure after a long
+    # park is the rare case that needs it.
+    parked_rate = None
+    if (place_pace is not None or prev is not None) and sync_mod.is_driving(snap):
+        gap_min = (snap["ts"] - prev["ts"]) / 60.0 if prev else 0.0
+        if gap_min > sync_mod.STALE_ANCHOR_MAX_MIN:
+            parked_rate = _departure_parked_rate_kw(
+                session, vehicle, prev, capacity_kwh)
+
     drives, charges, open_trip, open_charge = sync_mod.process_snapshot(
         prev, snap, open_trip, open_charge,
         capacity_kwh, settings.energy_price_per_kwh, settings.drive_min_km,
         prev_close_odo_km=prev_close_odo,
         last_quiet_ts=float(state.get(session, state.QUIET_SEEN_KEY) or 0) or None,
         departure_pace_kmh=place_pace,
+        parked_rate_kw=parked_rate,
     )
     drives = recovered + drives  # include a drive recovered from the upgrade gap
     # A trimmed tail is time the car spent parked, so its standby draw is not

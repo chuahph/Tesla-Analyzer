@@ -182,6 +182,33 @@ CITY_SPEED_KMH = 30.0  # assumed door-to-door pace when the real duration is unk
 # despite a pace error of 40%. Shrinking settings.sleep_recheck_min is the
 # real fix, and why that window went 20 -> 10.
 #
+# How much of a park's standby drain may ride into a trip on a recovered SoC
+# baseline before the baseline is refused. This is what STALE_ANCHOR_MAX_MIN
+# was always reaching for at the ENERGY end: its own note sizes it as "at most
+# 45 minutes of this car's ~0.3 kW ... ~0.2 kWh", so the 45 was never the
+# quantity of interest, only a stand-in for it.
+#
+# The 0.3 kW in that sizing was parked_awake_kw, which was deleted for reading
+# ten times high. Measured per place, this car draws 0.035 kW at Home and
+# 0.230 where Sentry stays armed (see driving.place_standby_kw) — so a flat
+# clock is 8x too strict in the one place it parks most nights and about right
+# in the others.
+#
+# Measured, trip 413: a 53-minute park at Home refused the baseline over the
+# 45-minute bound, which made 3.731 of 7.242 km blind, which crossed
+# BLIND_DISTANCE_MAX_SHARE by 1.5 points and zeroed the trip's energy
+# outright. The drain being guarded against was 0.031 kWh — five hundredths of
+# one SoC point. The trip lost its kWh, its Wh/km, its eco score and its cost
+# to avoid admitting it.
+#
+# Expressed as energy the same 0.2 kWh allows 5.7 hours at Home and 52 minutes
+# where Sentry runs, which is both what the original note intended and, at the
+# fast end, almost exactly the 45 it settled on.
+#
+# The clock bound stays as the fallback for when no rate is known: an unfitted
+# history must not silently widen this.
+DEPARTURE_BASELINE_MAX_KWH = 0.2
+
 # Three samples, no longer one-sided. The value is provisional.
 #
 # It is also, on later evidence, only right for SOME places. Three departures
@@ -1600,6 +1627,7 @@ def process_snapshot(
     prev_close_odo_km: float | None = None,
     last_quiet_ts: float | None = None,
     departure_pace_kmh: float | None = None,
+    parked_rate_kw: float | None = None,
 ) -> tuple[list[dict], list[dict], dict | None, dict | None]:
     """Advance the session state machine by one snapshot.
 
@@ -1636,6 +1664,12 @@ def process_snapshot(
     one onto a queue at a junction are minutes apart over the same blind
     kilometre. Caller-only knowledge again: the geofence table is not in the
     snapshot stream. None falls back to DEPARTURE_PACE_KMH.
+
+    ``parked_rate_kw``: what this car draws while parked where ``prev`` is, in
+    kW — the per-place standby fit, which needs the whole trip history and so
+    can only come from the caller. It decides how long a park may be before a
+    departure stops trusting its SoC as an energy baseline (see
+    DEPARTURE_BASELINE_MAX_KWH). None keeps the older, flat clock bound.
 
     Returns (drives, charges, open_trip, open_charge) — the sessions completed
     at this snapshot plus the carried-over open sessions.
@@ -2143,9 +2177,16 @@ def process_snapshot(
                     # so even a missing rate can only leave ~0.2 kWh behind,
                     # where the projection it replaces was wrong by more than
                     # that on trip 366 alone.
+                    # Bounded by the DRAIN the baseline would admit where this
+                    # car's parked rate is known, and by the clock where it is
+                    # not — see DEPARTURE_BASELINE_MAX_KWH.
+                    admits_kwh = (parked_rate_kw * park_min / 60.0
+                                  if parked_rate_kw else None)
                     open_trip["start_energy_recovered"] = (
                         recovered_wh_per_km <= MAX_PLAUSIBLE_WH_PER_KM
-                        and park_min <= STALE_ANCHOR_MAX_MIN)
+                        and (park_min <= STALE_ANCHOR_MAX_MIN
+                             or (admits_kwh is not None
+                                 and admits_kwh <= DEPARTURE_BASELINE_MAX_KWH)))
                     if open_trip["start_energy_recovered"]:
                         open_trip["soc"] = prev["soc"]
                         open_trip["range_km"] = prev.get("range_km")

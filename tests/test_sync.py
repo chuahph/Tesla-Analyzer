@@ -2770,3 +2770,63 @@ def test_place_departure_pace_never_undercuts_the_observed_speed():
                                            departure_pace_kmh=10.0)
     # 60 * 0.65 = 39 wins over the 10.
     assert slow_place["start_blind_kmh"] == 39.0
+
+
+def _park_then_depart(pace=45.0, rate=None, quiet_ago_sec=60.0):
+    """Trip 413's exact shape: a 53-minute park at Home, then a departure first
+    seen 3.731 km along, closing at 7.242 km. The park is confirmed quiet
+    throughout, so only the ENERGY bound is in question — the distance recovery
+    itself is never at issue."""
+    s1 = snap(T0, 1000.0, 80, range_km=400.0, locked=True)
+    s2 = snap(T0 + 3480, 1003.731, 79, shift="D", speed=50.0, range_km=395.0)
+    s3 = snap(T0 + 3480 + 1320, 1007.242, 78, shift="P", speed=0.0,
+              locked=True, range_km=390.0)
+    _, _, trip, _ = process_snapshot(
+        s1, s2, None, None, 68.4, 0.90,
+        last_quiet_ts=s2["ts"] - quiet_ago_sec,
+        departure_pace_kmh=pace, parked_rate_kw=rate)
+    drives, _, _, _ = process_snapshot(
+        s2, s3, trip, None, 68.4, 0.90,
+        last_quiet_ts=s2["ts"] - quiet_ago_sec,
+        departure_pace_kmh=pace, parked_rate_kw=rate)
+    return trip, drives[0]
+
+
+def test_a_long_quiet_park_keeps_its_energy_baseline_when_the_drain_is_small():
+    """Trip 413 lost its entire energy figure — kWh, Wh/km, eco score and cost
+    — because a 53-minute park at Home crossed a 45-minute clock bound. The
+    drain that bound was guarding against, at Home's measured 0.035 kW, was
+    0.031 kWh: five hundredths of one SoC point."""
+    # Distance is reclaimed either way; only the energy baseline is in doubt.
+    no_rate_trip, no_rate = _park_then_depart(rate=None)
+    home_trip, home = _park_then_depart(rate=0.035)
+    assert no_rate_trip["start_recovered_km"] == home_trip["start_recovered_km"] == 3.731
+
+    # Without a rate the clock still decides, exactly as before: the baseline
+    # is refused, which makes 51.5% of the trip blind, which zeroes the energy.
+    assert no_rate_trip["start_energy_recovered"] is False
+    assert no_rate["energy_used_kwh"] == 0.0
+
+    # With Home's own rate the park admits 0.031 kWh and the baseline stands,
+    # so the trip reports a measured figure over its whole distance.
+    assert home_trip["start_energy_recovered"] is True
+    assert home_trip["start_park_min"] == pytest.approx(53.0, abs=0.5)
+    assert home["energy_used_kwh"] > 1.0
+
+
+def test_the_energy_baseline_is_still_refused_where_the_car_drains_fast():
+    """The bound is the drain, not the clock, so it has to bite in both
+    directions: 0.230 kW is what this car draws where Sentry stays armed, and
+    53 minutes of it is 0.203 kWh — just past the 0.2 tolerance."""
+    sentry_trip, sentry = _park_then_depart(rate=0.230)
+    assert sentry_trip["start_energy_recovered"] is False
+    assert sentry["energy_used_kwh"] == 0.0
+
+    # And an implausible baseline is still refused however small the drain —
+    # that guard is about the reading, not the park.
+    s1 = snap(T0, 1000.0, 80, range_km=400.0, locked=True)
+    s2 = snap(T0 + 3480, 1000.2, 76, shift="D", speed=50.0, range_km=380.0)
+    _, _, trip, _ = process_snapshot(
+        s1, s2, None, None, 68.4, 0.90, last_quiet_ts=s2["ts"] - 60.0,
+        departure_pace_kmh=45.0, parked_rate_kw=0.001)
+    assert trip["start_energy_recovered"] is False
