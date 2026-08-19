@@ -826,6 +826,19 @@ def _place_departure_pace(session: Session, snap: dict | None) -> float | None:
     return best_pace
 
 
+def _full_history(session: Session, vehicle_id: int) -> tuple[list, list]:
+    """Every drive and charge this car has, for fitting rates that describe the
+    CAR rather than whatever window is on screen — see
+    driving.vampire_drain's ``rate_history``."""
+    return (
+        list(session.scalars(
+            select(Drive).where(Drive.vehicle_id == vehicle_id)
+            .order_by(Drive.start_time))),
+        list(session.scalars(
+            select(Charge).where(Charge.vehicle_id == vehicle_id))),
+    )
+
+
 def _departure_parked_rate_kw(session: Session, vehicle, prev: dict | None,
                               capacity_kwh: float) -> float | None:
     """What this car draws parked where ``prev`` is sitting, in kW.
@@ -3736,7 +3749,8 @@ def _monthly_report_payload(session: Session, vehicle: Vehicle, settings, days: 
     trip_costs = _trip_cost_map(session, vehicle.id)
     driving = driving_analysis.analyze(
         drives, settings.rated_wh_per_km, capacity_kwh, price_fn, charges=charges,
-        trip_costs=trip_costs)
+        trip_costs=trip_costs,
+        vampire_rate_history=_full_history(session, vehicle.id))
     charging = charging_analysis.analyze(charges, drives)
     efficiency = efficiency_analysis.analyze(drives, settings.rated_wh_per_km)
     cur = settings.currency
@@ -3825,7 +3839,9 @@ def _standby_longest(session: Session, vehicle: Vehicle, drives, charges,
     """The single biggest recent parked-drain event, for the standby alert:
     the charge-free gap that lost the most kWh, with its %/kWh/hours, the
     likely inducer, and a cost. None when there's no material parked drain."""
-    vd = driving_analysis.vampire_drain(drives, charges, capacity_kwh)
+    vd = driving_analysis.vampire_drain(
+        drives, charges, capacity_kwh,
+        rate_history=_full_history(session, vehicle.id))
     gaps = vd.get("gap_list") or []
     if not gaps:
         return None
@@ -5136,7 +5152,8 @@ def energy_reconcile(session: Session = Depends(get_session)):
     # charge, so every gap in this window is a pure-drain measurement.
     vampire = driving_analysis.vampire_drain(
         drives_since, [], capacity_kwh,
-        anchor=(last_charge.end_time, last_charge.end_soc))
+        anchor=(last_charge.end_time, last_charge.end_soc),
+        rate_history=_full_history(session, vehicle.id))
     trips_kwh = round(sum(d.energy_used_kwh or 0.0 for d in drives_since), 3)
     parked_kwh = round(vampire["kwh"], 3)
     attributed_kwh = round(trips_kwh + parked_kwh, 3)
@@ -6507,7 +6524,8 @@ def summary(
             .order_by(Drive.start_time)
         ).all()
         vampire_since = driving_analysis.vampire_drain(
-            drives_since, [], capacity_kwh, anchor=(last_charge.end_time, last_charge.end_soc))
+            drives_since, [], capacity_kwh, anchor=(last_charge.end_time, last_charge.end_soc),
+            rate_history=_full_history(session, vehicle.id))
         used_since_last_charge_kwh = (
             sum(d.energy_used_kwh for d in drives_since) + vampire_since["kwh"]
         )
@@ -6569,7 +6587,8 @@ def summary(
         # the "Show more" button (trips_limit) is how a caller sees the
         # rest, same as any other window, rather than an uncapped window
         # dumping the whole cycle into one long list.
-        recent_trips_limit=trips_limit or 5)
+        recent_trips_limit=trips_limit or 5,
+        vampire_rate_history=_full_history(session, vehicle.id))
     # A since-charge window's own `charges` list is always empty by
     # definition (it starts right where last_charge ends, so no charge can
     # have happened "since" yet) — without this, Energy Charged/AC-DC

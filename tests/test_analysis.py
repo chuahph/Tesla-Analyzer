@@ -1996,3 +1996,42 @@ def test_a_soc_rise_disqualifies_a_gap_from_the_standby_fit():
     wobble = driving_analysis.standby_kw(
         _chain(legs + [("Home", 90.0, 89.0)]), [], 68.4)
     assert wobble is not None and wobble < baseline
+
+
+def test_the_parked_rate_is_fitted_from_the_car_not_from_the_window():
+    """A standby rate is a property of the car. Fitted from whatever window is
+    on screen it needs 24 hours of qualifying gaps inside that window, which a
+    short one has not got — so the same overnight park reported a modelled
+    figure on a 30-day window and a whole raw SoC point on "since charge".
+
+    Measured, trip 415: a 10.7-hour park at Home read 0.68 kWh where Home's
+    own 0.035 kW models 0.37, because the since-charge window held six trips
+    and could fit no rate at all."""
+    # Home as it actually reads: most overnight parks move no whole point at
+    # all, and the rate is only visible as a sum across many of them.
+    history = _chain([
+        ("Home", 100.0, 99.0), ("Home", 98.0, 97.0),   # gap 1 point
+        ("Home", 97.0, 96.0),                          # gap 0
+        ("Home", 95.0, 94.0),                          # gap 1
+        ("Home", 94.0, 93.0),                          # gap 0
+        ("Home", 92.0, 91.0),                          # gap 1
+        ("Home", 91.0, 90.0), ("Home", 90.0, 89.0),    # gaps 0, 0
+        ("Home", 89.0, 88.0),                          # gap 0
+    ])
+    assert driving_analysis.standby_kw(history, [], 68.4) is not None
+
+    # The reported window is two drives: one gap, nowhere near enough to fit
+    # anything, and the one gap in it happens to have moved a whole point.
+    window = history[:2]
+    assert driving_analysis.standby_kw(window, [], 68.4) is None
+
+    windowed = driving_analysis.vampire_drain(window, [], 68.4)
+    from_car = driving_analysis.vampire_drain(
+        window, [], 68.4, rate_history=(history, []))
+
+    # Same gap, same hours — only the rate behind it differs.
+    assert windowed["hours"] == from_car["hours"] > 0
+    # Unable to fit, the window reports the raw whole SoC point. Given the
+    # car's own history the modelled drain is smaller, and is used instead.
+    assert windowed["kwh"] == pytest.approx(0.684, rel=0.01)
+    assert from_car["kwh"] < windowed["kwh"]
