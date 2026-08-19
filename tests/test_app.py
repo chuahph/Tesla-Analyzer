@@ -3186,3 +3186,72 @@ def test_standby_evidence_exposes_the_quantum_and_the_clipping():
                 s.commit()
     finally:
         settings.app_passcode = old
+
+
+def test_self_check_separates_what_can_be_fixed_from_what_cannot():
+    """The point of this endpoint is the sorting, not the finding. A trip whose
+    arrival is still estimated because nothing ever saw the car parked is not
+    work; a stop recorded short of a reading that exists is."""
+    from app import state
+    from app.database import SessionLocal
+    from app.models import BatteryReading, Drive, Vehicle
+
+    settings = get_settings()
+    old = settings.app_passcode
+    settings.app_passcode = ""
+    try:
+        with TestClient(app) as client:
+            with SessionLocal() as s:
+                car = Vehicle(vin="SELFCHECK-TEST", name="Check", model="Tesla",
+                              battery_capacity_kwh=68.4)
+                s.add(car)
+                s.flush()
+                vid = car.id
+                state.put(s, state.ACTIVE_VIN_KEY, "SELFCHECK-TEST")
+                base = datetime.now() - timedelta(days=2)
+                seen_short = Drive(
+                    vehicle_id=vid, start_time=base,
+                    end_time=base + timedelta(minutes=20),
+                    distance_km=10.0, duration_min=20.0, energy_used_kwh=1.5,
+                    start_soc=80.0, end_soc=78.0,
+                    start_odo_km=100.0, end_odo_km=110.0,
+                    start_location="A", end_location="Home")
+                nxt = Drive(
+                    vehicle_id=vid, start_time=base + timedelta(hours=10),
+                    end_time=base + timedelta(hours=10, minutes=20),
+                    distance_km=9.6, duration_min=20.0, energy_used_kwh=1.4,
+                    start_soc=78.0, end_soc=76.0,
+                    start_odo_km=110.0, end_odo_km=119.6,
+                    start_location="Home", end_location="B",
+                    end_est_km=0.24)          # arrival nothing ever measured
+                s.add_all([seen_short, nxt])
+                # A poll that saw the car resting 0.4 km past the first trip's
+                # recorded stop — evidence, so this one IS work.
+                s.add(BatteryReading(
+                    vehicle_id=vid, ts=base + timedelta(hours=1),
+                    soc=78.0, range_km=300.0, odo_km=110.4))
+                s.commit()
+                ids = (seen_short.id, nxt.id)
+
+            body = client.get("/api/self-check").json()
+            assert body["verdict"].startswith("1 item")
+            assert [f["drive_id"] for f in body["actionable"]] == [ids[0]]
+            assert "repair-arrivals" in body["actionable"][0]["fix"]
+
+            # The unverified arrival is reported, but not as something to do.
+            est = [f for f in body["inherent"]
+                   if f["what"] == "arrival distance still estimated"]
+            assert [f["drive_id"] for f in est] == [ids[1]]
+            assert all("fix" not in f for f in body["inherent"])
+
+            with SessionLocal() as s:
+                state.delete(s, state.ACTIVE_VIN_KEY)
+                s.query(BatteryReading).filter(
+                    BatteryReading.vehicle_id == vid).delete(synchronize_session=False)
+                s.query(Drive).filter(Drive.vehicle_id == vid).delete(
+                    synchronize_session=False)
+                s.query(Vehicle).filter(Vehicle.id == vid).delete(
+                    synchronize_session=False)
+                s.commit()
+    finally:
+        settings.app_passcode = old

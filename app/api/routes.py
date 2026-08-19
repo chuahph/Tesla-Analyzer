@@ -5048,6 +5048,125 @@ def capacity_evidence(
     }
 
 
+@router.get("/self-check")
+def self_check(days: int = Query(30, ge=1, le=730),
+               session: Session = Depends(get_session)):
+    """One verdict on whether anything actually needs a human.
+
+    This exists because the workflow around it had gone wrong. Every audit was
+    starting from a photograph of the car\'s own screen, which meant a
+    discrepancy of any size looked equally like a defect, and repairs were
+    being run daily for differences the app was never going to be able to
+    close. The distinction that matters is not big or small — it is whether
+    the app can SEE the answer.
+
+    So findings are sorted into two lists and only one of them is work.
+
+    ``actionable`` is where evidence exists inside the app: a parked reading
+    past a recorded stop, an odometer hole between two trips, a charge whose
+    implied capacity is impossible. Each carries the URL that fixes it.
+
+    ``inherent`` is where it does not, and no amount of checking will change
+    that. The clearest case is this car\'s home car park: the signal dies at
+    the ramp and does not return until the street next morning, so the drive
+    into the bay is never observed by anything. It is estimated from the
+    median of what that place has actually measured, which is right on average
+    and out by a couple of hundred metres about half the time — and that
+    residual lands on the next trip, whose totals then read long by the same
+    amount the arrival read short. Nothing is lost and nothing can be
+    recovered; repairing it moves a rounding error between two rows.
+
+    A day with an empty ``actionable`` list needs nothing done, whatever the
+    car\'s screen says to the third decimal.
+    """
+    vehicle = _first_vehicle(session)
+    settings = get_settings()
+    capacity_kwh, _ = _usable_capacity(session, vehicle, settings)
+    since = sync_mod.now_local() - timedelta(days=days)
+    drives = list(session.scalars(
+        select(Drive).where(Drive.vehicle_id == vehicle.id,
+                            Drive.start_time >= since).order_by(Drive.start_time)))
+    readings = list(session.scalars(
+        select(BatteryReading).where(BatteryReading.vehicle_id == vehicle.id,
+                                     BatteryReading.ts >= since)
+        .order_by(BatteryReading.ts)))
+    charges = list(session.scalars(
+        select(Charge).where(Charge.vehicle_id == vehicle.id,
+                             Charge.start_time >= since)))
+
+    actionable: list[dict] = []
+    inherent: list[dict] = []
+
+    # 1. Ground the car was SEEN resting on that no trip claims. The one
+    # finding here backed by a measurement rather than a model.
+    cont = driving_analysis.odometer_continuity(drives, readings)
+    for g in cont.get("gaps") or []:
+        km = g["unrecorded_km"]
+        row = {"what": "stop recorded short of where the car was seen",
+               "drive_id": g["drive_id"], "km": km, "route": g["route"]}
+        if km <= sync_mod.ARRIVAL_EST_MAX_KM:
+            row["fix"] = ("/api/repair-arrivals?apply=1 — the nightly job "
+                          "already does this; run it only to see it sooner")
+            actionable.append(row)
+        else:
+            # Past the arrival cap it is likelier a drive nobody logged, and
+            # which of the two it was cannot be settled from inside the app.
+            row["why"] = (f"{km} km is past ARRIVAL_EST_MAX_KM "
+                          f"({sync_mod.ARRIVAL_EST_MAX_KM}) — an unlogged drive "
+                          f"and a lost arrival look identical from here")
+            inherent.append(row)
+
+    for d in drives:
+        dist = d.distance_km or 0.0
+        blind = d.start_recovered_km or 0.0
+        # 2. Energy the app declined to report rather than invent.
+        if dist > 0 and not d.energy_used_kwh:
+            inherent.append({
+                "what": "energy not reported", "drive_id": d.id,
+                "route": f"{d.start_location} → {d.end_location}",
+                "why": ("more than half this trip was reclaimed without a "
+                        "matching battery reading, so its energy was never "
+                        "measured" if blind > dist * sync_mod.BLIND_DISTANCE_MAX_SHARE
+                        else "the battery reading implies an impossible Wh/km "
+                             "for the distance"),
+            })
+        # 3. An arrival still standing on an estimate. Only worth a human when
+        # a reading exists to check it against, which case (1) already catches.
+        elif d.end_est_km and not d.end_est_verified:
+            inherent.append({
+                "what": "arrival distance still estimated", "drive_id": d.id,
+                "km": d.end_est_km,
+                "why": ("no poll ever saw the car parked here, so the drive "
+                        "into the bay is unobserved — the estimate is the "
+                        "median of what this place has measured"),
+            })
+
+    # 4. A charge whose implied pack size cannot be right invalidates every
+    # kWh derived from it, unlike anything above.
+    for c in charges:
+        implied = getattr(c, "implied_capacity_kwh", None)
+        if implied and not 45.0 <= implied <= 95.0:
+            actionable.append({
+                "what": "charge implies an impossible pack size",
+                "charge_id": c.id, "implied_capacity_kwh": round(implied, 1),
+                "fix": "/api/capacity-evidence — check before it moves the fit",
+            })
+
+    return {
+        "days": days,
+        "trips_checked": len(drives),
+        "readings_checked": len(readings),
+        "capacity_kwh": round(capacity_kwh, 1),
+        "verdict": ("Nothing to do." if not actionable else
+                    f"{len(actionable)} item(s) the app has evidence to fix."),
+        "actionable": actionable,
+        "inherent": inherent,
+        "note": ("`inherent` is not a to-do list. Those are quantities nothing "
+                 "in the API can observe; the totals across the trips either "
+                 "side of them are already right."),
+    }
+
+
 @router.get("/continuity")
 def continuity(
     days: int = Query(30, ge=1, le=730),
