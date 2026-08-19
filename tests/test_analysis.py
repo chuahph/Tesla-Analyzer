@@ -582,8 +582,11 @@ def test_confirmed_zero_idle_is_trusted_not_re_estimated():
     trip = result["recent_trips"][0]
     assert trip["wh_per_km"] == 190
     # Not the old heuristic's ~144, and not the gross either: climate over
-    # 25.5 min at 31C is stripped whatever the stop pattern was.
-    assert trip["driving_wh_per_km"] == 107
+    # 25.5 min at 31C is stripped whatever the stop pattern was. The exact
+    # figure tracks ACCESSORY_KW and CLIMATE_BASE_KW, which moved to their own
+    # measured means (107 before that); what this test pins is that a
+    # confirmed-zero-idle trip is still stripped, not the constants.
+    assert trip["driving_wh_per_km"] == 95
     assert trip["driving_wh_per_km"] != 144
 
     # An otherwise-identical *untracked* trip (idle_tracked=False, e.g. logged

@@ -705,37 +705,39 @@ MIN_PLAUSIBLE_WH_PER_KM = 40.0  # below this over a whole trip = contaminated da
 #   407   0.3% over 19 min at 31C   0.648 kW
 #   406   0.4% over 25 min at 33C   0.657 kW
 #   408   0.3% over 24 min at 32C   0.513 kW
+#   409   0.5% over 36 min at 30C   0.570 kW
+#   418   0.5% over 38 min at 29C   0.540 kW
 #
-# The first two are 1.4% apart and look exactly like a constant sitting 23%
-# above the 0.5 assumed here. 0.65 was tried on that basis — it is even
-# checkable end to end on 406, where our propulsion energy moves from 0.881
-# kWh to 0.815 against the car's own Driving+Elevation of 0.821.
+# Mean 0.586, spread 0.513-0.657. The first two arrived 1.4% apart and looked
+# like a constant 23% above the 0.5 that used to sit here; 0.65 was tried on
+# that basis and reverted when 408 came in at 0.513. That was the right call
+# — two readings agreeing is two readings, not a constant.
 #
-# It is not shipped, for two reasons that arrived in that order.
+# Five is enough to take the mean, and the mean is 0.586. The value below is
+# that, set from these five readings ALONE. It is not fitted to the
+# non-propulsion totals in
+# test_non_propulsion_load_matches_the_cars_own_breakdown, and that is what
+# keeps those totals a check on it rather than a restatement of it.
 #
-# First: the model produces a TOTAL, and the total got worse. Against every
-# trip whose non-propulsion the car has reported (see
-# test_non_propulsion_load_matches_the_cars_own_breakdown), 0.65 improved
-# three and broke the two the model already fits. The reason is in the same
-# table — 363 and 406 share an ambient of 33C while the car's own total reads
-# 1.69 kW for one and 2.13 for the other. A 26% spread at ONE temperature is
-# wider than any constant can absorb.
-#
-# Second, and decisively: 408 arrived and read 0.513. The two-sample constant
-# was two samples, and 0.5 is within 3% of the third. Nothing needed changing.
-#
-# The general lesson is the one this whole block keeps relearning. Two
-# readings agreeing is not a constant, it is two readings; and re-fitting one
-# term of a two-term model while the other stays unmeasurable buys a
-# better-looking component and a worse answer.
+# The check: against the eight trips whose non-propulsion the car has
+# reported, the model used to run a mean of -10.0%, six of the eight low.
+# That is a bias, not scatter, and 0.5 was 15% under this term's own mean.
+# With both terms set to their own measured means the totals come to +1.8%
+# mean, four of eight low, and the worst single trip improves from 23% to 15%.
 #
 # One thing worth knowing regardless: this error had been HIDDEN. Trip 407's
 # logged duration was 28 minutes against a true 19, and billing a rate 19% low
 # over a clock 47% long came out 19% high instead. Correcting the clock
 # (Place.departure_pace_kmh) removes that cancellation, so whatever the rate
 # turns out to be, it has to stand on its own from here.
-ACCESSORY_KW = 0.5
-CLIMATE_BASE_KW = 0.35
+ACCESSORY_KW = 0.59
+# Raised 0.35 -> 0.47 on the same principle and from the same evening's
+# evidence: across the twelve readings of the car's own Climate line grouped
+# above, the model averaged 1.123 kW where the car averaged 1.239 — 9% low
+# across the whole band rather than at either end of it. Adding 0.116 to the
+# base closes exactly that and touches nothing about the SHAPE, which the
+# scatter above still says nothing useful about. The slope stays put.
+CLIMATE_BASE_KW = 0.47
 CLIMATE_KW_PER_DEGREE = 0.08
 CLIMATE_MAX_KW = 2.6
 
