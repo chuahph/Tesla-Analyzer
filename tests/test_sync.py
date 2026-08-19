@@ -846,15 +846,20 @@ def test_blind_distance_too_big_to_price_leaves_energy_unknown_not_diluted():
 
     A dash beats a number that looks like a reading: the distance is measured,
     the energy genuinely isn't. Same answer this already gives to a mid-trip
-    range refill."""
+    range refill.
+
+    Only past three quarters, though — see BLIND_DISTANCE_MAX_SHARE. Between
+    a tenth and that the trip is priced and labelled estimated, because a
+    blanked trip carries no cost either and leaves the month's total in
+    silence."""
     from app.sync import BLIND_DISTANCE_MAX_SHARE, _drive_from
 
     start = {"ts": T0, "odo_km": 1000.0, "soc": 80, "range_km": 400.0,
-             "start_recovered_km": 7.0, "start_energy_recovered": False,
+             "start_recovered_km": 8.0, "start_energy_recovered": False,
              "start_lost_km": 0.0}
     cur = {"ts": T0 + 1800, "odo_km": 1010.0, "soc": 79, "range_km": 396.0,
            "out_temp": 30.0, "lat": None, "lon": None}
-    assert 7.0 > 10.0 * BLIND_DISTANCE_MAX_SHARE      # 70% — past what it will project
+    assert 8.0 > 10.0 * BLIND_DISTANCE_MAX_SHARE      # 80% — past what it will project
     d = _drive_from(start, cur, 60.0)
     assert d["distance_km"] == 10.0                   # measured, kept
     assert d["energy_used_kwh"] == 0.0                # unknown, not fabricated
@@ -2398,7 +2403,7 @@ def test_blind_distance_pricing_is_refused_when_it_would_carry_the_trip():
     extended."""
     from app.sync import energy_for_blind_distance
 
-    assert energy_for_blind_distance(1.0, 10.0, 6.0) == 1.0     # 60% blind
+    assert energy_for_blind_distance(1.0, 10.0, 8.0) == 1.0     # 80% blind
     assert energy_for_blind_distance(1.0, 10.0, 4.0) > 1.0      # 40% blind
 
 
@@ -2546,7 +2551,7 @@ def test_a_blind_departure_costs_more_than_the_trip_average():
     # The refusal threshold still measures how much of the trip is INFERRED
     # rather than measured, so it reads the real blind distance, not the
     # weighted one — weighting cannot add measurements.
-    assert energy_for_blind_distance(1.0, 10.0, 6.0, departure_blind_km=6.0) == 1.0
+    assert energy_for_blind_distance(1.0, 10.0, 8.0, departure_blind_km=8.0) == 1.0
     # And a departure share can never exceed the blind distance it is part of.
     assert (energy_for_blind_distance(2.0, 10.0, 1.0, departure_blind_km=99.0)
             == pytest.approx(dep))
@@ -2793,34 +2798,35 @@ def _park_then_depart(pace=45.0, rate=None, quiet_ago_sec=60.0):
 
 
 def test_a_long_quiet_park_keeps_its_energy_baseline_when_the_drain_is_small():
-    """Trip 413 lost its entire energy figure — kWh, Wh/km, eco score and cost
-    — because a 53-minute park at Home crossed a 45-minute clock bound. The
-    drain that bound was guarding against, at Home's measured 0.035 kW, was
-    0.031 kWh: five hundredths of one SoC point."""
+    """A 53-minute park at Home crossed a 45-minute clock bound and lost trip
+    413 its energy baseline. The drain that bound was guarding against, at
+    Home's measured 0.035 kW, was 0.031 kWh — five hundredths of one SoC
+    point. (413 then lost its energy figure outright to the blind-share rule;
+    that consequence is BLIND_DISTANCE_MAX_SHARE's and has its own tests.)"""
     # Distance is reclaimed either way; only the energy baseline is in doubt.
     no_rate_trip, no_rate = _park_then_depart(rate=None)
     home_trip, home = _park_then_depart(rate=0.035)
     assert no_rate_trip["start_recovered_km"] == home_trip["start_recovered_km"] == 3.731
 
     # Without a rate the clock still decides, exactly as before: the baseline
-    # is refused, which makes 51.5% of the trip blind, which zeroes the energy.
+    # is refused, so 51.5% of the trip has no reading behind it and its energy
+    # is projected from the seen half rather than measured across the whole.
     assert no_rate_trip["start_energy_recovered"] is False
-    assert no_rate["energy_used_kwh"] == 0.0
 
     # With Home's own rate the park admits 0.031 kWh and the baseline stands,
-    # so the trip reports a measured figure over its whole distance.
+    # so the trip measures its energy over the whole distance instead.
     assert home_trip["start_energy_recovered"] is True
     assert home_trip["start_park_min"] == pytest.approx(53.0, abs=0.5)
     assert home["energy_used_kwh"] > 1.0
+    assert home["energy_used_kwh"] != no_rate["energy_used_kwh"]
 
 
 def test_the_energy_baseline_is_still_refused_where_the_car_drains_fast():
     """The bound is the drain, not the clock, so it has to bite in both
     directions: 0.230 kW is what this car draws where Sentry stays armed, and
     53 minutes of it is 0.203 kWh — just past the 0.2 tolerance."""
-    sentry_trip, sentry = _park_then_depart(rate=0.230)
+    sentry_trip, _ = _park_then_depart(rate=0.230)
     assert sentry_trip["start_energy_recovered"] is False
-    assert sentry["energy_used_kwh"] == 0.0
 
     # And an implausible baseline is still refused however small the drain —
     # that guard is about the reading, not the park.
@@ -2830,3 +2836,41 @@ def test_the_energy_baseline_is_still_refused_where_the_car_drains_fast():
         s1, s2, None, None, 68.4, 0.90, last_quiet_ts=s2["ts"] - 60.0,
         departure_pace_kmh=45.0, parked_rate_kw=0.001)
     assert trip["start_energy_recovered"] is False
+
+
+def test_a_mostly_blind_trip_reports_an_estimate_rather_than_nothing():
+    """A trip past the blind-share bound reported no energy, and therefore no
+    cost, so it left the month's total silently. Three trips a month out of
+    this car's home car park did that. data_quality already labels anything
+    over 10% blind as estimated, so the blanking was saying a second time what
+    the label says once — at the price of the trip's cost."""
+    # ~52% blind: trip 413's shape, which reported a dash.
+    s1 = snap(T0, 1000.0, 80, range_km=400.0, locked=True)
+    s2 = snap(T0 + 4200, 1003.731, 79, shift="D", speed=50.0, range_km=395.0)
+    s3 = snap(T0 + 4200 + 1320, 1007.242, 78, shift="P", speed=0.0,
+              locked=True, range_km=390.0)
+    _, _, trip, _ = process_snapshot(s1, s2, None, None, 68.4, 0.90,
+                                     last_quiet_ts=s2["ts"] - 60.0)
+    drives, _, _, _ = process_snapshot(s2, s3, trip, None, 68.4, 0.90)
+    d = drives[0]
+    assert d["start_recovered_km"] / d["distance_km"] > 0.5
+    assert d["energy_used_kwh"] > 0          # an estimate, not a dash
+    # ...and it is the measured stretch extended over the whole distance, so
+    # it has to exceed what the seen part alone cost.
+    assert d["energy_used_kwh"] > _energy_kwh(s2, s3, 68.4)
+
+
+def test_an_almost_entirely_blind_trip_still_reports_nothing():
+    """The bound moved, it did not go. Past three quarters the measured part
+    carries more than three times its own length and "estimated" stops being
+    an adequate warning."""
+    s1 = snap(T0, 1000.0, 80, range_km=400.0, locked=True)
+    s2 = snap(T0 + 5400, 1008.5, 79, shift="D", speed=50.0, range_km=395.0)
+    s3 = snap(T0 + 5400 + 600, 1010.0, 78, shift="P", speed=0.0,
+              locked=True, range_km=392.0)
+    _, _, trip, _ = process_snapshot(s1, s2, None, None, 68.4, 0.90,
+                                     last_quiet_ts=s2["ts"] - 60.0)
+    drives, _, _, _ = process_snapshot(s2, s3, trip, None, 68.4, 0.90)
+    d = drives[0]
+    assert d["start_recovered_km"] / d["distance_km"] > 0.75
+    assert d["energy_used_kwh"] == 0.0

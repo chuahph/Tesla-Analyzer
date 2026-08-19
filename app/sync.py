@@ -841,8 +841,32 @@ def _idle_adjusted_kwh(energy_kwh, idle_min, out_temp_c=None):
 # energy reading before the correction below refuses to apply. Past this the
 # "keep Wh/km constant" assumption is carrying more of the trip than the
 # measured part is, and a wrong efficiency would be amplified rather than
-# extended.
-BLIND_DISTANCE_MAX_SHARE = 0.5
+# extended. Past it the trip reports no energy at all.
+#
+# That second consequence is why this moved from 0.5 to 0.75. A dash is the
+# right answer when a number would be mistaken for a reading, and when this
+# was written that was the only way to say so. Drive.data_quality came later
+# and says it explicitly: anything past INFERRED_SHARE_MAX (10%) blind already
+# reads "estimated", so a 52%-blind trip was being labelled AND blanked.
+#
+# Blanking is not the conservative choice it looks like. A trip with no energy
+# has no cost either, so it silently leaves the month's total — three trips a
+# month out of this car's home car park, every one of them a real drive that
+# really cost money. An explicit estimate beats a silent omission.
+#
+# What is actually being extrapolated is better resolved than the 0.5 implies.
+# _energy_kwh prefers the RANGE delta, which is fractional, over the integer
+# SoC — so the measured stretch's Wh/km is good to a couple of percent even
+# when it is short, and the uncertainty is not rounding but whether the blind
+# head drove like the rest of the trip. Measured, that ratio has run 0.91
+# (trip 366), 1.10 (359 and 378), and 1.54-1.56 on the two ~1 km heads the
+# departure premium was fitted from. Call it +/-30% on the blind portion:
+# at three quarters blind, +/-22% on the trip, labelled as an estimate.
+#
+# 0.75 and not higher because past it the measured part is carrying more than
+# three times its own length, and there is a point where "estimated" stops
+# being an adequate warning.
+BLIND_DISTANCE_MAX_SHARE = 0.75
 
 # How much more energy a blind stretch at the DEPARTURE takes than the trip's
 # own average, because it is not an average piece of the trip: it is the first
