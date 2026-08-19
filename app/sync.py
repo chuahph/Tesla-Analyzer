@@ -707,8 +707,9 @@ MIN_PLAUSIBLE_WH_PER_KM = 40.0  # below this over a whole trip = contaminated da
 #   408   0.3% over 24 min at 32C   0.513 kW
 #   409   0.5% over 36 min at 30C   0.570 kW
 #   418   0.5% over 38 min at 29C   0.540 kW
+#   419   0.5% over 40 min at 31C   0.513 kW   (after the change; out of sample)
 #
-# Mean 0.586, spread 0.513-0.657. The first two arrived 1.4% apart and looked
+# Mean 0.586 over the first five, 0.574 with 419. Spread 0.513-0.657. The first two arrived 1.4% apart and looked
 # like a constant 23% above the 0.5 that used to sit here; 0.65 was tried on
 # that basis and reverted when 408 came in at 0.513. That was the right call
 # — two readings agreeing is two readings, not a constant.
@@ -724,6 +725,13 @@ MIN_PLAUSIBLE_WH_PER_KM = 40.0  # below this over a whole trip = contaminated da
 # That is a bias, not scatter, and 0.5 was 15% under this term's own mean.
 # With both terms set to their own measured means the totals come to +1.8%
 # mean, four of eight low, and the worst single trip improves from 23% to 15%.
+#
+# 419 then arrived, the first trip logged after the change and so the only
+# out-of-sample test of it. Its propulsion figure read 78 Wh/km against the
+# car's own Driving+Elevation of 79.1 — 0.4% — where the old constants would
+# have put it at 88.2, or +11.5%. Across nine trips now: mean -9.4% -> +2.6%,
+# low on seven of nine -> four, with mean absolute error unchanged at ~10%.
+# The bias went; the scatter is the scatter and always was.
 #
 # One thing worth knowing regardless: this error had been HIDDEN. Trip 407's
 # logged duration was 28 minutes against a true 19, and billing a rate 19% low

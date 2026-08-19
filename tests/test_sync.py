@@ -2334,6 +2334,11 @@ def test_non_propulsion_load_matches_the_cars_own_breakdown():
         # 29C, the coldest sample in the set and one of the HIGHEST draws — which
         # is the clearest single argument against the temperature slope.
         ("418", 2.68, 15.179, 38.0, 29.0, 1.163, 0.14),
+        # 419 is the first trip logged AFTER the two rates moved, so it is the
+        # only genuinely out-of-sample check on them. Its propulsion figure
+        # came out 78 Wh/km against the car's own Driving+Elevation of 79.1 —
+        # 0.4% — where the old constants would have read 88.2, +11.5%.
+        ("419", 2.35, 14.771, 40.0, 31.0, 1.094, 0.10),
         # 30C is the loosest, and the residual is the temperature curve, not
         # the gate: the car's own climate line reads 1.23 kW here against the
         # 1.20 it read at 33C — flat — while CLIMATE_KW_PER_DEGREE swings the
