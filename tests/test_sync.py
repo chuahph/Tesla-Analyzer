@@ -2343,6 +2343,7 @@ def test_non_propulsion_load_matches_the_cars_own_breakdown():
         # trips in the set disagree by more than the whole band does, which is
         # what keeps CLIMATE_KW_PER_DEGREE where it is.
         ("420", 2.97, 18.560, 47.0, 29.0, 1.026, 0.17),
+        ("422", 1.61, 10.223, 25.0, 32.0, 0.616, 0.20),
         # 30C is the loosest, and the residual is the temperature curve, not
         # the gate: the car's own climate line reads 1.23 kW here against the
         # 1.20 it read at 33C — flat — while CLIMATE_KW_PER_DEGREE swings the

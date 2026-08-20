@@ -796,6 +796,10 @@ ACCESSORY_KW = 0.59
 # how many people are aboard — none of which Tesla's API reports. Do not
 # refit this against a bigger set of the same four variables; measure
 # something new, or leave it.
+#
+# Eleven trips in, what ships runs a mean of -0.5% with mean absolute 10.0%,
+# low on four of them. The bias is gone and the scatter is exactly where it
+# was, which is the outcome this note predicts and the reason to stop here.
 CLIMATE_BASE_KW = 0.35
 CLIMATE_KW_PER_DEGREE = 0.08
 CLIMATE_MAX_KW = 2.6
@@ -1542,6 +1546,16 @@ def close_charge_on_sleep(open_charge: dict, last_snapshot: dict, capacity_kwh: 
 # a constant, and the median over sessions keeps it from moving the answer,
 # so it is recorded here rather than fitted. Revisit with three wide DC
 # sessions.
+# Briefly suspected of being 0.95. Eight of the car's own drive screens were
+# implying a usable pack of 67.7 kWh against the 68.4 measured from charges,
+# and 0.95 in place of 0.96 would have closed that to 0.01 kWh — which looked
+# less like arithmetic than like an answer.
+#
+# It did not survive its own next two samples. Pooling the readings (total kWh
+# over total percent, which lets the rounding average out instead of
+# compounding it trip by trip) puts the car's own figure at 67.97 against our
+# 68.4 — 0.6%, where the whole-percent rounding alone is worth +/-1.7%. The
+# gap was the small-percentage trips being read one at a time.
 AC_CHARGE_EFFICIENCY = 0.96
 
 
