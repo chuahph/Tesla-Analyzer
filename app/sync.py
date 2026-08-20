@@ -756,9 +756,46 @@ ACCESSORY_KW = 0.59
 # a mean of anything else: six direct reads of the term itself, averaging
 # 0.574, replacing a 0.50 that sat under every one of them.
 #
-# 420 is also why the slope stays flat. It reads 1.310 kW at 29C where 418
-# read 1.836 at the same ambient — 40% apart, the two of them the only 29C
+# 420 is also why the slope stays where it is. It reads 1.310 kW at 29C where
+# 418 read 1.836 at the same ambient — 40% apart, the two of them the only 29C
 # samples there are.
+#
+# At that point the whole SHAPE was tested rather than nudged, since a level
+# that will not settle usually means the form is wrong. Four candidates, each
+# refitted freely to minimise mean absolute PERCENTAGE error (not least
+# squares, which the two longest trips would otherwise dominate) across the
+# ten trips whose non-propulsion the car has reported:
+#
+#   flat kW x hours                     best possible  9.6%   worst 31%
+#   rate + a fixed per-trip kWh                        9.5%   worst 25%
+#   rate + a per-km term                               9.4%   worst 26%
+#   (base + slope/degree) x hours                      8.8%   worst 18%
+#   ---
+#   what this file actually ships                      9.2%   worst 18%
+#
+# Three things follow, and they close the question rather than reopen it.
+#
+# The per-trip and per-km terms fit at essentially zero (0.14 kWh and 0.008
+# kWh/km, both inside their own noise) and buy 0.1-0.2 points. There is no
+# pull-down transient to find and the load does not scale with distance: this
+# is a rate against TIME and nothing else, which is what the model already
+# assumes.
+#
+# The temperature slope is real, and earlier notes here saying otherwise
+# overstated it. The best flat model is 9.6% and the best sloped one 8.8%; the
+# slope carries the difference. It is simply much shallower than the scatter
+# at any one ambient, which is what made it look absent.
+#
+# And the free optimum lands at base 1.06 kW total with slope 0.065/degree,
+# against the 0.94 and 0.080 shipped here — near enough that refitting buys
+# 0.4 points on a 9% residual, from two parameters against ten points. That
+# is not a model improvement, it is the shape of a fit to its own sample.
+#
+# So: the residual is not ambient, not duration, not distance and not a
+# startup cost. It is cabin soak, sun on the glass, fan speed, recirculation,
+# how many people are aboard — none of which Tesla's API reports. Do not
+# refit this against a bigger set of the same four variables; measure
+# something new, or leave it.
 CLIMATE_BASE_KW = 0.35
 CLIMATE_KW_PER_DEGREE = 0.08
 CLIMATE_MAX_KW = 2.6
