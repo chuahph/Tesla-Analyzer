@@ -739,13 +739,27 @@ MIN_PLAUSIBLE_WH_PER_KM = 40.0  # below this over a whole trip = contaminated da
 # (Place.departure_pace_kmh) removes that cancellation, so whatever the rate
 # turns out to be, it has to stand on its own from here.
 ACCESSORY_KW = 0.59
-# Raised 0.35 -> 0.47 on the same principle and from the same evening's
-# evidence: across the twelve readings of the car's own Climate line grouped
-# above, the model averaged 1.123 kW where the car averaged 1.239 — 9% low
-# across the whole band rather than at either end of it. Adding 0.116 to the
-# base closes exactly that and touches nothing about the SHAPE, which the
-# scatter above still says nothing useful about. The slope stays put.
-CLIMATE_BASE_KW = 0.47
+# This was raised to 0.47 for one evening and put back the next morning, and
+# the reason is worth keeping because it is the same trap this file keeps
+# describing.
+#
+# The argument for 0.47 was that across the twelve readings of the car's own
+# Climate line grouped above, the model averaged 1.123 kW against the car's
+# 1.239 — 9% low across the whole band. True, and still true. But those
+# twelve readings are not the ten trips whose non-propulsion TOTAL is checked
+# in test_non_propulsion_load_matches_the_cars_own_breakdown, and closing a
+# gap measured on one sample does not close it on another. Measured: with
+# trip 420 in, 0.47 gives mean +4.7% and mean absolute 11.3%, against -2.4%
+# and 9.2% at 0.35. It made the bias look better and the answers worse.
+#
+# ACCESSORY_KW's raise survives the same test because it was never fitted to
+# a mean of anything else: six direct reads of the term itself, averaging
+# 0.574, replacing a 0.50 that sat under every one of them.
+#
+# 420 is also why the slope stays flat. It reads 1.310 kW at 29C where 418
+# read 1.836 at the same ambient — 40% apart, the two of them the only 29C
+# samples there are.
+CLIMATE_BASE_KW = 0.35
 CLIMATE_KW_PER_DEGREE = 0.08
 CLIMATE_MAX_KW = 2.6
 

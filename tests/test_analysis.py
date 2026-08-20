@@ -586,7 +586,7 @@ def test_confirmed_zero_idle_is_trusted_not_re_estimated():
     # figure tracks ACCESSORY_KW and CLIMATE_BASE_KW, which moved to their own
     # measured means (107 before that); what this test pins is that a
     # confirmed-zero-idle trip is still stripped, not the constants.
-    assert trip["driving_wh_per_km"] == 95
+    assert trip["driving_wh_per_km"] == 102
     assert trip["driving_wh_per_km"] != 144
 
     # An otherwise-identical *untracked* trip (idle_tracked=False, e.g. logged
