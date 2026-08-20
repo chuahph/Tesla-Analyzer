@@ -2344,6 +2344,12 @@ def test_non_propulsion_load_matches_the_cars_own_breakdown():
         # what keeps CLIMATE_KW_PER_DEGREE where it is.
         ("420", 2.97, 18.560, 47.0, 29.0, 1.026, 0.17),
         ("422", 1.61, 10.223, 25.0, 32.0, 0.616, 0.20),
+        # 423's own tolerance is loose for a reason that is about the CHECK,
+        # not the model: the car reports each component to 0.1% of pack, and
+        # this trip's whole non-propulsion is 0.5%. That is +/-10% before
+        # anything is compared. 419 and 420 carry +/-3%, 406 and 407 +/-6-8%.
+        # Short trips are weak evidence here however cleanly they log.
+        ("423", 1.05, 9.214, 13.0, 34.0, 0.342, 0.23),
         # 30C is the loosest, and the residual is the temperature curve, not
         # the gate: the car's own climate line reads 1.23 kW here against the
         # 1.20 it read at 33C — flat — while CLIMATE_KW_PER_DEGREE swings the
