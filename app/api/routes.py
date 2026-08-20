@@ -4906,6 +4906,34 @@ def repair_arrivals(
         boundary = g.get("boundary_odo_km")
         if not (closed_id and open_id and boundary):
             continue
+        # The car was seen sitting AT the recorded stop and only later further
+        # on. An arrival tail cannot do that: it is the last minutes of one
+        # drive, so the car reaches its bay and stays. Ground appearing after a
+        # confirmed stop is a second movement — repositioning inside a car
+        # park, most often — and folding it into the arriving trip credits that
+        # trip with distance it did not drive.
+        #
+        # Measured, trip 422: the parked readings put the car 0.35 km past its
+        # recorded stop at Intel, while the car's own trip meter agreed with
+        # the recorded figure exactly (10.2 km). Both are right. The 0.35 km
+        # happened in between, during a three-hour park, and this job would
+        # have quietly added it to the arrival.
+        #
+        # last_at_recorded is only set when a reading actually landed at the
+        # recorded odometer, so this refuses on positive evidence of a
+        # two-stage park rather than on the absence of anything.
+        if g.get("last_at_recorded"):
+            manual.append({
+                **g,
+                "why": ("the car was seen parked AT the recorded stop "
+                        f"({g['last_at_recorded']}) and only later "
+                        f"{g['unrecorded_km']} km further on — that is a move "
+                        "during the park, not an arrival tail"),
+                "run": (f"/api/repair-missing-trip?start_time={g['last_at_recorded']}"
+                        f"&end_time={g['observed_at']}"
+                        f"  (only if that move really happened)"),
+            })
+            continue
         if g["unrecorded_km"] > sync_mod.ARRIVAL_EST_MAX_KM:
             manual.append({
                 **g,
@@ -5104,7 +5132,15 @@ def self_check(days: int = Query(30, ge=1, le=730),
         km = g["unrecorded_km"]
         row = {"what": "stop recorded short of where the car was seen",
                "drive_id": g["drive_id"], "km": km, "route": g["route"]}
-        if km <= sync_mod.ARRIVAL_EST_MAX_KM:
+        if g.get("last_at_recorded"):
+            # Seen AT the recorded stop first, and further on only later — a
+            # move during the park, not an arrival the poll missed. Real, and
+            # nothing here can say what it was.
+            row["why"] = (f"the car was parked at the recorded stop as late as "
+                          f"{g['last_at_recorded']} and was {km} km further on "
+                          f"by {g['observed_at']} — a move during the park")
+            inherent.append(row)
+        elif km <= sync_mod.ARRIVAL_EST_MAX_KM:
             row["fix"] = ("/api/repair-arrivals?apply=1 — the nightly job "
                           "already does this; run it only to see it sooner")
             actionable.append(row)

@@ -3255,3 +3255,76 @@ def test_self_check_separates_what_can_be_fixed_from_what_cannot():
                 s.commit()
     finally:
         settings.app_passcode = old
+
+
+def test_repair_arrivals_refuses_a_move_made_during_the_park():
+    """Ground appearing after a stop the car was SEEN sitting at is a second
+    movement, not an arrival tail — an arrival cannot resume once the car has
+    parked. Measured, trip 422: the readings put the car 0.35 km past its
+    recorded stop while the car's own trip meter agreed with the recorded
+    figure exactly, so the 0.35 km happened during the three-hour park."""
+    from app import state
+    from app.database import SessionLocal
+    from app.models import BatteryReading, Drive, Vehicle
+
+    settings = get_settings()
+    old = settings.app_passcode
+    settings.app_passcode = ""
+    try:
+        with TestClient(app) as client:
+            with SessionLocal() as s:
+                car = Vehicle(vin="PARKMOVE-TEST", name="Parkmove", model="Tesla",
+                              battery_capacity_kwh=68.4)
+                s.add(car)
+                s.flush()
+                vid = car.id
+                state.put(s, state.ACTIVE_VIN_KEY, "PARKMOVE-TEST")
+                base = datetime.now() - timedelta(days=2)
+                arrive = Drive(
+                    vehicle_id=vid, start_time=base,
+                    end_time=base + timedelta(minutes=20),
+                    distance_km=10.0, duration_min=20.0, energy_used_kwh=1.5,
+                    start_soc=80.0, end_soc=78.0,
+                    start_odo_km=100.0, end_odo_km=110.0,
+                    start_location="A", end_location="Car park")
+                depart = Drive(
+                    vehicle_id=vid, start_time=base + timedelta(hours=4),
+                    end_time=base + timedelta(hours=4, minutes=20),
+                    distance_km=9.6, duration_min=20.0, energy_used_kwh=1.4,
+                    start_soc=78.0, end_soc=76.0,
+                    start_odo_km=110.0, end_odo_km=119.6,
+                    start_location="Car park", end_location="B")
+                s.add_all([arrive, depart])
+                # Parked at the recorded stop for an hour, THEN 0.35 further.
+                s.add(BatteryReading(vehicle_id=vid, ts=base + timedelta(hours=1),
+                                     soc=78.0, range_km=300.0, odo_km=110.0))
+                s.add(BatteryReading(vehicle_id=vid, ts=base + timedelta(hours=3),
+                                     soc=78.0, range_km=299.0, odo_km=110.35))
+                s.commit()
+                arrive_id = arrive.id
+
+            plan = client.get("/api/repair-arrivals").json()
+            assert plan["repaired"] == 0 and plan["needs_a_human"] == 1
+            refused = [m for m in plan["manual"] if m["drive_id"] == arrive_id]
+            assert len(refused) == 1
+            assert "move during the park" in refused[0]["why"]
+            assert "repair-missing-trip" in refused[0]["run"]
+
+            # ...and it is reported as something nothing here can settle,
+            # rather than as work with a one-click fix.
+            check = client.get("/api/self-check").json()
+            assert check["verdict"] == "Nothing to do."
+            moved = [f for f in check["inherent"] if f.get("drive_id") == arrive_id]
+            assert len(moved) == 1 and "a move during the park" in moved[0]["why"]
+
+            with SessionLocal() as s:
+                state.delete(s, state.ACTIVE_VIN_KEY)
+                s.query(BatteryReading).filter(
+                    BatteryReading.vehicle_id == vid).delete(synchronize_session=False)
+                s.query(Drive).filter(Drive.vehicle_id == vid).delete(
+                    synchronize_session=False)
+                s.query(Vehicle).filter(Vehicle.id == vid).delete(
+                    synchronize_session=False)
+                s.commit()
+    finally:
+        settings.app_passcode = old
