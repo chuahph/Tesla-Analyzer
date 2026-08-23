@@ -2743,7 +2743,11 @@ def test_departure_premium_kept_when_the_head_really_did_crawl():
     measured 1.54 and 1.56), and it keeps it.
     """
     trip, drive = _recovered_departure(10, measured_min=6)   # 5.9 km in 6 min
-    assert trip["start_blind_kmh"] == pytest.approx(20.0, abs=0.1)
+    # 0.0, not the floor that was used: 10 km/h * 0.65 is under it, so nothing
+    # here MEASURED the head and the floor is only a prior. _drive_from reads
+    # an unknown pace as "may have crawled" and keeps the premium, which is the
+    # branch this test is about.
+    assert trip["start_blind_kmh"] == 0.0
 
     measured = 29_606.381 - 29_600.452
     base = _energy_kwh({"soc": 58, "range_km": 261.0},
@@ -2778,7 +2782,9 @@ def test_place_departure_pace_shortens_the_back_dated_head():
     # 6 km at 32.5 (speed*0.65 beats the 20 floor) vs at 45: ~11.1 min vs 8.0.
     assert round((s2["ts"] - slow["ts"]) / 60.0, 1) == 11.1
     assert round((s2["ts"] - fast["ts"]) / 60.0, 1) == 8.0
-    assert fast["start_blind_kmh"] == 45.0
+    # The pace moved the clock, but it is a setting and not a reading, so it
+    # does not enter the record as one — see where start_blind_kmh is written.
+    assert fast["start_blind_kmh"] == 0.0
 
     # 0 / None mean "no opinion", not "instantly", and fall back to the default.
     _, _, unset, _ = process_snapshot(s1, s2, None, None, 60.0, 0.90,
@@ -2796,7 +2802,7 @@ def test_place_departure_pace_never_undercuts_the_observed_speed():
     _, _, slow_place, _ = process_snapshot(s1, s2, None, None, 60.0, 0.90,
                                            departure_pace_kmh=10.0)
     # 60 * 0.65 = 39 wins over the 10.
-    assert slow_place["start_blind_kmh"] == 39.0
+    assert slow_place["start_blind_kmh"] == 39.0   # observed, so recorded
 
 
 def _park_then_depart(pace=45.0, rate=None, quiet_ago_sec=60.0):
@@ -2896,3 +2902,58 @@ def test_an_almost_entirely_blind_trip_still_reports_nothing():
     d = drives[0]
     assert d["start_recovered_km"] / d["distance_km"] > 0.75
     assert d["energy_used_kwh"] == 0.0
+
+
+def test_a_place_pace_does_not_switch_the_departure_premium_off():
+    """Place.departure_pace_kmh exists to fix a start TIME. Recording it as the
+    head's pace made it change the ENERGY too: any pace fast enough to be worth
+    setting also clears a city trip average, so the premium that prices a crawl
+    out of a car park was switched off by the act of configuring the clock.
+
+    Only cur's own speed is evidence about this departure. The floor — global
+    constant or place setting — is a prior, and an unknown pace keeps the
+    premium, which is what happened before places had paces."""
+    s1 = snap(T0, 1000.0, 80, range_km=400.0, locked=True)
+    # First seen crawling: 12 km/h * 0.65 = 7.8, well under any floor.
+    s2 = snap(T0 + 2400, 1003.837, 79, shift="D", speed=12.0, range_km=396.0)
+    s3 = snap(T0 + 2400 + 1080, 1009.033, 78, shift="P", speed=0.0,
+              locked=True, range_km=392.0)
+
+    def run(pace):
+        _, _, t, _ = process_snapshot(s1, s2, None, None, 68.6, 0.90,
+                                      last_quiet_ts=s2["ts"] - 60.0,
+                                      departure_pace_kmh=pace)
+        d, _, _, _ = process_snapshot(s2, s3, t, None, 68.6, 0.90)
+        return t, d[0]
+
+    slow_trip, slow = run(None)     # global floor of 20
+    fast_trip, fast = run(45.0)     # Home's setting
+
+    # The setting still does its job: the start moves, so the trip is shorter.
+    assert fast["duration_min"] < slow["duration_min"]
+
+    # But neither run may claim to have MEASURED a head pace, because in both
+    # the floor beat the 7.8 km/h actually seen.
+    assert slow_trip["start_blind_kmh"] == fast_trip["start_blind_kmh"] == 0.0
+
+    # ...so the premium survives the setting, and the energy does not move with
+    # it. Same measured stretch, same blind stretch, same price for it.
+    assert fast["energy_used_kwh"] == slow["energy_used_kwh"]
+
+
+def test_a_head_seen_at_speed_is_still_evidence_and_still_drops_the_premium():
+    """The other half: a departure first seen already moving fast did not crawl,
+    and that reading is a measurement whatever any place has been set to."""
+    s1 = snap(T0, 1000.0, 80, range_km=400.0, locked=True)
+    s2 = snap(T0 + 2400, 1003.837, 79, shift="D", speed=90.0, range_km=396.0)
+    # The seen leg has to run at a normal pace, or the gap reads as another
+    # park and the start is re-anchored out from under the test.
+    s3 = snap(T0 + 2400 + 600, 1009.033, 78, shift="P", speed=0.0,
+              locked=True, range_km=392.0)
+    _, _, trip, _ = process_snapshot(s1, s2, None, None, 68.6, 0.90,
+                                     last_quiet_ts=s2["ts"] - 60.0,
+                                     departure_pace_kmh=45.0)
+    assert trip["start_blind_kmh"] == pytest.approx(58.5)   # 90 * 0.65, observed
+    drives, _, _, _ = process_snapshot(s2, s3, trip, None, 68.6, 0.90)
+    trip_kmh = drives[0]["avg_speed_kmh"]
+    assert trip["start_blind_kmh"] > trip_kmh                # did not crawl

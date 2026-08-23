@@ -2089,7 +2089,12 @@ def process_snapshot(
                 # complement: the minutes it was still PARKED, which is the
                 # only part of prev's SoC drop that isn't this drive's.
                 floor_kmh = departure_pace_kmh or DEPARTURE_PACE_KMH
-                pace = max((cur.get("speed_kmh") or 0.0) * 0.65, floor_kmh)
+                # Kept apart because only one of the two is EVIDENCE about this
+                # departure. cur's own speed was measured on it; the floor is a
+                # prior, whether it comes from the global constant or from a
+                # place's setting. See where start_blind_kmh is recorded below.
+                observed_kmh = (cur.get("speed_kmh") or 0.0) * 0.65
+                pace = max(observed_kmh, floor_kmh)
                 shift_sec = moved / pace * 3600.0
                 park_min = max(gap_min - shift_sec / 60.0, 0.0)
                 # is_driving(prev) blocks recovery below because prev isn't a
@@ -2218,7 +2223,27 @@ def process_snapshot(
                     # the departure premium that prices it is a claim about
                     # CRAWLING and cannot be checked without this (see
                     # DEPARTURE_BLIND_LOAD's use in _drive_from).
-                    open_trip["start_blind_kmh"] = round(pace, 1)
+                    #
+                    # Only the OBSERVED speed goes in. Recording the pace
+                    # actually used made the premium's test circular the moment
+                    # a place could set that pace: raising Home to 45 km/h both
+                    # shortened the clock and, because 45 clears any city trip
+                    # average, silently switched the premium off — so a setting
+                    # meant to fix the start TIME quietly changed the ENERGY
+                    # too, and always in the direction the setting implied.
+                    #
+                    # Measured, trip 445: the head really ran at 20.7 km/h
+                    # against a trip average of 23.6, a genuine crawl, and the
+                    # premium was skipped on the strength of the 45 that had
+                    # been typed in. The trip came out 9.4% under the car's own
+                    # figure where the premium would have put it at 3.9%.
+                    #
+                    # 0.0 when the floor won, which _drive_from reads as an
+                    # unknown pace and keeps the premium for — the conservative
+                    # branch, and the one that was there before places had
+                    # paces at all.
+                    open_trip["start_blind_kmh"] = (
+                        round(observed_kmh, 1) if observed_kmh >= floor_kmh else 0.0)
                     recovered_start = True
                     # The start coordinates move with the odometer, or the trip
                     # says two contradictory things about where it began: an
