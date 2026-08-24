@@ -3082,8 +3082,23 @@ def standby_evidence(session: Session = Depends(get_session)):
         select(Charge).where(Charge.vehicle_id == vehicle.id)
     ).all()
     charge_starts = sorted(c.start_time for c in charges)
+    # Whether Sentry was armed during a gap, which the fit currently averages
+    # over and the car's own screen reports separately. BatteryReading writes a
+    # row on any sentry_mode change (see /api/sync), so a park that armed or
+    # disarmed leaves one even when SoC never moved a whole point.
+    readings = list(session.scalars(
+        select(BatteryReading).where(BatteryReading.vehicle_id == vehicle.id)
+        .order_by(BatteryReading.ts)))
+
+    def sentry_during(start, end):
+        seen = [r.sentry_mode for r in readings
+                if start <= r.ts <= end and r.sentry_mode is not None]
+        if not seen:
+            return None
+        return any(seen)
 
     by_place: dict[str, list[float]] = {}
+    by_sentry: dict[str, list[float]] = {}
     gaps, total_kwh, total_kwh_signed, total_hours, clipped = [], 0.0, 0.0, 0.0, 0
     for a, b in zip(drives, drives[1:]):
         hours = (b.start_time - a.end_time).total_seconds() / 3600.0
@@ -3098,12 +3113,20 @@ def standby_evidence(session: Session = Depends(get_session)):
         total_kwh += max(kwh, 0.0)
         total_kwh_signed += kwh
         total_hours += hours
+        armed = sentry_during(a.end_time, b.start_time)
         seen = by_place.setdefault(a.end_location or "?", [0.0, 0.0, 0])
         seen[0] += max(points, 0.0)
         seen[1] += hours
         seen[2] += 1
+        row = by_sentry.setdefault(
+            "sentry on" if armed else "sentry off" if armed is False else "unknown",
+            [0.0, 0.0, 0])
+        row[0] += max(points, 0.0)
+        row[1] += hours
+        row[2] += 1
         gaps.append({
             "after_drive_id": a.id,
+            "sentry": armed,
             "at": a.end_time.isoformat(timespec="minutes"),
             "place": a.end_location,
             "hours": round(hours, 2),
@@ -3142,6 +3165,17 @@ def standby_evidence(session: Session = Depends(get_session)):
         # them, describing neither. ``in_use_kw`` is what each place actually
         # gets — its own figure where its history can carry one (see
         # driving.place_standby_kw), the blended rate where it cannot.
+        # The split the fit cannot currently see. This car's own screen puts a
+        # Sentry-off park at about 14 W and the fit reads 35 W at Home, which is
+        # not a contradiction: the fit averages armed and unarmed parks
+        # together and the screen was measuring one window with Sentry at 0.0%.
+        # If these two rows separate cleanly the rate should follow the state,
+        # not the place alone.
+        "by_sentry": sorted(
+            ({"sentry": k, "gaps": n, "hours": round(h, 1), "points": round(pts, 1),
+              "rate_kw": round(pts / 100.0 * capacity_kwh / h, 4) if h else None}
+             for k, (pts, h, n) in by_sentry.items()),
+            key=lambda r: -r["hours"]),
         "by_place": sorted(
             ({"place": p,
               "gaps": n,
