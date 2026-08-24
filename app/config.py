@@ -177,7 +177,17 @@ class Settings(BaseSettings):
     petrol_price_per_liter: float = 0.0
     petrol_l_per_100km: float = 0.0
     # When-new full range (km) used as the battery-health 100% reference.
-    # 0 = auto-detect from the car's variant badge (e.g. 74D -> 549 km).
+    # 0 = auto-detect from the car's variant badge AND its wheels, which
+    # matter as much: a 2024 74D is 549 km on 18-inch wheels and 491 on
+    # 19-inch, an 11% difference that lands straight in the health figure.
+    # See analysis/battery.NEW_RANGE_KM, which matches the wheel-name token
+    # Tesla reports (Nova19, Photon18, ...) alongside the badge.
+    #
+    # Cross-checked against the measured capacity, and they agree: 453 km
+    # observed against 491 new is 92.26%, and 92.26% of this variant's 75 kWh
+    # spec is 69.2 kWh where eleven charges measured 68.6 — 0.9% apart, from
+    # two routes sharing no input. Inverted, the measurement implies 74.4 kWh
+    # usable when new against a 75.0 spec, which is the same 0.9%.
     battery_new_range_km: float = 0.0
     # Usable pack capacity (kWh), the 100%->0% energy that turns a drive's
     # range/SoC delta into kWh. 0 = auto: the measured charge EMA, seeded from
