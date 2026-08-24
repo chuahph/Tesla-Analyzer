@@ -481,6 +481,7 @@ def vampire_drain(
     drives: list[Drive], charges: list[Charge] | None, capacity_kwh: float,
     anchor: tuple[datetime, float] | None = None,
     rate_history: tuple[list[Any], list[Any]] | None = None,
+    place_rates: dict[str, float] | None = None,
 ) -> dict[str, Any]:
     """kWh lost while parked between two consecutive drives, with no charge in
     between — standby/vampire drain (sentry mode, cabin overheat protection,
@@ -559,7 +560,12 @@ def vampire_drain(
         correct a gap at all.
         """
         if place not in _rate:
-            _rate[place] = (place_standby_kw(fit_drives, fit_charges, capacity_kwh, place)
+            # A figure read off the car's own Park screen outranks the fit,
+            # because it measures the same quantity at 0.1% where the fit has
+            # 1% and a temperature bias on top (see Place.parked_draw_w).
+            given = (place_rates or {}).get(place) if place else None
+            _rate[place] = (given if given else
+                            place_standby_kw(fit_drives, fit_charges, capacity_kwh, place)
                             if place else parked_rate_kw(fit_drives, fit_charges, capacity_kwh))
         if _rate[place] is None and place is not None:
             return park_rate(None)
@@ -955,6 +961,7 @@ def analyze(drives: list[Drive], rated_wh_per_km: float = 150.0,
             recent_trips_limit: int | None = 5,
             trip_costs: dict[int, dict[str, Any]] | None = None,
             vampire_rate_history: tuple[list[Any], list[Any]] | None = None,
+            vampire_place_rates: dict[str, float] | None = None,
             ) -> dict[str, Any]:
     """``energy_price`` is either a flat RM/kWh float, or a
     ``datetime -> RM/kWh`` callable (time-of-use pricing — see app.tariff) for
@@ -1002,7 +1009,8 @@ def analyze(drives: list[Drive], rated_wh_per_km: float = 150.0,
     # otherwise invisible; added back in below so "kWh used" is the real
     # total drawn from the pack, not just what happened while actually moving.
     vampire = vampire_drain(ordered, charges, capacity_kwh, anchor=vampire_anchor,
-                            rate_history=vampire_rate_history)
+                            rate_history=vampire_rate_history,
+                            place_rates=vampire_place_rates)
     vampire_kwh = vampire["kwh"]
     # Trip drain, measured PER DRIVE at its best-available precision: each
     # drive's own fractional energy_used_kwh (from its range delta — sub-1%

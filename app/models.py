@@ -442,6 +442,21 @@ class Place(Base):
     # tells the app it guessed wrong. The evidence has to come from outside —
     # the car's own Trips list — and then it lives here.
     departure_pace_kmh: Mapped[float] = mapped_column(Float, default=0.0)
+    # What this car draws parked HERE, in watts. 0 = use the fitted rate.
+    #
+    # Same shape as departure_pace_kmh above and for the same reason: a
+    # quantity this app cannot measure, entered from an instrument that can.
+    # The fit runs on whole-percent SoC deltas across parked gaps, which works
+    # where Sentry is armed (231 W measured, fifty times the quantum) and fails
+    # where it is not — seven Home nights from seven read a full point where
+    # the car's own screen implies 14 W and predicts one night in five. The
+    # residue is the pack's SoC estimate settling as it cools, and it is a
+    # bias, so no amount of resolution or averaging removes it.
+    #
+    # The car's Energy > Park screen reports the same quantity to 0.1% with
+    # the causes broken out. Read it across one park, divide by the hours, and
+    # set that here (see /api/set-parked-draw).
+    parked_draw_w: Mapped[float] = mapped_column(Float, default=0.0)
 
 
 class ServiceRecord(Base):

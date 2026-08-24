@@ -124,6 +124,7 @@ def init_db() -> None:
     # 0, not NULL: "not set" and "set to zero" mean the same thing here (fall
     # back to the global pace), so there is nothing for NULL to carry.
     _ensure_column("places", "departure_pace_kmh", "FLOAT", "0.0")
+    _ensure_column("places", "parked_draw_w", "FLOAT", "0.0")
     # NULL default (not FALSE) — "unknown" (older reading, car didn't report
     # it) must stay distinguishable from a confirmed off.
     _ensure_column("battery_readings", "sentry_mode", "BOOLEAN", "NULL")

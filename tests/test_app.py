@@ -3354,3 +3354,54 @@ def test_every_analyze_call_fits_the_parked_rate_from_the_whole_history():
         assert "vampire_rate_history" in src[at:i], (
             f"analyze() at offset {at} fits its rate from its own window:\n"
             f"{src[at - 40:i]}")
+
+
+def test_set_parked_draw_records_a_reading_the_fit_cannot_take(monkeypatch):
+    """One setting per place, from the car's own Park screen — the same shape
+    as the departure pace, and for the same reason: a real quantity this app
+    has no instrument for."""
+    from app.database import SessionLocal
+    from app.models import Place
+
+    settings = get_settings()
+    old = settings.app_passcode
+    settings.app_passcode = ""
+    try:
+        with TestClient(app) as client:
+            client.post("/api/places", json={
+                "name": "Home", "lat": 5.3301, "lon": 100.3001, "radius_km": 0.2,
+            })
+            assert client.get("/api/places").json()[0]["parked_draw_w"] == 0.0
+
+            assert client.get("/api/set-parked-draw",
+                              params={"place": "Nowhere", "w": 14}).status_code == 422
+            assert client.get("/api/set-parked-draw",
+                              params={"place": "Nowhere", "watts": 14}).status_code == 404
+            # kW typed where watts were asked for.
+            assert client.get("/api/set-parked-draw",
+                              params={"place": "Home", "watts": 0.014}).status_code == 400
+
+            body = client.get("/api/set-parked-draw",
+                              params={"place": "home", "watts": 14}).json()
+            assert body["place"] == "Home" and body["parked_draw_w"] == 14.0
+            assert body["was"] == 0.0
+
+            # The places editor posts no draw field, and must not clear it.
+            client.post("/api/places", json={
+                "name": "Home", "lat": 5.3302, "lon": 100.3002, "radius_km": 0.25,
+            })
+            assert client.get("/api/places").json()[0]["parked_draw_w"] == 14.0
+
+            from app.api.routes import _place_parked_rates
+            with SessionLocal() as s:
+                assert _place_parked_rates(s) == {"Home": 0.014}
+
+            assert client.get("/api/set-parked-draw",
+                              params={"place": "Home", "watts": 0}).json()[
+                                  "parked_draw_w"] == 0.0
+            with SessionLocal() as s:
+                assert _place_parked_rates(s) == {}
+                s.query(Place).delete()
+                s.commit()
+    finally:
+        settings.app_passcode = old

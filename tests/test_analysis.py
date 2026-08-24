@@ -2038,3 +2038,28 @@ def test_the_parked_rate_is_fitted_from_the_car_not_from_the_window():
     # car's own history the modelled drain is smaller, and is used instead.
     assert windowed["kwh"] == pytest.approx(0.684, rel=0.01)
     assert from_car["kwh"] < windowed["kwh"]
+
+
+def test_a_place_can_be_told_what_it_draws_when_the_fit_cannot_measure_it():
+    """The fit reads whole-percent SoC across parked gaps. Where Sentry is off
+    that is not an instrument: seven Home nights from seven read a full point
+    where the car's own screen implies 14 W and predicts one in five, and the
+    residue is the pack's SoC estimate settling as it cools — a bias, so more
+    gaps make it no better. A figure read off the car outranks the fit."""
+    history = _chain([("Home", 100.0 - 2 * i, 99.0 - 2 * i) for i in range(8)])
+    window = history[:2]                       # one 10-hour gap
+    fitted = driving_analysis.vampire_drain(
+        window, [], 68.6, rate_history=(history, []))
+    told = driving_analysis.vampire_drain(
+        window, [], 68.6, rate_history=(history, []),
+        place_rates={"Home": 0.014})
+
+    assert told["hours"] == fitted["hours"] > 0        # same gap
+    assert told["kwh"] < fitted["kwh"]                 # cheaper, and measured
+    assert told["kwh"] == pytest.approx(0.014 * told["hours"], rel=0.02)
+
+    # A place with no figure of its own is unaffected by another place's.
+    elsewhere = driving_analysis.vampire_drain(
+        window, [], 68.6, rate_history=(history, []),
+        place_rates={"Office": 0.014})
+    assert elsewhere["kwh"] == fitted["kwh"]
