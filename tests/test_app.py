@@ -3328,3 +3328,29 @@ def test_repair_arrivals_refuses_a_move_made_during_the_park():
                 s.commit()
     finally:
         settings.app_passcode = old
+
+
+def test_every_analyze_call_fits_the_parked_rate_from_the_whole_history():
+    """A standby rate describes the car, not the window. The commit that said
+    so patched only the two call sites that had prompted it, leaving the
+    comparison periods and the export to fit their own — so the same park
+    could report one figure on the dashboard and another beside it."""
+    import inspect
+    import re
+
+    from app.api import routes
+
+    src = inspect.getsource(routes)
+    # `analyze()` with nothing between the brackets is prose about the
+    # function in a comment, not a call to it.
+    calls = [m.end() for m in re.finditer(r"driving_analysis\.analyze\(", src)
+             if src[m.end()] != ")"]
+    assert len(calls) >= 5
+    for at in calls:
+        depth, i = 1, at
+        while depth:                     # to this call's closing bracket
+            depth += {"(": 1, ")": -1}.get(src[i], 0)
+            i += 1
+        assert "vampire_rate_history" in src[at:i], (
+            f"analyze() at offset {at} fits its rate from its own window:\n"
+            f"{src[at - 40:i]}")

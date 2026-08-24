@@ -2907,7 +2907,8 @@ def compare_vehicles(days: int = Query(30, ge=1, le=730), session: Session = Dep
         driving = driving_analysis.analyze(
             drives, settings.rated_wh_per_km, capacity_kwh,
             tariff.price_fn_from_settings(settings), charges=charges,
-            trip_costs=_trip_cost_map(session, vehicle.id))
+            trip_costs=_trip_cost_map(session, vehicle.id),
+            vampire_rate_history=_full_history(session, vehicle.id))
         charging = charging_analysis.analyze(charges, drives)
         readings = _newest_readings(
             session, vehicle.id,
@@ -3788,7 +3789,8 @@ def _monthly_report_payload(session: Session, vehicle: Vehicle, settings, days: 
     prev_drives, prev_charges = _window(session, vehicle.id, days, since=prev_since, until=since)
     prev_driving = driving_analysis.analyze(
         prev_drives, settings.rated_wh_per_km, capacity_kwh, price_fn, charges=prev_charges,
-        trip_costs=trip_costs)
+        trip_costs=trip_costs,
+        vampire_rate_history=_full_history(session, vehicle.id))
     prev_charging = charging_analysis.analyze(prev_charges, prev_drives)
     prev_efficiency = efficiency_analysis.analyze(prev_drives, settings.rated_wh_per_km)
     narrative_lines = narrative_engine.build(
@@ -6792,7 +6794,8 @@ def summary(
         prev_drives, prev_charges = _window(session, vehicle.id, days, since=prev_since, until=cur_since)
         prev_driving = driving_analysis.analyze(
             prev_drives, settings.rated_wh_per_km, capacity_kwh, price_fn,
-            charges=prev_charges, trip_costs=trip_costs)
+            charges=prev_charges, trip_costs=trip_costs,
+            vampire_rate_history=_full_history(session, vehicle.id))
         prev_charging = charging_analysis.analyze(prev_charges, prev_drives)
         prev_efficiency = efficiency_analysis.analyze(prev_drives, settings.rated_wh_per_km)
         narrative_lines = narrative_engine.build(
