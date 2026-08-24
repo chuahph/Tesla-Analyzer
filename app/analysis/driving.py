@@ -130,6 +130,45 @@ def odometer_continuity(drives: list[Any], readings: list[Any]) -> dict[str, Any
 # 2-6 h gaps now belong to neither rate, on purpose. They are a mixture, and
 # there is no way to split one without knowing when the car actually fell
 # asleep — which the API does not report.
+# Read this before changing any of the three constants below, or before
+# trusting what they produce for a place where Sentry is off.
+#
+# Fifty gaps and 538 parked hours, grouped by whether a BatteryReading inside
+# the gap saw Sentry armed:
+#
+#   sentry on        9 gaps   101 h   34 pts   231 W
+#   sentry off      18 gaps   174 h    8 pts    32 W
+#   unknown         23 gaps   264 h   18 pts    47 W
+#
+# 7.3x, and the cleanest split in this dataset. It is also the SAME split the
+# places make — Home and Office are where Sentry is off — so the per-place
+# rate already carries it and a second mechanism would be doing one job twice.
+# The Sentry-on figure is a real measurement: 34 points is fifty times the
+# quantum and nothing here is rounding.
+#
+# The Sentry-off figure is where this stops being measurement. The car's own
+# parked screen put everything since one charge at 0.4% — 0.274 kWh across
+# ~19.6 parked hours, about 14 W, with every category but Vehicle Standby at
+# zero. Against that:
+#
+#   - a 10-hour night at 14 W is 0.20 of an SoC point, so roughly one night in
+#     five should read 1 point and the rest 0;
+#   - the seven Home nights to 24 Aug read 1, 1, 1, 2, 1, 1, 1;
+#   - the night of 23-24 Aug read a whole point, 0.686 kWh, on its own more
+#     than the car attributed to that entire window.
+#
+# Seven from seven is not a 0.20 probability. Something adds close to a point
+# per overnight park that is not drain, and the likeliest candidate is the
+# pack's own SoC estimate settling as it cools: the arriving reading is taken
+# on a warm pack and the departing one after a night of cooling. That is a
+# systematic offset, not noise, and no amount of averaging removes it — which
+# is why the 22 older Home gaps read 33 W with twelve of them at zero while
+# the seven newest read 69 W with none at zero.
+#
+# So: SENTRY-ON rates are measured, SENTRY-OFF rates are an upper bound and
+# probably mostly drift. Do not "improve" the off figure by collecting more
+# gaps. What would settle it is the car's Park screen read at both ends of ONE
+# overnight park, which measures the same quantity at 0.1% instead of 1%.
 STANDBY_MIN_GAP_HOURS = 6.0
 # Two overnight parks. Raised with the floor: at 6 h a 12 h total could be a
 # single gap, and one gap has never been a rate anywhere else in this module.
