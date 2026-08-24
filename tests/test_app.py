@@ -3405,3 +3405,36 @@ def test_set_parked_draw_records_a_reading_the_fit_cannot_take(monkeypatch):
                 s.commit()
     finally:
         settings.app_passcode = old
+
+
+def test_the_trip_side_and_the_gap_side_price_a_park_at_the_same_rate():
+    """vampire_drain adds a park's drain to the gap; the sync-time correction
+    subtracts the same minutes from the trip they were taken out of. Two rates
+    leak at the boundary, and once a place could be told its own draw the leak
+    stopped being second-order: 99.6 parked minutes at the blended 78 W on one
+    side and Home's 14 on the other is 0.1 kWh going missing from one trip."""
+    from app.database import SessionLocal
+    from app.models import Place
+
+    settings = get_settings()
+    old = settings.app_passcode
+    settings.app_passcode = ""
+    try:
+        with TestClient(app) as client:
+            client.post("/api/places", json={
+                "name": "Home", "lat": 5.3301, "lon": 100.3001, "radius_km": 0.2})
+            client.get("/api/set-parked-draw", params={"place": "Home", "watts": 14})
+
+            from app.api.routes import _parked_rate_kw_for, _place_parked_rates
+            with SessionLocal() as s:
+                told = _parked_rate_kw_for(s, "Home", [], [], 68.6)
+                # Both consumers resolve through the same helper, so this IS
+                # the rate each of them uses.
+                assert told == pytest.approx(0.014)
+                assert _place_parked_rates(s)["Home"] == pytest.approx(0.014)
+                # An unknown place falls through to the fit, not to the setting.
+                assert _parked_rate_kw_for(s, "Nowhere", [], [], 68.6) != told
+                s.query(Place).delete()
+                s.commit()
+    finally:
+        settings.app_passcode = old

@@ -826,6 +826,30 @@ def _place_departure_pace(session: Session, snap: dict | None) -> float | None:
     return best_pace
 
 
+def _parked_rate_kw_for(session: Session, place: str | None, past_drives: list,
+                        past_charges: list, capacity_kwh: float) -> float | None:
+    """This car's parked draw at one place, in kW, best source first.
+
+    One definition, because two consumers depend on it agreeing with itself:
+    vampire_drain ADDS this back to a parked gap and the correction below
+    SUBTRACTS it from the trip whose minutes were taken out of that gap. Two
+    rates leave energy created or destroyed at the boundary — which is exactly
+    what happened when the gap side learned about places and the trip side did
+    not, and again, larger, once a place could be told a figure outright: 99.6
+    parked minutes priced at the blended 78 W on one side and Home's 14 on the
+    other is 0.1 kWh going missing from one trip.
+    """
+    if place:
+        told = _place_parked_rates(session).get(place)
+        if told:
+            return told
+        fitted = driving_analysis.place_standby_kw(
+            past_drives, past_charges, capacity_kwh, place)
+        if fitted is not None:
+            return fitted
+    return _trim_rate_kw(past_drives, past_charges, capacity_kwh)
+
+
 def _place_parked_rates(session: Session) -> dict[str, float]:
     """Places whose parked draw was read off the car rather than fitted, in kW.
 
@@ -872,11 +896,8 @@ def _departure_parked_rate_kw(session: Session, vehicle, prev: dict | None,
         select(Charge).where(Charge.vehicle_id == vehicle.id)
     ).all()
     place = _geofence_name(sync_mod._coords(prev), session) if prev else None
-    rate = driving_analysis.place_standby_kw(
-        list(past_drives), list(past_charges), capacity_kwh, place)
-    if rate is not None:
-        return rate
-    return _trim_rate_kw(list(past_drives), list(past_charges), capacity_kwh)
+    return _parked_rate_kw_for(
+        session, place, list(past_drives), list(past_charges), capacity_kwh)
 
 
 def _cached_place_near(coords: str) -> tuple[str, str] | None:
@@ -2186,13 +2207,30 @@ def _process_vehicle(
         past_charges = session.scalars(
             select(Charge).where(Charge.vehicle_id == vehicle.id)
         ).all()
-        rate_kw = _trim_rate_kw(
-            list(past_drives), list(past_charges), capacity_kwh)
+        past_drives, past_charges = list(past_drives), list(past_charges)
+
+        def rate_at(coords: str) -> float | None:
+            return _parked_rate_kw_for(
+                session, _geofence_name(coords, session),
+                past_drives, past_charges, capacity_kwh)
+
         for d in drives:
+            # The two ends are different places and, since a place can now be
+            # told its own draw, potentially very different rates. Weighted by
+            # the seconds each contributes so one call still prices both — and
+            # so the total taken off here is what vampire_drain puts back.
+            tail = d.get("tail_trim_sec") or 0.0
+            park = (d.get("start_park_min") or 0.0) * 60.0
+            # Still coords at this point; geocoding runs in the loop below.
+            end_kw = rate_at(d["end_location"]) if tail else None
+            start_kw = rate_at(d["start_location"]) if park else None
+            known = [(sec, kw) for sec, kw in ((tail, end_kw), (park, start_kw)) if kw]
+            if not known:
+                continue
+            secs = sum(sec for sec, _ in known)
             d["energy_used_kwh"] = sync_mod.trim_standby_kwh(
-                d["energy_used_kwh"], d["distance_km"],
-                (d.get("tail_trim_sec") or 0.0) + (d.get("start_park_min") or 0.0) * 60.0,
-                rate_kw)
+                d["energy_used_kwh"], d["distance_km"], secs,
+                sum(sec * kw for sec, kw in known) / secs)
     for d in drives:
         # Keep the raw coords (for map links) before geocoding replaces them.
         d["start_coords"], d["end_coords"] = d["start_location"], d["end_location"]
