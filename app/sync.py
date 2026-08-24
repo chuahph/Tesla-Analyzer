@@ -221,7 +221,21 @@ DEPARTURE_BASELINE_MAX_KWH = 0.2
 # the noise.
 #
 # So a Place may carry its own ``departure_pace_kmh`` and this stays the
-# default for everywhere else. Note what that is NOT: it is a setting, not
+# default for everywhere else.
+#
+# A time-of-day split was nearly added on top and should not be. Six Home
+# departures had separated perfectly — mornings at 20.7, 32.0 and 35.7 km/h,
+# evenings at 45.3, 47.2 and 55.3, no overlap and an obvious mechanism in
+# commuter traffic — and a split would have cut the mean clock error from 1.86
+# minutes to 1.01. Trip 447 then departed Home at 18:46 and ran its head at
+# 24.4 km/h, straight through the middle of the "morning" band. The separation
+# was three samples a side arranging themselves, which is the same shape as
+# the convex climate curve and the two-sample accessory constant, both also
+# withdrawn. A split still fits marginally better in minutes; that is two extra
+# parameters absorbing scatter, not a mechanism.
+#
+# 45 remains the best single value across all seven (1.86 min mean, against
+# 2.04 at 40 and 2.09 at 50). Note what that is NOT: it is a setting, not
 # something the app learns. The arrival tail is learnable because a later
 # poll observes where the car actually stopped; nothing whatsoever observes
 # when it actually STARTED, so no accumulation of history can score a

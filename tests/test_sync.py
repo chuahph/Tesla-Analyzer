@@ -2350,6 +2350,7 @@ def test_non_propulsion_load_matches_the_cars_own_breakdown():
         # anything is compared. 419 and 420 carry +/-3%, 406 and 407 +/-6-8%.
         # Short trips are weak evidence here however cleanly they log.
         ("423", 1.05, 9.214, 13.0, 34.0, 0.342, 0.23),
+        ("447", 1.66, 11.185, 23.0, 31.0, 0.617, 0.05),
         # 30C is the loosest, and the residual is the temperature curve, not
         # the gate: the car's own climate line reads 1.23 kW here against the
         # 1.20 it read at 33C — flat — while CLIMATE_KW_PER_DEGREE swings the
