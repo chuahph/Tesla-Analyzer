@@ -861,6 +861,18 @@ def _place_parked_rates(session: Session) -> dict[str, float]:
             for p in session.scalars(select(Place)) if p.parked_draw_w}
 
 
+def _parked_readings(session: Session, vehicle_id: int) -> list:
+    """Every battery reading, for telling which parks had Sentry armed.
+
+    /api/sync writes one on any sentry_mode change, so this is enough to state
+    each gap even where SoC never moved a whole point — see
+    driving.gap_sentry_state.
+    """
+    return list(session.scalars(
+        select(BatteryReading).where(BatteryReading.vehicle_id == vehicle_id)
+        .order_by(BatteryReading.ts)))
+
+
 def _full_history(session: Session, vehicle_id: int) -> tuple[list, list]:
     """Every drive and charge this car has, for fitting rates that describe the
     CAR rather than whatever window is on screen — see
@@ -3007,7 +3019,8 @@ def compare_vehicles(days: int = Query(30, ge=1, le=730), session: Session = Dep
             tariff.price_fn_from_settings(settings), charges=charges,
             trip_costs=_trip_cost_map(session, vehicle.id),
             vampire_rate_history=_full_history(session, vehicle.id),
-        vampire_place_rates=_place_parked_rates(session))
+        vampire_place_rates=_place_parked_rates(session),
+        vampire_readings=_parked_readings(session, vehicle.id))
         charging = charging_analysis.analyze(charges, drives)
         readings = _newest_readings(
             session, vehicle.id,
@@ -3885,7 +3898,8 @@ def _monthly_report_payload(session: Session, vehicle: Vehicle, settings, days: 
         drives, settings.rated_wh_per_km, capacity_kwh, price_fn, charges=charges,
         trip_costs=trip_costs,
         vampire_rate_history=_full_history(session, vehicle.id),
-        vampire_place_rates=_place_parked_rates(session))
+        vampire_place_rates=_place_parked_rates(session),
+        vampire_readings=_parked_readings(session, vehicle.id))
     charging = charging_analysis.analyze(charges, drives)
     efficiency = efficiency_analysis.analyze(drives, settings.rated_wh_per_km)
     cur = settings.currency
@@ -3925,7 +3939,8 @@ def _monthly_report_payload(session: Session, vehicle: Vehicle, settings, days: 
         prev_drives, settings.rated_wh_per_km, capacity_kwh, price_fn, charges=prev_charges,
         trip_costs=trip_costs,
         vampire_rate_history=_full_history(session, vehicle.id),
-        vampire_place_rates=_place_parked_rates(session))
+        vampire_place_rates=_place_parked_rates(session),
+        vampire_readings=_parked_readings(session, vehicle.id))
     prev_charging = charging_analysis.analyze(prev_charges, prev_drives)
     prev_efficiency = efficiency_analysis.analyze(prev_drives, settings.rated_wh_per_km)
     narrative_lines = narrative_engine.build(
@@ -3979,7 +3994,8 @@ def _standby_longest(session: Session, vehicle: Vehicle, drives, charges,
     vd = driving_analysis.vampire_drain(
         drives, charges, capacity_kwh,
         rate_history=_full_history(session, vehicle.id),
-        place_rates=_place_parked_rates(session))
+        place_rates=_place_parked_rates(session),
+        readings=_parked_readings(session, vehicle.id))
     gaps = vd.get("gap_list") or []
     if not gaps:
         return None
@@ -5447,7 +5463,8 @@ def energy_reconcile(session: Session = Depends(get_session)):
         drives_since, [], capacity_kwh,
         anchor=(last_charge.end_time, last_charge.end_soc),
         rate_history=_full_history(session, vehicle.id),
-        place_rates=_place_parked_rates(session))
+        place_rates=_place_parked_rates(session),
+        readings=_parked_readings(session, vehicle.id))
     trips_kwh = round(sum(d.energy_used_kwh or 0.0 for d in drives_since), 3)
     parked_kwh = round(vampire["kwh"], 3)
     attributed_kwh = round(trips_kwh + parked_kwh, 3)
@@ -6820,7 +6837,8 @@ def summary(
         vampire_since = driving_analysis.vampire_drain(
             drives_since, [], capacity_kwh, anchor=(last_charge.end_time, last_charge.end_soc),
             rate_history=_full_history(session, vehicle.id),
-        place_rates=_place_parked_rates(session))
+        place_rates=_place_parked_rates(session),
+        readings=_parked_readings(session, vehicle.id))
         used_since_last_charge_kwh = (
             sum(d.energy_used_kwh for d in drives_since) + vampire_since["kwh"]
         )
@@ -6884,7 +6902,8 @@ def summary(
         # dumping the whole cycle into one long list.
         recent_trips_limit=trips_limit or 5,
         vampire_rate_history=_full_history(session, vehicle.id),
-        vampire_place_rates=_place_parked_rates(session))
+        vampire_place_rates=_place_parked_rates(session),
+        vampire_readings=_parked_readings(session, vehicle.id))
     # A since-charge window's own `charges` list is always empty by
     # definition (it starts right where last_charge ends, so no charge can
     # have happened "since" yet) — without this, Energy Charged/AC-DC
@@ -6935,7 +6954,8 @@ def summary(
             prev_drives, settings.rated_wh_per_km, capacity_kwh, price_fn,
             charges=prev_charges, trip_costs=trip_costs,
             vampire_rate_history=_full_history(session, vehicle.id),
-        vampire_place_rates=_place_parked_rates(session))
+        vampire_place_rates=_place_parked_rates(session),
+        vampire_readings=_parked_readings(session, vehicle.id))
         prev_charging = charging_analysis.analyze(prev_charges, prev_drives)
         prev_efficiency = efficiency_analysis.analyze(prev_drives, settings.rated_wh_per_km)
         narrative_lines = narrative_engine.build(

@@ -207,7 +207,8 @@ SOC_RISE_TOLERANCE_PCT = 1.0
 
 def _gap_rate_kw(drives: list[Any], charges: list[Any] | None, capacity_kwh: float,
                  min_gap_h: float, max_gap_h: float | None,
-                 min_total_h: float, place: str | None = None) -> float | None:
+                 min_total_h: float, place: str | None = None,
+                 keep: Any = None) -> float | None:
     """Average draw (kW) across the parked gaps falling in a duration band.
 
     Shared by the two rates that matter — the deep-sleep average and the
@@ -226,6 +227,8 @@ def _gap_rate_kw(drives: list[Any], charges: list[Any] | None, capacity_kwh: flo
     total_hours = 0.0
     for a, b in zip(ordered, ordered[1:]):
         if place is not None and getattr(a, "end_location", None) != place:
+            continue
+        if keep is not None and not keep(a, b):
             continue
         gap_start, gap_end = a.end_time, b.start_time
         gap_hours = (gap_end - gap_start).total_seconds() / 3600.0
@@ -275,6 +278,46 @@ def standby_kw(drives: list[Any], charges: list[Any] | None,
     """
     return _gap_rate_kw(drives, charges, capacity_kwh,
                         STANDBY_MIN_GAP_HOURS, None, STANDBY_MIN_TOTAL_HOURS)
+
+
+def gap_sentry_state(readings: list[Any], start, end) -> bool | None:
+    """Was Sentry armed during this parked gap? None when nothing said.
+
+    /api/sync writes a BatteryReading on any sentry_mode change, so a park that
+    armed or disarmed leaves one even where SoC never moves a whole point.
+    Absent readings mean the car was unreachable throughout — usually a
+    signal-dead car park — and the answer is unknown, not "off".
+    """
+    seen = [r.sentry_mode for r in readings
+            if start <= r.ts <= end and r.sentry_mode is not None]
+    return any(seen) if seen else None
+
+
+def sentry_standby_kw(drives: list[Any], charges: list[Any] | None,
+                      capacity_kwh: float, readings: list[Any],
+                      armed: bool) -> float | None:
+    """The standby fit restricted to parks whose Sentry state was ``armed``.
+
+    Place was doing this job by proxy, and a proxy is exactly what it was:
+    Home and Office are where Sentry is off, everywhere else is where it is on,
+    and the per-place rates duplicated the split so faithfully that a second
+    mechanism looked redundant. Trip 448 parked at the resort — a 220 W place
+    fitted entirely from armed parks — with Sentry off. Fifteen hours later the
+    gap was priced at 220 W, which put the modelled drain past a whole SoC
+    point, which made the code report the raw point instead: 0.69 kWh, more
+    than the car attributed to every park since its last charge.
+
+    The state is the cause and the place only correlates with it, so where the
+    state is known it wins. Armed is the half worth fitting — 34 SoC points
+    across nine parks, fifty times the quantum. The unarmed half is the one
+    Place.parked_draw_w exists for.
+    """
+    if not readings:
+        return None
+    return _gap_rate_kw(
+        drives, charges, capacity_kwh,
+        STANDBY_MIN_GAP_HOURS, None, STANDBY_MIN_TOTAL_HOURS,
+        keep=lambda a, b: gap_sentry_state(readings, a.end_time, b.start_time) is armed)
 
 
 def place_standby_kw(drives: list[Any], charges: list[Any] | None,
@@ -482,6 +525,7 @@ def vampire_drain(
     anchor: tuple[datetime, float] | None = None,
     rate_history: tuple[list[Any], list[Any]] | None = None,
     place_rates: dict[str, float] | None = None,
+    readings: list[Any] | None = None,
 ) -> dict[str, Any]:
     """kWh lost while parked between two consecutive drives, with no charge in
     between — standby/vampire drain (sentry mode, cabin overheat protection,
@@ -549,20 +593,29 @@ def vampire_drain(
     # measure. Windows with neither shouldn't pay for the fit.
     _rate: dict[Any, float | None] = {}
 
-    def park_rate(place: str | None = None) -> float | None:
-        """What this car draws parked HERE, falling back to its whole history.
+    def park_rate(place: str | None = None, armed: bool | None = None) -> float | None:
+        """What this car draws parked HERE, in the state it was actually in.
 
-        Keyed by place because the two differ by 6.6x on this car (see
-        place_standby_kw) and every gap knows where it happened — the trip
-        that opened it ended somewhere. A place without enough parked hours of
-        its own returns the blended figure rather than nothing: it fits no
-        regime exactly, but it sits between them, which beats declining to
-        correct a gap at all.
+        Sentry first, because it is the cause and everything else correlates
+        with it: armed parks measure 231 W and unarmed ones a fraction of that,
+        and place was standing in for the distinction until a resort park with
+        Sentry off was priced at the resort's armed rate (see
+        sentry_standby_kw).
+
+        Then the place — a figure read off the car's own Park screen if it has
+        one, since that measures the same quantity at 0.1% where the fit has 1%
+        and a temperature bias on top (Place.parked_draw_w), else the place's
+        own fit. Then the whole-history blend, which fits no regime exactly but
+        sits between them, and beats declining to correct a gap at all.
         """
+        if armed and readings:
+            key = ("sentry", True)
+            if key not in _rate:
+                _rate[key] = sentry_standby_kw(
+                    fit_drives, fit_charges, capacity_kwh, readings, True)
+            if _rate[key]:
+                return _rate[key]
         if place not in _rate:
-            # A figure read off the car's own Park screen outranks the fit,
-            # because it measures the same quantity at 0.1% where the fit has
-            # 1% and a temperature bias on top (see Place.parked_draw_w).
             given = (place_rates or {}).get(place) if place else None
             _rate[place] = (given if given else
                             place_standby_kw(fit_drives, fit_charges, capacity_kwh, place)
@@ -617,7 +670,9 @@ def vampire_drain(
         # works for measurement at a scale that doesn't. It is not a guess
         # standing in for data.
         if gap_hours > 0:
-            rate = park_rate(getattr(a, "end_location", None))
+            rate = park_rate(getattr(a, "end_location", None),
+                             gap_sentry_state(readings, gap_start, gap_end)
+                             if readings else None)
             if rate and rate * gap_hours < soc_point_kwh:
                 kwh = rate * gap_hours
                 drop_pct = kwh / capacity_kwh * 100.0
@@ -637,7 +692,10 @@ def vampire_drain(
         # restored. Second-order, and cheaper than a column that exists only
         # to bookkeep.
         park_min = getattr(b, "start_park_min", None) or 0.0
-        park_rate_kw = park_rate(getattr(a, "end_location", None)) if park_min > 0 else None
+        park_rate_kw = park_rate(
+            getattr(a, "end_location", None),
+            gap_sentry_state(readings, gap_start, gap_end) if readings else None
+        ) if park_min > 0 else None
         if park_min > 0 and park_rate_kw:
             kwh += park_rate_kw * park_min / 60.0
             drop_pct = kwh / capacity_kwh * 100.0   # keep pct saying what kwh says
@@ -962,6 +1020,7 @@ def analyze(drives: list[Drive], rated_wh_per_km: float = 150.0,
             trip_costs: dict[int, dict[str, Any]] | None = None,
             vampire_rate_history: tuple[list[Any], list[Any]] | None = None,
             vampire_place_rates: dict[str, float] | None = None,
+            vampire_readings: list[Any] | None = None,
             ) -> dict[str, Any]:
     """``energy_price`` is either a flat RM/kWh float, or a
     ``datetime -> RM/kWh`` callable (time-of-use pricing — see app.tariff) for
@@ -1010,7 +1069,8 @@ def analyze(drives: list[Drive], rated_wh_per_km: float = 150.0,
     # total drawn from the pack, not just what happened while actually moving.
     vampire = vampire_drain(ordered, charges, capacity_kwh, anchor=vampire_anchor,
                             rate_history=vampire_rate_history,
-                            place_rates=vampire_place_rates)
+                            place_rates=vampire_place_rates,
+                            readings=vampire_readings)
     vampire_kwh = vampire["kwh"]
     # Trip drain, measured PER DRIVE at its best-available precision: each
     # drive's own fractional energy_used_kwh (from its range delta — sub-1%

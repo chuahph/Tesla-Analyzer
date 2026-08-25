@@ -2063,3 +2063,55 @@ def test_a_place_can_be_told_what_it_draws_when_the_fit_cannot_measure_it():
         window, [], 68.6, rate_history=(history, []),
         place_rates={"Office": 0.014})
     assert elsewhere["kwh"] == fitted["kwh"]
+
+
+def test_a_park_is_priced_by_its_sentry_state_not_by_the_place_it_happened_at():
+    """Place was standing in for Sentry, and a stand-in is what it was. Trip
+    448 parked at the resort — a place fitted entirely from armed parks at
+    220 W — with Sentry off. The gap was priced at 220 W, which put the
+    modelled drain past a whole SoC point, so the raw point was reported
+    instead: 0.69 kWh, more than the car attributed to every park since its
+    last charge."""
+    from datetime import timedelta
+    from types import SimpleNamespace
+
+    # A resort where every logged park armed Sentry and lost 4 points a night.
+    legs, soc = [], 100.0
+    for _ in range(4):
+        legs += [("Resort", soc, soc - 1.0)]
+        soc -= 5.0                                  # 4 points across the gap
+    history = _chain(legs, gap_hours=11.0)
+
+    def state_after(drives, armed_upto):
+        """One reading inside each gap — armed for the first ``armed_upto``.
+
+        Keyed off the drive that OPENS each gap, so no two land on the same
+        timestamp: an earlier version put an armed and a disarmed reading on
+        the same instant and any() quietly called the gap armed.
+        """
+        return [SimpleNamespace(ts=d.end_time + timedelta(hours=1),
+                                sentry_mode=i < armed_upto)
+                for i, d in enumerate(drives[:-1])]
+
+    armed = driving_analysis.sentry_standby_kw(
+        history, [], 68.6, state_after(history, len(history)), True)
+    assert armed is not None and armed > 0.15
+
+    # Now one more park at the same place with Sentry off.
+    # 84 -> 83 across the extra gap: one point, a quiet night.
+    quiet = _chain(legs + [("Resort", 83.0, 82.0)], gap_hours=11.0)
+    quiet_readings = state_after(quiet, len(quiet) - 2)
+    window = quiet[-2:]
+
+    by_place = driving_analysis.vampire_drain(
+        window, [], 68.6, rate_history=(quiet, []))
+    by_state = driving_analysis.vampire_drain(
+        window, [], 68.6, rate_history=(quiet, []),
+        place_rates={"Resort": 0.014}, readings=quiet_readings)
+
+    assert by_state["hours"] == by_place["hours"] > 0
+    # The armed rate is too big for the substitution to fire, so the place
+    # route reports the raw quantised point; the state route models it.
+    assert by_place["kwh"] == pytest.approx(0.686, rel=0.02)
+    # kwh is reported to two decimals, so compare at that resolution.
+    assert by_state["kwh"] == pytest.approx(0.014 * by_state["hours"], abs=0.01)
