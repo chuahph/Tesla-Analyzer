@@ -669,12 +669,24 @@ def vampire_drain(
         # parked_rate_kw), so this substitutes measurement at a scale that
         # works for measurement at a scale that doesn't. It is not a guess
         # standing in for data.
-        if gap_hours > 0:
+        #
+        # Only over the hours the SoC drop actually SPANS, which is not the
+        # whole gap when the trip after it recovered its baseline: then
+        # b.start_soc is the pre-gap reading, the drop covers nothing, and the
+        # add-back below is what accounts for those minutes. Substituting
+        # across the full gap and then adding them again charges the same
+        # minutes twice — measured on trip 451, a 1.9 h park at Home with 113
+        # of its 114 minutes recovered, reported at 0.05 kWh where 14 W over
+        # 1.9 h is 0.027. Exactly double, because park_min was nearly the
+        # whole gap.
+        park_min = getattr(b, "start_park_min", None) or 0.0
+        measured_hours = max(gap_hours - park_min / 60.0, 0.0)
+        if measured_hours > 0:
             rate = park_rate(getattr(a, "end_location", None),
                              gap_sentry_state(readings, gap_start, gap_end)
                              if readings else None)
-            if rate and rate * gap_hours < soc_point_kwh:
-                kwh = rate * gap_hours
+            if rate and rate * measured_hours < soc_point_kwh:
+                kwh = rate * measured_hours
                 drop_pct = kwh / capacity_kwh * 100.0
         # Drain the following trip gave up, put back where it belongs. When
         # b's departure was recovered across a blackout its start_soc is the
@@ -691,7 +703,6 @@ def vampire_drain(
         # difference between them is ~0.03 kWh, against the ~0.17 being
         # restored. Second-order, and cheaper than a column that exists only
         # to bookkeep.
-        park_min = getattr(b, "start_park_min", None) or 0.0
         park_rate_kw = park_rate(
             getattr(a, "end_location", None),
             gap_sentry_state(readings, gap_start, gap_end) if readings else None

@@ -2115,3 +2115,38 @@ def test_a_park_is_priced_by_its_sentry_state_not_by_the_place_it_happened_at():
     assert by_place["kwh"] == pytest.approx(0.686, rel=0.02)
     # kwh is reported to two decimals, so compare at that resolution.
     assert by_state["kwh"] == pytest.approx(0.014 * by_state["hours"], abs=0.01)
+
+
+def test_recovered_parked_minutes_are_not_charged_twice():
+    """Two mechanisms cover a parked gap and they were overlapping. The
+    short-gap substitution replaces an unmeasurable SoC drop with rate x hours;
+    the add-back restores minutes the trip after the gap gave up when its
+    departure recovery took the pre-gap SoC as its baseline. Those minutes are
+    INSIDE the gap, so substituting across all of it and then adding them again
+    bills them twice — trip 451, a 1.9 h park at Home with 113 of its 114
+    minutes recovered, reported 0.05 kWh where 14 W over 1.9 h is 0.027."""
+    from datetime import datetime, timedelta
+    from types import SimpleNamespace
+
+    base = datetime(2026, 8, 25, 17, 26)
+    a = SimpleNamespace(id=1, start_time=base - timedelta(minutes=30), end_time=base,
+                        start_soc=72.0, end_soc=70.0, end_location="Home",
+                        start_park_min=None)
+    b_start = base + timedelta(hours=1.9)
+    b = SimpleNamespace(id=2, start_time=b_start,
+                        end_time=b_start + timedelta(minutes=18),
+                        start_soc=70.0, end_soc=68.0, end_location="Resort",
+                        start_park_min=113.0)          # nearly the whole gap
+
+    out = driving_analysis.vampire_drain([a, b], [], 68.6,
+                                         place_rates={"Home": 0.014})
+    assert out["hours"] == pytest.approx(1.9, abs=0.05)
+    # rate x the WHOLE gap, once: the substitution takes the sliver the drop
+    # spans and the add-back takes the recovered minutes.
+    assert out["kwh"] == pytest.approx(0.014 * 1.9, abs=0.01)
+
+    # With nothing recovered the substitution still covers the whole gap.
+    b_plain = SimpleNamespace(**{**b.__dict__, "start_park_min": None})
+    plain = driving_analysis.vampire_drain([a, b_plain], [], 68.6,
+                                           place_rates={"Home": 0.014})
+    assert plain["kwh"] == pytest.approx(0.014 * 1.9, abs=0.01)
