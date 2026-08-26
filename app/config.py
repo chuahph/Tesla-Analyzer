@@ -38,6 +38,31 @@ class Settings(BaseSettings):
     # car that Sentry Mode is keeping awake, which is where the waste was.
     # The cost is up to ~2 min latency on the parked-car alerts.
     sync_poll_interval_min: float = 2.0
+    # How often to read a car that is CHARGING, as opposed to merely online.
+    # A charge used to bypass the throttle above entirely and take a read on
+    # every cron tick for its whole length — a third of this account's read
+    # spend went on it. Nothing a charge records needs finer than this:
+    # Tesla's own session meter (charge_energy_added) survives the end of the
+    # session, so a late poll still closes on the full total, and the capacity
+    # curve only keeps samples where the whole-percent SoC moved, which at AC
+    # rates is roughly one point every six minutes. Driving is deliberately
+    # NOT throttled this way — see the gate in the sync route.
+    charge_poll_interval_min: float = 5.0
+    # How long to wait between rechecks during the hours this car has
+    # essentially never departed in — see /api/recheck-plan, which both fits
+    # those hours and prices them. Confirming a parked car is still parked is
+    # the single biggest line on the Fleet API bill (54% of a measured day),
+    # but widening it flat is the worst trade this app can make: an unseen
+    # departure is the blind head that every trip audit runs into. Widening
+    # only the dead hours buys part of the saving at a price that can be
+    # stated in trips.
+    sleep_recheck_quiet_min: float = 40.0
+    # How many departures an hour may have in the fitting window and still
+    # count as dead. Zero is the strict reading and measured too strict to be
+    # worth running: 199 departures over 90 days left two such hours and a
+    # saving of 7 requests a day, because lone one-off departures at 00:00,
+    # 04:00 and 23:00 each protected a whole block of the night in perpetuity.
+    recheck_quiet_max_departures: int = 1
     # How long to stop calling Tesla at all while every car is asleep or
     # offline and nothing is open. list_vehicles() runs on every /api/sync
     # whether or not anything can have changed, and a sleeping car cannot

@@ -177,6 +177,75 @@ def _log_tick(session: Session, outcome: str, detail: str | None = None) -> None
 SUSPEND_MAX_QUIET_MIN = 60.0
 
 
+# How long a fitted set of quiet hours is trusted before being refitted. A
+# person's routine changes over weeks, not minutes, and the fit is a scan of
+# ninety days of drives — cheap, but not something to repeat on every tick of
+# a loop that runs once a minute.
+QUIET_HOURS_TTL_SEC = 24 * 3600
+
+# Departures needed in the fitting window before any hour may be called dead.
+# Below this, "never happened in this hour" is indistinguishable from "not
+# yet", and acting on it would widen the blind window on the strength of no
+# evidence at all.
+QUIET_HOURS_MIN_DEPARTURES = 60
+
+
+def _fit_quiet_hours(session: Session, days: int, max_departures: int) -> tuple[list[int], int]:
+    """Hours the sleep recheck may run wide in, and what that costs in trips.
+
+    An hour qualifies when neither it NOR THE FOLLOWING ONE has more than
+    ``max_departures`` in the window. The look-ahead is what makes the wider
+    interval safe at the boundary: a recheck starting at 04:50 and running
+    forty minutes reaches into 05:00, so 04:00 is only dead if 05:00 is too.
+
+    Returns (hours, departures_at_risk) — the second being how many departures
+    in the window fell in an hour this would widen, counting each qualifying
+    hour and the one after it. That is the honest price, in the only unit that
+    matters: trips that would have begun inside a longer blind window.
+
+    Shared with /api/recheck-plan on purpose. The endpoint exists to explain
+    what the loop does, and it can only do that while both read the same rule.
+    """
+    since = sync_mod.now_local() - timedelta(days=days)
+    starts = session.scalars(
+        select(Drive.start_time).where(Drive.start_time >= since)).all()
+    by_hour = [0] * 24
+    for ts in starts:
+        if ts is not None:
+            by_hour[ts.hour] += 1
+    if len(starts) < QUIET_HOURS_MIN_DEPARTURES:
+        return [], 0
+    hours = [h for h in range(24)
+             if by_hour[h] <= max_departures and by_hour[(h + 1) % 24] <= max_departures]
+    affected = {h for h in hours} | {(h + 1) % 24 for h in hours}
+    return hours, sum(by_hour[h] for h in affected)
+
+
+def _quiet_hours_now(session: Session) -> list[int]:
+    """The cached fit, refitted at most once a day.
+
+    Falls back to no quiet hours on any failure. That is the safe direction:
+    the cost of getting this wrong is a departure seen late, so an unreadable
+    cache must leave the recheck at its normal interval rather than guess.
+    """
+    import json as _json
+
+    settings = get_settings()
+    try:
+        cached = _json.loads(state.get(session, state.QUIET_HOURS_KEY) or "{}")
+    except ValueError:
+        cached = {}
+    if cached and time.time() - float(cached.get("at") or 0) < QUIET_HOURS_TTL_SEC:
+        return [int(h) for h in cached.get("hours") or []]
+    try:
+        hours, risk = _fit_quiet_hours(session, 90, settings.recheck_quiet_max_departures)
+        state.put(session, state.QUIET_HOURS_KEY, _json.dumps(
+            {"hours": hours, "risk": risk, "at": time.time()}))
+        return hours
+    except Exception:  # noqa: BLE001 — an optimisation must never break the sync
+        return []
+
+
 def _mark_full_tick(session: Session, now_ts: float) -> None:
     """Record that a tick reached the end without raising.
 
@@ -2810,11 +2879,50 @@ def _sync_now_impl(wake: bool, session: Session):
         last_poll_ts = float(state.get(session, poll_key) or 0)
         woke_at = float(state.get(session, state.scoped(state.WOKE_AT_KEY, vvin)) or 0)
         recently_woke = bool(woke_at) and (now_ts - woke_at) <= FAST_POLL_WINDOW_MIN * 60
-        due = (now_ts - last_poll_ts) >= settings.sync_poll_interval_min * 60
         trip_in_progress = bool(state.get(session, state.scoped(state.OPEN_TRIP_KEY, vvin)))
-        charge_in_progress = bool(state.get(session, state.scoped(state.OPEN_CHARGE_KEY, vvin)))
+        charge_raw = state.get(session, state.scoped(state.OPEN_CHARGE_KEY, vvin))
+        charge_in_progress = bool(charge_raw)
+        # Has this charge been read even once SINCE it opened? Until it has,
+        # the only reading it owns is the one that opened it, and a session
+        # that then stops and sleeps closes on a zero delta and is dropped
+        # entirely. A long charge never meets that — it is where all the spend
+        # is, and it gets the throttle — but a three-minute top-up plugged in
+        # and pulled out between two ticks would vanish from the totals
+        # rather than merely be measured a little coarsely.
+        charge_measured = False
+        if charge_raw:
+            try:
+                opened = float(_json.loads(charge_raw).get("ts") or 0)
+                seen = float(_json.loads(state.get(
+                    session, state.scoped(state.SNAPSHOT_KEY, vvin)) or "{}").get("ts") or 0)
+                charge_measured = seen > opened
+            except (ValueError, TypeError, AttributeError):
+                charge_measured = False
+        # A charge is the one open session that does not earn a read a minute.
+        # Driving does: distance, peak speed and both trip boundaries are only
+        # as good as the polling behind them. A charge records two SoC ends,
+        # its energy and its duration, and it is the one that runs for hours —
+        # measured on this account, a third of every read request went on
+        # watching one. Tesla's charge_energy_added is a cumulative session
+        # meter that SURVIVES the session's end, so a poll arriving five
+        # minutes late still closes on the complete total rather than a
+        # truncated one; and the capacity curve only keeps samples where the
+        # SoC moved, which at AC rates is about one point every six minutes.
+        # What it does cost: a charge that stops and sleeps before any poll
+        # sees it closes on a reading up to charge_poll_interval_min old
+        # instead of sync_poll_interval_min old.
+        interval = (settings.charge_poll_interval_min
+                    if charge_measured and not trip_in_progress
+                    else settings.sync_poll_interval_min)
+        due = (now_ts - last_poll_ts) >= interval * 60
         manual_sync = wake and vvin == active_target
-        if not (trip_in_progress or charge_in_progress or recently_woke or due or manual_sync):
+        # A charge with no reading of its own yet bypasses the throttle
+        # outright, exactly as every charge used to: one tick's wait, so the
+        # session owns a second reading and can be closed on something other
+        # than the moment it opened. Everything after that is throttled, which
+        # is where all the spend was.
+        if not (trip_in_progress or (charge_in_progress and not charge_measured)
+                or recently_woke or due or manual_sync):
             continue  # online but idle, not due yet — let it settle toward sleep
         state.put(session, poll_key, str(now_ts))
 
@@ -2868,8 +2976,17 @@ def _sync_now_impl(wake: bool, session: Session):
     )
     all_quiet = bool(vehicles) and not any_open and not any(
         v.get("state") == "online" for v in vehicles)
+    # How long to stay quiet. Longer during the hours this car has essentially
+    # never departed in: a recheck at 03:00 guards a departure that has never
+    # happened, while one at 06:40 guards the commute, and only the first is
+    # worth trading away. The look-ahead in the fit is what makes this safe at
+    # the boundary — an hour only qualifies if the next one does too, so a
+    # window that spills past the hour cannot spill into a busy one.
+    recheck_min = settings.sleep_recheck_min
+    if all_quiet and sync_mod.now_local().hour in _quiet_hours_now(session):
+        recheck_min = max(recheck_min, settings.sleep_recheck_quiet_min)
     state.put(session, state.SUSPEND_KEY,
-              str(now_ts + settings.sleep_recheck_min * 60.0) if all_quiet else "")
+              str(now_ts + recheck_min * 60.0) if all_quiet else "")
     # Record that we LOOKED and found the car still, not merely that we intend
     # to look again. list_vehicles reporting no car online is proof of absence
     # of movement: a driving car is online. So each of these stamps closes the
@@ -2890,8 +3007,16 @@ def _sync_now_impl(wake: bool, session: Session):
         # Distinguish "genuinely asleep/offline" from "online, but this tick
         # deliberately skipped reading it" (the poll-throttle above) — telling
         # a user their online car is "asleep" would be actively misleading.
+        # An online car with a charge already open is CHARGING, even on a tick
+        # that declined to read it. Before the charge throttle this could not
+        # arise — an open charge forced a read every tick — and reporting the
+        # throttle's own silence as "parked" would have the dashboard contradict
+        # a session it is itself displaying, for as long as the interval lasts.
+        charging_open = bool(state.get(
+            session, state.scoped(state.OPEN_CHARGE_KEY, active_target)))
         resp = {
-            "status": "asleep" if not active_seen_online else "parked",
+            "status": ("asleep" if not active_seen_online
+                       else "charging" if charging_open else "parked"),
             "tried_wake": wake,
             "logged": total,
             "poll_fast": False,
@@ -6550,6 +6675,10 @@ def recheck_plan(
     for ts in starts:
         if ts is not None:
             by_hour[ts.hour] += 1
+    # The same fit the loop runs, not a second copy of the rule — this
+    # endpoint's whole job is to explain what the loop is doing, which it can
+    # only do while the two cannot drift apart.
+    quiet, at_risk = _fit_quiet_hours(session, days, max_departures)
 
     # Where the recheck spend falls, bucketed by hour of day. Same
     # proportional spreading the daily summary uses: an asleep run covers a
@@ -6584,11 +6713,6 @@ def recheck_plan(
     logged_days = ((span_end - span_start) / 86400.0
                    if span_start is not None and span_end and span_end > span_start else 0.0)
 
-    quiet = [h for h in range(24)
-             if by_hour[h] <= max_departures and by_hour[(h + 1) % 24] <= max_departures]
-    # Every hour a widened recheck could span, so no departure is counted twice
-    # and none in the spill-over hour is missed.
-    affected = {h for h in quiet} | {(h + 1) % 24 for h in quiet}
     # Widening from the current interval to wide_min removes this share of the
     # rechecks in an hour. One list_vehicles per recheck, so ticks are requests.
     factor = max(1.0 - settings.sleep_recheck_min / wide_min, 0.0)
@@ -6609,14 +6733,16 @@ def recheck_plan(
         "quiet_hours": quiet,
         "max_departures": max_departures,
         # The price of the saving, in trips rather than requests.
-        "departures_at_risk": sum(by_hour[h] for h in affected),
+        "departures_at_risk": at_risk,
         "logged_days": round(logged_days, 1),
         "saving_per_day": round(saving) if saving is not None else None,
         "rm_saved_per_month": round(saving * 30 * RM_PER_REQUEST, 2) if saving is not None else None,
         # A quiet hour is only as trustworthy as the history behind it. Too
         # few departures and "never happened here" just means "not yet".
+        "in_effect": settings.sleep_recheck_quiet_min,
         "note": ("Too few departures logged to call any hour quiet — widen "
-                 "``days`` or wait for more history." if len(starts) < 60 else None),
+                 "``days`` or wait for more history."
+                 if len(starts) < QUIET_HOURS_MIN_DEPARTURES else None),
     }
 
 @router.api_route("/repair-trip-energy", methods=["GET", "POST"])

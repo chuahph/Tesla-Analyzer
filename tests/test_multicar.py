@@ -3507,6 +3507,172 @@ def test_recheck_plan_only_calls_an_hour_quiet_if_the_next_one_is_too():
         settings.app_passcode, settings.sleep_recheck_min = old_pass, old_recheck
         _reset_to_demo()
 
+class _LongChargeClient:
+    """Charges indefinitely, reporting a fresh snapshot every read."""
+    VIN = "VINAAAAAAAAAAAAAA"
+    step = 0
+    reads = 0
+
+    def __init__(self, **_):
+        pass
+
+    def list_vehicles(self):
+        return [{"vin": self.VIN, "id_s": "1", "id": 1, "state": "online"}]
+
+    def wake_up(self, vid):
+        return True
+
+    def vehicle_data(self, vid):
+        type(self).reads += 1
+        step = type(self).step
+        return {
+            "vin": self.VIN,
+            "display_name": "Highland",
+            "drive_state": {"timestamp": 1_760_500_000_000 + step * 300_000,
+                            "shift_state": "P", "speed": 0},
+            "charge_state": {"battery_level": 50 + step, "battery_range": 300.0 / 1.60934,
+                             "charging_state": "Charging", "charger_power": 11,
+                             "charge_energy_added": 1.0 + step},
+            "climate_state": {"outside_temp": 25},
+            "vehicle_state": {"odometer": ODO_KM_TO_MI(10_000.0),
+                              "is_user_present": False, "locked": True},
+            "vehicle_config": {"car_type": "model3"},
+        }
+
+
+def test_a_settled_charge_is_read_on_its_own_slower_clock(monkeypatch):
+    """An open charge used to bypass the read throttle outright and take a
+    full read on every cron tick for its entire length — a third of this
+    account's read spend went on watching one.
+
+    Driving keeps that treatment: distance, peak speed and both trip
+    boundaries are only as good as the polling behind them. A charge does not
+    need it. But a charge that has no reading of its own YET still does: until
+    the second one arrives the session owns only the moment it opened, and one
+    that stops and sleeps in between would close on a zero delta and be
+    dropped from the totals altogether rather than merely measured coarsely."""
+    import time
+
+    from app import services, state
+
+    settings = get_settings()
+    old_pass = settings.app_passcode
+    settings.app_passcode = ""
+    _LongChargeClient.step = 0
+    _LongChargeClient.reads = 0
+    try:
+        monkeypatch.setattr("app.tesla_client.TeslaClient", _FakeClient)
+        with SessionLocal() as s:
+            services.link_with_token(s, "tok")
+
+        monkeypatch.setattr("app.tesla_client.TeslaClient", _LongChargeClient)
+        with TestClient(app) as client:
+            client.post("/api/sync")                      # opens the charge
+            opened_at = _LongChargeClient.reads
+
+            # The charge has no reading of its own yet, so this tick reads
+            # despite arriving far inside sync_poll_interval_min.
+            _LongChargeClient.step = 1
+            client.post("/api/sync")
+            assert _LongChargeClient.reads == opened_at + 1
+
+            # Now it is settled, and back-to-back ticks buy nothing — before
+            # this change every one of them spent a full read.
+            _LongChargeClient.step = 2
+            for _ in range(5):
+                client.post("/api/sync")
+            assert _LongChargeClient.reads == opened_at + 1
+
+            # And the dashboard still says charging rather than reporting the
+            # throttle's own silence as a parked car.
+            assert client.post("/api/sync").json()["status"] == "charging"
+
+            # Only once the charge's own interval has elapsed does it read
+            # again — five minutes, not the two an idle online car gets.
+            with SessionLocal() as s:
+                state.put(s, state.scoped(state.LAST_POLL_KEY, _LongChargeClient.VIN),
+                          str(time.time() - settings.sync_poll_interval_min * 60 - 1))
+                s.commit()
+            client.post("/api/sync")
+            assert _LongChargeClient.reads == opened_at + 1
+            with SessionLocal() as s:
+                state.put(s, state.scoped(state.LAST_POLL_KEY, _LongChargeClient.VIN),
+                          str(time.time() - settings.charge_poll_interval_min * 60 - 1))
+                s.commit()
+            client.post("/api/sync")
+            assert _LongChargeClient.reads == opened_at + 2
+    finally:
+        settings.app_passcode = old_pass
+        _reset_to_demo()
+
+def test_the_recheck_runs_wide_only_in_hours_this_car_never_leaves_in():
+    """Confirming a parked car is still parked is the biggest line on the
+    Fleet API bill — 137 of one measured day's 255 requests. Widening it flat
+    is the worst trade available, because the unseen stretch it buys is the
+    blind head every trip audit runs into.
+
+    So it widens only where a departure has essentially never happened, and
+    the loop and /api/recheck-plan fit those hours with the same function —
+    the endpoint's job is to explain what the loop does, which it can only do
+    while the two cannot drift."""
+    from datetime import datetime
+
+    from sqlalchemy import select as sa_select
+
+    from app import state
+    from app.api import routes
+    from app.models import Drive
+    from app.sync import now_local
+
+    settings = get_settings()
+    old = (settings.app_passcode, settings.sleep_recheck_min,
+           settings.sleep_recheck_quiet_min)
+    settings.app_passcode = ""
+    settings.sleep_recheck_min, settings.sleep_recheck_quiet_min = 10.0, 40.0
+    try:
+        with TestClient(app):  # startup seeds the demo vehicle
+            pass
+        with SessionLocal() as s:
+            s.execute(Drive.__table__.delete())
+            state.put(s, state.QUIET_HOURS_KEY, "")
+            v = s.scalars(sa_select(Vehicle)).first()
+            base = now_local().replace(minute=0, second=0, microsecond=0)
+            for i in range(40):
+                for hour in (7, 18):
+                    t = (base - timedelta(days=i + 1)).replace(hour=hour, minute=5)
+                    s.add(Drive(vehicle_id=v.id, start_time=t, end_time=t,
+                                duration_min=30.0))
+            s.commit()
+
+            hours = routes._quiet_hours_now(s)
+            # Never the commute, never the hour feeding into it.
+            assert 7 not in hours and 6 not in hours
+            assert 18 not in hours and 17 not in hours
+            assert 2 in hours
+
+            # Fitted once, then cached — the routine changes over weeks, and
+            # this runs inside a loop that ticks once a minute.
+            s.execute(Drive.__table__.delete())
+            s.commit()
+            assert routes._quiet_hours_now(s) == hours
+
+            # Too thin a history is not evidence of a quiet hour. "Never
+            # happened here" and "not yet" look identical, and acting on the
+            # second widens the blind window for nothing.
+            state.put(s, state.QUIET_HOURS_KEY, "")
+            s.commit()
+            assert routes._quiet_hours_now(s) == []
+
+            # A cache that cannot be read leaves the recheck alone rather
+            # than guessing — the cost of being wrong is a departure missed.
+            state.put(s, state.QUIET_HOURS_KEY, "{not json")
+            s.commit()
+            assert routes._quiet_hours_now(s) == []
+    finally:
+        (settings.app_passcode, settings.sleep_recheck_min,
+         settings.sleep_recheck_quiet_min) = old
+        _reset_to_demo()
+
 def test_repair_split_trip_cuts_one_row_into_the_two_journeys_it_was():
     """A departure recovery reaching across a long blind gap can swallow a
     whole separate drive, the stop after it, and the start of the next one.

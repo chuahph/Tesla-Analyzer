@@ -28,6 +28,10 @@ QUIET_SEEN_KEY = "quiet_seen_ts"  # epoch a tick last CONFIRMED every car not on
 # could have been MOVING unseen, which is not the same as how long it sat —
 # an overnight park that was rechecked every ten minutes is nine hours old as
 # an energy baseline and ten minutes old as a distance one.
+QUIET_HOURS_KEY = "recheck_quiet_hours"  # JSON {hours, risk, at}: the hours of
+# the day the sleep recheck may run wide in, refitted from the departure
+# history once a day. Cached rather than recomputed per tick because it
+# changes on the timescale of a person's routine, not a poll loop's.
 SYNC_LOG_KEY = "sync_log"  # JSON: run-length record of what each /api/sync tick did —
 # the only place a blackout can be told from a quiet car after the fact, since
 # LAST_STATUS_KEY is overwritten every tick and keeps no history
