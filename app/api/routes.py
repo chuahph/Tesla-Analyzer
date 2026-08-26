@@ -6422,6 +6422,46 @@ def sync_log_summary(session: Session = Depends(get_session)):
             "cut_needed_pct": round(max(1.0 - budget_per_day / per_day, 0.0) * 100.0, 1),
         }
 
+    # WHY A THREE-DAY LOG CAN DISAGREE WITH THE MONTH'S BILL.
+    #
+    # An open trip or an open charge bypasses the read throttle outright —
+    # see the sync route, where trip_in_progress and charge_in_progress both
+    # skip the "due" check that sync_poll_interval_min otherwise imposes. So
+    # for as long as either is open, EVERY cron tick spends a full read
+    # (list_vehicles + vehicle_data), once a minute, however long it lasts.
+    #
+    # Driving earns that: distance, peak speed and both trip boundaries are
+    # only as good as the polling behind them. A charge does not — its logged
+    # quantities are its two SoC ends, its energy and its duration, none of
+    # which need minute resolution — and it is the one that runs for hours.
+    #
+    # This is measured from the sessions themselves, not from the log: the log
+    # is trimmed to a few days (SYNC_LOG_MAX_CHARS) and a window that happens
+    # to contain no charge reads far cheaper than the month it sits in.
+    live = None
+    if per_day:
+        ticks_per_min = sum(r["ticks"] for r in whole) / len(whole) / 1440.0
+        since = sync_mod.now_local() - timedelta(days=30)
+        drive_min = session.scalar(select(func.coalesce(func.sum(Drive.duration_min), 0.0))
+                                   .where(Drive.start_time >= since)) or 0.0
+        charge_min = session.scalar(select(func.coalesce(func.sum(Charge.duration_min), 0.0))
+                                    .where(Charge.start_time >= since)) or 0.0
+
+        def _cost(minutes: float) -> float:
+            return minutes * ticks_per_min * TICK_REQUESTS["read"] / 30.0
+
+        live = {
+            "ticks_per_min": round(ticks_per_min, 2),
+            "drive_min_per_day": round(drive_min / 30.0, 1),
+            "charge_min_per_day": round(charge_min / 30.0, 1),
+            "drive_requests_per_day": round(_cost(drive_min)),
+            "charge_requests_per_day": round(_cost(charge_min)),
+            # What throttling a charge to one read every five minutes would
+            # give back. Nothing a charge records needs finer than that; the
+            # only thing it costs is how quickly the end of one is noticed.
+            "charge_saving_at_5min": round(_cost(charge_min) * (1 - 1 / 5.0)),
+        }
+
     return {
         "from": rows[0]["date"],
         "to": rows[-1]["date"],
@@ -6430,6 +6470,8 @@ def sync_log_summary(session: Session = Depends(get_session)):
         # Whole days only, so this is the split the projection is built on.
         "requests_by_outcome": by_outcome,
         "requests_per_day": per_day,
+        # What the log window cannot show: see the comment above.
+        "live_polling": live,
         "projection": projection,
         "per_request_rm": RM_PER_REQUEST,
         "free_allowance_rm": RM_FREE_ALLOWANCE,

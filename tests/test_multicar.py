@@ -3321,6 +3321,69 @@ def test_sync_log_summary_prices_each_tick_at_what_it_spends_at_tesla():
         settings.app_passcode = old
         _reset_to_demo()
 
+def test_sync_log_summary_shows_what_an_open_charge_costs_to_watch():
+    """A trip or a charge in progress bypasses the read throttle outright, so
+    every cron tick spends a full read for as long as one is open.
+
+    Driving earns that — distance, peak speed and both boundaries are only as
+    good as the polling behind them. A charge does not: its two SoC ends, its
+    energy and its duration need nothing finer than five minutes, and it is
+    the one that runs for hours. The log can't show this on its own, because
+    it is trimmed to a few days and a window with no charge in it reads far
+    cheaper than the month it sits in."""
+    import json as _json
+    from datetime import datetime
+
+    from sqlalchemy import select as sa_select
+
+    from app import state
+    from app.models import Charge, Drive
+    from app.sync import MYT, now_local
+
+    settings = get_settings()
+    old = settings.app_passcode
+    settings.app_passcode = ""
+    try:
+        with TestClient(app) as client:
+            def at(day, hour, minute=0):
+                return datetime(2026, 8, day, hour, minute, tzinfo=MYT).timestamp()
+
+            # A cron firing once a minute: three whole days of 1,440 ticks,
+            # 40 of them reads, bracketed by partial days the average ignores.
+            runs = [{"o": "read", "n": 1, "a": at(20, 12), "b": at(20, 12)}]
+            for d in (21, 22, 23):
+                runs.append({"o": "backoff", "n": 1400, "a": at(d, 0), "b": at(d, 20)})
+                runs.append({"o": "read", "n": 40, "a": at(d, 20, 1), "b": at(d, 23, 59)})
+            runs.append({"o": "read", "n": 1, "a": at(24, 12), "b": at(24, 12)})
+
+            with SessionLocal() as s:
+                state.put(s, state.SYNC_LOG_KEY, _json.dumps(runs))
+                s.execute(Drive.__table__.delete())
+                s.execute(Charge.__table__.delete())
+                v = s.scalars(sa_select(Vehicle)).first()
+                now = now_local()
+                # Ten hours of driving and ten of charging in the window, so
+                # the two are told apart by nothing but which table they're in.
+                s.add(Drive(vehicle_id=v.id, start_time=now - timedelta(days=2),
+                            end_time=now - timedelta(days=2), duration_min=600.0))
+                s.add(Charge(vehicle_id=v.id, start_time=now - timedelta(days=2),
+                             end_time=now - timedelta(days=2), duration_min=600.0))
+                s.commit()
+
+            live = client.get("/api/sync-log/summary").json()["live_polling"]
+            assert live["ticks_per_min"] == 1.0
+            # 600 minutes over 30 days is 20 a day, and each of those minutes
+            # is one tick costing a list plus a read.
+            assert live["charge_min_per_day"] == 20.0
+            assert live["charge_requests_per_day"] == 40
+            assert live["drive_requests_per_day"] == 40
+            # Reading a charge every five minutes instead of every one gives
+            # four fifths of it back, and costs only how fast its end is seen.
+            assert live["charge_saving_at_5min"] == 32
+    finally:
+        settings.app_passcode = old
+        _reset_to_demo()
+
 def test_repair_split_trip_cuts_one_row_into_the_two_journeys_it_was():
     """A departure recovery reaching across a long blind gap can swallow a
     whole separate drive, the stop after it, and the start of the next one.
