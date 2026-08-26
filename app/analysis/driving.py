@@ -76,6 +76,7 @@ def odometer_continuity(drives: list[Any], readings: list[Any]) -> dict[str, Any
         if missing <= CONTINUITY_TOLERANCE_KM:
             continue
         total += missing
+        next_claimed = (getattr(nxt, "start_recovered_km", None) or 0.0) if nxt else 0.0
         out.append({
             "drive_id": getattr(d, "id", None),
             # The trip that most likely holds this ground now, because its
@@ -103,6 +104,20 @@ def odometer_continuity(drives: list[Any], readings: list[Any]) -> dict[str, Any
                     default=None).isoformat(timespec="minutes")
                 if any(o <= d.end_odo_km + 0.001 for _, o in resting) else None),
             "unrecorded_km": round(missing, 2),
+            # How much of this ground the NEXT trip has already claimed as its
+            # own blind departure head. A reading taken while the car was
+            # rolling out of its bay — before the app had declared the trip
+            # started — lands inside the "resting" window above and reads as
+            # ground the ARRIVING trip failed to record. It is the opposite:
+            # ground the DEPARTING trip drove, and already knows it drove.
+            #
+            # Measured, trip 456: 0.22 km of it, against a start_recovered_km
+            # of 0.214 on trip 457. The car's own trip meters settle which
+            # trip owns it — 44.0 km for 456, which the recorded 43.94 already
+            # matches, and 19.8 for 457, which the recorded 19.2 does not.
+            # Moving the boundary would have made both figures worse.
+            "claimed_by_next_km": round(next_claimed, 3),
+            "claimed_by_departure": missing - next_claimed <= CONTINUITY_TOLERANCE_KM,
         })
     return {
         "available": True,

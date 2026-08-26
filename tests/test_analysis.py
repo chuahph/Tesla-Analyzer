@@ -2150,3 +2150,58 @@ def test_recovered_parked_minutes_are_not_charged_twice():
     plain = driving_analysis.vampire_drain([a, b_plain], [], 68.6,
                                            place_rates={"Home": 0.014})
     assert plain["kwh"] == pytest.approx(0.014 * 1.9, abs=0.01)
+
+
+def test_ground_the_next_trip_already_recovered_is_not_a_missing_arrival():
+    """A reading taken while the car is rolling OUT of its bay — before the
+    app has declared the next trip started — lands inside the window that asks
+    where the previous one came to rest. It then reads as ground the arriving
+    trip failed to record, when it is ground the departing trip drove and
+    already knows it drove.
+
+    Measured, trips 456/457: 0.22 km of it, against a start_recovered_km of
+    0.214 on 457. The car's own trip meters settle the ownership — 44.0 km for
+    456, which the recorded 43.94 already matches, and 19.8 for 457, which the
+    recorded 19.2 does not. Moving the boundary would have made both worse.
+    This is the trip-422 lesson through a gap the last_at_recorded guard does
+    not cover: there, a reading landed AT the recorded stop first, and here no
+    reading ever did."""
+    from datetime import datetime
+
+    from app.analysis.driving import odometer_continuity
+
+    class D:
+        def __init__(self, i, start, end, end_odo, recovered=0.0):
+            self.id, self.start_time, self.end_time = i, start, end
+            self.end_odo_km, self.start_recovered_km = end_odo, recovered
+            self.start_location, self.end_location = "Home", "Juru"
+            self.end_lost_km = 0.0
+
+    class R:
+        def __init__(self, ts, odo):
+            self.ts, self.odo_km = ts, odo
+
+    def at(h, m):
+        return datetime(2026, 8, 26, h, m)
+
+    arriving = D(456, at(17, 39), at(18, 55), 30490.476)
+    # The departing trip knows it drove 0.214 km before anyone saw it move.
+    departing = D(457, at(21, 15), at(21, 32), 30509.691, recovered=0.214)
+    # No reading ever lands at the recorded stop — the last_at_recorded guard
+    # cannot fire — and the one that does was taken mid-departure.
+    readings = [R(at(21, 14), 30490.696)]
+
+    gaps = odometer_continuity([arriving, departing], readings)["gaps"]
+    assert len(gaps) == 1
+    g = gaps[0]
+    assert g["unrecorded_km"] == 0.22
+    assert g["last_at_recorded"] is None
+    assert g["claimed_by_next_km"] == 0.214
+    assert g["claimed_by_departure"] is True
+
+    # Ground genuinely lost still reports as lost: same reading, but a
+    # departure that recovered nothing.
+    departing.start_recovered_km = 0.0
+    lost = odometer_continuity([arriving, departing], readings)["gaps"][0]
+    assert lost["claimed_by_departure"] is False
+    assert lost["unrecorded_km"] == 0.22

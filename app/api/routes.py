@@ -5213,6 +5213,18 @@ def repair_arrivals(
                         f"  (only if that move really happened)"),
             })
             continue
+        # Already claimed by the following trip's departure recovery — see
+        # odometer_continuity. Moving the boundary would take ground from the
+        # trip that drove it and credit the one that did not.
+        if g.get("claimed_by_departure"):
+            manual.append({
+                **g,
+                "why": (f"the next trip already recovered "
+                        f"{g.get('claimed_by_next_km')} km of blind departure over "
+                        f"this ground — it is claimed, not lost"),
+                "run": None,
+            })
+            continue
         if g["unrecorded_km"] > sync_mod.ARRIVAL_EST_MAX_KM:
             manual.append({
                 **g,
@@ -5418,6 +5430,15 @@ def self_check(days: int = Query(30, ge=1, le=730),
             row["why"] = (f"the car was parked at the recorded stop as late as "
                           f"{g['last_at_recorded']} and was {km} km further on "
                           f"by {g['observed_at']} — a move during the park")
+            inherent.append(row)
+        elif g.get("claimed_by_departure"):
+            # The next trip already reclaimed this ground as its blind
+            # departure head, so nothing is missing — it is merely held by the
+            # trip that drove it. Repairing would move it to the arriving trip
+            # and make both figures worse.
+            row["why"] = (f"the next trip already recovered "
+                          f"{g.get('claimed_by_next_km')} km of blind departure "
+                          f"over this ground — it is claimed, not lost")
             inherent.append(row)
         elif km <= sync_mod.ARRIVAL_EST_MAX_KM:
             row["fix"] = ("/api/repair-arrivals?apply=1 — the nightly job "
