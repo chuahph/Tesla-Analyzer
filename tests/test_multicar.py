@@ -3472,6 +3472,31 @@ def test_recheck_plan_only_calls_an_hour_quiet_if_the_next_one_is_too():
             assert all(h["recheck_per_day"] == pytest.approx(6.0, abs=0.1)
                        for h in body["hours"])
 
+            # Nothing is at risk when only never-used hours are widened.
+            assert body["departures_at_risk"] == 0
+
+            # A single one-off departure protects a whole block of the night
+            # in perpetuity under the strict reading, which on real data left
+            # two quiet hours and a saving of seven requests a day. Allowing
+            # one weighs it instead: put a lone 03:05 departure in and the
+            # strict rule loses 02:00 and 03:00, while max_departures=1 keeps
+            # them and says plainly what it costs.
+            with SessionLocal() as s:
+                v = s.scalars(sa_select(Vehicle)).first()
+                t = (base - timedelta(days=5)).replace(hour=3, minute=5)
+                s.add(Drive(vehicle_id=v.id, start_time=t, end_time=t, duration_min=20.0))
+                s.commit()
+            strict = client.get("/api/recheck-plan?wide_min=40").json()
+            assert 2 not in strict["quiet_hours"] and 3 not in strict["quiet_hours"]
+            assert strict["departures_at_risk"] == 0
+
+            weighed = client.get("/api/recheck-plan?wide_min=40&max_departures=1").json()
+            assert {2, 3} <= set(weighed["quiet_hours"])
+            assert weighed["saving_per_day"] > strict["saving_per_day"]
+            # And the price is the one departure that would have been seen
+            # late, stated in trips rather than in requests.
+            assert weighed["departures_at_risk"] == 1
+
             # A history too thin to say "never happens here" must not be read
             # as one — that is just "not yet".
             with SessionLocal() as s:

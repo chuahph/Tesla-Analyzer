@@ -6501,6 +6501,7 @@ def sync_log_summary(session: Session = Depends(get_session)):
 def recheck_plan(
     days: int = Query(90, ge=7, le=365),
     wide_min: float = Query(40.0, gt=0),
+    max_departures: int = Query(0, ge=0),
     session: Session = Depends(get_session),
 ):
     """Which hours of the day the sleep recheck could be widened in, and what
@@ -6519,10 +6520,23 @@ def recheck_plan(
       * when departures actually happen, from the drive rows
       * where the recheck spend actually falls, from the sync log
 
-    An hour is QUIET only if neither it nor the following hour has ever seen a
-    departure. The look-ahead is the point: widening 06:00 to forty minutes
-    puts a 07:05 departure at risk just as surely as a 06:05 one, so an hour
-    that merely leads into a busy one is not safe to widen.
+    An hour is QUIET when neither it nor the following hour has more than
+    ``max_departures`` in the window. The look-ahead is the point: widening
+    06:00 to forty minutes puts a 07:05 departure at risk just as surely as a
+    06:05 one, so an hour that merely leads into a busy one is not safe.
+
+    NEVER (max_departures=0) is the strict reading and on real data it is too
+    strict to be worth anything. Measured: 199 departures over 90 days left
+    exactly two quiet hours and a saving of 7 requests a day, because single
+    one-off departures at 00:00, 04:00 and 23:00 each protected a whole block
+    of the night in perpetuity. One departure in three months is not a
+    pattern; it is a number to weigh.
+
+    So ``departures_at_risk`` weighs it: how many departures in the window
+    fell in an hour this plan would widen. That is the honest price of the
+    saving, in the only unit that matters — trips that would have started
+    inside a longer blind window. It is an upper bound, counting each quiet
+    hour and the one after it.
 
     Read-only. Nothing here changes what the loop does.
     """
@@ -6570,7 +6584,11 @@ def recheck_plan(
     logged_days = ((span_end - span_start) / 86400.0
                    if span_start is not None and span_end and span_end > span_start else 0.0)
 
-    quiet = [h for h in range(24) if by_hour[h] == 0 and by_hour[(h + 1) % 24] == 0]
+    quiet = [h for h in range(24)
+             if by_hour[h] <= max_departures and by_hour[(h + 1) % 24] <= max_departures]
+    # Every hour a widened recheck could span, so no departure is counted twice
+    # and none in the spill-over hour is missed.
+    affected = {h for h in quiet} | {(h + 1) % 24 for h in quiet}
     # Widening from the current interval to wide_min removes this share of the
     # rechecks in an hour. One list_vehicles per recheck, so ticks are requests.
     factor = max(1.0 - settings.sleep_recheck_min / wide_min, 0.0)
@@ -6589,6 +6607,9 @@ def recheck_plan(
             for h in range(24)
         ],
         "quiet_hours": quiet,
+        "max_departures": max_departures,
+        # The price of the saving, in trips rather than requests.
+        "departures_at_risk": sum(by_hour[h] for h in affected),
         "logged_days": round(logged_days, 1),
         "saving_per_day": round(saving) if saving is not None else None,
         "rm_saved_per_month": round(saving * 30 * RM_PER_REQUEST, 2) if saving is not None else None,
