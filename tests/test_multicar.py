@@ -3372,14 +3372,36 @@ def test_sync_log_summary_shows_what_an_open_charge_costs_to_watch():
 
             live = client.get("/api/sync-log/summary").json()["live_polling"]
             assert live["ticks_per_min"] == 1.0
-            # 600 minutes over 30 days is 20 a day, and each of those minutes
-            # is one tick costing a list plus a read.
             assert live["charge_min_per_day"] == 20.0
+            # The level comes from the log — 40 reads a day at two requests
+            # each — never from the durations. An estimate built on those
+            # alone once reported 462 a day on a day that spent 255, and a
+            # number larger than the measured total can only mislead.
+            assert live["read_requests_per_day"] == 80
+            # Equal drive and charge minutes, so the mix splits it evenly.
             assert live["charge_requests_per_day"] == 40
             assert live["drive_requests_per_day"] == 40
             # Reading a charge every five minutes instead of every one gives
             # four fifths of it back, and costs only how fast its end is seen.
             assert live["charge_saving_at_5min"] == 32
+            # Here every session minute WAS polled at the tick rate, so the
+            # two agree and no warning is raised.
+            assert live["polled_share"] == 1.0 and live["note"] is None
+
+            # History the loop never watched — an import, or a blackout —
+            # inflates the durations without touching the bill. The ratio is
+            # what says so, and the level must not move.
+            with SessionLocal() as s:
+                v = s.scalars(sa_select(Vehicle)).first()
+                s.add(Drive(vehicle_id=v.id, start_time=now_local() - timedelta(days=20),
+                            end_time=now_local() - timedelta(days=20), duration_min=3000.0))
+                s.commit()
+            stale = client.get("/api/sync-log/summary").json()["live_polling"]
+            assert stale["read_requests_per_day"] == 80
+            assert stale["polled_share"] < 0.3
+            assert "imported or reconstructed" in stale["note"]
+            # And the mix has moved to the drive side, where the hours landed.
+            assert stale["charge_requests_per_day"] < 20
     finally:
         settings.app_passcode = old
         _reset_to_demo()

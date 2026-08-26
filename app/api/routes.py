@@ -6446,20 +6446,39 @@ def sync_log_summary(session: Session = Depends(get_session)):
                                    .where(Drive.start_time >= since)) or 0.0
         charge_min = session.scalar(select(func.coalesce(func.sum(Charge.duration_min), 0.0))
                                     .where(Charge.start_time >= since)) or 0.0
-
-        def _cost(minutes: float) -> float:
-            return minutes * ticks_per_min * TICK_REQUESTS["read"] / 30.0
-
+        session_min = drive_min + charge_min
+        # What those sessions WOULD have cost if every minute of them had been
+        # polled at the rate the cron runs at today.
+        expected = session_min / 30.0 * ticks_per_min * TICK_REQUESTS["read"]
+        # What reads actually cost, from the log. This is the ground truth and
+        # the estimate above must never be reported over it: the first version
+        # of this said 462 a day on a day that measurably spent 255.
+        measured = by_outcome["read"] / len(whole)
+        # THE RATIO IS THE WARNING. It is 1.0 only if every logged session
+        # minute was watched by this loop at today's tick rate, and there are
+        # several reasons it isn't: drives imported from elsewhere, or
+        # reconstructed after a blackout, carry a duration nothing ever polled,
+        # and so does any stretch the loop was down for. Well under 1 means the
+        # session history is not a billing model, so the split below takes only
+        # the MIX from those durations and the LEVEL from the log.
+        share = (charge_min / session_min) if session_min else 0.0
         live = {
             "ticks_per_min": round(ticks_per_min, 2),
             "drive_min_per_day": round(drive_min / 30.0, 1),
             "charge_min_per_day": round(charge_min / 30.0, 1),
-            "drive_requests_per_day": round(_cost(drive_min)),
-            "charge_requests_per_day": round(_cost(charge_min)),
+            "read_requests_per_day": round(measured),
+            "charge_requests_per_day": round(measured * share),
+            "drive_requests_per_day": round(measured * (1 - share)),
             # What throttling a charge to one read every five minutes would
             # give back. Nothing a charge records needs finer than that; the
             # only thing it costs is how quickly the end of one is noticed.
-            "charge_saving_at_5min": round(_cost(charge_min) * (1 - 1 / 5.0)),
+            "charge_saving_at_5min": round(measured * share * (1 - 1 / 5.0)),
+            "polled_share": round(measured / expected, 2) if expected else None,
+            "note": (None if not expected or measured / expected >= 0.8 else
+                     "Logged sessions cover far more time than this loop has "
+                     "polled — imported or reconstructed history, or a stretch "
+                     "the loop was down. Only the drive/charge MIX is taken "
+                     "from them; the level comes from the log."),
         }
 
     return {
