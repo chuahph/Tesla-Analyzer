@@ -3222,6 +3222,105 @@ def test_sync_log_names_the_cause_of_a_gap_including_no_tick_at_all():
         _reset_to_demo()
 
 
+def test_sync_log_summary_prices_each_tick_at_what_it_spends_at_tesla():
+    """The log holds the bill; only the arithmetic was missing.
+
+    A day of active polling runs to hundreds of rows, which is unreadable on
+    a phone and unanswerable by eye — and the question the log gets opened
+    for is where the spend goes, not what happened at 14:32. Each outcome
+    costs what the sync route actually calls: backoff nothing, asleep and
+    idle one list_vehicles, read that plus vehicle_data."""
+    import json as _json
+    from datetime import datetime, timedelta
+
+    from app import state
+    from app.sync import MYT
+
+    settings = get_settings()
+    old = settings.app_passcode
+    settings.app_passcode = ""
+    try:
+        with TestClient(app) as client:
+            with SessionLocal() as s:
+                state.put(s, state.SYNC_LOG_KEY, "")
+                s.commit()
+            assert client.get("/api/sync-log/summary").json()["days"] == []
+
+            # Four whole MYT days, plus a partial one either side. Day 2 is
+            # built so every outcome's price is separately visible.
+            def at(day, hour, minute=0):
+                return datetime(2026, 8, day, hour, minute, tzinfo=MYT).timestamp()
+
+            runs = [
+                {"o": "read", "n": 10, "a": at(20, 22), "b": at(20, 23)},
+                {"o": "read", "n": 100, "a": at(21, 8), "b": at(21, 18)},
+                {"o": "idle", "n": 50, "a": at(21, 18, 1), "b": at(21, 20)},
+                {"o": "asleep", "n": 30, "a": at(21, 20, 1), "b": at(21, 23)},
+                {"o": "backoff", "n": 200, "a": at(22, 1), "b": at(22, 5)},
+                {"o": "read", "n": 60, "a": at(22, 8), "b": at(22, 18)},
+                {"o": "read", "n": 60, "a": at(23, 8), "b": at(23, 18)},
+                {"o": "read", "n": 5, "a": at(24, 8), "b": at(24, 9)},
+            ]
+            with SessionLocal() as s:
+                state.put(s, state.SYNC_LOG_KEY, _json.dumps(runs))
+                s.commit()
+
+            body = client.get("/api/sync-log/summary").json()
+            by_date = {r["date"]: r for r in body["days"]}
+            assert body["from"] == "2026-08-20" and body["to"] == "2026-08-24"
+
+            # 100 reads at two requests each, 50 idles and 30 asleeps at one.
+            day21 = by_date["2026-08-21"]
+            assert (day21["read"], day21["idle"], day21["asleep"]) == (100, 50, 30)
+            assert day21["requests"] == 100 * 2 + 50 + 30
+            assert day21["rm"] == pytest.approx(280 * 0.00894, abs=0.01)
+
+            # Backoff returns before list_vehicles, so 200 of them are free.
+            day22 = by_date["2026-08-22"]
+            assert day22["backoff"] == 200
+            assert day22["requests"] == 60 * 2
+
+            # The window's ends are partial — the oldest runs get trimmed to
+            # fit the log's size cap and today isn't over — so neither can
+            # carry a daily rate, and the average is the whole days only.
+            assert body["partial_days"] == ["2026-08-20", "2026-08-24"]
+            assert body["requests_per_day"] == pytest.approx((280 + 120 + 120) / 3, abs=0.1)
+            assert body["requests_by_outcome"]["read"] == (100 + 60 + 60) * 2
+            assert body["requests_by_outcome"]["backoff"] == 0
+
+            # RM 45 a month buys 5,034 requests; the cut is measured against
+            # that, not against the gross bill.
+            proj = body["projection"]
+            assert proj["free_per_day"] == round(45.0 / 0.00894 / 30.0)
+            assert proj["requests_per_month"] == round(body["requests_per_day"] * 30)
+            # 173.3 a day is 5,199 a month against 5,034 free — RM 1.48 due,
+            # and a 3.2% cut to owe nothing. The cut is what the cron has to
+            # be chosen against, so it is measured from the daily rate rather
+            # than from the gross bill the allowance is subtracted from.
+            assert proj["requests_per_month"] == 5199
+            assert proj["rm_due"] == pytest.approx(1.48, abs=0.01)
+            assert proj["cut_needed_pct"] == pytest.approx(3.2, abs=0.1)
+
+            # An overnight asleep run is one row spanning a midnight; charging
+            # all of it to the day it started would invent a spike and hide
+            # the recheck cost on the day it mostly happened.
+            night = datetime(2026, 8, 21, 22, tzinfo=MYT).timestamp()
+            with SessionLocal() as s:
+                state.put(s, state.SYNC_LOG_KEY, _json.dumps([
+                    {"o": "read", "n": 1, "a": at(20, 12), "b": at(20, 12)},
+                    {"o": "asleep", "n": 40, "a": night,
+                     "b": night + timedelta(hours=4).total_seconds()},
+                    {"o": "read", "n": 1, "a": at(23, 12), "b": at(23, 12)},
+                ]))
+                s.commit()
+            split = {r["date"]: r for r in client.get("/api/sync-log/summary").json()["days"]}
+            # Two hours either side of midnight, so half the ticks each.
+            assert split["2026-08-21"]["asleep"] == 20
+            assert split["2026-08-22"]["asleep"] == 20
+    finally:
+        settings.app_passcode = old
+        _reset_to_demo()
+
 def test_repair_split_trip_cuts_one_row_into_the_two_journeys_it_was():
     """A departure recovery reaching across a long blind gap can swallow a
     whole separate drive, the stop after it, and the start of the next one.

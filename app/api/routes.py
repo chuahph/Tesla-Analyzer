@@ -6306,6 +6306,136 @@ def sync_log(session: Session = Depends(get_session)):
     }
 
 
+# What one tick of each outcome costs at the Tesla Fleet API, in billed
+# requests. Read off the sync route itself, not assumed:
+#   backoff  returns before list_vehicles — spends nothing
+#   asleep   list_vehicles ran and found no car online
+#   idle     list_vehicles ran; the read throttle declined vehicle_data
+#   read     list_vehicles + vehicle_data
+# "error" is the one that can't be pinned down after the fact — a tick can
+# fail on either side of the list — so it's counted as one, an under-estimate
+# only when the failure came after a successful read.
+TICK_REQUESTS = {"backoff": 0, "asleep": 1, "idle": 1, "read": 2, "error": 1}
+
+# What Tesla bills per request, and the monthly discount every account gets.
+# Both are the published figures, kept here so the endpoint below can answer
+# the only question anyone actually asks of the log — "am I going to be
+# charged" — instead of handing back a number of ticks to convert by hand.
+RM_PER_REQUEST = 0.00894
+RM_FREE_ALLOWANCE = 45.0
+
+
+@router.get("/sync-log/summary")
+def sync_log_summary(session: Session = Depends(get_session)):
+    """The sync log added up per day, as billed Tesla requests.
+
+    Exists because /api/sync-log is unreadable at the size that matters. A
+    day of active polling is hundreds of runs, and the question it gets
+    opened for is not "what happened at 14:32" but "where is the bill going"
+    — which needs the whole window summed, not listed. Measured: 7,864
+    requests over 25 days against a RM 45 allowance, with no way to tell from
+    the log itself which outcome was spending it.
+
+    Each outcome's cost is TICK_REQUESTS above. The split is the lever map:
+    ``asleep`` requests are the sleep recheck (settings.sleep_recheck_min),
+    ``idle`` requests are the cron firing faster than the read throttle will
+    use (the cron interval), and ``read`` requests are the only ones that
+    bring data back. Cutting spend means cutting the first two.
+
+    Ticks are attributed to days proportionally across a run's span rather
+    than dumped on its first day — a single ``asleep`` run routinely covers a
+    whole night and would otherwise charge the entire overnight recheck to
+    yesterday.
+    """
+    import json as _json
+
+    try:
+        runs = _json.loads(state.get(session, state.SYNC_LOG_KEY) or "[]")
+    except ValueError:
+        runs = []
+    if not runs:
+        return {"days": [], "note": "No history yet — the log starts filling on the next tick."}
+
+    outcomes = ("read", "idle", "asleep", "backoff", "error")
+    days: dict[str, dict[str, float]] = {}
+
+    def _day(ts: float) -> str:
+        return datetime.fromtimestamp(ts, sync_mod.MYT).date().isoformat()
+
+    def _add(date: str, outcome: str, ticks: float) -> None:
+        row = days.setdefault(date, {o: 0.0 for o in outcomes})
+        row[outcome] = row.get(outcome, 0.0) + ticks
+
+    for r in runs:
+        start, end = float(r.get("a") or 0), float(r.get("b") or 0)
+        outcome, n = r.get("o") or "error", float(r.get("n") or 0)
+        if n <= 0:
+            continue
+        span = max(end - start, 0.0)
+        if span <= 0 or _day(start) == _day(end):
+            _add(_day(start), outcome, n)
+            continue
+        # Split across the midnights the run crosses, in proportion to how
+        # much of its span fell either side of each.
+        cursor = start
+        while cursor < end:
+            midnight = datetime.fromtimestamp(cursor, sync_mod.MYT).replace(
+                hour=0, minute=0, second=0, microsecond=0) + timedelta(days=1)
+            slice_end = min(end, midnight.timestamp())
+            _add(_day(cursor), outcome, n * (slice_end - cursor) / span)
+            cursor = slice_end
+
+    rows = []
+    for date in sorted(days):
+        counts = days[date]
+        requests = sum(TICK_REQUESTS.get(o, 1) * counts.get(o, 0.0) for o in outcomes)
+        rows.append({
+            "date": date,
+            **{o: round(counts.get(o, 0.0)) for o in outcomes},
+            "ticks": round(sum(counts.values())),
+            "requests": round(requests),
+            "rm": round(requests * RM_PER_REQUEST, 2),
+        })
+
+    # The first and last days in the window are partial — the log's oldest
+    # runs have been trimmed to fit SYNC_LOG_MAX_CHARS, and today isn't over —
+    # so neither can carry a daily rate. With fewer than three days there is
+    # no whole day to average and the projection is withheld rather than
+    # guessed from a half one.
+    whole = rows[1:-1]
+    by_outcome = {
+        o: round(sum(TICK_REQUESTS.get(o, 1) * days[r["date"]].get(o, 0.0) for r in whole))
+        for o in outcomes
+    }
+    per_day = round(sum(r["requests"] for r in whole) / len(whole), 1) if whole else None
+    projection = None
+    if per_day:
+        month = per_day * 30.0
+        # What per-day rate keeps the month inside the allowance — the number
+        # the cron interval has to be chosen to hit.
+        budget_per_day = RM_FREE_ALLOWANCE / RM_PER_REQUEST / 30.0
+        projection = {
+            "requests_per_month": round(month),
+            "rm_gross": round(month * RM_PER_REQUEST, 2),
+            "rm_due": round(max(month * RM_PER_REQUEST - RM_FREE_ALLOWANCE, 0.0), 2),
+            "free_per_day": round(budget_per_day),
+            "cut_needed_pct": round(max(1.0 - budget_per_day / per_day, 0.0) * 100.0, 1),
+        }
+
+    return {
+        "from": rows[0]["date"],
+        "to": rows[-1]["date"],
+        "partial_days": [rows[0]["date"], rows[-1]["date"]],
+        "days": rows,
+        # Whole days only, so this is the split the projection is built on.
+        "requests_by_outcome": by_outcome,
+        "requests_per_day": per_day,
+        "projection": projection,
+        "per_request_rm": RM_PER_REQUEST,
+        "free_allowance_rm": RM_FREE_ALLOWANCE,
+        "note": None if whole else "Fewer than three days logged — no whole day to average.",
+    }
+
 @router.api_route("/repair-trip-energy", methods=["GET", "POST"])
 def repair_trip_energy(
     drive_id: int = Query(...),
