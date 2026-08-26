@@ -3406,6 +3406,82 @@ def test_sync_log_summary_shows_what_an_open_charge_costs_to_watch():
         settings.app_passcode = old
         _reset_to_demo()
 
+def test_recheck_plan_only_calls_an_hour_quiet_if_the_next_one_is_too():
+    """Widening the sleep recheck is the biggest saving available and the one
+    that costs accuracy where this app is already weakest — an unseen
+    departure is the blind head every trip audit runs into.
+
+    The cost isn't spread evenly across the day, though: 03:00 protects a
+    departure that has never happened, 06:40 protects the commute. So the
+    plan pairs when departures happen with where the spend falls, and refuses
+    to widen an hour that merely LEADS INTO a busy one — a 07:05 departure is
+    put at risk by a forty-minute recheck at 06:00 just as surely as a 06:05
+    one would be."""
+    import json as _json
+    from datetime import datetime
+
+    from sqlalchemy import select as sa_select
+
+    from app import state
+    from app.models import Drive
+    from app.sync import MYT, now_local
+
+    settings = get_settings()
+    old_pass, old_recheck = settings.app_passcode, settings.sleep_recheck_min
+    settings.app_passcode = ""
+    settings.sleep_recheck_min = 10.0
+    try:
+        with TestClient(app) as client:
+            with SessionLocal() as s:
+                s.execute(Drive.__table__.delete())
+                v = s.scalars(sa_select(Vehicle)).first()
+                base = now_local().replace(minute=0, second=0, microsecond=0)
+                # Every departure at 07:00 or 18:00, thirty of each — a
+                # commute, and nothing else all day.
+                for i in range(30):
+                    for hour in (7, 18):
+                        t = (base - timedelta(days=i + 1)).replace(hour=hour, minute=5)
+                        s.add(Drive(vehicle_id=v.id, start_time=t, end_time=t,
+                                    duration_min=30.0))
+                # One full day of asleep ticks, six an hour, every hour.
+                day = datetime(2026, 8, 21, tzinfo=MYT)
+                state.put(s, state.SYNC_LOG_KEY, _json.dumps([
+                    {"o": "asleep", "n": 144, "a": day.timestamp(),
+                     "b": (day + timedelta(days=1)).timestamp()},
+                ]))
+                s.commit()
+
+            body = client.get("/api/recheck-plan?wide_min=40").json()
+            assert body["departures"] == 60 and body["note"] is None
+            quiet = set(body["quiet_hours"])
+            # The departure hours themselves are never quiet...
+            assert 7 not in quiet and 18 not in quiet
+            # ...and neither is the hour before one, which is the whole point
+            # of the look-ahead.
+            assert 6 not in quiet and 17 not in quiet
+            # The dead middle of the night is.
+            assert {0, 1, 2, 3, 4} <= quiet
+            # 24 hours minus the four the commute protects.
+            assert len(quiet) == 20
+
+            # Six rechecks an hour over twenty quiet hours is 120 a day, and
+            # going from ten minutes to forty gives back three quarters.
+            assert body["saving_per_day"] == round(120 * 0.75)
+            assert body["rm_saved_per_month"] == pytest.approx(90 * 30 * 0.00894, abs=0.05)
+            # Per-hour spend is spread across the run, not dumped on its start.
+            assert all(h["recheck_per_day"] == pytest.approx(6.0, abs=0.1)
+                       for h in body["hours"])
+
+            # A history too thin to say "never happens here" must not be read
+            # as one — that is just "not yet".
+            with SessionLocal() as s:
+                s.execute(Drive.__table__.delete())
+                s.commit()
+            assert "Too few departures" in client.get("/api/recheck-plan").json()["note"]
+    finally:
+        settings.app_passcode, settings.sleep_recheck_min = old_pass, old_recheck
+        _reset_to_demo()
+
 def test_repair_split_trip_cuts_one_row_into_the_two_journeys_it_was():
     """A departure recovery reaching across a long blind gap can swallow a
     whole separate drive, the stop after it, and the start of the next one.

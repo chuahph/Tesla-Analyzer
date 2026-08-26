@@ -6497,6 +6497,107 @@ def sync_log_summary(session: Session = Depends(get_session)):
         "note": None if whole else "Fewer than three days logged — no whole day to average.",
     }
 
+@router.get("/recheck-plan")
+def recheck_plan(
+    days: int = Query(90, ge=7, le=365),
+    wide_min: float = Query(40.0, gt=0),
+    session: Session = Depends(get_session),
+):
+    """Which hours of the day the sleep recheck could be widened in, and what
+    that would save — measured, before any polling behaviour is changed.
+
+    The recheck is the single biggest line on the Fleet API bill: 137 of one
+    logged day's 255 requests went on confirming a parked car was still
+    parked. Widening it flat costs accuracy exactly where this app is already
+    weakest — a departure goes unseen for up to one recheck interval, and that
+    unseen stretch is the blind head every trip audit keeps running into.
+
+    But the cost is not spread evenly across the day. A recheck at 03:00 is
+    protecting against a departure that has never once happened, while one at
+    06:40 is protecting the commute. So this pairs two measurements:
+
+      * when departures actually happen, from the drive rows
+      * where the recheck spend actually falls, from the sync log
+
+    An hour is QUIET only if neither it nor the following hour has ever seen a
+    departure. The look-ahead is the point: widening 06:00 to forty minutes
+    puts a 07:05 departure at risk just as surely as a 06:05 one, so an hour
+    that merely leads into a busy one is not safe to widen.
+
+    Read-only. Nothing here changes what the loop does.
+    """
+    import json as _json
+
+    settings = get_settings()
+    since = sync_mod.now_local() - timedelta(days=days)
+    starts = session.scalars(
+        select(Drive.start_time).where(Drive.start_time >= since)).all()
+    by_hour = [0] * 24
+    for ts in starts:
+        if ts is not None:
+            by_hour[ts.hour] += 1
+
+    # Where the recheck spend falls, bucketed by hour of day. Same
+    # proportional spreading the daily summary uses: an asleep run covers a
+    # whole night in one row, and charging it to the hour it started would
+    # invent a spike at bedtime and show nothing for the rest of the night.
+    try:
+        runs = _json.loads(state.get(session, state.SYNC_LOG_KEY) or "[]")
+    except ValueError:
+        runs = []
+    asleep_hour = [0.0] * 24
+    span_start = span_end = None
+    for r in runs:
+        a, b = float(r.get("a") or 0), float(r.get("b") or 0)
+        span_start = a if span_start is None else min(span_start, a)
+        span_end = b if span_end is None else max(span_end, b)
+        if r.get("o") != "asleep":
+            continue
+        n, span = float(r.get("n") or 0), max(b - a, 0.0)
+        if n <= 0:
+            continue
+        if span <= 0:
+            asleep_hour[datetime.fromtimestamp(a, sync_mod.MYT).hour] += n
+            continue
+        cursor = a
+        while cursor < b:
+            here = datetime.fromtimestamp(cursor, sync_mod.MYT)
+            nxt = (here.replace(minute=0, second=0, microsecond=0)
+                   + timedelta(hours=1)).timestamp()
+            slice_end = min(b, nxt)
+            asleep_hour[here.hour] += n * (slice_end - cursor) / span
+            cursor = slice_end
+    logged_days = ((span_end - span_start) / 86400.0
+                   if span_start is not None and span_end and span_end > span_start else 0.0)
+
+    quiet = [h for h in range(24) if by_hour[h] == 0 and by_hour[(h + 1) % 24] == 0]
+    # Widening from the current interval to wide_min removes this share of the
+    # rechecks in an hour. One list_vehicles per recheck, so ticks are requests.
+    factor = max(1.0 - settings.sleep_recheck_min / wide_min, 0.0)
+    quiet_ticks = sum(asleep_hour[h] for h in quiet)
+    saving = quiet_ticks / logged_days * factor if logged_days else None
+
+    return {
+        "days": days,
+        "departures": len(starts),
+        "sleep_recheck_min": settings.sleep_recheck_min,
+        "wide_min": wide_min,
+        "hours": [
+            {"hour": h, "departures": by_hour[h],
+             "recheck_per_day": round(asleep_hour[h] / logged_days, 1) if logged_days else None,
+             "quiet": h in quiet}
+            for h in range(24)
+        ],
+        "quiet_hours": quiet,
+        "logged_days": round(logged_days, 1),
+        "saving_per_day": round(saving) if saving is not None else None,
+        "rm_saved_per_month": round(saving * 30 * RM_PER_REQUEST, 2) if saving is not None else None,
+        # A quiet hour is only as trustworthy as the history behind it. Too
+        # few departures and "never happened here" just means "not yet".
+        "note": ("Too few departures logged to call any hour quiet — widen "
+                 "``days`` or wait for more history." if len(starts) < 60 else None),
+    }
+
 @router.api_route("/repair-trip-energy", methods=["GET", "POST"])
 def repair_trip_energy(
     drive_id: int = Query(...),
