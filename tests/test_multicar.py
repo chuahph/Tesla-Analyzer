@@ -3673,6 +3673,92 @@ def test_the_recheck_runs_wide_only_in_hours_this_car_never_leaves_in():
          settings.sleep_recheck_quiet_min) = old
         _reset_to_demo()
 
+def test_polling_coverage_says_where_a_trip_s_unwatched_minutes_went():
+    """Every blind head and every estimated trip traces back to driving
+    nobody polled, and the size of that stretch has never been measured.
+
+    The causes want opposite fixes, which is why the split matters: a car
+    reporting itself unreachable mid-drive cannot be polled harder, while a
+    cron that isn't firing can. Counting BatteryReading rows cannot tell them
+    apart — one is written only when the whole-percent SoC moves — so this
+    intersects the trip's own window with the sync log's timestamped runs."""
+    import json as _json
+    from datetime import datetime
+
+    from sqlalchemy import select as sa_select
+
+    from app import state
+    from app.models import Drive
+    from app.sync import MYT
+
+    settings = get_settings()
+    old = settings.app_passcode
+    settings.app_passcode = ""
+    try:
+        with TestClient(app) as client:
+            def at(h, m):
+                return datetime(2026, 8, 21, h, m)
+
+            def ep(h, m):
+                return at(h, m).replace(tzinfo=MYT).timestamp()
+
+            with SessionLocal() as s:
+                s.execute(Drive.__table__.delete())
+                v = s.scalars(sa_select(Vehicle)).first()
+                # Watched end to end.
+                s.add(Drive(vehicle_id=v.id, start_time=at(9, 0), end_time=at(9, 30),
+                            duration_min=30.0, start_location="Home",
+                            end_location="Office", start_recovered_km=0.0))
+                # Half of it spent with the car reporting itself unreachable.
+                s.add(Drive(vehicle_id=v.id, start_time=at(11, 0), end_time=at(11, 40),
+                            duration_min=40.0, start_location="Office",
+                            end_location="Home", start_recovered_km=3.2))
+                state.put(s, state.SYNC_LOG_KEY, _json.dumps([
+                    {"o": "backoff", "n": 480, "a": ep(0, 0), "b": ep(8, 0)},
+                    {"o": "read", "n": 90, "a": ep(8, 0), "b": ep(9, 30)},
+                    {"o": "read", "n": 90, "a": ep(11, 0), "b": ep(11, 20)},
+                    {"o": "asleep", "n": 20, "a": ep(11, 20), "b": ep(11, 40)},
+                    {"o": "backoff", "n": 100, "a": ep(11, 40), "b": ep(23, 0)},
+                ]))
+                s.commit()
+
+            body = client.get("/api/polling-coverage").json()
+            by_id = {t["route"]: t for t in body["trips"]}
+
+            watched = by_id["Home → Office"]
+            assert watched["minutes"] == 30.0
+            assert watched["read"] == 30.0 and watched["watched_pct"] == 100.0
+            assert watched["unlogged"] == 0.0
+
+            # Twenty minutes read, twenty with the car unreachable — and the
+            # trip's own blind head is there beside it for comparison.
+            half = by_id["Office → Home"]
+            assert half["read"] == 20.0 and half["asleep"] == 20.0
+            assert half["watched_pct"] == 50.0
+            assert half["blind_km"] == 3.2
+
+            assert body["drive_minutes"] == 70.0
+            assert body["minutes_by_outcome"]["asleep"] == 20.0
+            assert body["watched_pct"] == pytest.approx(71.4, abs=0.1)
+            # Unreachable outweighs silence, so the ceiling is the car.
+            assert "cannot fix that" in body["verdict"]
+
+            # A hole no tick wrote is the opposite diagnosis and must not be
+            # folded in with the car being unreachable.
+            with SessionLocal() as s:
+                state.put(s, state.SYNC_LOG_KEY, _json.dumps([
+                    {"o": "read", "n": 60, "a": ep(8, 0), "b": ep(9, 10)},
+                    {"o": "read", "n": 60, "a": ep(11, 30), "b": ep(23, 0)},
+                ]))
+                s.commit()
+            gap = client.get("/api/polling-coverage").json()
+            silent = {t["route"]: t for t in gap["trips"]}["Office → Home"]
+            assert silent["unlogged"] == 30.0 and silent["asleep"] == 0.0
+            assert "loop was not running" in gap["verdict"]
+    finally:
+        settings.app_passcode = old
+        _reset_to_demo()
+
 def test_repair_split_trip_cuts_one_row_into_the_two_journeys_it_was():
     """A departure recovery reaching across a long blind gap can swallow a
     whole separate drive, the stop after it, and the start of the next one.

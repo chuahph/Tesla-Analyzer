@@ -6766,6 +6766,118 @@ def recheck_plan(
                  if len(starts) < QUIET_HOURS_MIN_DEPARTURES else None),
     }
 
+@router.get("/polling-coverage")
+def polling_coverage(session: Session = Depends(get_session)):
+    """How much of each trip was actually watched, minute by minute.
+
+    Every blind head, every "estimated" trip and most of the manual repairs
+    trace back to the same thing: a stretch of driving nobody polled. What has
+    never been measured is how big that stretch usually is, or where the
+    unwatched minutes go — and the difference matters, because the causes want
+    opposite fixes. A car reporting itself offline mid-drive cannot be polled
+    harder. A cron that isn't firing can.
+
+    The measurement is an intersection. The sync log timestamps every run of
+    ticks and what each run did; a drive knows when it started and stopped. So
+    for each trip, how many of its minutes fell inside a run that READ the car,
+    how many fell inside one that found it unreachable, and how many fell in no
+    run at all — the last being the loop not running, which no tick can record.
+
+    Counting BatteryReading rows cannot answer this: one is written only when
+    the whole-percent SoC moves or a state flag flips, so a densely polled
+    drive and a sparsely polled one leave nearly the same number.
+
+    Bounded by the sync log's own window, which is a few days (see
+    SYNC_LOG_MAX_CHARS) — this is a diagnosis of the loop, not a history.
+    """
+    import json as _json
+
+    try:
+        runs = [r for r in _json.loads(state.get(session, state.SYNC_LOG_KEY) or "[]")
+                if r.get("a") and r.get("b")]
+    except ValueError:
+        runs = []
+    if not runs:
+        return {"trips": [], "note": "No sync log yet — nothing to intersect."}
+
+    span_a = min(float(r["a"]) for r in runs)
+    span_b = max(float(r["b"]) for r in runs)
+
+    def _epoch(dt: datetime) -> float:
+        return dt.replace(tzinfo=sync_mod.MYT).timestamp()
+
+    drives = session.scalars(
+        select(Drive)
+        .where(Drive.start_time >= datetime.fromtimestamp(span_a, sync_mod.MYT).replace(tzinfo=None))
+        .order_by(Drive.start_time)).all()
+
+    outcomes = ("read", "idle", "asleep", "backoff", "error")
+    rows, totals = [], dict.fromkeys(outcomes + ("duration", "unlogged"), 0.0)
+    for d in drives:
+        if not d.end_time:
+            continue
+        a, b = _epoch(d.start_time), _epoch(d.end_time)
+        if b <= a or a < span_a or b > span_b:
+            continue  # only trips the log fully covers can be judged
+        split = dict.fromkeys(outcomes, 0.0)
+        for r in runs:
+            overlap = min(float(r["b"]), b) - max(float(r["a"]), a)
+            if overlap > 0:
+                split[r.get("o") or "error"] = split.get(r.get("o") or "error", 0.0) + overlap / 60.0
+        minutes = (b - a) / 60.0
+        # Minutes inside no run at all. Not an outcome — a hole. No tick can
+        # write one, which is what makes it diagnostic: the request never came.
+        unlogged = max(minutes - sum(split.values()), 0.0)
+        totals["duration"] += minutes
+        totals["unlogged"] += unlogged
+        for o in outcomes:
+            totals[o] += split[o]
+        rows.append({
+            "drive_id": d.id,
+            "route": f"{d.start_location} → {d.end_location}",
+            "start": d.start_time.isoformat(timespec="minutes"),
+            "minutes": round(minutes, 1),
+            **{o: round(split[o], 1) for o in outcomes},
+            "unlogged": round(unlogged, 1),
+            "watched_pct": round(split["read"] / minutes * 100.0, 1) if minutes else None,
+            # What the trip itself says it could not see, for comparison: the
+            # two should agree, and a trip reporting no blind head while this
+            # says it was barely watched is a contradiction worth knowing.
+            "blind_km": round(d.start_recovered_km or 0.0, 2),
+        })
+
+    dur = totals["duration"]
+    verdict = None
+    if dur:
+        watched = totals["read"] / dur
+        if watched >= 0.9:
+            verdict = ("Drives are being watched nearly minute by minute. The "
+                       "blind stretches are at the EDGES — before a departure "
+                       "is noticed and after an arrival — not inside the drive.")
+        elif totals["asleep"] > totals["unlogged"]:
+            verdict = ("Much of the driving happens while the car reports "
+                       "itself unreachable. Polling harder cannot fix that — "
+                       "the reads would fail — and it is the ceiling on how "
+                       "well any trip here can be measured.")
+        else:
+            verdict = ("Much of the driving falls in no tick at all, which "
+                       "means the loop was not running. That is the cron or "
+                       "the host, not this app, and it IS fixable.")
+    return {
+        "from": datetime.fromtimestamp(span_a, sync_mod.MYT).isoformat(timespec="minutes"),
+        "to": datetime.fromtimestamp(span_b, sync_mod.MYT).isoformat(timespec="minutes"),
+        "trips": rows,
+        "drive_minutes": round(dur, 1),
+        "minutes_by_outcome": {o: round(totals[o], 1) for o in outcomes},
+        "minutes_unlogged": round(totals["unlogged"], 1),
+        "watched_pct": round(totals["read"] / dur * 100.0, 1) if dur else None,
+        "verdict": verdict,
+        "note": None if rows else
+                "No trip falls entirely inside the log's window yet — the log "
+                "holds only a few days, and a trip is judged only if both its "
+                "ends are covered.",
+    }
+
 @router.api_route("/repair-trip-energy", methods=["GET", "POST"])
 def repair_trip_energy(
     drive_id: int = Query(...),
