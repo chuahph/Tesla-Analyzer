@@ -585,11 +585,17 @@ MEASURED_CAPACITY_MAX_DRIFT = 0.20
 def _measured_capacity(session: Session, vehicle: Vehicle) -> tuple[float | None, int]:
     """This car's usable pack as its own charging sessions measure it.
 
-    Same rules as sync.capacity_from_charge, applied to the stored rows rather
+    Same rules as sync.implied_capacity_kwh, applied to the stored rows rather
     than one live session: a gain wide enough that whole-percent SoC does not
-    dominate, the AC efficiency correction because a charger reports what went
-    in rather than what reached the pack, and a sane clamp so one bad row
-    cannot move the answer.
+    dominate, the efficiency correction because a charger reports what went in
+    rather than what reached the pack, and a sane clamp so one bad row cannot
+    move the answer.
+
+    "Same rules" has to keep being true. This is the third of three places
+    that correction is applied and the last to be updated when it stopped
+    being AC-only, so for one deploy the constant was right in the two places
+    that DISPLAY capacity and wrong in the one that sets it — which reads
+    exactly like the change not working.
 
     Median, not mean: a single mis-recorded session should not shift the figure
     every kWh and every ringgit is derived from.
@@ -602,9 +608,7 @@ def _measured_capacity(session: Session, vehicle: Vehicle) -> tuple[float | None
         gain = (c.end_soc or 0) - (c.start_soc or 0)
         if gain < 15 or not c.energy_added_kwh:
             continue
-        cap = c.energy_added_kwh / (gain / 100.0)
-        if (c.charge_type or "AC") != "DC":
-            cap *= sync_mod.CHARGE_EFFICIENCY
+        cap = c.energy_added_kwh / (gain / 100.0) * sync_mod.CHARGE_EFFICIENCY
         if 45.0 <= cap <= 95.0:
             vals.append(cap)
     if len(vals) < MEASURED_CAPACITY_MIN_CHARGES:

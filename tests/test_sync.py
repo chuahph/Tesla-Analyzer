@@ -2961,3 +2961,32 @@ def test_a_head_seen_at_speed_is_still_evidence_and_still_drops_the_premium():
     drives, _, _, _ = process_snapshot(s2, s3, trip, None, 68.6, 0.90)
     trip_kmh = drives[0]["avg_speed_kmh"]
     assert trip["start_blind_kmh"] > trip_kmh                # did not crawl
+
+
+def test_every_place_that_corrects_a_charge_uses_the_same_rule():
+    """The efficiency correction lives in three places and they must agree.
+
+    Measured, twice now in this project: a constant changed in the sites that
+    DISPLAY a figure and missed in the one that SETS it reads exactly like the
+    change not working, and costs a deploy to find. When the correction
+    stopped being AC-only, _measured_capacity — the path that actually
+    supplies capacity_kwh to every kWh and every ringgit — kept its
+    ``!= "DC"`` guard while the two evidence endpoints did not.
+
+    So this walks the source. Any surviving charge-type condition around the
+    constant is the bug, whatever the tests around it say."""
+    import re
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parent.parent
+    for name in ("app/sync.py", "app/api/routes.py"):
+        text = (root / name).read_text()
+        for match in re.finditer(r"CHARGE_EFFICIENCY", text):
+            # The 200 characters before each use, minus comments — a charge
+            # type mentioned there means the correction is still conditional.
+            before = text[max(0, match.start() - 200):match.start()]
+            code = "\n".join(ln for ln in before.splitlines()
+                             if not ln.strip().startswith("#"))
+            assert '"DC"' not in code and "'DC'" not in code, (
+                f"{name}: charge type still gates the efficiency correction "
+                f"near offset {match.start()}")
