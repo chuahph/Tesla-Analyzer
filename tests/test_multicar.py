@@ -3833,21 +3833,21 @@ def test_polling_coverage_says_where_a_trip_s_unwatched_minutes_went():
         settings.app_passcode = old
         _reset_to_demo()
 
-def test_capacity_evidence_measures_the_discharge_side_instead_of_quoting_it():
-    """The charge side cannot check itself.
+def test_capacity_evidence_takes_the_pack_reading_from_the_car_not_from_itself():
+    """Pooling this app's own trips cannot measure the pack.
 
-    A charge says how much energy went IN per point of SoC; a drive says how
-    much came OUT. They differ by the round trip, which is exactly the
-    constant under argument — so the discharge side is the independent half,
-    and it was four numbers hardcoded here from an old analysis. They read as
-    live evidence and did not move when the car did.
+    _energy_kwh returns a fraction of capacity_kwh by either of its branches,
+    so summing trip energy over trip percent returns the constant it started
+    from — differing only by how far the range-based estimate sits from the
+    SoC-based one. Tried on real data it read 68.52 against a constant of
+    68.8, which is not a measurement of the pack but of the 0.4% between two
+    internal estimators, and it was very nearly believed.
 
-    Pooled rather than averaged per trip: the percentages are whole numbers,
-    and reading them one trip at a time compounds the rounding instead of
-    letting it average out."""
-    from sqlalchemy import select as sa_select
-
-    from app.models import Drive
+    The car's own Since-Charge panel owes nothing to any constant here, and
+    the Fleet API does not expose it. So it is typed in, like a place's
+    parked draw or its departure pace: a real quantity this app cannot
+    measure, from an instrument that can."""
+    from app import state
 
     settings = get_settings()
     old = settings.app_passcode
@@ -3855,43 +3855,29 @@ def test_capacity_evidence_measures_the_discharge_side_instead_of_quoting_it():
     try:
         with TestClient(app) as client:
             with SessionLocal() as s:
-                s.execute(Drive.__table__.delete())
-                v = s.scalars(sa_select(Vehicle)).first()
-                now = sync_now_local()
-                # Two clean trips: 34.5 kWh out over 50 SoC points is a 69 kWh
-                # pack, and pooling gets there from figures neither trip could
-                # give on its own.
-                for i, (kwh, soc) in enumerate(((13.8, 20.0), (20.7, 30.0))):
-                    t = now - timedelta(days=i + 1)
-                    s.add(Drive(vehicle_id=v.id, start_time=t,
-                                end_time=t + timedelta(minutes=30),
-                                distance_km=100.0, duration_min=30.0,
-                                energy_used_kwh=kwh, start_soc=80.0,
-                                end_soc=80.0 - soc, idle_tracked=True,
-                                start_recovered_km=0.0))
+                state.put(s, state.SCREEN_CAPACITY_KEY, "")
                 s.commit()
+            empty = client.get("/api/capacity-evidence").json()["screen_side"]
+            assert empty["kwh"] is None and "add-screen-reading" in empty["how"]
 
-            body = client.get("/api/capacity-evidence").json()
-            disc = body["discharge_side"]
-            assert disc["trips"] == 2 and disc["soc_points"] == 50.0
-            assert disc["kwh"] == pytest.approx(69.0, abs=0.01)
-            # Fifty whole points either side, so the pool is good to 2%.
-            assert disc["precision_pct"] == pytest.approx(2.0, abs=0.01)
+            # Two readings off the screen. Pooled, not averaged: 27.3 kWh over
+            # 40 points is 68.25, which neither reading gives on its own and
+            # which lets each screen's rounding average out rather than
+            # compound.
+            client.post("/api/add-screen-reading?kwh=18.4&pct=26.8")
+            body = client.post("/api/add-screen-reading?kwh=8.9&pct=13.1").json()
+            assert body["added"]["implied_kwh"] == pytest.approx(67.94, abs=0.01)
+            pooled = body["pooled"]
+            assert pooled["readings"] == 2 and pooled["soc_points"] == 39.9
+            assert pooled["kwh"] == pytest.approx(68.42, abs=0.01)
+            assert client.get("/api/capacity-evidence").json()["screen_side"] == pooled
 
-            # A trip mostly reconstructed was PRICED from a capacity constant,
-            # so feeding it back would measure the constant rather than the
-            # pack. It must not reach the pool however tempting its numbers.
-            with SessionLocal() as s:
-                v = s.scalars(sa_select(Vehicle)).first()
-                t = sync_now_local() - timedelta(days=3)
-                s.add(Drive(vehicle_id=v.id, start_time=t,
-                            end_time=t + timedelta(minutes=30),
-                            distance_km=100.0, duration_min=30.0,
-                            energy_used_kwh=50.0, start_soc=80.0, end_soc=30.0,
-                            idle_tracked=True, start_recovered_km=90.0))
-                s.commit()
-            again = client.get("/api/capacity-evidence").json()["discharge_side"]
-            assert again["trips"] == 2 and again["kwh"] == pytest.approx(69.0, abs=0.01)
+            # The same pooling over this app's own trips is reported too, but
+            # as what it actually is: whether the two internal estimators
+            # agree. Their ratio is independent of the constant even though
+            # neither figure is.
+            agree = client.get("/api/capacity-evidence").json()["energy_basis_agreement"]
+            assert "NOT a capacity measurement" in agree["means"]
     finally:
         settings.app_passcode = old
         _reset_to_demo()

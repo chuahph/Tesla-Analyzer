@@ -28,6 +28,10 @@ QUIET_SEEN_KEY = "quiet_seen_ts"  # epoch a tick last CONFIRMED every car not on
 # could have been MOVING unseen, which is not the same as how long it sat —
 # an overnight park that was rechecked every ten minutes is nine hours old as
 # an energy baseline and ten minutes old as a distance one.
+SCREEN_CAPACITY_KEY = "screen_capacity"  # JSON list of {kwh, pct, at}: the
+# car's own Since-Charge readings, typed in from the screen. The ONLY
+# independent check on the capacity constant — see _screen_capacity — because
+# every energy figure this app computes is itself linear in that constant.
 QUIET_HOURS_KEY = "recheck_quiet_hours"  # JSON {hours, risk, at}: the hours of
 # the day the sleep recheck may run wide in, refitted from the departure
 # history once a day. Cached rather than recomputed per tick because it

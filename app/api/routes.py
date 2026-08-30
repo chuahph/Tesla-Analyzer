@@ -5320,27 +5320,56 @@ def repair_arrivals(
     }
 
 
-def _discharge_capacity(session: Session, vehicle: Any) -> dict[str, Any]:
-    """What this car's own DRIVING says the pack holds, pooled.
+def _screen_capacity(session: Session) -> dict[str, Any]:
+    """What the CAR says the pack holds, from readings typed off its screen.
 
-    The independent half of the capacity question. A charge says how much
-    energy went in per point of SoC; a drive says how much came out. The two
-    differ by the round trip, which is exactly the constant under argument, so
-    a charge-side figure can never check itself.
+    The only independent check there is. Every energy figure this app computes
+    runs through _energy_kwh, which returns a fraction of ``capacity_kwh`` by
+    either of its branches — so pooling this app's own trips to "measure" the
+    pack returns the constant it started from, differing only by how far the
+    range-based estimate sits from the SoC-based one. That was tried here and
+    read 68.52 against a constant of 68.8: not a measurement of the pack, a
+    measurement of the 0.4% between two internal estimators.
 
-    Pooled — total kWh over total percent — rather than averaged per trip. The
-    percentages are coarse, and reading them one trip at a time compounds the
-    rounding instead of letting it average out: that is how 0.95 once looked
-    like a better efficiency constant than 0.96, on a difference the rounding
-    alone was worth more than.
+    Tesla's energy app computes its Since-Charge kWh and percentage from the
+    car's own pack model, which owes nothing to ours, and the Fleet API does
+    not expose either. So they are entered, exactly like a place's parked draw
+    or its departure pace: a real quantity this app cannot measure, from an
+    instrument that can.
 
-    Only trips whose energy was MEASURED end to end count. An estimated one
-    was priced from a capacity constant, so feeding it back in would measure
-    nothing but the constant it came from.
+    Pooled — total kWh over total percent — so the rounding on each screen
+    averages out instead of compounding reading by reading.
+    """
+    import json as _json
 
-    This replaces four numbers that were hardcoded here from an old analysis.
-    They read as live evidence, did not move when the car did, and were the
-    figures anyone would check the charge side against.
+    try:
+        rows = _json.loads(state.get(session, state.SCREEN_CAPACITY_KEY) or "[]")
+    except ValueError:
+        rows = []
+    kwh = sum(float(r.get("kwh") or 0) for r in rows)
+    pct = sum(float(r.get("pct") or 0) for r in rows)
+    if pct <= 0:
+        return {"kwh": None, "readings": 0,
+                "how": "Add one with /api/add-screen-reading?kwh=&pct= from the "
+                       "car's Energy screen, Since Last Charge."}
+    return {
+        "kwh": round(kwh / (pct / 100.0), 2),
+        "readings": len(rows),
+        "soc_points": round(pct, 1),
+        # Both figures on the screen are rounded to a tenth, and the
+        # percentage is the one that matters at these magnitudes.
+        "precision_pct": round(0.05 / pct * 100.0, 2),
+        "latest": rows[-1].get("at") if rows else None,
+    }
+
+
+def _energy_basis_agreement(session: Session, vehicle: Any) -> dict[str, Any]:
+    """How far this app's two ways of reading a trip's energy disagree.
+
+    _energy_kwh prefers the rated-range delta and falls back to the SoC delta.
+    Both are multiplied by the same capacity constant, so their RATIO is
+    independent of it — which makes this a real internal check even though
+    the same pooling cannot measure the pack.
     """
     drives = session.scalars(
         select(Drive).where(Drive.vehicle_id == vehicle.id)
@@ -5355,18 +5384,49 @@ def _discharge_capacity(session: Session, vehicle: Any) -> dict[str, Any]:
         kwh += d.energy_used_kwh
         pct += soc
         used += 1
-    if pct <= 0:
-        return {"kwh": None, "trips": 0,
-                "note": "No end-to-end measured trip has a usable SoC drop yet."}
+    in_use, _ = _usable_capacity(session, vehicle, get_settings())
     return {
-        "kwh": round(kwh / (pct / 100.0), 2),
+        # Stated even when there is nothing to state it about: the whole point
+        # of this field is what it must not be read as, and a shape that drops
+        # the caveat exactly when the number is absent invites the number to
+        # be reintroduced later without it.
+        "means": "range-delta energy over SoC-delta energy. 1.0 is agreement; "
+                 "this is NOT a capacity measurement, since both carry the "
+                 "same constant.",
+        "ratio": (round(kwh / (pct / 100.0) / in_use, 4)
+                  if pct > 0 and used and in_use else None),
         "trips": used,
         "soc_points": round(pct, 1),
-        # Whole-percent SoC at both ends of every trip, so the pool is only as
-        # sharp as the total points it spans.
-        "precision_pct": round(1.0 / pct * 100.0, 2),
     }
 
+
+@router.api_route("/add-screen-reading", methods=["GET", "POST"])
+def add_screen_reading(
+    kwh: float = Query(..., gt=0),
+    pct: float = Query(..., gt=0, le=100),
+    session: Session = Depends(get_session),
+):
+    """Record one Since-Charge reading off the car's Energy screen.
+
+    Both numbers come from the same panel: the kWh consumed and the percentage
+    beside it. Together they are the one measurement of this pack that owes
+    nothing to any constant in this app, which is why they are worth the
+    typing — see _screen_capacity.
+    """
+    import json as _json
+
+    try:
+        rows = _json.loads(state.get(session, state.SCREEN_CAPACITY_KEY) or "[]")
+    except ValueError:
+        rows = []
+    rows.append({"kwh": round(kwh, 2), "pct": round(pct, 2),
+                 "at": sync_mod.now_local().isoformat(timespec="minutes")})
+    # A pack's capacity moves over years, not weeks, so a long tail of old
+    # readings is history rather than evidence — and pooling them all would
+    # let a reading from a different state of health outvote a current one.
+    state.put(session, state.SCREEN_CAPACITY_KEY, _json.dumps(rows[-20:]))
+    return {"added": {"kwh": kwh, "pct": pct, "implied_kwh": round(kwh / (pct / 100.0), 2)},
+            "pooled": _screen_capacity(session)}
 
 @router.get("/capacity-evidence")
 def capacity_evidence(
@@ -5462,7 +5522,8 @@ def capacity_evidence(
         "caveat": (f"AC sessions carry the {sync_mod.AC_CHARGE_EFFICIENCY} "
                    f"efficiency correction, same as sync.capacity_from_charge, "
                    f"so these are pack-side figures rather than charger-side."),
-        "discharge_side": _discharge_capacity(session, vehicle),
+        "screen_side": _screen_capacity(session),
+        "energy_basis_agreement": _energy_basis_agreement(session, vehicle),
         # The charge-side figures split by how the car was plugged in. They
         # should not: charge_energy_added is the same quantity either way. That
         # they DO is the evidence about the correction above, so it is reported
