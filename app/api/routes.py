@@ -5320,6 +5320,54 @@ def repair_arrivals(
     }
 
 
+def _discharge_capacity(session: Session, vehicle: Any) -> dict[str, Any]:
+    """What this car's own DRIVING says the pack holds, pooled.
+
+    The independent half of the capacity question. A charge says how much
+    energy went in per point of SoC; a drive says how much came out. The two
+    differ by the round trip, which is exactly the constant under argument, so
+    a charge-side figure can never check itself.
+
+    Pooled — total kWh over total percent — rather than averaged per trip. The
+    percentages are coarse, and reading them one trip at a time compounds the
+    rounding instead of letting it average out: that is how 0.95 once looked
+    like a better efficiency constant than 0.96, on a difference the rounding
+    alone was worth more than.
+
+    Only trips whose energy was MEASURED end to end count. An estimated one
+    was priced from a capacity constant, so feeding it back in would measure
+    nothing but the constant it came from.
+
+    This replaces four numbers that were hardcoded here from an old analysis.
+    They read as live evidence, did not move when the car did, and were the
+    figures anyone would check the charge side against.
+    """
+    drives = session.scalars(
+        select(Drive).where(Drive.vehicle_id == vehicle.id)
+        .order_by(Drive.start_time.desc()).limit(400)).all()
+    kwh = pct = 0.0
+    used = 0
+    for d in drives:
+        soc = (d.start_soc or 0) - (d.end_soc or 0)
+        if (not d.energy_used_kwh or soc <= 0
+                or driving_analysis._data_quality(d) != "measured"):
+            continue
+        kwh += d.energy_used_kwh
+        pct += soc
+        used += 1
+    if pct <= 0:
+        return {"kwh": None, "trips": 0,
+                "note": "No end-to-end measured trip has a usable SoC drop yet."}
+    return {
+        "kwh": round(kwh / (pct / 100.0), 2),
+        "trips": used,
+        "soc_points": round(pct, 1),
+        # Whole-percent SoC at both ends of every trip, so the pool is only as
+        # sharp as the total points it spans.
+        "precision_pct": round(1.0 / pct * 100.0, 2),
+    }
+
+
 @router.get("/capacity-evidence")
 def capacity_evidence(
     min_swing_pct: float = Query(15.0, ge=1.0, le=90.0),
@@ -5414,7 +5462,23 @@ def capacity_evidence(
         "caveat": (f"AC sessions carry the {sync_mod.AC_CHARGE_EFFICIENCY} "
                    f"efficiency correction, same as sync.capacity_from_charge, "
                    f"so these are pack-side figures rather than charger-side."),
-        "screen_readings": [69.01, 68.69, 68.14, 68.82],
+        "discharge_side": _discharge_capacity(session, vehicle),
+        # The charge-side figures split by how the car was plugged in. They
+        # should not: charge_energy_added is the same quantity either way. That
+        # they DO is the evidence about the correction above, so it is reported
+        # rather than left to be reconstructed from the rows by hand.
+        "by_charge_type": {
+            kind: {
+                "count": len(v),
+                "median_kwh": round(percentile(sorted(v), 0.5), 2) if v else None,
+            }
+            for kind, v in (
+                ("AC", [r["implied_capacity_kwh"] for r in rows
+                        if r["counts"] and r["charge_type"] != "DC"]),
+                ("DC", [r["implied_capacity_kwh"] for r in rows
+                        if r["counts"] and r["charge_type"] == "DC"]),
+            )
+        },
         "charges": rows[:40],
         "note": ("No charge has a swing wide enough to measure with — raise the "
                  "sample by charging in bigger sessions, or lower min_swing_pct "

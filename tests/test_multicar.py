@@ -9,6 +9,7 @@ from app.config import get_settings
 from app.database import SessionLocal
 from app.main import app
 from app.models import ArrivalTailSample, Vehicle
+from app.sync import now_local as sync_now_local
 
 
 @pytest.fixture(autouse=True)
@@ -3828,6 +3829,69 @@ def test_polling_coverage_says_where_a_trip_s_unwatched_minutes_went():
             silent = {t["route"]: t for t in gap["trips"]}["Office → Home"]
             assert silent["unlogged"] == 30.0 and silent["asleep"] == 0.0
             assert "loop was not running" in gap["verdict"]
+    finally:
+        settings.app_passcode = old
+        _reset_to_demo()
+
+def test_capacity_evidence_measures_the_discharge_side_instead_of_quoting_it():
+    """The charge side cannot check itself.
+
+    A charge says how much energy went IN per point of SoC; a drive says how
+    much came OUT. They differ by the round trip, which is exactly the
+    constant under argument — so the discharge side is the independent half,
+    and it was four numbers hardcoded here from an old analysis. They read as
+    live evidence and did not move when the car did.
+
+    Pooled rather than averaged per trip: the percentages are whole numbers,
+    and reading them one trip at a time compounds the rounding instead of
+    letting it average out."""
+    from sqlalchemy import select as sa_select
+
+    from app.models import Drive
+
+    settings = get_settings()
+    old = settings.app_passcode
+    settings.app_passcode = ""
+    try:
+        with TestClient(app) as client:
+            with SessionLocal() as s:
+                s.execute(Drive.__table__.delete())
+                v = s.scalars(sa_select(Vehicle)).first()
+                now = sync_now_local()
+                # Two clean trips: 34.5 kWh out over 50 SoC points is a 69 kWh
+                # pack, and pooling gets there from figures neither trip could
+                # give on its own.
+                for i, (kwh, soc) in enumerate(((13.8, 20.0), (20.7, 30.0))):
+                    t = now - timedelta(days=i + 1)
+                    s.add(Drive(vehicle_id=v.id, start_time=t,
+                                end_time=t + timedelta(minutes=30),
+                                distance_km=100.0, duration_min=30.0,
+                                energy_used_kwh=kwh, start_soc=80.0,
+                                end_soc=80.0 - soc, idle_tracked=True,
+                                start_recovered_km=0.0))
+                s.commit()
+
+            body = client.get("/api/capacity-evidence").json()
+            disc = body["discharge_side"]
+            assert disc["trips"] == 2 and disc["soc_points"] == 50.0
+            assert disc["kwh"] == pytest.approx(69.0, abs=0.01)
+            # Fifty whole points either side, so the pool is good to 2%.
+            assert disc["precision_pct"] == pytest.approx(2.0, abs=0.01)
+
+            # A trip mostly reconstructed was PRICED from a capacity constant,
+            # so feeding it back would measure the constant rather than the
+            # pack. It must not reach the pool however tempting its numbers.
+            with SessionLocal() as s:
+                v = s.scalars(sa_select(Vehicle)).first()
+                t = sync_now_local() - timedelta(days=3)
+                s.add(Drive(vehicle_id=v.id, start_time=t,
+                            end_time=t + timedelta(minutes=30),
+                            distance_km=100.0, duration_min=30.0,
+                            energy_used_kwh=50.0, start_soc=80.0, end_soc=30.0,
+                            idle_tracked=True, start_recovered_km=90.0))
+                s.commit()
+            again = client.get("/api/capacity-evidence").json()["discharge_side"]
+            assert again["trips"] == 2 and again["kwh"] == pytest.approx(69.0, abs=0.01)
     finally:
         settings.app_passcode = old
         _reset_to_demo()
