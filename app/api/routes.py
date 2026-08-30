@@ -190,18 +190,35 @@ QUIET_HOURS_TTL_SEC = 24 * 3600
 QUIET_HOURS_MIN_DEPARTURES = 60
 
 
-def _fit_quiet_hours(session: Session, days: int, max_departures: int) -> tuple[list[int], int]:
-    """Hours the sleep recheck may run wide in, and what that costs in trips.
+def _fit_recheck_hours(session: Session, days: int, max_departures: int
+                       ) -> tuple[list[int], list[int], int]:
+    """When to recheck wide, when to recheck tight, and what the wide part costs.
 
-    An hour qualifies when neither it NOR THE FOLLOWING ONE has more than
-    ``max_departures`` in the window. The look-ahead is what makes the wider
-    interval safe at the boundary: a recheck starting at 04:50 and running
-    forty minutes reaches into 05:00, so 04:00 is only dead if 05:00 is too.
+    QUIET hours qualify when neither the hour NOR THE FOLLOWING ONE has more
+    than ``max_departures``. The look-ahead is what makes a wider interval safe
+    at the boundary: a recheck starting at 04:50 and running forty minutes
+    reaches into 05:00, so 04:00 is only dead if 05:00 is too.
 
-    Returns (hours, departures_at_risk) — the second being how many departures
-    in the window fell in an hour this would widen, counting each qualifying
-    hour and the one after it. That is the honest price, in the only unit that
-    matters: trips that would have begun inside a longer blind window.
+    BUSY hours are the ones at ``recheck_busy_multiple`` times the flat
+    24-hour average, and they are the more important half. The sleep back-off
+    arms when every car is quiet and runs to completion — a suppressed tick
+    returns before it can clear the window — so a departure inside that window
+    is unseen until it expires. Measured over 22 trips: every blind head had
+    suppressed minutes at its start, every trip with none had no blind head,
+    37.3 blind km against 63.4 suppressed minutes, an implied 35 km/h. The
+    window IS the blind head. Buying it back everywhere is unaffordable;
+    buying it back where the departures are costs a fraction of that.
+
+    Busy needs no look-ahead of its own: the interval chosen for an hour is
+    clamped at the boundary when the NEXT hour wants a tighter one (see
+    _recheck_interval_min), which is exact and costs one extra recheck rather
+    than a whole widened hour.
+
+    Returns (quiet, busy, departures_at_risk) — the last being how many
+    departures fell in an hour the quiet rule would widen, counting each
+    qualifying hour and the one after it. That is the honest price of the
+    saving, in the only unit that matters: trips that would have begun inside
+    a longer blind window.
 
     Shared with /api/recheck-plan on purpose. The endpoint exists to explain
     what the loop does, and it can only do that while both read the same rule.
@@ -214,19 +231,23 @@ def _fit_quiet_hours(session: Session, days: int, max_departures: int) -> tuple[
         if ts is not None:
             by_hour[ts.hour] += 1
     if len(starts) < QUIET_HOURS_MIN_DEPARTURES:
-        return [], 0
-    hours = [h for h in range(24)
+        return [], [], 0
+    quiet = [h for h in range(24)
              if by_hour[h] <= max_departures and by_hour[(h + 1) % 24] <= max_departures]
-    affected = {h for h in hours} | {(h + 1) % 24 for h in hours}
-    return hours, sum(by_hour[h] for h in affected)
+    threshold = len(starts) / 24.0 * get_settings().recheck_busy_multiple
+    busy = [h for h in range(24) if by_hour[h] >= threshold]
+    affected = {h for h in quiet} | {(h + 1) % 24 for h in quiet}
+    return quiet, busy, sum(by_hour[h] for h in affected)
 
 
-def _quiet_hours_now(session: Session) -> list[int]:
-    """The cached fit, refitted at most once a day.
+def _recheck_hours_now(session: Session) -> tuple[list[int], list[int]]:
+    """The cached fit of (quiet, busy) hours, refitted at most once a day.
 
-    Falls back to no quiet hours on any failure. That is the safe direction:
-    the cost of getting this wrong is a departure seen late, so an unreadable
-    cache must leave the recheck at its normal interval rather than guess.
+    Falls back to neither on any failure, which leaves the recheck flat at
+    settings.sleep_recheck_min. That is the safe direction in both
+    directions at once: no hour is widened on a fit that could not be read,
+    and none is tightened either, so a broken cache costs accuracy nowhere and
+    money nowhere.
     """
     import json as _json
 
@@ -236,14 +257,50 @@ def _quiet_hours_now(session: Session) -> list[int]:
     except ValueError:
         cached = {}
     if cached and time.time() - float(cached.get("at") or 0) < QUIET_HOURS_TTL_SEC:
-        return [int(h) for h in cached.get("hours") or []]
+        return ([int(h) for h in cached.get("hours") or []],
+                [int(h) for h in cached.get("busy") or []])
     try:
-        hours, risk = _fit_quiet_hours(session, 90, settings.recheck_quiet_max_departures)
+        quiet, busy, risk = _fit_recheck_hours(
+            session, 90, settings.recheck_quiet_max_departures)
         state.put(session, state.QUIET_HOURS_KEY, _json.dumps(
-            {"hours": hours, "risk": risk, "at": time.time()}))
-        return hours
+            {"hours": quiet, "busy": busy, "risk": risk, "at": time.time()}))
+        return quiet, busy
     except Exception:  # noqa: BLE001 — an optimisation must never break the sync
-        return []
+        return [], []
+
+
+def _recheck_interval_min(session: Session, when: datetime) -> float:
+    """How long the back-off may hold, given the hour it is arming in.
+
+    Wide where this car never departs, tight where it usually does, and the
+    ordinary interval everywhere else.
+
+    Then clamped at the hour boundary when the NEXT hour wants something
+    tighter. A window armed at 05:58 under a ten-minute rule would otherwise
+    run to 06:08 and blind the first eight minutes of the busiest hour of the
+    morning. Clamping ends it at 06:00 instead, which costs one extra recheck
+    at that boundary rather than widening or tightening a whole hour to cover
+    for it — the cheapest possible fix for a problem that only exists in the
+    last few minutes of an hour.
+    """
+    settings = get_settings()
+    quiet, busy = _recheck_hours_now(session)
+
+    def need(hour: int) -> float:
+        if hour in busy:
+            return settings.sleep_recheck_busy_min
+        if hour in quiet:
+            return max(settings.sleep_recheck_min, settings.sleep_recheck_quiet_min)
+        return settings.sleep_recheck_min
+
+    mins = need(when.hour)
+    if need((when.hour + 1) % 24) < mins:
+        to_boundary = 60.0 - (when.minute + when.second / 60.0)
+        # Never below a minute: the cron ticks about that often, so a shorter
+        # window buys nothing and only risks a burst of back-to-back rechecks
+        # in the closing seconds of an hour.
+        mins = min(mins, max(to_boundary, 1.0))
+    return mins
 
 
 def _mark_full_tick(session: Session, now_ts: float) -> None:
@@ -2982,9 +3039,8 @@ def _sync_now_impl(wake: bool, session: Session):
     # worth trading away. The look-ahead in the fit is what makes this safe at
     # the boundary — an hour only qualifies if the next one does too, so a
     # window that spills past the hour cannot spill into a busy one.
-    recheck_min = settings.sleep_recheck_min
-    if all_quiet and sync_mod.now_local().hour in _quiet_hours_now(session):
-        recheck_min = max(recheck_min, settings.sleep_recheck_quiet_min)
+    recheck_min = (_recheck_interval_min(session, sync_mod.now_local())
+                   if all_quiet else settings.sleep_recheck_min)
     state.put(session, state.SUSPEND_KEY,
               str(now_ts + recheck_min * 60.0) if all_quiet else "")
     # Record that we LOOKED and found the car still, not merely that we intend
@@ -6699,7 +6755,7 @@ def recheck_plan(
     # The same fit the loop runs, not a second copy of the rule — this
     # endpoint's whole job is to explain what the loop is doing, which it can
     # only do while the two cannot drift apart.
-    quiet, at_risk = _fit_quiet_hours(session, days, max_departures)
+    quiet, busy, at_risk = _fit_recheck_hours(session, days, max_departures)
 
     # Where the recheck spend falls, bucketed by hour of day. Same
     # proportional spreading the daily summary uses: an asleep run covers a
@@ -6739,6 +6795,14 @@ def recheck_plan(
     factor = max(1.0 - settings.sleep_recheck_min / wide_min, 0.0)
     quiet_ticks = sum(asleep_hour[h] for h in quiet)
     saving = quiet_ticks / logged_days * factor if logged_days else None
+    # And what tightening the busy hours costs. Going from the base interval
+    # to the busy one multiplies the rechecks in those hours; the extra is
+    # what that multiple adds. This is the price of the blind heads, and it
+    # belongs beside the saving rather than in a separate reading — the two
+    # are one decision.
+    busy_ticks = sum(asleep_hour[h] for h in busy)
+    busy_factor = max(settings.sleep_recheck_min / settings.sleep_recheck_busy_min - 1.0, 0.0)
+    cost = busy_ticks / logged_days * busy_factor if logged_days else None
 
     return {
         "days": days,
@@ -6748,10 +6812,18 @@ def recheck_plan(
         "hours": [
             {"hour": h, "departures": by_hour[h],
              "recheck_per_day": round(asleep_hour[h] / logged_days, 1) if logged_days else None,
-             "quiet": h in quiet}
+             "quiet": h in quiet, "busy": h in busy}
             for h in range(24)
         ],
         "quiet_hours": quiet,
+        "busy_hours": busy,
+        "busy_min": settings.sleep_recheck_busy_min,
+        # How many of the window's departures fall in an hour that is now
+        # polled tightly — the share of trips whose blind head this halves.
+        "departures_covered": sum(by_hour[h] for h in busy),
+        "cost_per_day": round(cost) if cost is not None else None,
+        "net_per_day": (round(cost - saving)
+                        if cost is not None and saving is not None else None),
         "max_departures": max_departures,
         # The price of the saving, in trips rather than requests.
         "departures_at_risk": at_risk,

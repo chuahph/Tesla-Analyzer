@@ -63,6 +63,19 @@ class Settings(BaseSettings):
     # saving of 7 requests a day, because lone one-off departures at 00:00,
     # 04:00 and 23:00 each protected a whole block of the night in perpetuity.
     recheck_quiet_max_departures: int = 1
+    # And how long to wait during the hours this car departs in most. The
+    # mirror of the quiet interval, and the more important half: measured over
+    # 22 trips, every blind departure head had suppressed minutes at its start
+    # and every trip with none had no blind head — 37.3 blind km against 63.4
+    # suppressed minutes, an implied 35 km/h. The back-off arms when every car
+    # is quiet and runs to completion, so a departure inside the window is
+    # unseen until it expires. That window IS the blind head, and here it is
+    # bought back where the departures actually are.
+    sleep_recheck_busy_min: float = 5.0
+    # An hour counts as busy at this multiple of the flat 24-hour average.
+    # Two picks out the commute peaks without dragging in the long tail of
+    # ordinary daytime hours: on this car, 6 hours holding 65% of departures.
+    recheck_busy_multiple: float = 2.0
     # How long to stop calling Tesla at all while every car is asleep or
     # offline and nothing is open. list_vehicles() runs on every /api/sync
     # whether or not anything can have changed, and a sleeping car cannot

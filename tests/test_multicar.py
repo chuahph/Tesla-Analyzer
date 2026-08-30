@@ -3490,6 +3490,18 @@ def test_recheck_plan_only_calls_an_hour_quiet_if_the_next_one_is_too():
             assert 2 not in strict["quiet_hours"] and 3 not in strict["quiet_hours"]
             assert strict["departures_at_risk"] == 0
 
+            # The busy half of the same fit: hours at twice the flat average
+            # carry the departures whose blind heads the back-off creates, and
+            # tightening them is what the saving is spent on. Both sides of
+            # the decision come back in one reading because they are one
+            # decision.
+            assert set(strict["busy_hours"]) == {7, 18}
+            assert strict["departures_covered"] == 60
+            assert strict["cost_per_day"] > 0
+            assert strict["net_per_day"] == (strict["cost_per_day"]
+                                             - strict["saving_per_day"])
+            assert all(h["busy"] is (h["hour"] in (7, 18)) for h in strict["hours"])
+
             weighed = client.get("/api/recheck-plan?wide_min=40&max_departures=1").json()
             assert {2, 3} <= set(weighed["quiet_hours"])
             assert weighed["saving_per_day"] > strict["saving_per_day"]
@@ -3637,6 +3649,10 @@ def test_the_recheck_runs_wide_only_in_hours_this_car_never_leaves_in():
             state.put(s, state.QUIET_HOURS_KEY, "")
             v = s.scalars(sa_select(Vehicle)).first()
             base = now_local().replace(minute=0, second=0, microsecond=0)
+
+            def at(h, m, sec=0):
+                return base.replace(hour=h, minute=m, second=sec)
+
             for i in range(40):
                 for hour in (7, 18):
                     t = (base - timedelta(days=i + 1)).replace(hour=hour, minute=5)
@@ -3644,30 +3660,54 @@ def test_the_recheck_runs_wide_only_in_hours_this_car_never_leaves_in():
                                 duration_min=30.0))
             s.commit()
 
-            hours = routes._quiet_hours_now(s)
+            hours, busy = routes._recheck_hours_now(s)
             # Never the commute, never the hour feeding into it.
             assert 7 not in hours and 6 not in hours
             assert 18 not in hours and 17 not in hours
             assert 2 in hours
+            # And the commute hours are where the polling gets TIGHTER — the
+            # back-off window is the blind head, so it is bought back exactly
+            # where the departures are.
+            assert busy == [7, 18]
 
             # Fitted once, then cached — the routine changes over weeks, and
             # this runs inside a loop that ticks once a minute.
             s.execute(Drive.__table__.delete())
             s.commit()
-            assert routes._quiet_hours_now(s) == hours
+            assert routes._recheck_hours_now(s) == (hours, busy)
+
+            # Wide in a dead hour, tight in a commute one, ordinary between.
+            assert routes._recheck_interval_min(s, at(2, 0)) == 40.0
+            assert routes._recheck_interval_min(s, at(7, 0)) == 5.0
+            # Hour 17 is neither: no departure of its own, but the hour after
+            # it is the evening peak, so the quiet rule's look-ahead excludes
+            # it and the busy rule has no reason to include it.
+            assert routes._recheck_interval_min(s, at(17, 0)) == 10.0
+            # A window armed at 06:58 under the ordinary rule would run to
+            # 07:08 and blind the first eight minutes of the busiest hour of
+            # the morning. Clamped to the boundary instead — one extra
+            # recheck, rather than a whole hour widened or tightened to cover
+            # for the last few minutes of another.
+            assert routes._recheck_interval_min(s, at(6, 58)) == 2.0
+            assert routes._recheck_interval_min(s, at(6, 0)) == 10.0
+            # Never below a minute: the cron ticks about that often, so a
+            # shorter window buys nothing.
+            assert routes._recheck_interval_min(s, at(6, 59, 30)) == 1.0
 
             # Too thin a history is not evidence of a quiet hour. "Never
             # happened here" and "not yet" look identical, and acting on the
             # second widens the blind window for nothing.
             state.put(s, state.QUIET_HOURS_KEY, "")
             s.commit()
-            assert routes._quiet_hours_now(s) == []
+            assert routes._recheck_hours_now(s) == ([], [])
 
-            # A cache that cannot be read leaves the recheck alone rather
-            # than guessing — the cost of being wrong is a departure missed.
+            # A cache that cannot be read leaves the recheck flat in BOTH
+            # directions — nothing widened, nothing tightened — so a broken
+            # fit costs accuracy nowhere and money nowhere.
             state.put(s, state.QUIET_HOURS_KEY, "{not json")
             s.commit()
-            assert routes._quiet_hours_now(s) == []
+            assert routes._recheck_hours_now(s) == ([], [])
+            assert routes._recheck_interval_min(s, at(7, 0)) == 10.0
     finally:
         (settings.app_passcode, settings.sleep_recheck_min,
          settings.sleep_recheck_quiet_min) = old
