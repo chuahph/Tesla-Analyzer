@@ -5493,6 +5493,33 @@ def add_screen_reading(
     return {"added": {"kwh": kwh, "pct": pct, "implied_kwh": round(kwh / (pct / 100.0), 2)},
             "pooled": _screen_capacity(session)}
 
+@router.api_route("/drop-screen-reading", methods=["GET", "POST"])
+def drop_screen_reading(
+    all: bool = Query(False),
+    session: Session = Depends(get_session),
+):
+    """Remove the newest screen reading, or all of them.
+
+    These set the capacity constant outright, so a wrong one is not noise to
+    be averaged away — it has to be removable. And a wrong one is easy to
+    make: the Park tab shows a "% consumed" too, and pairing that with the
+    Since Charge kWh gives a plausible-looking number that means nothing.
+    Neither the entry clamp nor the pooling can catch that, because the result
+    is still the right size for a pack.
+    """
+    import json as _json
+
+    try:
+        rows = _json.loads(state.get(session, state.SCREEN_CAPACITY_KEY) or "[]")
+    except ValueError:
+        rows = []
+    if not rows:
+        return {"dropped": None, "pooled": _screen_capacity(session)}
+    dropped = rows if all else [rows[-1]]
+    state.put(session, state.SCREEN_CAPACITY_KEY,
+              "" if all else _json.dumps(rows[:-1]))
+    return {"dropped": dropped, "pooled": _screen_capacity(session)}
+
 @router.get("/capacity-evidence")
 def capacity_evidence(
     min_swing_pct: float = Query(15.0, ge=1.0, le=90.0),

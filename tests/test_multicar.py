@@ -3901,6 +3901,26 @@ def test_capacity_evidence_takes_the_pack_reading_from_the_car_not_from_itself()
             assert "same panel" in bad.json()["detail"]
             assert client.get("/api/capacity-evidence").json()[
                 "screen_side"]["readings"] == 3
+
+            # A wrong reading has to be removable. It sets the constant
+            # outright, so it is not noise to be averaged away — and the
+            # easiest mistake to make passes every check there is: the Park
+            # tab shows a "% consumed" too, and pairing that with the Since
+            # Charge kWh gives a number the right size for a pack.
+            gone = client.post("/api/drop-screen-reading").json()
+            assert gone["dropped"][0]["kwh"] == 21.1
+            assert gone["pooled"]["readings"] == 2
+            # And with the newest gone the constant falls back, because two
+            # readings no longer clear the precision floor.
+            assert "screen readings" not in client.get(
+                "/api/capacity-evidence").json()["in_use"]["source"]
+
+            cleared = client.post("/api/drop-screen-reading?all=true").json()
+            assert len(cleared["dropped"]) == 2
+            assert cleared["pooled"]["readings"] == 0
+            # Dropping from nothing is not an error, so a repeated tap on a
+            # phone cannot fail confusingly.
+            assert client.post("/api/drop-screen-reading").json()["dropped"] is None
     finally:
         settings.app_passcode = old
         _reset_to_demo()
