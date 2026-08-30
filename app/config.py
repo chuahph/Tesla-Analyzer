@@ -73,9 +73,16 @@ class Settings(BaseSettings):
     # bought back where the departures actually are.
     sleep_recheck_busy_min: float = 5.0
     # An hour counts as busy at this multiple of the flat 24-hour average.
-    # Two picks out the commute peaks without dragging in the long tail of
-    # ordinary daytime hours: on this car, 6 hours holding 65% of departures.
-    recheck_busy_multiple: float = 2.0
+    # High enough to pick out the commute peaks, low enough not to drag in the
+    # long tail of ordinary daytime hours.
+    #
+    # Chosen off a plateau rather than a cliff. On this car's 229 departures
+    # the hourly counts run 31, 25, 24, 24, 22, 19 and then fall away to 13, so
+    # anything from 1.5 to 1.8 selects the same six hours — while 2.0 puts the
+    # threshold at 19.08 and drops a 19-departure evening peak by less than one
+    # trip. A rule that changes its mind over a rounding error is not measuring
+    # anything.
+    recheck_busy_multiple: float = 1.75
     # How long to stop calling Tesla at all while every car is asleep or
     # offline and nothing is open. list_vehicles() runs on every /api/sync
     # whether or not anything can have changed, and a sleeping car cannot

@@ -6812,6 +6812,13 @@ def recheck_plan(
         "hours": [
             {"hour": h, "departures": by_hour[h],
              "recheck_per_day": round(asleep_hour[h] / logged_days, 1) if logged_days else None,
+             # What that observed rate implies the hour is ACTUALLY being
+             # polled at, which is the only way to tell a change that shipped
+             # from one that shipped and did nothing. A quiet hour reading 1.5
+             # rechecks an hour is running at forty minutes; one still reading
+             # 6 is running at ten, whatever the settings say.
+             "implied_interval_min": (round(60.0 / (asleep_hour[h] / logged_days), 1)
+                                      if logged_days and asleep_hour[h] else None),
              "quiet": h in quiet, "busy": h in busy}
             for h in range(24)
         ],
@@ -6833,6 +6840,15 @@ def recheck_plan(
         # A quiet hour is only as trustworthy as the history behind it. Too
         # few departures and "never happened here" just means "not yet".
         "in_effect": settings.sleep_recheck_quiet_min,
+        # saving_per_day and cost_per_day are measured against the rates the
+        # log OBSERVED, so once a change is live they stop describing it and
+        # start describing whatever is left. A quiet hour already running at
+        # forty minutes has almost nothing further to give, and its shrinking
+        # saving is the change working rather than failing — read
+        # implied_interval_min for that, not these two.
+        "measured_from": "observed rates in the log window, so these are what "
+                         "a FURTHER change would be worth, not what an "
+                         "already-live one has banked",
         "note": ("Too few departures logged to call any hour quiet — widen "
                  "``days`` or wait for more history."
                  if len(starts) < QUIET_HOURS_MIN_DEPARTURES else None),

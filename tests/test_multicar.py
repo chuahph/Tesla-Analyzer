@@ -3501,6 +3501,15 @@ def test_recheck_plan_only_calls_an_hour_quiet_if_the_next_one_is_too():
             assert strict["net_per_day"] == (strict["cost_per_day"]
                                              - strict["saving_per_day"])
             assert all(h["busy"] is (h["hour"] in (7, 18)) for h in strict["hours"])
+            # What each hour is ACTUALLY being polled at, from the observed
+            # rate — the only way to tell a change that shipped from one that
+            # shipped and did nothing. Six rechecks an hour is ten minutes.
+            assert all(h["implied_interval_min"] == pytest.approx(10.0, abs=0.2)
+                       for h in strict["hours"])
+            # And the warning that goes with it: these two are measured from
+            # what the log saw, so once a change is live they describe what is
+            # LEFT, not what it banked.
+            assert "already-live" in strict["measured_from"]
 
             weighed = client.get("/api/recheck-plan?wide_min=40&max_departures=1").json()
             assert {2, 3} <= set(weighed["quiet_hours"])
