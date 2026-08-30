@@ -6847,14 +6847,29 @@ def polling_coverage(session: Session = Depends(get_session)):
         })
 
     dur = totals["duration"]
+    blind_km = sum(r["blind_km"] for r in rows)
+    backoff_min = totals["backoff"]
     verdict = None
     if dur:
-        watched = totals["read"] / dur
-        if watched >= 0.9:
+        # Rank the three ways a driving minute goes unread, because they have
+        # nothing in common but the symptom. The first version of this
+        # compared only asleep against unlogged and never looked at backoff at
+        # all — which on the first real data pointed at the cron while the
+        # app's own sleep window was the largest cause by a wide margin.
+        worst = max(("backoff", backoff_min), ("unlogged", totals["unlogged"]),
+                    ("asleep", totals["asleep"]), key=lambda x: x[1])[0]
+        if totals["read"] / dur >= 0.9:
             verdict = ("Drives are being watched nearly minute by minute. The "
                        "blind stretches are at the EDGES — before a departure "
                        "is noticed and after an arrival — not inside the drive.")
-        elif totals["asleep"] > totals["unlogged"]:
+        elif worst == "backoff":
+            verdict = ("The sleep back-off suppressed polling while the car "
+                       "was already driving. It arms when every car is quiet "
+                       "and then runs to completion, so a departure inside "
+                       "that window is unseen until it expires — this app's "
+                       "own doing, and the direct cause of the blind heads. "
+                       "The interval is settings.sleep_recheck_min.")
+        elif worst == "asleep":
             verdict = ("Much of the driving happens while the car reports "
                        "itself unreachable. Polling harder cannot fix that — "
                        "the reads would fail — and it is the ceiling on how "
@@ -6871,6 +6886,14 @@ def polling_coverage(session: Session = Depends(get_session)):
         "minutes_by_outcome": {o: round(totals[o], 1) for o in outcomes},
         "minutes_unlogged": round(totals["unlogged"], 1),
         "watched_pct": round(totals["read"] / dur * 100.0, 1) if dur else None,
+        "blind_km": round(blind_km, 2),
+        # The test of whether the back-off is merely correlated with the blind
+        # heads or is actually driving them. Every blind kilometre divided by
+        # every suppressed minute: land near a road speed and the two are the
+        # same event seen from either end, since a suppressed minute can only
+        # produce blind distance at whatever speed the car was doing.
+        "blind_kmh_implied": (round(blind_km / (backoff_min / 60.0), 1)
+                              if backoff_min else None),
         "verdict": verdict,
         "note": None if rows else
                 "No trip falls entirely inside the log's window yet — the log "

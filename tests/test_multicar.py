@@ -3740,8 +3740,32 @@ def test_polling_coverage_says_where_a_trip_s_unwatched_minutes_went():
             assert body["drive_minutes"] == 70.0
             assert body["minutes_by_outcome"]["asleep"] == 20.0
             assert body["watched_pct"] == pytest.approx(71.4, abs=0.1)
-            # Unreachable outweighs silence, so the ceiling is the car.
+            # Unreachable outweighs both silence and the back-off, so the
+            # ceiling is the car and no amount of polling moves it.
             assert "cannot fix that" in body["verdict"]
+
+            # The back-off suppressing polls WHILE THE CAR DROVE is a third
+            # cause, and the one the first version of this could not name — it
+            # weighed only asleep against unlogged, so on real data it pointed
+            # at the cron while the app's own sleep window was the largest
+            # cause by a wide margin. Measured: 63.4 suppressed minutes
+            # against 37.3 blind kilometres across 22 trips.
+            with SessionLocal() as s:
+                state.put(s, state.SYNC_LOG_KEY, _json.dumps([
+                    {"o": "read", "n": 60, "a": ep(8, 0), "b": ep(9, 30)},
+                    {"o": "backoff", "n": 20, "a": ep(11, 0), "b": ep(11, 20)},
+                    {"o": "read", "n": 20, "a": ep(11, 20), "b": ep(11, 40)},
+                ]))
+                s.commit()
+            held = client.get("/api/polling-coverage").json()
+            assert "sleep back-off" in held["verdict"]
+            assert "sleep_recheck_min" in held["verdict"]
+            # Blind distance over suppressed time. Landing near a road speed
+            # is what separates the two being the same event from the two
+            # merely coinciding: a suppressed minute can only turn into blind
+            # distance at whatever speed the car was actually doing.
+            assert held["blind_km"] == 3.2
+            assert held["blind_kmh_implied"] == pytest.approx(9.6, abs=0.1)
 
             # A hole no tick wrote is the opposite diagnosis and must not be
             # folded in with the car being unreachable.
