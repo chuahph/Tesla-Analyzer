@@ -3878,8 +3878,95 @@ def test_capacity_evidence_takes_the_pack_reading_from_the_car_not_from_itself()
             # neither figure is.
             agree = client.get("/api/capacity-evidence").json()["energy_basis_agreement"]
             assert "NOT a capacity measurement" in agree["means"]
+
+            # Two readings are 39.9 points, under the floor, so they inform
+            # nothing yet — the floor is on POINTS rather than on a count of
+            # readings because points are what set the precision.
+            assert "screen readings" not in client.get(
+                "/api/capacity-evidence").json()["in_use"]["source"]
+
+            # A third crosses it, and the screen then outranks every other
+            # estimate: it is the discharge itself, measured by a pack model
+            # that owes nothing to ours, and an order of magnitude sharper
+            # than the charge median.
+            client.post("/api/add-screen-reading?kwh=21.1&pct=30.9")
+            in_use = client.get("/api/capacity-evidence").json()["in_use"]
+            assert in_use["source"] == "measured from 3 screen readings"
+            assert in_use["kwh"] == pytest.approx(68.36, abs=0.02)
+
+            # A transposed decimal must not become the constant every kWh and
+            # every ringgit is scaled by. Refused at entry, not averaged in.
+            bad = client.post("/api/add-screen-reading?kwh=89&pct=13.1")
+            assert bad.status_code == 422
+            assert "same panel" in bad.json()["detail"]
+            assert client.get("/api/capacity-evidence").json()[
+                "screen_side"]["readings"] == 3
     finally:
         settings.app_passcode = old
+        _reset_to_demo()
+
+def test_a_stale_screen_reading_hands_back_to_the_estimate_that_keeps_measuring():
+    """Screen readings lead because they are precise, not because they are
+    screen readings.
+
+    A pack's usable capacity moves over years, so the age bar is generous —
+    but not unbounded. A figure nobody refreshes should eventually give way to
+    the charge side, which keeps measuring itself, rather than pin the car to
+    a number from a different year. An unreadable timestamp counts as stale
+    for the same reason: handing back costs precision, trusting a date that
+    cannot be parsed costs correctness."""
+    import json as _json
+
+    from app import state
+    from app.api import routes
+    from app.sync import now_local
+
+    settings = get_settings()
+    old = settings.app_passcode
+    settings.app_passcode = ""
+    try:
+        with TestClient(app) as client:
+            def put(rows):
+                with SessionLocal() as s:
+                    state.put(s, state.SCREEN_CAPACITY_KEY, _json.dumps(rows))
+                    s.commit()
+
+            fresh = (now_local() - timedelta(days=10)).isoformat(timespec="minutes")
+            rows = [{"kwh": 40.0, "pct": 58.0, "at": fresh},
+                    {"kwh": 20.0, "pct": 29.0, "at": fresh}]
+            put(rows)
+            assert "screen readings" in client.get(
+                "/api/capacity-evidence").json()["in_use"]["source"]
+
+            # Past the age bar it steps aside, without the readings being
+            # deleted — they are still reported as evidence, just no longer
+            # leading.
+            stale = (now_local() - timedelta(
+                days=routes.SCREEN_CAPACITY_MAX_AGE_DAYS + 1)).isoformat(timespec="minutes")
+            put([{**r, "at": stale} for r in rows])
+            body = client.get("/api/capacity-evidence").json()
+            assert "screen readings" not in body["in_use"]["source"]
+            assert body["screen_side"]["readings"] == 2
+
+            # A timestamp that cannot be read is stale, not fresh.
+            put([{**r, "at": "not a date"} for r in rows])
+            assert "screen readings" not in client.get(
+                "/api/capacity-evidence").json()["in_use"]["source"]
+
+            # And a pooled figure that is not a pack at all never leads,
+            # however precise it claims to be. The entry check catches this
+            # for anything typed in, but rows can reach the store from an
+            # older build or by hand, and this is the only bar available when
+            # the variant has no spec to compare against.
+            put([{"kwh": 20.0, "pct": 58.0, "at": fresh},
+                 {"kwh": 10.0, "pct": 29.0, "at": fresh}])
+            assert "screen readings" not in client.get(
+                "/api/capacity-evidence").json()["in_use"]["source"]
+    finally:
+        settings.app_passcode = old
+        with SessionLocal() as s:
+            state.put(s, state.SCREEN_CAPACITY_KEY, "")
+            s.commit()
         _reset_to_demo()
 
 def test_repair_split_trip_cuts_one_row_into_the_two_journeys_it_was():

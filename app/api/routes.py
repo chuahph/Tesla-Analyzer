@@ -580,6 +580,19 @@ MEASURED_CAPACITY_MIN_CHARGES = 4
 # treated as a bad reading rather than a small pack. Degradation of more than
 # a fifth would be a warranty case, not a calibration.
 MEASURED_CAPACITY_MAX_DRIFT = 0.20
+# Pooled SoC points needed before the car's own screen readings outrank every
+# other estimate. Both screen figures are rounded to a tenth, so the pooled
+# precision is 0.05/points — fifty points is already 0.1%, an order of
+# magnitude sharper than the charge side can manage, and this car reached 70.8
+# on three readings. The precision is the reason to prefer it, and the reason
+# there has to be a floor: one reading of a few points is worse than the
+# median it would displace.
+SCREEN_CAPACITY_MIN_POINTS = 50.0
+# And how stale the newest reading may be. A pack's usable capacity moves over
+# years, so this is generous — but not unbounded, because a figure that stops
+# being refreshed should eventually hand back to the estimate that keeps
+# measuring itself rather than pin the car to a number from a different year.
+SCREEN_CAPACITY_MAX_AGE_DAYS = 120.0
 
 
 def _measured_capacity(session: Session, vehicle: Vehicle) -> tuple[float | None, int]:
@@ -616,6 +629,23 @@ def _measured_capacity(session: Session, vehicle: Vehicle) -> tuple[float | None
     return round(percentile(sorted(vals), 0.5), 1), len(vals)
 
 
+def _screen_reading_fresh(screen: dict[str, Any]) -> bool:
+    """Whether the newest screen reading is recent enough to lead.
+
+    Unparseable counts as stale. The fallbacks below it keep measuring
+    themselves, so handing back to them costs precision; trusting a timestamp
+    that cannot be read costs correctness.
+    """
+    latest = screen.get("latest")
+    if not latest:
+        return False
+    try:
+        when = datetime.fromisoformat(latest)
+    except (TypeError, ValueError):
+        return False
+    return (sync_mod.now_local() - when).days <= SCREEN_CAPACITY_MAX_AGE_DAYS
+
+
 def _usable_capacity(session: Session, vehicle: Vehicle, settings) -> tuple[float, str]:
     """Usable pack capacity (kWh) for turning a drive's range/SoC delta into
     kWh, plus where it came from.
@@ -649,6 +679,26 @@ def _usable_capacity(session: Session, vehicle: Vehicle, settings) -> tuple[floa
     # something, and within MEASURED_CAPACITY_MAX_DRIFT of spec so a run of bad
     # rows cannot walk the constant away from physical sense. Below either bar
     # it falls through to exactly what it did before.
+    # The car's own energy screen outranks even that. Every other estimate
+    # here reaches the pack through the charge side and an efficiency
+    # constant; this one is the discharge itself, measured by a pack model
+    # that owes nothing to ours, and pooled it is an order of magnitude
+    # sharper than the charge median — 0.07% against 1.4% on this car. Gated
+    # on total SoC points rather than on a count of readings, because that is
+    # what sets the precision, and clamped against spec like every other
+    # figure so a mistyped panel cannot walk the constant away.
+    screen = _screen_capacity(session)
+    if (screen.get("kwh")
+            and (screen.get("soc_points") or 0) >= SCREEN_CAPACITY_MIN_POINTS
+            and _screen_reading_fresh(screen)
+            # Plausible as a pack at all, which is the only check available
+            # when the variant has no spec to compare against — and rows can
+            # reach the store without passing the entry check, from an older
+            # build or by hand.
+            and 45.0 <= screen["kwh"] <= 95.0
+            and (not spec
+                 or abs(screen["kwh"] - spec) <= spec * MEASURED_CAPACITY_MAX_DRIFT)):
+        return screen["kwh"], f"measured from {screen['readings']} screen readings"
     measured, samples = _measured_capacity(session, vehicle)
     if measured and (not spec or abs(measured - spec) <= spec * MEASURED_CAPACITY_MAX_DRIFT):
         return measured, f"measured from {samples} charges"
@@ -5419,6 +5469,17 @@ def add_screen_reading(
     """
     import json as _json
 
+    # Refuse a reading that cannot describe this pack before it is stored, not
+    # after. These readings now OUTRANK every other capacity estimate, so a
+    # transposed decimal — 89 for 8.9 — would not merely add noise, it would
+    # become the constant every kWh and every ringgit is scaled by. Same clamp
+    # the charge side uses on a single session.
+    implied = kwh / (pct / 100.0)
+    if not 45.0 <= implied <= 95.0:
+        raise HTTPException(
+            422, f"{kwh} kWh over {pct}% implies a {implied:.1f} kWh pack, which "
+                 f"is outside anything this could be — check the two figures "
+                 f"came from the same panel.")
     try:
         rows = _json.loads(state.get(session, state.SCREEN_CAPACITY_KEY) or "[]")
     except ValueError:
