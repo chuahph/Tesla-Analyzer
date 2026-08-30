@@ -1554,12 +1554,22 @@ def close_charge_on_sleep(open_charge: dict, last_snapshot: dict, capacity_kwh: 
 # At 0.95 this car's measured pack came out 67.9 against a screen saying
 # 68.67, an over-correction of 1.1%; at 0.96 it lands on 68.6.
 #
-# DC is still left unadjusted and that is now known to be slightly wrong. The
-# one wide Supercharger session on record implies 70.86 against the same
-# screen median — about 3% of loss the pack never received. One sample is not
-# a constant, and the median over sessions keeps it from moving the answer,
-# so it is recorded here rather than fitted. Revisit with three wide DC
-# sessions.
+# DC WAS left unadjusted, on one wide Supercharger session implying 70.86
+# against the same screen median, with a note to revisit at three. Three
+# arrived, and they say the split was never real:
+#
+#   the six highest-precision sessions on record (1.2-1.8%), raw, are
+#   71.28 AC, 71.00 AC, 70.86 DC, 71.50 AC, 71.59 DC, 71.82 AC
+#
+# AC and DC interleave completely, mean 71.34, and against a pooled screen
+# figure of 68.36 over 70.8 SoC points that is a factor of 0.958 — this same
+# constant, for both. So it is no longer AC-specific.
+#
+# What made DC look different was its MEDIAN, 70.33 against AC's 71.14. DC's
+# two best sessions are also its two highest, so the median of five sits below
+# them while AC's sits among its own. Sorting by precision rather than taking
+# a median over mixed precisions is the whole difference between a 2.9% type
+# split and no split at all.
 # Briefly suspected of being 0.95. Eight of the car's own drive screens were
 # implying a usable pack of 67.7 kWh against the 68.4 measured from charges,
 # and 0.95 in place of 0.96 would have closed that to 0.01 kWh — which looked
@@ -1570,7 +1580,10 @@ def close_charge_on_sleep(open_charge: dict, last_snapshot: dict, capacity_kwh: 
 # compounding it trip by trip) puts the car's own figure at 67.97 against our
 # 68.4 — 0.6%, where the whole-percent rounding alone is worth +/-1.7%. The
 # gap was the small-percentage trips being read one at a time.
-AC_CHARGE_EFFICIENCY = 0.96
+CHARGE_EFFICIENCY = 0.96
+# Was AC_CHARGE_EFFICIENCY while it applied to one charge type. Kept as a name
+# so an old reference cannot silently read as 1.0.
+AC_CHARGE_EFFICIENCY = CHARGE_EFFICIENCY
 
 
 def implied_capacity_kwh(charge: dict) -> float | None:
@@ -1589,8 +1602,11 @@ def implied_capacity_kwh(charge: dict) -> float | None:
     if gain < 15 or energy <= 0:
         return None
     cap = energy / (gain / 100.0)
-    if charge.get("charge_type") != "DC":
-        cap *= AC_CHARGE_EFFICIENCY
+    # Every charge type, not just AC. See CHARGE_EFFICIENCY: on the six
+    # highest-precision sessions this car has recorded, AC and DC interleave
+    # with no separation at all, and the apparent split that once justified
+    # exempting DC was an artifact of taking a median over mixed precisions.
+    cap *= CHARGE_EFFICIENCY
     return round(cap, 1) if 45.0 <= cap <= 95.0 else None
 
 

@@ -604,7 +604,7 @@ def _measured_capacity(session: Session, vehicle: Vehicle) -> tuple[float | None
             continue
         cap = c.energy_added_kwh / (gain / 100.0)
         if (c.charge_type or "AC") != "DC":
-            cap *= sync_mod.AC_CHARGE_EFFICIENCY
+            cap *= sync_mod.CHARGE_EFFICIENCY
         if 45.0 <= cap <= 95.0:
             vals.append(cap)
     if len(vals) < MEASURED_CAPACITY_MIN_CHARGES:
@@ -5473,12 +5473,13 @@ def capacity_evidence(
         if swing <= 0 or not c.energy_added_kwh:
             continue
         implied = c.energy_added_kwh / (swing / 100.0)
-        # A charger reports what went IN; the AC efficiency correction is what
-        # reached the pack. sync.capacity_from_charge has always applied this,
-        # and reporting the uncorrected figure here made the evidence disagree
-        # with the estimator it is evidence for.
-        if (c.charge_type or "AC") != "DC":
-            implied *= sync_mod.AC_CHARGE_EFFICIENCY
+        # A charger reports what went IN; the efficiency correction is what
+        # reached the pack. sync.implied_capacity_kwh applies this, and
+        # reporting the uncorrected figure here made the evidence disagree
+        # with the estimator it is evidence for. Applied to every charge type
+        # since the split between them turned out not to exist — see
+        # sync.CHARGE_EFFICIENCY.
+        implied *= sync_mod.CHARGE_EFFICIENCY
         # One SoC point at each end, so the swing is +/-1 point in total.
         precision = 1.0 / swing * 100.0
         rows.append({
@@ -5519,9 +5520,11 @@ def capacity_evidence(
         # never reached the pack, so this reads HIGH by exactly that much —
         # which matters, because the constant it is being compared against is
         # already suspected of reading high.
-        "caveat": (f"AC sessions carry the {sync_mod.AC_CHARGE_EFFICIENCY} "
-                   f"efficiency correction, same as sync.capacity_from_charge, "
-                   f"so these are pack-side figures rather than charger-side."),
+        "caveat": (f"Every session carries the {sync_mod.CHARGE_EFFICIENCY} "
+                   f"efficiency correction, same as sync.implied_capacity_kwh, "
+                   f"so these are pack-side figures rather than charger-side. "
+                   f"Check them against screen_side, which is the only "
+                   f"reading here that does not pass through it."),
         "screen_side": _screen_capacity(session),
         "energy_basis_agreement": _energy_basis_agreement(session, vehicle),
         # The charge-side figures split by how the car was plugged in. They

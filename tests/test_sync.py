@@ -1449,22 +1449,25 @@ def test_gap_fallback_plain_drive_and_charge_unaffected_without_meter():
 
 
 def test_implied_capacity_from_measured_charge():
-    from app.sync import AC_CHARGE_EFFICIENCY, implied_capacity_kwh
+    from app.sync import CHARGE_EFFICIENCY, implied_capacity_kwh
 
-    # Tesla measured 18.5 kWh for a 55->80% (25%) charge on a Supercharger
-    # (DC, no onboard-charger conversion loss) => 74 kWh usable, unadjusted.
+    # Tesla measured 18.5 kWh for a 55->80% (25%) charge => 74 kWh of energy
+    # delivered per 100%, before any of it is lost getting back out.
     c = {"energy_measured": True, "start_soc": 55, "end_soc": 80,
          "energy_added_kwh": 18.5, "charge_type": "DC"}
-    assert implied_capacity_kwh(c) == 74.0
-    # The identical session on AC (home/destination) loses ~5% to the
-    # onboard charger's AC->DC conversion, so the raw energy_added figure
-    # overstates what actually reached the pack — corrected down.
+    assert implied_capacity_kwh(c) == round(74.0 * CHARGE_EFFICIENCY, 1)
+    # The identical session on AC lands identically. It did not always: DC was
+    # exempt from the correction until this car had enough wide Supercharger
+    # sessions to check, and its six highest-precision charges then turned out
+    # to interleave AC and DC with no separation at all. Charge type stops
+    # changing the answer here, and a regression that reintroduced the split
+    # would show up as these two disagreeing.
     ac = {**c, "charge_type": "AC"}
-    assert implied_capacity_kwh(ac) == round(74.0 * AC_CHARGE_EFFICIENCY, 1)
-    # Charge type missing (legacy data) is treated as AC (the common case,
-    # and the safer assumption — DC should always be tagged explicitly).
+    assert implied_capacity_kwh(ac) == implied_capacity_kwh(c)
+    # Charge type missing (legacy data) lands there too, which is now true by
+    # construction rather than by defaulting to the commoner case.
     assert implied_capacity_kwh({k: v for k, v in c.items() if k != "charge_type"}) == \
-        round(74.0 * AC_CHARGE_EFFICIENCY, 1)
+        implied_capacity_kwh(c)
     # SoC-estimate charges are ignored (calibrating from them is circular).
     assert implied_capacity_kwh({**c, "energy_measured": False}) is None
     # Small gains are too quantised to trust.
