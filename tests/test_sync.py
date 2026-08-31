@@ -3055,3 +3055,30 @@ def test_a_departure_is_never_back_dated_into_the_charge_before_it():
     _, _, held, _ = process_snapshot(
         rolling, cur, None, None, 68.4, 0.5, last_charge_end_ts=charge_end)
     assert held["ts"] == charge_end
+
+    # The SoC has to move with the clock. The anchor supplies both, so a trip
+    # opened on a mid-charge snapshot otherwise starts from a mid-charge state
+    # of charge and reports only the fraction of its own energy that fell
+    # after that point. Measured, drive 489: 3.38 kWh recorded against a
+    # baseline of about 83.9% where the charge had ended at 87 — roughly 2.1
+    # kWh missing, and recurring on every departure soon after a charge.
+    mid = {**rolling, "soc": 83.9, "range_km": 380.0}
+    _, _, drifted, _ = process_snapshot(mid, cur, None, None, 68.4, 0.5)
+    assert drifted["soc"] == 83.9
+    _, _, corrected, _ = process_snapshot(
+        mid, cur, None, None, 68.4, 0.5,
+        last_charge_end_ts=charge_end, last_charge_end_soc=87.0)
+    assert corrected["soc"] == 87.0
+    # Range scaled by the same ratio, never left behind: _energy_kwh projects
+    # the full pack from the range/SoC PAIR, so correcting one alone hands it
+    # a mismatched pair — a worse reading than either gives on its own.
+    assert corrected["range_km"] == pytest.approx(380.0 * 87.0 / 83.9, abs=0.01)
+
+    # An anchor that already sits after the charge is left entirely alone,
+    # SoC included — the floor exists to correct the impossible, not to
+    # overwrite a good baseline with the charge's.
+    fine = {**rolling, "ts": charge_end + 60, "soc": 86.5}
+    _, _, untouched, _ = process_snapshot(
+        fine, cur, None, None, 68.4, 0.5,
+        last_charge_end_ts=charge_end, last_charge_end_soc=87.0)
+    assert untouched["soc"] == 86.5 and untouched["ts"] == charge_end + 60

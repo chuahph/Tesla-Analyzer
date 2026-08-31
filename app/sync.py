@@ -1770,6 +1770,7 @@ def process_snapshot(
     departure_pace_kmh: float | None = None,
     parked_rate_kw: float | None = None,
     last_charge_end_ts: float | None = None,
+    last_charge_end_soc: float | None = None,
 ) -> tuple[list[dict], list[dict], dict | None, dict | None]:
     """Advance the session state machine by one snapshot.
 
@@ -2062,8 +2063,31 @@ def process_snapshot(
         # selects trips from the charge's end, so the one trip that charge paid
         # for was the one trip it excluded. It read as a missing trip rather
         # than a misplaced one, which is why it took a boundary dump to find.
-        open_trip["ts"] = max(open_trip["ts"],
-                              _charge_floor(last_charge_end_ts, cur["ts"]))
+        # And the SoC has to move with the clock. The anchor supplies BOTH, so
+        # a trip that opened on a mid-charge snapshot starts from a mid-charge
+        # state of charge — it measures from partway up the charge instead of
+        # from its end, and reports only the fraction of its own energy that
+        # happened to fall after that point.
+        #
+        # Measured, drive 489: recorded 3.38 kWh, which at 68.4 kWh a pack is
+        # 4.94 SoC points, against a charge that ended at 87% and a car sitting
+        # at 79% an hour later. The baseline was about 83.9% — where the pack
+        # was at 13:41, twenty-seven minutes into a 50-to-87% charge. Roughly
+        # 2.1 kWh and RM 2.30 missing from one trip, and it would recur on
+        # every departure shortly after a charge.
+        #
+        # Range is scaled by the same ratio rather than left alone or dropped.
+        # _energy_kwh projects the full pack from the range/SoC PAIR, so
+        # correcting one and not the other hands it a mismatched pair — which
+        # is a worse reading than either would give on its own.
+        floor_ts = _charge_floor(last_charge_end_ts, cur["ts"])
+        if floor_ts and open_trip["ts"] < floor_ts:
+            open_trip["ts"] = floor_ts
+            anchor_soc = open_trip.get("soc")
+            if last_charge_end_soc and anchor_soc:
+                if open_trip.get("range_km"):
+                    open_trip["range_km"] *= last_charge_end_soc / anchor_soc
+                open_trip["soc"] = last_charge_end_soc
         # Odometer movement that happened BEFORE this trip's anchor and is
         # therefore not counted in its distance — the symmetric counterpart to
         # tail_trim_sec at the other end. Zero when anchored at prev (nothing
