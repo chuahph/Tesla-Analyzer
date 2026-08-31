@@ -444,6 +444,18 @@ def _place_tail_km(session: Session, place: str) -> float | None:
     """
     if not place:
         return None
+    # A figure this place has been TOLD outranks the fit, because the fit
+    # cannot see what it is missing. It medians the tails a poll happened to
+    # catch, and a tail goes unmeasured precisely when the signal died before
+    # the car stopped — so the long ones leave no sample at all. Measured
+    # against the car's own trip meter at Home: 0.585 km and 0.4 km, against a
+    # fitted 0.275. Nothing in the sample set was wrong; the sample set was
+    # the wrong sample set.
+    told = session.scalars(
+        select(Place).where(func.lower(Place.name) == place.strip().lower())
+    ).first()
+    if told is not None and (told.arrival_tail_km or 0) > 0:
+        return round(told.arrival_tail_km, 3)
     vals = sorted(
         v for v in (_sample_place(session, s) == place and s.measured_km or None
                     for s in session.scalars(select(ArrivalTailSample)).all())
@@ -1685,6 +1697,47 @@ def set_departure_pace(
         "applies_to": "future departures only — already-logged trips keep their times",
     }
 
+
+@router.get("/set-arrival-tail")
+def set_arrival_tail(place: str, km: float,
+                     session: Session = Depends(get_session)):
+    """Record how far this car drives past its last poll, arriving HERE.
+
+    The app medians the tails a poll happened to catch at a place. That set is
+    missing exactly the cases it most needs: a tail goes unmeasured when the
+    signal dies before the car stops, which is what a long tail IS. So the fit
+    is drawn from the short ones and reads low.
+
+    Where to get the number: the car's own trip meter against the app's. Two
+    ways it shows up, and they are the same quantity seen from either side —
+    the arriving trip reads SHORT by it, or, if nothing corrects the anchor,
+    the next departure from here reads LONG by it. Measured at Home: 0.585 km
+    short on trip 457, 0.4 km long on trip 487, against a fitted 0.275.
+
+    Affects the estimated arrival distance at this place, and therefore that
+    trip's Wh/km. 0 goes back to the fitted median. A GET so it runs from the
+    address bar.
+    """
+    row = session.scalars(
+        select(Place).where(func.lower(Place.name) == place.strip().lower())
+    ).first()
+    if row is None:
+        known = [p.name for p in session.scalars(select(Place).order_by(Place.name))]
+        raise HTTPException(404, f"No place named {place!r}. Known places: {known}")
+    # Past ARRIVAL_EST_MAX_KM this stops being an arrival tail and starts being
+    # a drive nobody logged — the same bar the estimator itself refuses at, so
+    # a told value cannot walk around it.
+    if km and not 0.0 < km <= sync_mod.ARRIVAL_EST_MAX_KM:
+        raise HTTPException(
+            422, f"{km} km is past ARRIVAL_EST_MAX_KM "
+                 f"({sync_mod.ARRIVAL_EST_MAX_KM}) — that is a drive nobody "
+                 f"logged rather than the last stretch of one.")
+    was, row.arrival_tail_km = row.arrival_tail_km or 0.0, km
+    session.commit()
+    return {"place": row.name, "arrival_tail_km": km, "was": was,
+            "fitted_km": _place_tail_km(session, row.name) if not km else None,
+            "note": ("Back to the fitted median." if not km else
+                     "Overrides the fitted median for arrivals here.")}
 
 @router.get("/set-parked-draw")
 def set_parked_draw(place: str, watts: float,

@@ -457,6 +457,18 @@ class Place(Base):
     # the causes broken out. Read it across one park, divide by the hours, and
     # set that here (see /api/set-parked-draw).
     parked_draw_w: Mapped[float] = mapped_column(Float, default=0.0)
+    # How far the car drives past the last poll that can see it, arriving HERE,
+    # in km. 0 = use the median of what this place has measured.
+    #
+    # The fitted median only sees tails a poll happened to CATCH. The ones it
+    # misses entirely are invisible to it, and those are the long ones — the
+    # whole reason a tail goes unmeasured is that the signal died before the
+    # car stopped. Measured against the car's own trip meter at Home: 0.585 km
+    # short on trip 457, 0.4 km handed to the next departure on trip 487,
+    # against a fitted estimate of 0.275. Both above it, neither visible to
+    # the fit, because a tail nobody watched leaves no sample to take a median
+    # over.
+    arrival_tail_km: Mapped[float] = mapped_column(Float, default=0.0)
 
 
 class ServiceRecord(Base):

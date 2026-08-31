@@ -3989,6 +3989,70 @@ def test_a_stale_screen_reading_hands_back_to_the_estimate_that_keeps_measuring(
             s.commit()
         _reset_to_demo()
 
+def test_a_place_can_be_told_the_arrival_tail_its_own_samples_cannot_see():
+    """The fitted median is drawn from the tails a poll happened to CATCH, and
+    a tail goes unmeasured precisely when the signal died before the car
+    stopped — which is what a long tail is. So the sample set is missing the
+    cases it most needs, and reads low.
+
+    Measured against the car's own trip meter at Home: trip 457 arrived 0.585
+    km short, and trip 487 then departed 0.4 km long because nothing had
+    corrected the anchor — the same quantity seen from either side. Against a
+    fitted 0.275. Nothing in the sample set was wrong; the sample set was the
+    wrong sample set."""
+    from sqlalchemy import select as sa_select
+
+    from app.api import routes
+    from app.models import ArrivalTailSample, Place
+    from app.sync import ARRIVAL_EST_MAX_KM, now_local
+
+    settings = get_settings()
+    old = settings.app_passcode
+    settings.app_passcode = ""
+    try:
+        with TestClient(app) as client:
+            with SessionLocal() as s:
+                s.execute(ArrivalTailSample.__table__.delete())
+                s.execute(Place.__table__.delete())
+                s.add(Place(name="Home", lat=5.343, lon=100.311, radius_km=0.15,
+                            created_at=now_local()))
+                vid = s.scalars(sa_select(Vehicle)).first().id
+                s.commit()
+                # Two short tails: the only ones a poll ever caught.
+                for km in (0.25, 0.30):
+                    s.add(ArrivalTailSample(vehicle_id=vid, place="Home",
+                                            measured_km=km, ts=now_local()))
+                s.commit()
+                assert routes._place_tail_km(s, "Home") == pytest.approx(0.275)
+
+            told = client.get("/api/set-arrival-tail?place=Home&km=0.5").json()
+            assert told["arrival_tail_km"] == 0.5 and told["was"] == 0.0
+            with SessionLocal() as s:
+                # The told figure outranks the fit, and the samples are still
+                # there — the fit was not wrong about what it saw.
+                assert routes._place_tail_km(s, "Home") == 0.5
+                assert len(s.scalars(sa_select(ArrivalTailSample)).all()) == 2
+
+            # Zero hands back to the median rather than meaning "no tail".
+            back = client.get("/api/set-arrival-tail?place=Home&km=0").json()
+            assert back["fitted_km"] == pytest.approx(0.275)
+            with SessionLocal() as s:
+                assert routes._place_tail_km(s, "Home") == pytest.approx(0.275)
+
+            # Past the estimator's own cap this stops being an arrival tail and
+            # becomes a drive nobody logged, so a told value cannot walk around
+            # the bar the estimator refuses at.
+            over = client.get(
+                f"/api/set-arrival-tail?place=Home&km={ARRIVAL_EST_MAX_KM + 0.1}")
+            assert over.status_code == 422
+            assert "drive nobody logged" in over.json()["detail"]
+
+            missing = client.get("/api/set-arrival-tail?place=Nowhere&km=0.4")
+            assert missing.status_code == 404
+    finally:
+        settings.app_passcode = old
+        _reset_to_demo()
+
 def test_repair_split_trip_cuts_one_row_into_the_two_journeys_it_was():
     """A departure recovery reaching across a long blind gap can swallow a
     whole separate drive, the stop after it, and the start of the next one.
