@@ -658,6 +658,23 @@ def _screen_reading_fresh(screen: dict[str, Any]) -> bool:
     return (sync_mod.now_local() - when).days <= SCREEN_CAPACITY_MAX_AGE_DAYS
 
 
+def _last_charge_end_ts(session: Session, vehicle_id: int) -> float | None:
+    """When this car most recently finished charging, as an epoch.
+
+    Used as a floor on a recovered departure. A plugged-in car is not driving,
+    so however far back the blind gap reaches, the trip after a charge began
+    after that charge ended — and nothing else in process_snapshot knows this:
+    its ``prev`` is simply the last snapshot, which can perfectly well be one
+    taken mid-charge.
+    """
+    row = session.scalars(
+        select(Charge).where(Charge.vehicle_id == vehicle_id)
+        .order_by(Charge.end_time.desc()).limit(1)).first()
+    if row is None or row.end_time is None:
+        return None
+    return row.end_time.replace(tzinfo=sync_mod.MYT).timestamp()
+
+
 def _usable_capacity(session: Session, vehicle: Vehicle, settings) -> tuple[float, str]:
     """Usable pack capacity (kWh) for turning a drive's range/SoC delta into
     kWh, plus where it came from.
@@ -2428,6 +2445,9 @@ def _process_vehicle(
         last_quiet_ts=float(state.get(session, state.QUIET_SEEN_KEY) or 0) or None,
         departure_pace_kmh=place_pace,
         parked_rate_kw=parked_rate,
+        # So a departure recovered across a blind gap cannot be back-dated
+        # into the charge that preceded it — see the floor in process_snapshot.
+        last_charge_end_ts=_last_charge_end_ts(session, vehicle.id),
     )
     drives = recovered + drives  # include a drive recovered from the upgrade gap
     # A trimmed tail is time the car spent parked, so its standby draw is not

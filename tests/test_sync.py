@@ -2990,3 +2990,68 @@ def test_every_place_that_corrects_a_charge_uses_the_same_rule():
             assert '"DC"' not in code and "'DC'" not in code, (
                 f"{name}: charge type still gates the efficiency correction "
                 f"near offset {match.start()}")
+
+
+def test_a_departure_is_never_back_dated_into_the_charge_before_it():
+    """A plugged-in car is not driving.
+
+    The recovered start is floored at prev's timestamp, and prev alone does
+    not stop this: prev is simply the last snapshot, which can be one taken
+    mid-charge. Measured, drive 489 — a charge ran 13:14-13:44 and the trip
+    after it was recorded starting at 13:41. Three impossible minutes, and
+    they cost the whole row: the dashboard's since-charge window selects
+    trips from the charge's end, so the one trip that charge paid for was the
+    one trip it excluded."""
+    from app.sync import process_snapshot
+
+    charge_end = 1_760_500_000.0
+    # Last poll landed three minutes before the charge finished, then a six
+    # minute blind gap, then the car is found already moving at speed.
+    prev = {"ts": charge_end - 180, "odo_km": 30819.5, "soc": 85.0,
+            "range_km": 385.0, "speed_kmh": 0.0, "shift_state": "P",
+            "lat": 5.40, "lon": 100.40, "charging": False}
+    # Five km already covered by the time the car is first seen moving, which
+    # at the departure pace floor back-dates the start well past the charge.
+    cur = {"ts": charge_end + 360, "odo_km": 30824.5, "soc": 87.0,
+           "range_km": 394.0, "speed_kmh": 60.0, "shift_state": "D",
+           "lat": 5.41, "lon": 100.41, "charging": False}
+
+    _, _, open_trip, _ = process_snapshot(
+        prev, cur, None, None, 68.4, 0.5, last_charge_end_ts=charge_end)
+    assert open_trip is not None
+    # Never before the charge ended, and never after the reading that caught
+    # the car moving.
+    assert open_trip["ts"] >= charge_end
+    assert open_trip["ts"] <= cur["ts"]
+
+    # Without the floor the same gap back-dates into the charge, which is the
+    # bug this exists to stop — asserted so a regression cannot pass by the
+    # floor simply never being reached.
+    _, _, unfloored, _ = process_snapshot(
+        prev, cur, None, None, 68.4, 0.5)
+    assert unfloored is not None
+    assert unfloored["ts"] < charge_end
+
+    # And the floor never pushes a start FORWARD past where the trip really
+    # began: a charge that ended long ago constrains nothing.
+    _, _, later, _ = process_snapshot(
+        prev, cur, None, None, 68.4, 0.5, last_charge_end_ts=charge_end - 86400)
+    assert later["ts"] == unfloored["ts"]
+
+    # Nor does one that has not finished yet. A stale or future figure pushing
+    # a start forward would be a different error in the same place.
+    _, _, ahead, _ = process_snapshot(
+        prev, cur, None, None, 68.4, 0.5, last_charge_end_ts=cur["ts"] + 600)
+    assert ahead["ts"] == unfloored["ts"]
+
+    # The shape drive 489 actually had: prev not seen parked, so the trip
+    # anchors on prev directly and the clock shift never runs. This is the path
+    # that produced the impossible timestamp, and the one a floor applied only
+    # to the shift estimate would have missed entirely.
+    rolling = {**prev, "speed_kmh": 30.0, "shift_state": "D"}
+    _, _, anchored, _ = process_snapshot(
+        rolling, cur, None, None, 68.4, 0.5)
+    assert anchored["ts"] < charge_end
+    _, _, held, _ = process_snapshot(
+        rolling, cur, None, None, 68.4, 0.5, last_charge_end_ts=charge_end)
+    assert held["ts"] == charge_end

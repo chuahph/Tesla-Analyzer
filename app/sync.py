@@ -1744,6 +1744,18 @@ def _split_gap_events(prev: dict, cur: dict, capacity_kwh: float, price_per_kwh:
     return charge, drive
 
 
+def _charge_floor(last_charge_end_ts: float | None, now_ts: float) -> float:
+    """The earliest a trip may have started, given the charge before it.
+
+    Zero when there is no charge to bound it, or when that charge ended after
+    the reading in hand — a stale or future figure must not push a start
+    FORWARD, which would be a different error in the same place.
+    """
+    if not last_charge_end_ts or last_charge_end_ts > now_ts:
+        return 0.0
+    return last_charge_end_ts
+
+
 def process_snapshot(
     prev: dict | None,
     cur: dict,
@@ -1757,6 +1769,7 @@ def process_snapshot(
     last_quiet_ts: float | None = None,
     departure_pace_kmh: float | None = None,
     parked_rate_kw: float | None = None,
+    last_charge_end_ts: float | None = None,
 ) -> tuple[list[dict], list[dict], dict | None, dict | None]:
     """Advance the session state machine by one snapshot.
 
@@ -2035,6 +2048,22 @@ def process_snapshot(
             was_parked = True
         base = cur if was_parked else (prev or cur)
         open_trip = _open_trip_at(base, cur, prev)
+        # A car that is plugged in is not driving, so a trip cannot begin
+        # before the charge before it ended. The anchor is where this has to be
+        # said: base is prev whenever the car was not seen parked, and prev is
+        # simply the last snapshot — which can perfectly well be one taken
+        # mid-charge. The clock shift further down overrides this timestamp
+        # only when it is worth at least a minute, so most trips keep the
+        # anchor's own value and never reach that code at all.
+        #
+        # Measured, drive 489: a charge ran 13:14-13:44 and the trip after it
+        # opened anchored at a 13:41 snapshot. Three impossible minutes, and
+        # they cost the entire row — the dashboard's since-charge window
+        # selects trips from the charge's end, so the one trip that charge paid
+        # for was the one trip it excluded. It read as a missing trip rather
+        # than a misplaced one, which is why it took a boundary dump to find.
+        open_trip["ts"] = max(open_trip["ts"],
+                              _charge_floor(last_charge_end_ts, cur["ts"]))
         # Odometer movement that happened BEFORE this trip's anchor and is
         # therefore not counted in its distance — the symmetric counterpart to
         # tail_trim_sec at the other end. Zero when anchored at prev (nothing
@@ -2387,7 +2416,25 @@ def process_snapshot(
                 if recovered_start or not was_parked:
                     if shift_sec >= 60:
                         est_start = cur["ts"] - shift_sec
-                        open_trip["ts"] = min(max(est_start, prev["ts"]), cur["ts"])
+                        # A car that is plugged in is not driving, so a
+                        # departure cannot be back-dated into the charge before
+                        # it. prev alone does not stop that: prev is the last
+                        # snapshot, and the last snapshot can be one taken
+                        # mid-charge.
+                        #
+                        # Measured, drive 489: a charge ran 13:14-13:44 and the
+                        # trip after it was recorded starting at 13:41. Three
+                        # impossible minutes, and they cost the whole row —
+                        # the dashboard's since-charge window selects trips
+                        # from the charge's end, so the one trip that charge
+                        # paid for was the one trip it excluded.
+                        # Floored at the charge end for the same reason the
+                        # anchor is (see _charge_floor): the estimate can reach
+                        # back past it just as easily.
+                        open_trip["ts"] = min(
+                            max(est_start, prev["ts"],
+                                _charge_floor(last_charge_end_ts, cur["ts"])),
+                            cur["ts"])
     elif prev and split_drive:
         # A charge and a drive both happened in this gap — see
         # _split_gap_events for why the plain whole-gap drive reconstruction
