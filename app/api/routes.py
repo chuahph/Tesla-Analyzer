@@ -5485,13 +5485,34 @@ def _screen_capacity(session: Session) -> dict[str, Any]:
         return {"kwh": None, "readings": 0,
                 "how": "Add one with /api/add-screen-reading?kwh=&pct= from the "
                        "car's Energy screen, Since Last Charge."}
+    each = sorted(float(r["kwh"]) / (float(r["pct"]) / 100.0)
+                  for r in rows if float(r.get("pct") or 0) > 0)
+    pooled = kwh / (pct / 100.0)
+    # How far the readings disagree with EACH OTHER, which is the uncertainty
+    # that actually matters and is not the same thing as how finely the screen
+    # rounds. Reported because the rounding figure alone read 0.05% on four
+    # readings that spanned 1.6% between them — thirty times its own claim —
+    # and it was the number used to argue this side was sharper than the
+    # charge side. It is not sharper by anything like that margin; its case is
+    # that it is the only reading here that does not pass through this app's
+    # own efficiency constant.
+    spread = (each[-1] - each[0]) / pooled * 100.0 if len(each) > 1 else None
+    stderr = None
+    if len(each) > 1:
+        mean = sum(each) / len(each)
+        var = sum((v - mean) ** 2 for v in each) / (len(each) - 1)
+        stderr = (var ** 0.5) / (len(each) ** 0.5) / mean * 100.0
     return {
-        "kwh": round(kwh / (pct / 100.0), 2),
+        "kwh": round(pooled, 2),
         "readings": len(rows),
         "soc_points": round(pct, 1),
-        # Both figures on the screen are rounded to a tenth, and the
-        # percentage is the one that matters at these magnitudes.
-        "precision_pct": round(0.05 / pct * 100.0, 2),
+        # What the SCREEN's own rounding allows — a floor on the error, never
+        # the whole of it.
+        "rounding_pct": round(0.05 / pct * 100.0, 2),
+        # What the readings themselves say. Trust this one.
+        "spread_pct": round(spread, 2) if spread is not None else None,
+        "stderr_pct": round(stderr, 2) if stderr is not None else None,
+        "each_kwh": [round(v, 2) for v in each],
         "latest": rows[-1].get("at") if rows else None,
     }
 

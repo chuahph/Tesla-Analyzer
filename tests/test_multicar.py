@@ -3870,6 +3870,12 @@ def test_capacity_evidence_takes_the_pack_reading_from_the_car_not_from_itself()
             pooled = body["pooled"]
             assert pooled["readings"] == 2 and pooled["soc_points"] == 39.9
             assert pooled["kwh"] == pytest.approx(68.42, abs=0.01)
+            # Two figures: what the screen's rounding allows, and what the
+            # readings themselves say. The first is a floor on the error and
+            # was for a while reported as though it were the whole of it —
+            # 0.05% on four readings that spanned 1.6% between them.
+            assert pooled["rounding_pct"] < pooled["spread_pct"]
+            assert pooled["each_kwh"] == [67.94, 68.66]
             assert client.get("/api/capacity-evidence").json()["screen_side"] == pooled
 
             # The same pooling over this app's own trips is reported too, but
