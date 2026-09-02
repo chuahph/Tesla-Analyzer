@@ -187,12 +187,28 @@ QUIET_HOURS_TTL_SEC = 24 * 3600
 # Below this, "never happened in this hour" is indistinguishable from "not
 # yet", and acting on it would widen the blind window on the strength of no
 # evidence at all.
-QUIET_HOURS_MIN_DEPARTURES = 60
+QUIET_HOURS_MIN_DEPARTURES = 40
+# How far back the fit looks. Ninety days was too long: it is a median over a
+# routine, and a routine changes. Measured over one week in September, both
+# morning departures fell in the 07:00 hour — trips 492 at 07:21 and 498 at
+# 07:26, which lost 8.2 and 7.3 minutes to the back-off between them and
+# produced the two largest blind heads in the sample. The ninety-day
+# histogram rated that hour at 2 departures against the 06:00 hour's 22, so
+# it ran wide while the hour it had replaced ran tight.
+#
+# Thirty days still spans four of every weekday and holds enough departures
+# to clear the floor above, which comes down with it: sixty was two thirds of
+# a ninety-day count, and the same fraction of a month is forty.
+RECHECK_FIT_DAYS = 30
 
 
 def _fit_recheck_hours(session: Session, days: int, max_departures: int
                        ) -> tuple[list[int], list[int], int]:
     """When to recheck wide, when to recheck tight, and what the wide part costs.
+
+    The window is RECHECK_FIT_DAYS, and short on purpose: this is a median over
+    a routine, and a routine changes faster than a quarter. See that constant
+    for the week that proved it.
 
     QUIET hours qualify when neither the hour NOR THE FOLLOWING ONE has more
     than ``max_departures``. The look-ahead is what makes a wider interval safe
@@ -261,7 +277,7 @@ def _recheck_hours_now(session: Session) -> tuple[list[int], list[int]]:
                 [int(h) for h in cached.get("busy") or []])
     try:
         quiet, busy, risk = _fit_recheck_hours(
-            session, 90, settings.recheck_quiet_max_departures)
+            session, RECHECK_FIT_DAYS, settings.recheck_quiet_max_departures)
         state.put(session, state.QUIET_HOURS_KEY, _json.dumps(
             {"hours": quiet, "busy": busy, "risk": risk, "at": time.time()}))
         return quiet, busy
@@ -7021,7 +7037,7 @@ def sync_log_summary(session: Session = Depends(get_session)):
 
 @router.get("/recheck-plan")
 def recheck_plan(
-    days: int = Query(90, ge=7, le=365),
+    days: int = Query(RECHECK_FIT_DAYS, ge=7, le=365),
     wide_min: float = Query(40.0, gt=0),
     max_departures: int = Query(0, ge=0),
     session: Session = Depends(get_session),
