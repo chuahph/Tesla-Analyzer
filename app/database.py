@@ -104,6 +104,7 @@ def init_db() -> None:
     _ensure_column("drives", "end_coords", "VARCHAR(40)", "''")
     _ensure_column("drives", "tag", "VARCHAR(20)", "''")
     _ensure_column("drives", "cost_override", "FLOAT", "NULL")
+    _ensure_column("drives", "energy_estimated", "BOOLEAN", "FALSE")
     _ensure_column("drives", "tail_trim_sec", "FLOAT", "NULL")
     _ensure_column("drives", "start_lost_km", "FLOAT", "NULL")
     _ensure_column("drives", "end_lost_km", "FLOAT", "NULL")

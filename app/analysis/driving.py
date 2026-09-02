@@ -897,6 +897,13 @@ def _data_quality(d: Drive) -> str:
     """
     if not has_valid_energy(d):
         return "incomplete"
+    # A priced trip is never "measured", whatever the rest of it looks like.
+    # This is the one case the checks below cannot see: distance, duration and
+    # the idle record can all be perfect on a trip whose battery reading never
+    # arrived, so without the flag a figure this app invented would present
+    # itself as one the car reported.
+    if getattr(d, "energy_estimated", False):
+        return "estimated"
     distance = getattr(d, "distance_km", 0.0) or 0.0
     inferred = ((getattr(d, "start_recovered_km", None) or 0.0)
                 + (getattr(d, "end_est_km", None) or 0.0))

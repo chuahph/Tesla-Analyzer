@@ -4066,6 +4066,82 @@ def test_a_place_can_be_told_the_arrival_tail_its_own_samples_cannot_see():
         settings.app_passcode = old
         _reset_to_demo()
 
+def test_a_trip_with_no_energy_is_priced_and_flagged_rather_than_left_out():
+    """A trip whose battery reading never arrived carries no energy and so no
+    cost. That is the honest thing to store and the wrong thing to total: the
+    trip is real, fuel was spent on it, and it silently leaves every monthly
+    figure it belongs in. Measured on this car, six of them.
+
+    The flag matters more than the number. Distance, duration and the idle
+    record can all be perfect on a trip whose energy was never read, so
+    nothing else distinguishes a figure this app invented from one the car
+    reported — and a priced trip must never feed the rate that prices the
+    next one."""
+    from sqlalchemy import select as sa_select
+
+    from app.analysis import driving as driving_analysis
+    from app.models import Drive
+    from app.sync import now_local
+
+    settings = get_settings()
+    old = settings.app_passcode
+    settings.app_passcode = ""
+    try:
+        with TestClient(app) as client:
+            with SessionLocal() as s:
+                s.execute(Drive.__table__.delete())
+                v = s.scalars(sa_select(Vehicle)).first()
+                now = now_local()
+                # Twenty-five clean trips at a flat 150 Wh/km, plus one that
+                # never got an energy reading at all.
+                for i in range(25):
+                    t = now - timedelta(days=i + 1)
+                    s.add(Drive(vehicle_id=v.id, start_time=t,
+                                end_time=t + timedelta(minutes=30),
+                                distance_km=20.0, duration_min=30.0,
+                                energy_used_kwh=3.0, start_soc=80.0,
+                                end_soc=75.6, idle_tracked=True,
+                                start_recovered_km=0.0,
+                                start_location="Home", end_location="Office"))
+                s.add(Drive(vehicle_id=v.id, start_time=now - timedelta(hours=2),
+                            end_time=now - timedelta(hours=1),
+                            distance_km=10.0, duration_min=20.0,
+                            energy_used_kwh=0.0, start_soc=70.0, end_soc=70.0,
+                            idle_tracked=True, start_recovered_km=0.0,
+                            start_location="Home", end_location="Zen6"))
+                s.commit()
+
+            plan = client.get("/api/repair-missing-energy").json()
+            assert plan["rate_wh_per_km"] == 150 and plan["measured_trips"] == 25
+            assert plan["priced"] == 1
+            assert plan["trips"][0]["energy_kwh"] == pytest.approx(1.5, abs=0.01)
+            assert "Dry run" in plan["note"]
+            # A dry run writes nothing.
+            with SessionLocal() as s:
+                stuck = s.scalars(sa_select(Drive).where(
+                    Drive.end_location == "Zen6")).first()
+                assert not stuck.energy_used_kwh
+
+            done = client.post("/api/repair-missing-energy?apply=1").json()
+            assert done["priced"] == 1 and done["kwh_restored"] == 1.5
+            with SessionLocal() as s:
+                fixed = s.scalars(sa_select(Drive).where(
+                    Drive.end_location == "Zen6")).first()
+                assert fixed.energy_used_kwh == pytest.approx(1.5, abs=0.01)
+                # Never "measured" again, however good the rest of the row is
+                # — this trip has a clean distance, duration and idle record.
+                assert fixed.energy_estimated is True
+                assert driving_analysis._data_quality(fixed) == "estimated"
+
+            # And it cannot feed the rate next time, which is what keeps a
+            # priced figure from breeding more of itself.
+            again = client.get("/api/repair-missing-energy").json()
+            assert again["measured_trips"] == 25 and again["priced"] == 0
+            assert "already has energy" in again["note"]
+    finally:
+        settings.app_passcode = old
+        _reset_to_demo()
+
 def test_repair_split_trip_cuts_one_row_into_the_two_journeys_it_was():
     """A departure recovery reaching across a long blind gap can swallow a
     whole separate drive, the stop after it, and the start of the next one.

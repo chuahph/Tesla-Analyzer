@@ -5636,6 +5636,105 @@ def drop_screen_reading(
               "" if all else _json.dumps(rows[:-1]))
     return {"dropped": dropped, "pooled": _screen_capacity(session)}
 
+# Measured trips needed before this car's own Wh/km is used to price one that
+# has none. A rate is what is being borrowed, and a rate over a handful of
+# trips is whatever those trips happened to be — a motorway run and a car park
+# crawl differ by more than threefold.
+PRICED_ENERGY_MIN_SAMPLES = 20
+
+
+@router.api_route("/repair-missing-energy", methods=["GET", "POST"])
+def repair_missing_energy(
+    days: int = Query(90, ge=1, le=3650),
+    apply: bool = Query(False),
+    session: Session = Depends(get_session),
+):
+    """Give a trip that has no energy the cost it plainly had.
+
+    A trip whose battery reading never arrived — or arrived implying an
+    impossible Wh/km — carries no energy, and therefore no cost. That is the
+    honest thing to store and the wrong thing to total: the trip is real,
+    fuel was spent on it, and it silently leaves every monthly figure it
+    belongs in. Measured on this car: six such trips, including two that were
+    more than half reclaimed across a blackout and four whose SoC reading
+    could not describe the distance driven.
+
+    Priced at the median Wh/km of this car's own MEASURED trips, which is the
+    same thing energy_for_blind_distance already does for the unseen head of a
+    trip — this simply does it for a trip whose whole energy is unseen rather
+    than part of it. Median rather than mean, and over measured trips only, so
+    a previously priced trip can never feed the rate that prices the next one.
+
+    Every repaired trip is flagged energy_estimated, which keeps it out of
+    "measured" for good (see driving._data_quality). The flag matters more
+    than the number: distance, duration and the idle record can all be perfect
+    on a trip whose energy was never read, so nothing else distinguishes a
+    figure this app invented from one the car reported.
+
+    Dry run by default.
+    """
+    vehicle = _first_vehicle(session)
+    since = sync_mod.now_local() - timedelta(days=days)
+    drives = session.scalars(
+        select(Drive).where(Drive.vehicle_id == vehicle.id,
+                            Drive.start_time >= since)
+        .order_by(Drive.start_time)).all()
+
+    rates = sorted(
+        d.energy_used_kwh * 1000.0 / d.distance_km
+        for d in drives
+        if d.distance_km and d.energy_used_kwh
+        and driving_analysis._data_quality(d) == "measured"
+    )
+    if len(rates) < PRICED_ENERGY_MIN_SAMPLES:
+        return {"days": days, "priced": 0, "rate_wh_per_km": None,
+                "note": (f"Only {len(rates)} measured trips in this window — "
+                         f"too few to borrow a rate from. Widen ``days``.")}
+    rate = percentile(rates, 0.5)
+
+    planned, skipped = [], []
+    for d in drives:
+        if not d.distance_km or d.distance_km <= 0:
+            continue
+        if d.energy_used_kwh:
+            continue
+        kwh = round(rate * d.distance_km / 1000.0, 2)
+        # A priced figure still has to be a possible one. The rate is this
+        # car's own median, so the only way out of range is a distance that
+        # was itself wrong — and inventing energy on top of a bad distance
+        # would bury the distance problem under a plausible-looking cost.
+        if not (sync_mod.MIN_PLAUSIBLE_WH_PER_KM
+                <= kwh * 1000.0 / d.distance_km
+                <= sync_mod.MAX_PLAUSIBLE_WH_PER_KM):
+            skipped.append({"drive_id": d.id, "why": "priced energy is itself implausible"})
+            continue
+        planned.append({
+            "drive_id": d.id,
+            "route": f"{d.start_location} → {d.end_location}",
+            "start": d.start_time.isoformat(timespec="minutes"),
+            "distance_km": round(d.distance_km, 2),
+            "energy_kwh": kwh,
+        })
+        if apply:
+            d.energy_used_kwh = kwh
+            d.energy_estimated = True
+    if apply and planned:
+        session.commit()
+
+    return {
+        "days": days,
+        "applied": apply,
+        "rate_wh_per_km": round(rate),
+        "measured_trips": len(rates),
+        "priced": len(planned),
+        "kwh_restored": round(sum(p["energy_kwh"] for p in planned), 2),
+        "trips": planned,
+        "skipped": skipped,
+        "note": ("Nothing to price — every trip in this window already has "
+                 "energy." if not planned and not skipped else
+                 "Dry run. Add &apply=1 to write these." if not apply else None),
+    }
+
 @router.get("/capacity-evidence")
 def capacity_evidence(
     min_swing_pct: float = Query(15.0, ge=1.0, le=90.0),

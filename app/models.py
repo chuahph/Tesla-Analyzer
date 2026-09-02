@@ -213,6 +213,15 @@ class Drive(Base):
     # it automatically"; set via /api/data/set-drive-cost, always wins over
     # the computed figure when present.
     cost_override: Mapped[float | None] = mapped_column(Float, nullable=True)
+    # This trip's energy was PRICED, not measured — see
+    # /api/repair-missing-energy. A trip whose battery reading never arrived,
+    # or arrived implying an impossible Wh/km, used to carry no energy at all
+    # and therefore no cost, which quietly removed it from every monthly total
+    # it belonged in. Pricing it puts the trip back; this flag is what stops
+    # the priced figure being mistaken afterwards for a measurement, which
+    # nothing else could tell: a trip can have a perfectly good distance,
+    # duration and idle record and still have had no usable energy reading.
+    energy_estimated: Mapped[bool] = mapped_column(Boolean, default=False)
 
     vehicle: Mapped["Vehicle"] = relationship(back_populates="drives")
 
