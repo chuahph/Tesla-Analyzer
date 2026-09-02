@@ -5906,6 +5906,8 @@ def self_check(days: int = Query(30, ge=1, le=730),
 
     actionable: list[dict] = []
     inherent: list[dict] = []
+    told_tails = {p.name.strip().lower(): (p.arrival_tail_km or 0.0)
+                  for p in session.scalars(select(Place)).all()}
 
     # 1. Ground the car was SEEN resting on that no trip claims. The one
     # finding here backed by a measurement rather than a model.
@@ -5963,9 +5965,19 @@ def self_check(days: int = Query(30, ge=1, le=730),
             inherent.append({
                 "what": "arrival distance still estimated", "drive_id": d.id,
                 "km": d.end_est_km,
+                # Where the figure came from, because the two provenances
+                # warrant different confidence and the row previously claimed
+                # the fitted one for both. A told value came from the car's own
+                # trip meter and is the better number; a fitted one is a median
+                # over the tails a poll happened to catch, which is blind to
+                # the long ones by construction (see set-arrival-tail).
                 "why": ("no poll ever saw the car parked here, so the drive "
-                        "into the bay is unobserved — the estimate is the "
-                        "median of what this place has measured"),
+                        "into the bay is unobserved — "
+                        + ("this place was TOLD its tail, so the figure is "
+                           "measured against the car's own trip meter"
+                           if (told_tails.get((d.end_location or "").strip().lower()) or 0) > 0
+                           else "the estimate is the median of what this place "
+                                "has measured")),
             })
 
     # 4. A charge whose implied pack size cannot be right invalidates every
