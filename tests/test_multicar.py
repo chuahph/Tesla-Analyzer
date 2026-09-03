@@ -4142,6 +4142,82 @@ def test_a_trip_with_no_energy_is_priced_and_flagged_rather_than_left_out():
         settings.app_passcode = old
         _reset_to_demo()
 
+def test_a_new_daily_habit_makes_an_hour_busy_before_the_month_notices():
+    """Thirty days is a steady state, and a routine can change overnight.
+
+    Measured: three consecutive weekday mornings departed in the 07:00 hour —
+    trips 492, 498 and 500 — while the thirty-day histogram still rated it at
+    2 departures against the 06:00 hour's 13, because it was counting a
+    routine that had already ended. Trip 500 came out 72% blind and 28% high
+    on Wh/km. At one departure a weekday that hour needs two to three WEEKS to
+    cross the ordinary threshold.
+
+    Distinct DAYS, not departures: three trips in one afternoon is an errand,
+    three mornings running is a habit, and only the second is worth polling
+    for."""
+    from sqlalchemy import select as sa_select
+
+    from app.api import routes
+    from app.models import Drive
+    from app.sync import now_local
+
+    settings = get_settings()
+    old = settings.app_passcode
+    settings.app_passcode = ""
+    try:
+        with TestClient(app):
+            pass
+        with SessionLocal() as s:
+            s.execute(Drive.__table__.delete())
+            v = s.scalars(sa_select(Vehicle)).first()
+            base = now_local().replace(minute=0, second=0, microsecond=0)
+
+            def add(day_offset, hour, minute=5):
+                t = (base - timedelta(days=day_offset)).replace(
+                    hour=hour, minute=minute)
+                s.add(Drive(vehicle_id=v.id, start_time=t, end_time=t,
+                            duration_min=20.0))
+
+            # A month of an 18:00 commute, enough to clear the ordinary bar
+            # and enough history for any hour to be judged at all.
+            for i in range(1, 29):
+                add(i, 18)
+            # An old 06:00 habit that stopped a fortnight ago.
+            for i in range(15, 29):
+                add(i, 6)
+            s.commit()
+            _, busy, _ = routes._fit_recheck_hours(s, routes.RECHECK_FIT_DAYS, 1)
+            assert 18 in busy and 6 in busy and 7 not in busy
+
+            # Three consecutive recent mornings at 07:00 — far short of the
+            # thirty-day threshold, and a habit all the same.
+            for i in (1, 2, 3):
+                add(i, 7)
+            s.commit()
+            _, busy, _ = routes._fit_recheck_hours(s, routes.RECHECK_FIT_DAYS, 1)
+            assert 7 in busy
+
+            # Three departures in ONE recent afternoon is an errand, and must
+            # not tighten an hour: it is days that count, not trips.
+            for minute in (5, 25, 45):
+                add(2, 14, minute)
+            s.commit()
+            _, busy, _ = routes._fit_recheck_hours(s, routes.RECHECK_FIT_DAYS, 1)
+            assert 14 not in busy
+
+            # The window has an edge, and a habit that stopped before it does
+            # not count. Three departures at 09:00, but eight to ten days back
+            # — outside RECHECK_RECENT_DAYS, and far short of the thirty-day
+            # threshold, so the hour stays wide.
+            for i in (8, 9, 10):
+                add(i, 9)
+            s.commit()
+            _, busy, _ = routes._fit_recheck_hours(s, routes.RECHECK_FIT_DAYS, 1)
+            assert 9 not in busy and 7 in busy
+    finally:
+        settings.app_passcode = old
+        _reset_to_demo()
+
 def test_repair_split_trip_cuts_one_row_into_the_two_journeys_it_was():
     """A departure recovery reaching across a long blind gap can swallow a
     whole separate drive, the stop after it, and the start of the next one.

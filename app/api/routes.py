@@ -200,6 +200,26 @@ QUIET_HOURS_MIN_DEPARTURES = 40
 # to clear the floor above, which comes down with it: sixty was two thirds of
 # a ninety-day count, and the same fraction of a month is forty.
 RECHECK_FIT_DAYS = 30
+# A second, faster way into "busy", because thirty days is still a steady
+# state and a routine can change overnight.
+#
+# Measured: three consecutive weekday mornings departed in the 07:00 hour —
+# trips 492, 498 and 500, at 07:21, 07:26 and 07:28 — while the thirty-day
+# histogram still rated that hour at 2 departures against the 06:00 hour's 13,
+# because it was counting a routine that had already ended. Trip 500 came out
+# 72% blind and 28% high on Wh/km. At one departure a weekday that hour needs
+# two to three WEEKS to cross the ordinary threshold, and every morning until
+# then costs the same.
+#
+# So an hour is also busy when it has departures on this many of the last
+# RECHECK_RECENT_DAYS days. Distinct DAYS, not departures, because the
+# question is whether something happens daily — three trips in one afternoon
+# is an errand, three mornings running is a habit. Three of seven catches the
+# habit while leaving the midday hours alone: on this car those run about two
+# days in seven each, and tightening all of them would cost ten times what
+# tightening the one that matters does.
+RECHECK_RECENT_DAYS = 7
+RECHECK_RECENT_MIN_DAYS = 3
 
 
 def _fit_recheck_hours(session: Session, days: int, max_departures: int
@@ -216,7 +236,9 @@ def _fit_recheck_hours(session: Session, days: int, max_departures: int
     reaches into 05:00, so 04:00 is only dead if 05:00 is too.
 
     BUSY hours are the ones at ``recheck_busy_multiple`` times the flat
-    24-hour average, and they are the more important half. The sleep back-off
+    24-hour average, OR with departures on RECHECK_RECENT_MIN_DAYS of the last
+    RECHECK_RECENT_DAYS days — see those constants for the three mornings that
+    made the second rule necessary. They are the more important half. The sleep back-off
     arms when every car is quiet and runs to completion — a suppressed tick
     returns before it can clear the window — so a departure inside that window
     is unseen until it expires. Measured over 22 trips: every blind head had
@@ -251,7 +273,18 @@ def _fit_recheck_hours(session: Session, days: int, max_departures: int
     quiet = [h for h in range(24)
              if by_hour[h] <= max_departures and by_hour[(h + 1) % 24] <= max_departures]
     threshold = len(starts) / 24.0 * get_settings().recheck_busy_multiple
-    busy = [h for h in range(24) if by_hour[h] >= threshold]
+    # Distinct days per hour over the recent window, which is the fast path
+    # into busy. Days rather than departures: three trips in one afternoon is
+    # an errand, three mornings running is a habit, and only the second is
+    # worth polling for.
+    recent_since = sync_mod.now_local() - timedelta(days=RECHECK_RECENT_DAYS)
+    recent_days: list[set] = [set() for _ in range(24)]
+    for ts in starts:
+        if ts is not None and ts >= recent_since:
+            recent_days[ts.hour].add(ts.date())
+    busy = [h for h in range(24)
+            if by_hour[h] >= threshold
+            or len(recent_days[h]) >= RECHECK_RECENT_MIN_DAYS]
     affected = {h for h in quiet} | {(h + 1) % 24 for h in quiet}
     return quiet, busy, sum(by_hour[h] for h in affected)
 
