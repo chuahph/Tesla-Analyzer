@@ -5852,6 +5852,8 @@ def add_car_reading(
 @router.get("/accuracy")
 def accuracy(
     target_pct: float = Query(2.0, gt=0),
+    since_charge_kwh: float | None = Query(None, gt=0),
+    since_charge_km: float | None = Query(None, gt=0),
     session: Session = Depends(get_session),
 ):
     """How far this app is from the car, decomposed, over every recorded pair.
@@ -5882,6 +5884,19 @@ def accuracy(
     of reference uncertainty before this app is even consulted. A 2% claim
     about such a trip cannot be tested, in either direction, and this reports
     where that floor sits rather than pretending the comparison is clean.
+
+    ``since_charge_kwh`` and ``since_charge_km`` add the best comparison
+    available, and the one every per-trip figure above is a noisy sample of:
+    the car's Since Charge panel against this app's own total for the same
+    window. Both sides then span tens of kilowatt-hours, so the tenth-of-a-unit
+    display that makes a single short trip untestable costs a fraction of a
+    percent here.
+
+    DRIVING ONLY on both sides. The car's Since Charge kWh excludes parked
+    consumption — that sits on its Park tab, and was 2.2% against the Drive
+    tab's 29.0% on the reading that prompted this. So the app's side sums
+    trips and leaves vampire drain out; including it would compare 31.2% of a
+    pack against 29.0% and call the difference an error.
 
     Read-only.
     """
@@ -5942,9 +5957,48 @@ def accuracy(
     # car's own rate and the length follows directly.
     rate = _mid([r["wh_per_km"] for r in rows]) / 1000.0
     per_km = abs(energy_off / rate - dist_off)
+    window = None
+    if since_charge_kwh and since_charge_km:
+        last = session.scalars(
+            select(Charge).where(Charge.vehicle_id == vehicle.id)
+            .order_by(Charge.end_time.desc()).limit(1)).first()
+        if last is None or last.end_time is None:
+            window = {"note": "No charge on record to measure a window from."}
+        else:
+            since = session.scalars(
+                select(Drive).where(Drive.vehicle_id == vehicle.id,
+                                    Drive.start_time >= last.end_time)).all()
+            app_kwh = sum(d.energy_used_kwh or 0.0 for d in since)
+            app_km = sum(d.distance_km or 0.0 for d in since)
+            window = {
+                "since": last.end_time.isoformat(timespec="minutes"),
+                "trips": len(since),
+                # Priced rather than measured trips are counted but named: they
+                # were estimated from this car's own median, so a window
+                # containing them is testing that median as much as anything.
+                "priced_trips": sum(1 for d in since
+                                    if getattr(d, "energy_estimated", False)),
+                "kwh": [round(app_kwh, 2), since_charge_kwh],
+                "km": [round(app_km, 1), since_charge_km],
+                "kwh_err_pct": (round((app_kwh - since_charge_kwh)
+                                      / since_charge_kwh * 100.0, 1)
+                                if since_charge_kwh else None),
+                "km_err_pct": (round((app_km - since_charge_km)
+                                     / since_charge_km * 100.0, 1)
+                               if since_charge_km else None),
+                "wh_per_km": [round(app_kwh * 1000.0 / app_km) if app_km else None,
+                              round(since_charge_kwh * 1000.0 / since_charge_km)],
+                # What the car's own display allows on figures this size —
+                # a fraction of what a single short trip carries.
+                "reference_floor_pct": round(0.05 / since_charge_kwh * 100.0, 2),
+                "driving_only": "Vampire drain excluded from the app's side, "
+                                "because the car's Since Charge kWh excludes "
+                                "its own Park tab.",
+            }
     return {
         "trips": len(out),
         "target_pct": target_pct,
+        "since_charge": window,
         "capacity_kwh": capacity_kwh,
         "median_distance_error_km": dist_off,
         "median_energy_error_kwh": energy_off,

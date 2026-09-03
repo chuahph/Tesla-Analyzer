@@ -4289,6 +4289,34 @@ def test_accuracy_reports_a_trip_length_because_the_errors_are_absolute():
             assert short["reference_floor_pct"] > 2.0
             assert long["reference_floor_pct"] < 2.0
 
+            # The window comparison is the one every per-trip figure above is
+            # a noisy sample of: tens of kWh on both sides, so the display
+            # rounding that makes a single short trip untestable costs a
+            # fraction of a percent here.
+            with SessionLocal() as s:
+                from app.models import Charge
+                s.execute(Charge.__table__.delete())
+                v = s.scalars(sa_select(Vehicle)).first()
+                s.add(Charge(vehicle_id=v.id,
+                             start_time=now - timedelta(days=3, hours=1),
+                             end_time=now - timedelta(days=3),
+                             duration_min=60.0, energy_added_kwh=30.0,
+                             start_soc=40.0, end_soc=84.0))
+                s.commit()
+            # The two seeded trips total 6.8 kWh over 44 km; the car says 6.7.
+            win = client.get("/api/accuracy?since_charge_kwh=6.7"
+                             "&since_charge_km=44.0").json()["since_charge"]
+            assert win["trips"] == 2 and win["priced_trips"] == 0
+            assert win["kwh"] == [pytest.approx(6.8, abs=0.01), 6.7]
+            assert win["kwh_err_pct"] == pytest.approx(1.5, abs=0.1)
+            assert win["km_err_pct"] == pytest.approx(0.0, abs=0.1)
+            # Driving only on both sides — the car's Since Charge kWh excludes
+            # its own Park tab, so including vampire drain here would compare
+            # two different quantities and call the difference an error.
+            assert "Vampire drain excluded" in win["driving_only"]
+            # And the reference is far sharper at this size than per trip.
+            assert win["reference_floor_pct"] < short["reference_floor_pct"]
+
             # Three figures that cannot have come from one drive are refused
             # before they can become evidence.
             bad = client.post(f"/api/add-car-reading?readings={ids[0]}:4.0:0.1:150")
