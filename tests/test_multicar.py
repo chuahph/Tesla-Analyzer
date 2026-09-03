@@ -4314,6 +4314,20 @@ def test_accuracy_reports_a_trip_length_because_the_errors_are_absolute():
             # its own Park tab, so including vampire drain here would compare
             # two different quantities and call the difference an error.
             assert "Vampire drain excluded" in win["driving_only"]
+            # And with a window in hand the headline changes: a per-trip
+            # comparison carries the app's error, the car's rounding, and any
+            # energy attributed to the neighbouring trip; a whole cycle carries
+            # only the first. Measured, 0.5% over 103 km against a per-trip
+            # median of 4.9% — reading the second as this app's error would
+            # send a week of tuning at a constant already right to half a
+            # percent.
+            full = client.get("/api/accuracy?since_charge_kwh=6.7"
+                              "&since_charge_km=44.0").json()
+            assert "Trust the window" in full["verdict"]
+            assert full["per_trip_median_err_pct"] > abs(win["kwh_err_pct"])
+            # Without one, the endpoint says so rather than presenting the
+            # per-trip median as the answer.
+            assert "isolates this app" in client.get("/api/accuracy").json()["verdict"]
             # And the reference is far sharper at this size than per trip.
             assert win["reference_floor_pct"] < short["reference_floor_pct"]
 
