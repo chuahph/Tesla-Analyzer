@@ -119,6 +119,7 @@ def init_db() -> None:
     _ensure_column("drives", "start_odo_km", "FLOAT", "NULL")
     _ensure_column("drives", "end_odo_km", "FLOAT", "NULL")
     _ensure_column("charges", "is_free", "BOOLEAN", "FALSE")
+    _ensure_column("charges", "billed_kwh", "FLOAT", "0.0")
     _ensure_column("charges", "implied_capacity_kwh", "FLOAT", "NULL")
     _ensure_column("charges", "capacity_samples", "INTEGER", "NULL")
     _ensure_column("charges", "price_source", "VARCHAR(10)", "''")

@@ -6042,6 +6042,71 @@ def accuracy(
         "readings": out,
     }
 
+@router.api_route("/set-charge-billed", methods=["GET", "POST"])
+def set_charge_billed(
+    charge_id: int = Query(...),
+    kwh: float = Query(..., gt=0),
+    paid: float | None = Query(None, ge=0),
+    session: Session = Depends(get_session),
+):
+    """Record what a charger's receipt said: energy delivered, and paid.
+
+    The car reports the energy that reached its pack. A charger bills what
+    left the dispenser, and the onboard conversion sits between the two — so
+    pricing the car's figure under-charges every AC session by the loss.
+    Measured, 3 Sep at Intel PG15: 17.194 kWh delivered and MYR 13.93 paid
+    against 16 kWh into the pack, a 7% under-charge on that session and on
+    every trip costed from it.
+
+    Nothing in the vehicle API sees the meter, so this cannot be fitted, only
+    told. ``paid`` is the total actually charged — after any membership
+    discount, since that is what left your account — and becomes this
+    session's cost outright.
+
+    Each receipt also measures this car's real charging efficiency for that
+    session, pack over delivered, which is reported back and pooled across
+    every receipt recorded. That is the figure an untold session's cost could
+    eventually be estimated from, and it is worth knowing before it is used:
+    the constant assumed elsewhere in this app is 0.96.
+    """
+    charge = session.get(Charge, charge_id)
+    if charge is None:
+        raise HTTPException(404, f"No charge {charge_id}.")
+    pack = charge.energy_added_kwh or 0.0
+    # A meter cannot deliver less than reached the pack, and a 60%-efficient
+    # onboard charger does not exist. Either end means the receipt and the
+    # session do not belong together.
+    if pack and not 0.60 <= pack / kwh <= 1.02:
+        raise HTTPException(
+            422, f"{kwh} kWh delivered against {pack:.2f} kWh into the pack is "
+                 f"{pack / kwh * 100:.0f}% efficient — that receipt is not this "
+                 f"session.")
+    charge.billed_kwh = kwh
+    if paid is not None:
+        charge.cost = round(paid, 2)
+        charge.is_free = paid == 0
+        charge.price_source = "receipt"
+    session.commit()
+
+    told = session.scalars(
+        select(Charge).where(Charge.billed_kwh > 0)).all()
+    effs = sorted((c.energy_added_kwh or 0.0) / c.billed_kwh
+                  for c in told if c.energy_added_kwh)
+    return {
+        "charge_id": charge_id,
+        "billed_kwh": kwh,
+        "pack_kwh": round(pack, 3),
+        "cost": charge.cost,
+        "efficiency": round(pack / kwh, 3) if pack else None,
+        "receipts": len(effs),
+        "median_efficiency": round(percentile(effs, 0.5), 3) if effs else None,
+        "assumed_elsewhere": sync_mod.CHARGE_EFFICIENCY,
+        "note": ("Cost set from the receipt. Trips drawing on this charge "
+                 "reprice automatically." if paid is not None else
+                 "Delivered energy recorded; cost unchanged. Pass &paid= to "
+                 "set what you were actually billed."),
+    }
+
 @router.get("/capacity-evidence")
 def capacity_evidence(
     min_swing_pct: float = Query(15.0, ge=1.0, le=90.0),

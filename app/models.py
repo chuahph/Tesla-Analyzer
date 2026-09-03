@@ -399,6 +399,20 @@ class Charge(Base):
     # telemetry field reliably distinguishes these from a paid AC charger, so
     # this is set by hand rather than auto-detected. Forces cost to 0.
     is_free: Mapped[bool] = mapped_column(Boolean, default=False)
+    # What the CHARGER delivered, from its receipt, in kWh. 0 = not recorded.
+    #
+    # The car reports energy that reached the pack; a charger bills what left
+    # the dispenser, and the onboard AC-DC conversion sits between them.
+    # Measured, 3 Sep at Intel PG15: the receipt says 17.194 kWh delivered
+    # and MYR 13.93 paid, against the 16 kWh the car took in. Pricing the
+    # car's figure under-charged that session by 7%, and every trip costed
+    # from it by the same.
+    #
+    # Only a receipt can close this — nothing in the vehicle API sees the
+    # meter — so it joins departure_pace_kmh, parked_draw_w and
+    # arrival_tail_km: a real quantity this app cannot measure, from an
+    # instrument that can.
+    billed_kwh: Mapped[float] = mapped_column(Float, default=0.0)
 
     # Usable pack capacity this session implies, measured from the slope of
     # energy-added against SoC across the whole charge rather than from its two

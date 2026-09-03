@@ -4344,6 +4344,75 @@ def test_accuracy_reports_a_trip_length_because_the_errors_are_absolute():
             s.commit()
         _reset_to_demo()
 
+def test_a_charge_can_be_told_what_the_meter_actually_billed():
+    """The car reports energy that reached its pack. A charger bills what left
+    the dispenser, and the onboard conversion sits between them — so pricing
+    the car's figure under-charges every AC session by the loss.
+
+    Measured, 3 Sep at Intel PG15: the receipt says 17.194 kWh delivered and
+    MYR 13.93 paid, against 16 kWh into the pack. A 7% under-charge on that
+    session and on every trip costed from it, and nothing in the vehicle API
+    can see it."""
+    from sqlalchemy import select as sa_select
+
+    from app.models import Charge
+    from app.sync import CHARGE_EFFICIENCY, now_local
+
+    settings = get_settings()
+    old = settings.app_passcode
+    settings.app_passcode = ""
+    try:
+        with TestClient(app) as client:
+            with SessionLocal() as s:
+                s.execute(Charge.__table__.delete())
+                v = s.scalars(sa_select(Vehicle)).first()
+                t = now_local() - timedelta(hours=3)
+                s.add(Charge(vehicle_id=v.id, start_time=t,
+                             end_time=t + timedelta(minutes=134),
+                             duration_min=134.0, energy_added_kwh=16.0,
+                             start_soc=53.0, end_soc=75.0, charge_type="AC",
+                             cost=12.96))
+                s.commit()
+                cid = s.scalars(sa_select(Charge)).first().id
+
+            body = client.post(f"/api/set-charge-billed?charge_id={cid}"
+                               f"&kwh=17.194&paid=13.93").json()
+            assert body["billed_kwh"] == 17.194 and body["pack_kwh"] == 16.0
+            assert body["cost"] == 13.93
+            # The receipt measures this car's real charging efficiency for the
+            # session — the thing an untold session could eventually be
+            # estimated from, and worth seeing before it is used.
+            assert body["efficiency"] == pytest.approx(0.931, abs=0.001)
+            assert body["assumed_elsewhere"] == CHARGE_EFFICIENCY
+            assert body["receipts"] == 1
+
+            with SessionLocal() as s:
+                fixed = s.scalars(sa_select(Charge)).first()
+                assert fixed.cost == 13.93 and fixed.price_source == "receipt"
+                assert fixed.billed_kwh == 17.194
+                # Pack energy is untouched: it is what the car measured, and
+                # the receipt says nothing about it.
+                assert fixed.energy_added_kwh == 16.0
+
+            # A meter cannot deliver less than reached the pack, and a
+            # 60%-efficient onboard charger does not exist — either end means
+            # the receipt and the session are not the same event.
+            for bad_kwh in (15.0, 40.0):
+                bad = client.post(f"/api/set-charge-billed?charge_id={cid}&kwh={bad_kwh}")
+                assert bad.status_code == 422
+                assert "not this session" in bad.json()["detail"]
+
+            # Delivered energy alone is recordable without touching cost —
+            # a receipt read off a meter that did not bill you.
+            keep = client.post(f"/api/set-charge-billed?charge_id={cid}&kwh=17.0").json()
+            assert keep["cost"] == 13.93 and "cost unchanged" in keep["note"]
+
+            assert client.post("/api/set-charge-billed?charge_id=999999&kwh=1"
+                               ).status_code == 404
+    finally:
+        settings.app_passcode = old
+        _reset_to_demo()
+
 def test_repair_split_trip_cuts_one_row_into_the_two_journeys_it_was():
     """A departure recovery reaching across a long blind gap can swallow a
     whole separate drive, the stop after it, and the start of the next one.
