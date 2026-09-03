@@ -727,6 +727,29 @@ def _last_charge_end(session: Session, vehicle_id: int) -> tuple[float | None, f
     return row.end_time.replace(tzinfo=sync_mod.MYT).timestamp(), row.end_soc
 
 
+def _fleet_wh_per_km(session: Session, vehicle_id: int) -> float | None:
+    """The median Wh/km of this car's own measured trips, or None.
+
+    Used where a trip is too blind to be priced from itself. Measured trips
+    only, and a median rather than a mean, for the same two reasons as
+    /api/repair-missing-energy: a priced trip must never feed the rate that
+    prices the next one, and one contaminated row must not move a figure every
+    kWh and every ringgit derives from.
+    """
+    drives = session.scalars(
+        select(Drive).where(Drive.vehicle_id == vehicle_id)
+        .order_by(Drive.start_time.desc()).limit(400)).all()
+    rates = sorted(
+        d.energy_used_kwh * 1000.0 / d.distance_km
+        for d in drives
+        if d.distance_km and d.energy_used_kwh
+        and driving_analysis._data_quality(d) == "measured"
+    )
+    if len(rates) < PRICED_ENERGY_MIN_SAMPLES:
+        return None
+    return percentile(rates, 0.5)
+
+
 def _usable_capacity(session: Session, vehicle: Vehicle, settings) -> tuple[float, str]:
     """Usable pack capacity (kWh) for turning a drive's range/SoC delta into
     kWh, plus where it came from.
@@ -2503,6 +2526,9 @@ def _process_vehicle(
         # the floor in process_snapshot.
         last_charge_end_ts=last_charge_end_ts,
         last_charge_end_soc=last_charge_end_soc,
+        # For a trip too blind to price from its own sliver — see
+        # sync.BLIND_RATE_FALLBACK_SHARE.
+        fleet_wh_per_km=_fleet_wh_per_km(session, vehicle.id),
     )
     drives = recovered + drives  # include a drive recovered from the upgrade gap
     # A trimmed tail is time the car spent parked, so its standby draw is not

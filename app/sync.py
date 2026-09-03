@@ -1004,9 +1004,30 @@ DEPARTURE_BLIND_LOAD = 1.55
 DEPARTURE_PREMIUM_MAX_KM = 1.0
 
 
+# Blind share past which the trip's OWN measured rate stops being the better
+# estimator and this car's fleet rate takes over for the unseen part.
+#
+# Holding Wh/km constant is sound while most of the trip carried a reading. It
+# stops being sound when the reading covers a sliver: the sliver is then a
+# small, biased sample of one trip rather than an estimate of it. Measured,
+# trip 500 — 2.96 km of a 4.12 km drive unseen, so the rate came from 1.16 km
+# of the slowest, most congested part and was then marked up 1.55x on top. It
+# read 207 Wh/km against the car's 161.9.
+#
+# Priced instead at the median of this car's own measured trips, the same trip
+# comes to 0.72 kWh against the car's 0.70. A median over a hundred-odd trips
+# beats a quarter of one, which is the argument that does not rest on the
+# single trip confirming it.
+#
+# No departure premium in that branch: a fleet median already contains
+# everybody's departures, so charging one again would count it twice.
+BLIND_RATE_FALLBACK_SHARE = 0.5
+
+
 def energy_for_blind_distance(energy_kwh: float, distance_km: float,
                               blind_km: float,
-                              departure_blind_km: float = 0.0) -> float:
+                              departure_blind_km: float = 0.0,
+                              fleet_wh_per_km: float | None = None) -> float:
     """Trip energy with the folded-in distance's own consumption added back.
 
     Both trip boundaries can pull odometer distance into a trip without the
@@ -1042,6 +1063,10 @@ def energy_for_blind_distance(energy_kwh: float, distance_km: float,
     if (not energy_kwh or energy_kwh <= 0 or blind_km <= 0
             or measured <= 0 or blind_km > distance_km * BLIND_DISTANCE_MAX_SHARE):
         return energy_kwh
+    # Past BLIND_RATE_FALLBACK_SHARE the trip's own rate is a sliver, not a
+    # sample — see that constant.
+    if fleet_wh_per_km and blind_km > distance_km * BLIND_RATE_FALLBACK_SHARE:
+        return energy_kwh + blind_km * fleet_wh_per_km / 1000.0
     # Only the first DEPARTURE_PREMIUM_MAX_KM of a blind departure carries the
     # premium — beyond that the opening-minutes costs it prices are over and
     # the stretch is ordinary driving (see DEPARTURE_PREMIUM_MAX_KM).
@@ -1180,9 +1205,14 @@ def _drive_from(start: dict, cur: dict, capacity_kwh: float, max_speed: float = 
     head_kmh = start.get("start_blind_kmh") or 0.0
     trip_kmh = distance / (dt_min / 60.0) if dt_min > 0 else 0.0
     crawled = not (head_kmh and trip_kmh and head_kmh >= trip_kmh)
+    # Carried on the snapshot dicts rather than through six call signatures:
+    # every path into here passes a start and a cur derived from a snapshot,
+    # and process_snapshot stamps both.
     energy = energy_for_blind_distance(
         energy, distance, blind,
         departure_blind_km=start_blind if crawled else 0.0,
+        fleet_wh_per_km=(start.get("fleet_wh_per_km")
+                         or cur.get("fleet_wh_per_km")),
     )
     # When that refuses — the blind stretch is too large a share of the trip to
     # project across (BLIND_DISTANCE_MAX_SHARE) — the distance has still been
@@ -1771,6 +1801,7 @@ def process_snapshot(
     parked_rate_kw: float | None = None,
     last_charge_end_ts: float | None = None,
     last_charge_end_soc: float | None = None,
+    fleet_wh_per_km: float | None = None,
 ) -> tuple[list[dict], list[dict], dict | None, dict | None]:
     """Advance the session state machine by one snapshot.
 
@@ -1817,6 +1848,16 @@ def process_snapshot(
     Returns (drives, charges, open_trip, open_charge) — the sessions completed
     at this snapshot plus the carried-over open sessions.
     """
+    # Stamped onto the snapshots so _drive_from can read it without six
+    # call signatures having to carry it. cur becomes the next call's prev,
+    # and every derived dict is built with {**cur} or {**prev}, so the key
+    # survives into the reconstruction paths too.
+    if fleet_wh_per_km:
+        cur["fleet_wh_per_km"] = fleet_wh_per_km
+        if prev is not None:
+            prev["fleet_wh_per_km"] = fleet_wh_per_km
+        if open_trip is not None:
+            open_trip["fleet_wh_per_km"] = fleet_wh_per_km
     drives: list[dict] = []
     charges: list[dict] = []
 

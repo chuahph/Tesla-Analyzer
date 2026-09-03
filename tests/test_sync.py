@@ -3082,3 +3082,43 @@ def test_a_departure_is_never_back_dated_into_the_charge_before_it():
         fine, cur, None, None, 68.4, 0.5,
         last_charge_end_ts=charge_end, last_charge_end_soc=87.0)
     assert untouched["soc"] == 86.5 and untouched["ts"] == charge_end + 60
+
+
+def test_a_mostly_blind_trip_is_priced_from_the_fleet_not_from_its_own_sliver():
+    """Holding Wh/km constant is sound while most of a trip carried a reading.
+    It stops being sound when the reading covers a sliver: the sliver is then a
+    small, biased sample of one trip rather than an estimate of it.
+
+    Measured, trip 500 — 2.96 km of a 4.12 km drive unseen, so the rate came
+    from 1.16 km of the slowest, most congested part and was marked up 1.55x
+    on top. It read 207 Wh/km against the car's 161.9. Priced at this car's own
+    median instead, the same trip comes to 0.72 kWh against the car's 0.70."""
+    from app.sync import BLIND_RATE_FALLBACK_SHARE, energy_for_blind_distance
+
+    # A lightly blind trip is unchanged: its own rate is still the best
+    # estimate of itself, and the departure premium still applies.
+    light = energy_for_blind_distance(4.0, 30.0, 3.0, departure_blind_km=3.0)
+    assert light == energy_for_blind_distance(
+        4.0, 30.0, 3.0, departure_blind_km=3.0, fleet_wh_per_km=173.0)
+    assert light > 4.0
+
+    # Trip 500's shape: 1.16 km measured at 0.211 kWh, 2.96 km unseen.
+    own = energy_for_blind_distance(0.211, 4.118, 2.96, departure_blind_km=2.96)
+    fleet = energy_for_blind_distance(0.211, 4.118, 2.96, departure_blind_km=2.96,
+                                      fleet_wh_per_km=173.0)
+    assert own == pytest.approx(0.85, abs=0.02)     # what it used to report
+    assert fleet == pytest.approx(0.72, abs=0.02)   # the car said 0.70
+    # And the premium is gone with it — a fleet median already contains
+    # everybody's departures, so charging one again counts it twice.
+    assert fleet == pytest.approx(
+        energy_for_blind_distance(0.211, 4.118, 2.96, departure_blind_km=0.0,
+                                  fleet_wh_per_km=173.0), abs=1e-9)
+
+    # The boundary is the share, and either side of it behaves differently.
+    just_under = 4.118 * BLIND_RATE_FALLBACK_SHARE - 0.01
+    assert (energy_for_blind_distance(0.211, 4.118, just_under, fleet_wh_per_km=173.0)
+            == energy_for_blind_distance(0.211, 4.118, just_under))
+
+    # No fleet rate yet (a young history) leaves the old behaviour exactly.
+    assert energy_for_blind_distance(0.211, 4.118, 2.96, departure_blind_km=2.96,
+                                     fleet_wh_per_km=None) == own
