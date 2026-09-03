@@ -4218,6 +4218,90 @@ def test_a_new_daily_habit_makes_an_hour_busy_before_the_month_notices():
         settings.app_passcode = old
         _reset_to_demo()
 
+def test_accuracy_reports_a_trip_length_because_the_errors_are_absolute():
+    """Battery % and Wh/km are not two accuracy questions. The trip card
+    derives soc_used_pct as energy over capacity, so both are the same energy
+    figure divided by two different constants — the independent measurements
+    are energy and distance.
+
+    And both of this app's errors are absolute rather than proportional: a
+    roughly fixed number of kWh and of kilometres per trip. Divided by a long
+    trip they vanish, divided by a short one they dominate, which is why the
+    same app reads within 3% on a 44 km drive and 28% out on a 4 km one with
+    nothing having changed in between. So the honest answer to "how accurate"
+    is a trip length, not a percentage."""
+    from sqlalchemy import select as sa_select
+
+    from app.models import Drive
+    from app.sync import now_local
+
+    settings = get_settings()
+    old = settings.app_passcode
+    settings.app_passcode = ""
+    try:
+        with TestClient(app) as client:
+            with SessionLocal() as s:
+                s.execute(Drive.__table__.delete())
+                v = s.scalars(sa_select(Vehicle)).first()
+                now = now_local()
+                # Two trips carrying the SAME absolute error — 0.1 kWh high —
+                # one long, one short.
+                for i, (km, kwh) in enumerate(((40.0, 6.1), (4.0, 0.7))):
+                    t = now - timedelta(days=i + 1)
+                    s.add(Drive(vehicle_id=v.id, start_time=t,
+                                end_time=t + timedelta(minutes=30),
+                                distance_km=km, duration_min=30.0,
+                                energy_used_kwh=kwh, start_soc=80.0,
+                                end_soc=70.0, idle_tracked=True,
+                                start_recovered_km=0.0,
+                                start_location="Home", end_location="Office"))
+                s.commit()
+                ids = [d.id for d in s.scalars(
+                    sa_select(Drive).order_by(Drive.start_time)).all()]
+
+            empty = client.get("/api/accuracy").json()
+            assert empty["trips"] == 0 and "add-car-reading" in empty["how"]
+
+            # The car's own figures for the same two: 150 Wh/km exactly.
+            client.post(f"/api/add-car-reading?readings="
+                        f"{ids[0]}:4.0:0.88:150,{ids[1]}:40.0:8.76:150")
+            body = client.get("/api/accuracy").json()
+            assert body["trips"] == 2
+            short = next(r for r in body["readings"] if r["km"][1] == 4.0)
+            long = next(r for r in body["readings"] if r["km"][1] == 40.0)
+
+            # Same 0.1 kWh error in both. Utterly different as a percentage.
+            assert short["energy_err_kwh"] == pytest.approx(0.1, abs=0.01)
+            assert long["energy_err_kwh"] == pytest.approx(0.1, abs=0.01)
+            assert short["wh_per_km_err_pct"] == pytest.approx(16.7, abs=0.5)
+            assert long["wh_per_km_err_pct"] == pytest.approx(1.7, abs=0.5)
+            assert long["within_target"] and not short["within_target"]
+
+            # So the headline is the length at which the measured offsets fall
+            # inside the target: 0.1 kWh at 150 Wh/km is 0.667 km of error, and
+            # 2% of a trip covers that at about 33 km.
+            assert body["median_energy_error_kwh"] == pytest.approx(0.1, abs=0.01)
+            assert body["target_met_above_km"] == pytest.approx(33.3, abs=1.0)
+
+            # The car is not an infinitely precise reference either: a trip it
+            # reports as 0.88% carries its own rounding, and a 2% claim about
+            # it cannot be tested in either direction.
+            assert short["reference_floor_pct"] > 2.0
+            assert long["reference_floor_pct"] < 2.0
+
+            # Three figures that cannot have come from one drive are refused
+            # before they can become evidence.
+            bad = client.post(f"/api/add-car-reading?readings={ids[0]}:4.0:0.1:150")
+            assert bad.status_code == 422
+            assert "same drive" in bad.json()["detail"]
+    finally:
+        settings.app_passcode = old
+        with SessionLocal() as s:
+            from app import state
+            state.put(s, state.CAR_READINGS_KEY, "")
+            s.commit()
+        _reset_to_demo()
+
 def test_repair_split_trip_cuts_one_row_into_the_two_journeys_it_was():
     """A departure recovery reaching across a long blind gap can swallow a
     whole separate drive, the stop after it, and the start of the next one.

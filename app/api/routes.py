@@ -5794,6 +5794,171 @@ def repair_missing_energy(
                  "Dry run. Add &apply=1 to write these." if not apply else None),
     }
 
+@router.api_route("/add-car-reading", methods=["GET", "POST"])
+def add_car_reading(
+    readings: str = Query(..., description="drive_id:km:pct:wh_per_km, comma-separated"),
+    session: Session = Depends(get_session),
+):
+    """Record what the car's own Energy screen said about trips this app logged.
+
+    Four figures per trip, all off the Current Drive panel: the drive's
+    distance, its "% consumed", and its Wh/km. Comma-separate several.
+
+    This exists because accuracy has been argued from screenshots held in a
+    conversation rather than measured. Eight pairs is enough to see a pattern
+    and far too few to fit anything, and nothing in the app remembered them.
+    """
+    import json as _json
+
+    try:
+        rows = _json.loads(state.get(session, state.CAR_READINGS_KEY) or "[]")
+    except ValueError:
+        rows = []
+    by_id = {int(r["drive_id"]): r for r in rows}
+    added = []
+    for chunk in readings.split(","):
+        parts = [p.strip() for p in chunk.split(":") if p.strip() != ""]
+        if len(parts) != 4:
+            raise HTTPException(422, f"{chunk!r} is not drive_id:km:pct:wh_per_km")
+        try:
+            drive_id, km, pct, whkm = (int(parts[0]), float(parts[1]),
+                                       float(parts[2]), float(parts[3]))
+        except ValueError:
+            raise HTTPException(422, f"{chunk!r} has a value that is not a number") from None
+        if session.get(Drive, drive_id) is None:
+            raise HTTPException(404, f"No trip {drive_id}.")
+        if km <= 0 or pct <= 0 or whkm <= 0:
+            raise HTTPException(422, f"{chunk!r}: all three figures must be positive.")
+        # The car's own three figures have to agree with each other before they
+        # can judge anything: kWh is Wh/km x km, and % is that over the pack.
+        # A pair read off two different panels, or at two different moments,
+        # fails this and would otherwise enter the study as evidence.
+        implied = whkm * km / 1000.0 / (pct / 100.0)
+        if not 45.0 <= implied <= 95.0:
+            raise HTTPException(
+                422, f"{chunk!r}: {whkm} Wh/km over {km} km is "
+                     f"{whkm * km / 1000.0:.2f} kWh, which at {pct}% implies a "
+                     f"{implied:.0f} kWh pack — those figures did not come from "
+                     f"the same drive.")
+        by_id[drive_id] = {"drive_id": drive_id, "km": km, "pct": pct,
+                           "wh_per_km": whkm,
+                           "at": sync_mod.now_local().isoformat(timespec="minutes")}
+        added.append(drive_id)
+    state.put(session, state.CAR_READINGS_KEY,
+              _json.dumps(sorted(by_id.values(), key=lambda r: r["drive_id"])))
+    return {"added": added, "readings": len(by_id)}
+
+
+@router.get("/accuracy")
+def accuracy(
+    target_pct: float = Query(2.0, gt=0),
+    session: Session = Depends(get_session),
+):
+    """How far this app is from the car, decomposed, over every recorded pair.
+
+    THE FIRST THING TO KNOW is that battery % and Wh/km are not two
+    independent accuracy questions. The trip card derives soc_used_pct as
+    energy / capacity (see driving.recent_trips), so both are the same energy
+    figure divided by two different constants. There are only two independent
+    measurements to be wrong about: ENERGY and DISTANCE.
+
+        Wh/km error  =  energy error  -  distance error
+        battery % error = energy error - capacity error
+
+    THE SECOND is that both of this app's errors are ABSOLUTE, not
+    proportional — a roughly fixed number of kWh and of kilometres per trip,
+    from arrival tails, blind heads and trip windows that differ from the
+    car's by a few seconds at each end. Divided by a long trip they vanish;
+    divided by a short one they dominate. That is why the same app reads
+    within 3% on a 44 km drive and 28% out on a 4 km one, with nothing having
+    changed in between.
+
+    So the target is reported per trip AND as the trip length at which the
+    measured offsets fall inside it, which is the only form of the question
+    with a stable answer.
+
+    THE THIRD is that the car is not an infinitely precise reference. Its
+    "% consumed" is shown to a tenth, so a trip consuming 1.0% carries +/-5%
+    of reference uncertainty before this app is even consulted. A 2% claim
+    about such a trip cannot be tested, in either direction, and this reports
+    where that floor sits rather than pretending the comparison is clean.
+
+    Read-only.
+    """
+    import json as _json
+
+    vehicle = _first_vehicle(session)
+    capacity_kwh, _ = _usable_capacity(session, vehicle, get_settings())
+    try:
+        rows = _json.loads(state.get(session, state.CAR_READINGS_KEY) or "[]")
+    except ValueError:
+        rows = []
+    if not rows:
+        return {"trips": 0,
+                "how": "Add pairs with /api/add-car-reading?readings=<id>:<km>:<pct>:<wh_per_km>"}
+
+    out, d_err, e_err = [], [], []
+    for r in rows:
+        d = session.get(Drive, int(r["drive_id"]))
+        if d is None or not d.distance_km or not d.energy_used_kwh:
+            continue
+        car_kwh = r["wh_per_km"] * r["km"] / 1000.0
+        app_whkm = d.energy_used_kwh * 1000.0 / d.distance_km
+        app_pct = d.energy_used_kwh / capacity_kwh * 100.0 if capacity_kwh else None
+        dk, ek = d.distance_km - r["km"], d.energy_used_kwh - car_kwh
+        d_err.append(dk)
+        e_err.append(ek)
+        out.append({
+            "drive_id": d.id,
+            "route": f"{d.start_location} → {d.end_location}",
+            "km": [round(d.distance_km, 2), r["km"]],
+            "kwh": [round(d.energy_used_kwh, 2), round(car_kwh, 2)],
+            "pct": [round(app_pct, 1) if app_pct else None, r["pct"]],
+            "wh_per_km": [round(app_whkm), round(r["wh_per_km"], 1)],
+            "distance_err_km": round(dk, 3),
+            "energy_err_kwh": round(ek, 3),
+            "wh_per_km_err_pct": round((app_whkm - r["wh_per_km"]) / r["wh_per_km"] * 100.0, 1),
+            "pct_err_points": round(app_pct - r["pct"], 2) if app_pct else None,
+            # What the car's own tenth-of-a-percent display allows, before
+            # this app is consulted at all. A claim tighter than this about
+            # this trip is untestable rather than true or false.
+            "reference_floor_pct": round(0.05 / r["pct"] * 100.0, 1),
+            "blind_km": round(d.start_recovered_km or 0.0, 2),
+            "within_target": abs((app_whkm - r["wh_per_km"]) / r["wh_per_km"] * 100.0) <= target_pct,
+        })
+    if not out:
+        return {"trips": 0, "note": "None of the recorded readings match a trip with energy."}
+
+    def _mid(xs):
+        return round(percentile(sorted(xs), 0.5), 3)
+
+    # The offsets as absolute quantities, which is the form they actually take.
+    # Median rather than mean so one badly reconstructed trip cannot set the
+    # figure every conclusion below rests on.
+    dist_off, energy_off = _mid(d_err), _mid(e_err)
+    # And the trip length at which those offsets fall inside the target. Wh/km
+    # error is the energy offset over the trip's energy MINUS the distance
+    # offset over its distance, so both are expressed per kilometre at this
+    # car's own rate and the length follows directly.
+    rate = _mid([r["wh_per_km"] for r in rows]) / 1000.0
+    per_km = abs(energy_off / rate - dist_off)
+    return {
+        "trips": len(out),
+        "target_pct": target_pct,
+        "capacity_kwh": capacity_kwh,
+        "median_distance_error_km": dist_off,
+        "median_energy_error_kwh": energy_off,
+        # The headline, and the only stable form of "how accurate is it".
+        "target_met_above_km": round(per_km / (target_pct / 100.0), 1) if per_km else None,
+        "within_target": sum(1 for r in out if r["within_target"]),
+        "note": ("Battery % and Wh/km are the same energy figure over two "
+                 "different constants — see this endpoint's docs. The two "
+                 "independent errors are energy and distance, and both are "
+                 "absolute, so the honest answer to 'how accurate' is a trip "
+                 "length, not a percentage."),
+        "readings": out,
+    }
+
 @router.get("/capacity-evidence")
 def capacity_evidence(
     min_swing_pct: float = Query(15.0, ge=1.0, le=90.0),
