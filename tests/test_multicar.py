@@ -4516,6 +4516,81 @@ def test_splitting_an_estimated_trip_divides_its_energy_rather_than_repricing_it
         settings.app_passcode = old
         _reset_to_demo()
 
+def test_a_trips_clock_can_be_corrected_without_touching_anything_else():
+    """Every other repair moves a boundary and recomputes the clock from it.
+    None could move the clock ALONE, so a repair that wrote wrong times left
+    nothing able to fix them.
+
+    Measured, trip 505: a split applied without ``first_end`` interpolated the
+    boundary by distance across the whole span and produced a 3.9 km leg
+    lasting 10.25 hours. Distance, energy and odometer were all correct; only
+    the clock was wrong, and no endpoint could say so."""
+    from sqlalchemy import select as sa_select
+
+    from app.models import Drive
+    from app.sync import now_local
+
+    settings = get_settings()
+    old = settings.app_passcode
+    settings.app_passcode = ""
+    try:
+        with TestClient(app) as client:
+            with SessionLocal() as s:
+                s.execute(Drive.__table__.delete())
+                v = s.scalars(sa_select(Vehicle)).first()
+                base = now_local().replace(hour=23, minute=0, second=0, microsecond=0)
+                s.add(Drive(vehicle_id=v.id, start_time=base - timedelta(days=1),
+                            end_time=base - timedelta(days=1) + timedelta(minutes=615),
+                            distance_km=3.9, duration_min=615.0,
+                            energy_used_kwh=0.67, avg_speed_kmh=0.4,
+                            start_location="Tingkat Bukit Kecil", end_location="Home"))
+                s.commit()
+                did = s.scalars(sa_select(Drive)).first().id
+
+            begin = (base - timedelta(days=1)).isoformat(timespec="minutes")
+            finish = (base - timedelta(days=1)
+                      + timedelta(minutes=7)).isoformat(timespec="minutes")
+            plan = client.get(f"/api/set-drive-times?drive_id={did}"
+                              f"&end_time={finish}").json()
+            assert plan["duration_min"] == [615.0, 7.0]
+            # Derived figures follow the clock; measured ones never move.
+            assert plan["avg_speed_kmh"][1] == pytest.approx(33.4, abs=0.2)
+            assert plan["distance_km"] == 3.9 and plan["energy_kwh"] == 0.67
+            assert "Dry run" in plan["note"]
+            with SessionLocal() as s:
+                assert s.get(Drive, did).duration_min == 615.0
+
+            client.post(f"/api/set-drive-times?drive_id={did}"
+                        f"&end_time={finish}&apply=1")
+            with SessionLocal() as s:
+                fixed = s.get(Drive, did)
+                assert fixed.duration_min == 7.0
+                assert fixed.distance_km == 3.9 and fixed.energy_used_kwh == 0.67
+
+            # Overlap is refused first: two trips claiming the same minutes
+            # make every window total wrong, and no later repair undoes it.
+            with SessionLocal() as s:
+                v = s.scalars(sa_select(Vehicle)).first()
+                s.add(Drive(vehicle_id=v.id, start_time=base + timedelta(hours=1),
+                            end_time=base + timedelta(hours=2),
+                            distance_km=10.0, duration_min=60.0,
+                            start_location="Home", end_location="Office"))
+                s.commit()
+            clash = client.post(
+                f"/api/set-drive-times?drive_id={did}"
+                f"&start_time={(base + timedelta(minutes=90)).isoformat(timespec='minutes')}"
+                f"&end_time={(base + timedelta(minutes=100)).isoformat(timespec='minutes')}"
+                f"&apply=1")
+            assert clash.status_code == 409 and "overlap" in clash.json()["detail"]
+
+            assert client.post(f"/api/set-drive-times?drive_id={did}").status_code == 422
+            assert client.post(
+                f"/api/set-drive-times?drive_id={did}&end_time={begin}"
+            ).status_code == 409
+    finally:
+        settings.app_passcode = old
+        _reset_to_demo()
+
 def test_repair_split_trip_cuts_one_row_into_the_two_journeys_it_was():
     """A departure recovery reaching across a long blind gap can swallow a
     whole separate drive, the stop after it, and the start of the next one.

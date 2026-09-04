@@ -7162,6 +7162,86 @@ def repair_missing_trip(
     return plan
 
 
+@router.api_route("/set-drive-times", methods=["GET", "POST"])
+def set_drive_times(
+    drive_id: int = Query(...),
+    start_time: str | None = Query(None),
+    end_time: str | None = Query(None),
+    apply: bool = Query(False),
+    session: Session = Depends(get_session),
+):
+    """Correct when a trip started or ended, leaving everything else alone.
+
+    Every other repair here moves a boundary and recomputes the clock from
+    it. None of them can move the clock ALONE, and a repair that writes the
+    wrong times leaves nothing able to fix them — measured, trip 505: a split
+    applied without ``first_end`` interpolated the boundary by distance across
+    the whole span and produced a 3.9 km leg lasting 10.25 hours. Distance,
+    energy and odometer were all right; only the clock was wrong, and no
+    endpoint could say so.
+
+    Distance, energy and the odometer are never touched: this is for a clock
+    that is wrong about a drive that is otherwise correct. Duration and
+    average speed follow from the new times, because they are derived from
+    them and would otherwise contradict what is on screen.
+
+    Overlap is checked first and refused, for the reason repair-missing-trip
+    gives: two trips claiming the same minutes make every window total wrong,
+    and no later repair can undo it.
+
+    Dry run by default.
+    """
+    drive = session.get(Drive, drive_id)
+    if drive is None:
+        raise HTTPException(404, f"No trip {drive_id}.")
+    if not start_time and not end_time:
+        raise HTTPException(422, "Give start_time, end_time, or both.")
+
+    def _when(raw: str | None, fallback: datetime) -> datetime:
+        if not raw:
+            return fallback
+        try:
+            return datetime.fromisoformat(raw)
+        except ValueError:
+            raise HTTPException(409, f"'{raw}' is not an ISO datetime.") from None
+
+    begin = _when(start_time, drive.start_time)
+    finish = _when(end_time, drive.end_time)
+    if finish <= begin:
+        raise HTTPException(409, "end_time must be after start_time.")
+    clash = session.scalars(
+        select(Drive).where(Drive.vehicle_id == drive.vehicle_id,
+                            Drive.id != drive.id,
+                            Drive.start_time < finish, Drive.end_time > begin)
+        .limit(1)).first()
+    if clash is not None:
+        raise HTTPException(
+            409, f"Those times overlap trip {clash.id} "
+                 f"({clash.start_time:%Y-%m-%d %H:%M} - {clash.end_time:%H:%M}).")
+
+    minutes = (finish - begin).total_seconds() / 60.0
+    speed = round((drive.distance_km or 0.0) / max(minutes / 60.0, 1e-9), 1)
+    plan = {
+        "drive_id": drive.id,
+        "route": f"{drive.start_location} → {drive.end_location}",
+        "start_time": [drive.start_time.isoformat(timespec="minutes"),
+                       begin.isoformat(timespec="minutes")],
+        "end_time": [drive.end_time.isoformat(timespec="minutes"),
+                     finish.isoformat(timespec="minutes")],
+        "duration_min": [round(drive.duration_min or 0.0, 1), round(minutes, 1)],
+        "avg_speed_kmh": [drive.avg_speed_kmh, speed],
+        "distance_km": drive.distance_km,
+        "energy_kwh": drive.energy_used_kwh,
+        "applied": apply,
+        "note": None if apply else "Dry run. Add &apply=1 to write this.",
+    }
+    if apply:
+        drive.start_time, drive.end_time = begin, finish
+        drive.duration_min = round(minutes, 1)
+        drive.avg_speed_kmh = speed
+        session.commit()
+    return plan
+
 @router.api_route("/repair-split-trip", methods=["GET", "POST"])
 def repair_split_trip(
     drive_id: int = Query(...),
