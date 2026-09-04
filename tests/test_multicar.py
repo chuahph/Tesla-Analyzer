@@ -3631,14 +3631,20 @@ def test_a_settled_charge_is_read_on_its_own_slower_clock(monkeypatch):
             # and blocked exactly that tick.
             from app.api import routes
             with SessionLocal() as s:
+                snap_key = state.scoped(state.SNAPSHOT_KEY, _LongChargeClient.VIN)
+                real = state.get(s, snap_key)
                 assert routes._charge_has_a_reading(s, _LongChargeClient.VIN)
                 opened = _json.loads(
                     state.get(s, state.scoped(state.OPEN_CHARGE_KEY,
                                               _LongChargeClient.VIN)))
-                state.put(s, state.scoped(state.SNAPSHOT_KEY, _LongChargeClient.VIN),
-                          _json.dumps({**opened, "ts": opened["ts"] - 1}))
+                state.put(s, snap_key, _json.dumps({**opened, "ts": opened["ts"] - 1}))
                 s.commit()
                 assert not routes._charge_has_a_reading(s, _LongChargeClient.VIN)
+                # Put the real snapshot back: everything after this depends on
+                # it, and leaving a doctored one behind made the next sync read
+                # when it should not have.
+                state.put(s, snap_key, real)
+                s.commit()
 
             # Only once the charge's own interval has elapsed does it read
             # again — five minutes, not the two an idle online car gets.
