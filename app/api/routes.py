@@ -6008,6 +6008,27 @@ def accuracy(
         # below, which is the whole reason this is no longer the headline.
         "target_met_above_km": round(per_km / (target_pct / 100.0), 1) if per_km else None,
         "within_target": sum(1 for r in out if r["within_target"]),
+        # Which recent trips have no car reading yet. The pairs collected so
+        # far were chosen by a person noticing something, and every one reads
+        # high while the window they sit inside reads +0.5% — eight positives
+        # from a distribution centred near zero is a coincidence at 1 in 256,
+        # so they sample the tail rather than the trips. Per-trip SCATTER
+        # cannot be estimated from a set selected on the value of the thing
+        # being measured, and scatter is the whole question once the window
+        # has settled the mean.
+        #
+        # So this says what is missing, to be captured because it is next
+        # rather than because it looks wrong.
+        "unmeasured_recent": [
+            {"drive_id": d.id,
+             "route": f"{d.start_location} → {d.end_location}",
+             "start": d.start_time.isoformat(timespec="minutes"),
+             "km": round(d.distance_km, 1)}
+            for d in session.scalars(
+                select(Drive).where(Drive.vehicle_id == vehicle.id)
+                .order_by(Drive.start_time.desc()).limit(12)).all()
+            if d.id not in {int(r["drive_id"]) for r in rows} and d.distance_km
+        ],
         # WHICH FIGURE TO BELIEVE. A per-trip comparison contains the app's
         # error, the car's tenth-of-a-unit display, and any energy this app
         # attributed to the neighbouring trip instead of this one. A whole
