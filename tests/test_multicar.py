@@ -4458,6 +4458,64 @@ def test_a_charge_can_be_told_what_the_meter_actually_billed():
         settings.app_passcode = old
         _reset_to_demo()
 
+def test_splitting_an_estimated_trip_divides_its_energy_rather_than_repricing_it():
+    """An estimated figure is not a measurement of anything, least of all of
+    the sliver one leg happened to watch.
+
+    Re-pricing it treats a rate that already covered the whole trip as if it
+    had covered only part, and scales it up by the ratio. Measured, trip 505:
+    1.37 kWh priced from the fleet rate came back out of the split as 3.77 on
+    one leg alone — energy the trip never used and the split cannot have
+    discovered."""
+    from sqlalchemy import select as sa_select
+
+    from app.models import Drive
+    from app.sync import now_local
+
+    settings = get_settings()
+    old = settings.app_passcode
+    settings.app_passcode = ""
+    try:
+        with TestClient(app) as client:
+            with SessionLocal() as s:
+                s.execute(Drive.__table__.delete())
+                v = s.scalars(sa_select(Vehicle)).first()
+                t = now_local() - timedelta(hours=2)
+                s.add(Drive(vehicle_id=v.id, start_time=t,
+                            end_time=t + timedelta(minutes=24),
+                            distance_km=8.0, duration_min=24.0,
+                            energy_used_kwh=1.37, energy_estimated=True,
+                            start_soc=68.0, end_soc=66.0,
+                            start_odo_km=30960.582, end_odo_km=30968.552,
+                            start_recovered_km=6.278, idle_tracked=False,
+                            start_location="Tingkat Bukit Kecil", end_location="Home"))
+                s.commit()
+                did = s.scalars(sa_select(Drive)).first().id
+
+            plan = client.get(f"/api/repair-split-trip?drive_id={did}"
+                              f"&boundary_odo_km=30964.452").json()
+            legs = plan["legs"]
+            # Split by distance, and the two still add to what there was.
+            assert legs[0]["energy_kwh"] + legs[1]["energy_kwh"] == pytest.approx(1.37, abs=0.01)
+            assert legs[0]["energy_kwh"] < legs[1]["energy_kwh"]  # 3.9 km vs 4.1
+            # Never more than the whole trip had, which is what the bug did.
+            assert max(l["energy_kwh"] for l in legs) < 1.37
+
+            client.post(f"/api/repair-split-trip?drive_id={did}"
+                        f"&boundary_odo_km=30964.452&apply=1")
+            with SessionLocal() as s:
+                both = s.scalars(sa_select(Drive).order_by(Drive.start_odo_km)).all()
+                assert len(both) == 2
+                # A split of an estimated figure is still estimated on BOTH
+                # legs — losing the flag would let a number this app invented
+                # pass for a measurement on the strength of being divided.
+                assert all(d.energy_estimated for d in both)
+                assert sum(d.energy_used_kwh for d in both) == pytest.approx(1.37, abs=0.01)
+                assert sum(d.distance_km for d in both) == pytest.approx(8.0, abs=0.05)
+    finally:
+        settings.app_passcode = old
+        _reset_to_demo()
+
 def test_repair_split_trip_cuts_one_row_into_the_two_journeys_it_was():
     """A departure recovery reaching across a long blind gap can swallow a
     whole separate drive, the stop after it, and the start of the next one.

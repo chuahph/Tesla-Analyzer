@@ -7247,11 +7247,32 @@ def repair_split_trip(
     # and with the blind stretch at the front that is the tail of the second
     # leg. A leg with nothing measured gets no energy rather than a share of a
     # figure that never covered it.
-    a_energy = 0.0 if a_measured <= 0 else round(
-        (drive.energy_used_kwh or 0.0) * a_measured / max(a_measured + b_measured, 1e-9), 2)
-    b_energy = round(sync_mod.energy_for_blind_distance(
-        (drive.energy_used_kwh or 0.0) - a_energy, b_km, b_blind,
-        departure_blind_km=b_blind), 2) if drive.energy_used_kwh else 0.0
+    total_energy = drive.energy_used_kwh or 0.0
+    if getattr(drive, "energy_estimated", False):
+        # An ESTIMATED figure is not a measurement of anything, least of all
+        # of the sliver this leg happened to watch. Re-pricing it treats a
+        # rate that already covered the whole trip as if it had covered only
+        # part, and scales it up by the ratio — measured, trip 505: 1.37 kWh
+        # priced from the fleet rate came back out of the split as 3.77 on one
+        # leg alone, which is energy the trip never used and the split cannot
+        # have discovered. Split by distance and leave it estimated.
+        a_energy = round(total_energy * a_km / max(a_km + b_km, 1e-9), 2)
+        b_energy = round(total_energy - a_energy, 2)
+    else:
+        # The trip's measured energy was carried entirely by whatever was
+        # watched, and with the blind stretch at the front that is the tail of
+        # the second leg. A leg with nothing measured gets no energy rather
+        # than a share of a figure that never covered it.
+        a_energy = 0.0 if a_measured <= 0 else round(
+            total_energy * a_measured / max(a_measured + b_measured, 1e-9), 2)
+        b_energy = round(sync_mod.energy_for_blind_distance(
+            total_energy - a_energy, b_km, b_blind,
+            departure_blind_km=b_blind,
+            # Past half blind the leg's own sliver is not a sample of it, and
+            # this leg is a sliver by construction — the split just took most
+            # of its distance away. See sync.BLIND_RATE_FALLBACK_SHARE.
+            fleet_wh_per_km=_fleet_wh_per_km(session, drive.vehicle_id)), 2
+        ) if total_energy else 0.0
 
     mid_coords = (boundary_coords or "").strip()
     mid_place, mid_area = (_place_and_area(mid_coords, session) if mid_coords
@@ -7305,6 +7326,10 @@ def repair_split_trip(
             end_lost_km=drive.end_lost_km, end_est_km=drive.end_est_km,
             tail_trim_sec=drive.tail_trim_sec, end_gap_sec=drive.end_gap_sec,
             idle_tracked=False, tag=drive.tag,
+            # A split of an estimated figure is still estimated, on both legs.
+            # Losing the flag here would let a number this app invented pass
+            # for a measurement on the strength of having been divided.
+            energy_estimated=getattr(drive, "energy_estimated", False),
         )
         session.add(second)
         # The original becomes the FIRST leg: it already carries the correct
