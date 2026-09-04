@@ -7242,6 +7242,64 @@ def set_drive_times(
         session.commit()
     return plan
 
+@router.api_route("/set-drive-place", methods=["GET", "POST"])
+def set_drive_place(
+    drive_id: int = Query(...),
+    which: str = Query(..., pattern="^(start|end)$"),
+    coords: str = Query(...),
+    apply: bool = Query(False),
+    session: Session = Depends(get_session),
+):
+    """Give one end of a trip the coordinates it should have had.
+
+    A boundary this app invented has no position of its own. repair-split-trip
+    takes ``boundary_coords`` for that reason, and a split run without it
+    leaves both new ends blank — measured, trips 505 and 506, whose shared
+    boundary is Home and which showed nothing at all.
+
+    "Reset locations" cannot fix that: it re-geocodes from stored
+    coordinates, and there are none to re-geocode. Nothing else set them
+    either, which is the same gap the clock had until set-drive-times.
+
+    A blank end is not only cosmetic. The trip then matches no Place, so it
+    misses that place's told arrival tail and departure pace, and it groups
+    under no route.
+
+    Distance, energy, the odometer and the clock are never touched. Give
+    ``coords`` as "lat, lon"; the name is looked up the same way every other
+    trip's is, so a user-defined Place wins over whatever the geocoder would
+    have called it.
+
+    Dry run by default.
+    """
+    drive = session.get(Drive, drive_id)
+    if drive is None:
+        raise HTTPException(404, f"No trip {drive_id}.")
+    raw = coords.strip()
+    if haversine_km(raw, raw) is None:
+        raise HTTPException(422, f"'{coords}' is not a 'lat, lon' pair.")
+    place, area = _place_and_area(raw, session)
+    was = ((drive.start_location, drive.start_coords) if which == "start"
+           else (drive.end_location, drive.end_coords))
+    plan = {
+        "drive_id": drive.id,
+        "which": which,
+        "location": [was[0], place],
+        "coords": [was[1], raw],
+        "area": area,
+        "route": (f"{place} → {drive.end_location}" if which == "start"
+                  else f"{drive.start_location} → {place}"),
+        "applied": apply,
+        "note": None if apply else "Dry run. Add &apply=1 to write this.",
+    }
+    if apply:
+        if which == "start":
+            drive.start_coords, drive.start_location, drive.start_area = raw, place, area
+        else:
+            drive.end_coords, drive.end_location, drive.end_area = raw, place, area
+        session.commit()
+    return plan
+
 @router.api_route("/repair-split-trip", methods=["GET", "POST"])
 def repair_split_trip(
     drive_id: int = Query(...),

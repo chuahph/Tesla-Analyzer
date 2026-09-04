@@ -4591,6 +4591,73 @@ def test_a_trips_clock_can_be_corrected_without_touching_anything_else():
         settings.app_passcode = old
         _reset_to_demo()
 
+def test_a_split_boundary_can_be_given_the_place_it_should_have_had():
+    """A boundary this app invented has no position of its own.
+    repair-split-trip takes boundary_coords for that reason, and a split run
+    without it leaves both new ends blank — measured, trips 505 and 506, whose
+    shared boundary is Home and which showed nothing at all.
+
+    "Reset locations" cannot fix that: it re-geocodes from stored coordinates,
+    and there are none. A blank end is not only cosmetic either — the trip
+    matches no Place, so it misses that place's told arrival tail and
+    departure pace, and groups under no route."""
+    from sqlalchemy import select as sa_select
+
+    from app.models import Drive, Place
+    from app.sync import now_local
+
+    settings = get_settings()
+    old = settings.app_passcode
+    settings.app_passcode = ""
+    try:
+        with TestClient(app) as client:
+            with SessionLocal() as s:
+                s.execute(Drive.__table__.delete())
+                s.execute(Place.__table__.delete())
+                s.add(Place(name="Home", lat=5.3413, lon=100.3107,
+                            radius_km=0.15, created_at=now_local()))
+                v = s.scalars(sa_select(Vehicle)).first()
+                t = now_local() - timedelta(hours=2)
+                s.add(Drive(vehicle_id=v.id, start_time=t,
+                            end_time=t + timedelta(minutes=7),
+                            distance_km=3.9, duration_min=7.0,
+                            energy_used_kwh=0.67,
+                            start_location="Tingkat Bukit Kecil",
+                            start_coords="5.3354, 100.2974",
+                            end_location="", end_coords=""))
+                s.commit()
+                did = s.scalars(sa_select(Drive)).first().id
+
+            plan = client.get(f"/api/set-drive-place?drive_id={did}"
+                              f"&which=end&coords=5.3413, 100.3107").json()
+            # A user-defined Place wins over whatever a geocoder would say,
+            # which is the whole reason the name is looked up rather than given.
+            assert plan["location"] == ["", "Home"]
+            assert plan["route"] == "Tingkat Bukit Kecil → Home"
+            assert "Dry run" in plan["note"]
+            with SessionLocal() as s:
+                assert s.get(Drive, did).end_location == ""
+
+            client.post(f"/api/set-drive-place?drive_id={did}"
+                        f"&which=end&coords=5.3413, 100.3107&apply=1")
+            with SessionLocal() as s:
+                fixed = s.get(Drive, did)
+                assert fixed.end_location == "Home"
+                assert fixed.end_coords == "5.3413, 100.3107"
+                # Nothing else moves: this is a position, not a measurement.
+                assert fixed.distance_km == 3.9 and fixed.energy_used_kwh == 0.67
+                assert fixed.duration_min == 7.0
+
+            assert client.post(f"/api/set-drive-place?drive_id={did}"
+                               f"&which=end&coords=nowhere").status_code == 422
+            assert client.post(f"/api/set-drive-place?drive_id={did}"
+                               f"&which=middle&coords=5.3,100.3").status_code == 422
+            assert client.post("/api/set-drive-place?drive_id=999999"
+                               "&which=end&coords=5.3,100.3").status_code == 404
+    finally:
+        settings.app_passcode = old
+        _reset_to_demo()
+
 def test_repair_split_trip_cuts_one_row_into_the_two_journeys_it_was():
     """A departure recovery reaching across a long blind gap can swallow a
     whole separate drive, the stop after it, and the start of the next one.
