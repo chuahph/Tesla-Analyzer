@@ -6063,11 +6063,21 @@ def set_charge_billed(
     discount, since that is what left your account — and becomes this
     session's cost outright.
 
-    Each receipt also measures this car's real charging efficiency for that
-    session, pack over delivered, which is reported back and pooled across
-    every receipt recorded. That is the figure an untold session's cost could
-    eventually be estimated from, and it is worth knowing before it is used:
-    the constant assumed elsewhere in this app is 0.96.
+    Each receipt also measures a loss nothing else here can: CHARGER TO PACK,
+    delivered over what arrived. That is not the constant this app already
+    carries. sync.CHARGE_EFFICIENCY is PACK TO USABLE — the round trip
+    between energy stored and energy you get back out — and it is applied to
+    a figure that is already pack-side, so the two describe different halves
+    of the same journey and multiply rather than compete.
+
+        wall -> pack   this measurement, 0.931 on the first receipt
+        pack -> wheels sync.CHARGE_EFFICIENCY, 0.96
+        wall -> wheels the product, about 0.89
+
+    The first version of this reported the two side by side as though one
+    were a check on the other. They are not comparable, and reading them that
+    way would put the capacity constant 3% out on the strength of a number
+    that says nothing about it.
     """
     charge = session.get(Charge, charge_id)
     if charge is None:
@@ -6097,10 +6107,15 @@ def set_charge_billed(
         "billed_kwh": kwh,
         "pack_kwh": round(pack, 3),
         "cost": charge.cost,
-        "efficiency": round(pack / kwh, 3) if pack else None,
+        "wall_to_pack": round(pack / kwh, 3) if pack else None,
         "receipts": len(effs),
-        "median_efficiency": round(percentile(effs, 0.5), 3) if effs else None,
-        "assumed_elsewhere": sync_mod.CHARGE_EFFICIENCY,
+        "median_wall_to_pack": round(percentile(effs, 0.5), 3) if effs else None,
+        # Named so it cannot be read as a check on the figure above. It
+        # describes the OTHER half of the journey and is applied to a
+        # pack-side number, so the two multiply.
+        "pack_to_wheels": sync_mod.CHARGE_EFFICIENCY,
+        "wall_to_wheels": (round(pack / kwh * sync_mod.CHARGE_EFFICIENCY, 3)
+                           if pack else None),
         "note": ("Cost set from the receipt. Trips drawing on this charge "
                  "reprice automatically." if paid is not None else
                  "Delivered energy recorded; cost unchanged. Pass &paid= to "

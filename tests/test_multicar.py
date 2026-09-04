@@ -4382,8 +4382,16 @@ def test_a_charge_can_be_told_what_the_meter_actually_billed():
             # The receipt measures this car's real charging efficiency for the
             # session — the thing an untold session could eventually be
             # estimated from, and worth seeing before it is used.
-            assert body["efficiency"] == pytest.approx(0.931, abs=0.001)
-            assert body["assumed_elsewhere"] == CHARGE_EFFICIENCY
+            assert body["wall_to_pack"] == pytest.approx(0.931, abs=0.001)
+            # Named apart from sync.CHARGE_EFFICIENCY on purpose. That one is
+            # pack-to-wheels and is applied to a figure already pack-side, so
+            # the two describe different halves of the same journey and
+            # multiply. Reported side by side as though one checked the other
+            # — which the first version did — they would put the capacity
+            # constant 3% out on a number that says nothing about it.
+            assert body["pack_to_wheels"] == CHARGE_EFFICIENCY
+            assert body["wall_to_wheels"] == pytest.approx(
+                0.931 * CHARGE_EFFICIENCY, abs=0.001)
             assert body["receipts"] == 1
 
             with SessionLocal() as s:
