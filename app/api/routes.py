@@ -7966,6 +7966,24 @@ def polling_coverage(session: Session = Depends(get_session)):
 
     span_a = min(float(r["a"]) for r in runs)
     span_b = max(float(r["b"]) for r in runs)
+    # How far apart ticks actually are, from the runs that contain more than
+    # one. Measured rather than assumed, because it is the width of the
+    # phantom above and a wrong value would either restore the phantom or
+    # paper over a real hole.
+    spacings = sorted((float(r["b"]) - float(r["a"])) / (float(r["n"]) - 1)
+                      for r in runs if (r.get("n") or 0) > 1
+                      and float(r["b"]) > float(r["a"]))
+    tick_sec = min(percentile(spacings, 0.5), 180.0) if spacings else 60.0
+    # Each run's coverage, ending one tick after its last — but never past
+    # where the next run starts, or two runs would both claim the same minute
+    # and the total would exceed the trip.
+    ordered = sorted(runs, key=lambda r: float(r["a"]))
+    covers = [
+        (r, float(r["a"]),
+         min(float(r["b"]) + tick_sec,
+             float(ordered[i + 1]["a"]) if i + 1 < len(ordered) else float("inf")))
+        for i, r in enumerate(ordered)
+    ]
 
     def _epoch(dt: datetime) -> float:
         return dt.replace(tzinfo=sync_mod.MYT).timestamp()
@@ -7984,13 +8002,22 @@ def polling_coverage(session: Session = Depends(get_session)):
         if b <= a or a < span_a or b > span_b:
             continue  # only trips the log fully covers can be judged
         split = dict.fromkeys(outcomes, 0.0)
-        for r in runs:
-            overlap = min(float(r["b"]), b) - max(float(r["a"]), a)
+        for r, r_from, r_to in covers:
+            # A run records its FIRST and LAST tick, so the minute after its
+            # last tick belongs to it too — the next tick simply hadn't
+            # happened yet. Without that, every change of outcome manufactures
+            # a phantom gap, and during a drive the outcome alternates
+            # constantly (read, idle, read). Measured: this reported 19% of
+            # drive minutes as "no tick ran" against a sync log showing an
+            # unbroken 1.0 ticks a minute, and that phantom was used to
+            # accuse a cron that was working perfectly.
+            overlap = min(r_to, b) - max(r_from, a)
             if overlap > 0:
                 split[r.get("o") or "error"] = split.get(r.get("o") or "error", 0.0) + overlap / 60.0
         minutes = (b - a) / 60.0
-        # Minutes inside no run at all. Not an outcome — a hole. No tick can
-        # write one, which is what makes it diagnostic: the request never came.
+        # Minutes inside no run at all, and no tick's shadow either. Not an
+        # outcome — a hole. No tick can write one, which is what makes it
+        # diagnostic: the request never came.
         unlogged = max(minutes - sum(split.values()), 0.0)
         totals["duration"] += minutes
         totals["unlogged"] += unlogged

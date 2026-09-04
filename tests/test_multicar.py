@@ -3861,6 +3861,20 @@ def test_polling_coverage_says_where_a_trip_s_unwatched_minutes_went():
             assert held["blind_km"] == 3.2
             assert held["blind_kmh_implied"] == pytest.approx(9.6, abs=0.1)
 
+            # Contiguous runs leave no hole between them. A run records its
+            # first and last tick, so the minute after its last belongs to it
+            # — without that every change of outcome manufactures a phantom
+            # gap, and during a drive the outcome alternates constantly.
+            # Measured: 19% of drive minutes reported as "no tick ran" against
+            # a sync log showing an unbroken 1.0 ticks a minute, and that
+            # phantom was used to accuse a cron that was working perfectly.
+            assert half["unlogged"] == 0.0
+            # And the shadow never runs past where the next run starts, or two
+            # runs would claim the same minute and the parts would exceed the
+            # whole.
+            assert sum(half[o] for o in ("read", "idle", "asleep", "backoff",
+                                         "error")) <= half["minutes"] + 0.01
+
             # A hole no tick wrote is the opposite diagnosis and must not be
             # folded in with the car being unreachable.
             with SessionLocal() as s:
