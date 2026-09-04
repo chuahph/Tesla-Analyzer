@@ -1060,13 +1060,25 @@ def energy_for_blind_distance(energy_kwh: float, distance_km: float,
     inferred rather than measured, and weighting cannot add measurements.
     """
     measured = distance_km - blind_km
-    if (not energy_kwh or energy_kwh <= 0 or blind_km <= 0
-            or measured <= 0 or blind_km > distance_km * BLIND_DISTANCE_MAX_SHARE):
+    if blind_km <= 0 or energy_kwh is None or energy_kwh < 0:
         return energy_kwh
     # Past BLIND_RATE_FALLBACK_SHARE the trip's own rate is a sliver, not a
-    # sample — see that constant.
+    # sample — see that constant. Checked BEFORE the refusal below, and that
+    # ordering is the whole point: BLIND_DISTANCE_MAX_SHARE exists because
+    # projecting the trip's OWN rate across a large blind share is unsound,
+    # and a fleet rate is not the trip's own rate. Behind the refusal this
+    # branch could never run for the trips it was written for.
+    #
+    # Measured, trip 505: 6.278 km of an 8.0 km drive unseen, 78.5%, three
+    # points past the refusal. It reported no energy and therefore no cost at
+    # all — the exact outcome the pricing exists to prevent, produced by the
+    # pricing declining. With the fleet rate it comes to about 1.39 kWh, or
+    # 173 Wh/km, which is at least a number of the right kind.
     if fleet_wh_per_km and blind_km > distance_km * BLIND_RATE_FALLBACK_SHARE:
         return energy_kwh + blind_km * fleet_wh_per_km / 1000.0
+    if (not energy_kwh or energy_kwh <= 0
+            or measured <= 0 or blind_km > distance_km * BLIND_DISTANCE_MAX_SHARE):
+        return energy_kwh
     # Only the first DEPARTURE_PREMIUM_MAX_KM of a blind departure carries the
     # premium — beyond that the opening-minutes costs it prices are over and
     # the stretch is ordinary driving (see DEPARTURE_PREMIUM_MAX_KM).

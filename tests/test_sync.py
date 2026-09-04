@@ -3122,3 +3122,24 @@ def test_a_mostly_blind_trip_is_priced_from_the_fleet_not_from_its_own_sliver():
     # No fleet rate yet (a young history) leaves the old behaviour exactly.
     assert energy_for_blind_distance(0.211, 4.118, 2.96, departure_blind_km=2.96,
                                      fleet_wh_per_km=None) == own
+
+    # PAST the refusal threshold the fleet rate still applies, and the
+    # ordering is the point. BLIND_DISTANCE_MAX_SHARE exists because
+    # projecting the trip's own rate across a large blind share is unsound; a
+    # fleet rate is not the trip's own rate. Behind the refusal this branch
+    # could never run for the trips it was written for.
+    #
+    # Measured, trip 505: 6.278 km of an 8.0 km drive unseen — 78.5%, three
+    # points past the refusal — reported no energy and so no cost at all,
+    # which is the outcome the pricing exists to prevent, produced by the
+    # pricing declining.
+    assert energy_for_blind_distance(0.30, 8.0, 6.278) == 0.30
+    priced = energy_for_blind_distance(0.30, 8.0, 6.278, fleet_wh_per_km=173.0)
+    assert priced == pytest.approx(1.386, abs=0.01)
+    assert priced * 1000.0 / 8.0 == pytest.approx(173.0, abs=1.0)
+
+    # A trip with no measured energy at all is still priceable from the fleet
+    # — every kilometre of it is blind, so there was never a rate of its own
+    # to refuse in the first place.
+    assert energy_for_blind_distance(0.0, 8.0, 8.0, fleet_wh_per_km=173.0) == \
+        pytest.approx(1.384, abs=0.01)
