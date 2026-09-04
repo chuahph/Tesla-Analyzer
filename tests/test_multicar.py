@@ -916,6 +916,14 @@ def test_open_charge_closes_immediately_when_car_falls_asleep(monkeypatch):
             assert resp1.json()["status"] == "charging"
 
             _SleepsWhileChargingClient.step = 2
+            # The settled charge armed the back-off, so the tick that finds the
+            # car asleep is the next one after that window — up to
+            # charge_poll_interval_min later. The CLOSE is unaffected: it uses
+            # the last real reading either way, so only the moment of noticing
+            # moves, by exactly the interval the read throttle already accepts.
+            with SessionLocal() as s:
+                state.put(s, state.SUSPEND_KEY, "")
+                s.commit()
             resp2 = client.post("/api/sync")               # step 2: now asleep
             assert resp2.json()["status"] == "asleep"
             assert resp2.json()["logged"]["charges"] == 1    # auto-closed
@@ -3616,18 +3624,41 @@ def test_a_settled_charge_is_read_on_its_own_slower_clock(monkeypatch):
             # throttle's own silence as a parked car.
             assert client.post("/api/sync").json()["status"] == "charging"
 
+            # A charge with only its OPENING reading must never arm the window:
+            # it has to get a second reading on the very next tick, and the
+            # back-off returns long before the loop that knows that. Measured
+            # the hard way — the first version of this armed unconditionally
+            # and blocked exactly that tick.
+            from app.api import routes
+            with SessionLocal() as s:
+                assert routes._charge_has_a_reading(s, _LongChargeClient.VIN)
+                opened = _json.loads(
+                    state.get(s, state.scoped(state.OPEN_CHARGE_KEY,
+                                              _LongChargeClient.VIN)))
+                state.put(s, state.scoped(state.SNAPSHOT_KEY, _LongChargeClient.VIN),
+                          _json.dumps({**opened, "ts": opened["ts"] - 1}))
+                s.commit()
+                assert not routes._charge_has_a_reading(s, _LongChargeClient.VIN)
+
             # Only once the charge's own interval has elapsed does it read
             # again — five minutes, not the two an idle online car gets.
-            with SessionLocal() as s:
-                state.put(s, state.scoped(state.LAST_POLL_KEY, _LongChargeClient.VIN),
-                          str(time.time() - settings.sync_poll_interval_min * 60 - 1))
-                s.commit()
+            # A settled charge now also arms the back-off, so BOTH clocks have
+            # to come round — and in production they expire together, since the
+            # window is armed for exactly the read interval. Rolling only the
+            # read clock back leaves the window still holding, which is the
+            # point of arming it: those ticks cost nothing at all now, where
+            # before each one paid for a list_vehicles it did nothing with.
+            def _due(minutes):
+                with SessionLocal() as s:
+                    state.put(s, state.scoped(state.LAST_POLL_KEY, _LongChargeClient.VIN),
+                              str(time.time() - minutes * 60 - 1))
+                    state.put(s, state.SUSPEND_KEY, "")
+                    s.commit()
+
+            _due(settings.sync_poll_interval_min)
             client.post("/api/sync")
             assert _LongChargeClient.reads == opened_at + 1
-            with SessionLocal() as s:
-                state.put(s, state.scoped(state.LAST_POLL_KEY, _LongChargeClient.VIN),
-                          str(time.time() - settings.charge_poll_interval_min * 60 - 1))
-                s.commit()
+            _due(settings.charge_poll_interval_min)
             client.post("/api/sync")
             assert _LongChargeClient.reads == opened_at + 2
     finally:

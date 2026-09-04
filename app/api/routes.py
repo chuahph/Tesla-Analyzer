@@ -750,6 +750,26 @@ def _fleet_wh_per_km(session: Session, vehicle_id: int) -> float | None:
     return percentile(rates, 0.5)
 
 
+def _charge_has_a_reading(session: Session, vin: str) -> bool:
+    """Whether this car's open charge has been read since it opened.
+
+    Same question the read throttle asks, asked again where the back-off is
+    armed — because the back-off returns before the loop that answers it, and
+    suspending a charge that owns only its opening reading would block the
+    tick that gives it a second one.
+    """
+    import json as _json
+
+    try:
+        charge = _json.loads(
+            state.get(session, state.scoped(state.OPEN_CHARGE_KEY, vin)) or "{}")
+        snap = _json.loads(
+            state.get(session, state.scoped(state.SNAPSHOT_KEY, vin)) or "{}")
+    except ValueError:
+        return False
+    return float(snap.get("ts") or 0) > float(charge.get("ts") or 0)
+
+
 def _usable_capacity(session: Session, vehicle: Vehicle, settings) -> tuple[float, str]:
     """Usable pack capacity (kWh) for turning a drive's range/SoC delta into
     kWh, plus where it came from.
@@ -3235,27 +3255,65 @@ def _sync_now_impl(wake: bool, session: Session):
     # it as a reason to keep listing would hold the back-off off for exactly
     # the hours it exists for: a car parked overnight carries that marker the
     # whole time, and no amount of listing can act on it.
-    any_open = any(
-        state.get(session, state.scoped(k, v.get("vin")))
-        for v in vehicles for k in (state.OPEN_TRIP_KEY, state.OPEN_CHARGE_KEY)
-    )
-    all_quiet = bool(vehicles) and not any_open and not any(
+    any_trip = any(
+        state.get(session, state.scoped(state.OPEN_TRIP_KEY, v.get("vin")))
+        for v in vehicles)
+    any_charge = any(
+        state.get(session, state.scoped(state.OPEN_CHARGE_KEY, v.get("vin")))
+        for v in vehicles)
+    all_quiet = bool(vehicles) and not any_trip and not any_charge and not any(
         v.get("state") == "online" for v in vehicles)
+    # A CHARGE is quiet enough for the back-off too, and until now it was not.
+    #
+    # Throttling the read during a charge saved half of what it should have.
+    # A throttled tick still reached list_vehicles and paid a request for it,
+    # so it cost one instead of two rather than nothing — measured, 3 Sep: a
+    # 2h14m charge turned roughly 108 ticks into "idle", and the day's total
+    # went from 255 requests to 431 with idle alone rising from 18 to 138.
+    #
+    # A charging car is not going anywhere. The read is already only every
+    # charge_poll_interval_min, so suspending between those reads changes
+    # nothing about when the charge's end is noticed — it only stops paying
+    # to be told, once a minute, something the throttle has already decided to
+    # ignore. A trip is different and stays excluded: a driving car's position
+    # is worth a request every tick.
+    #
+    # Gated on the charge having been READ at least once, the same condition
+    # the read throttle uses. A charge with only its opening reading must get
+    # its second one on the very next tick — otherwise a session that stops
+    # and sleeps in between closes on a zero delta and is dropped from the
+    # totals entirely — and a suspend armed here would block exactly that
+    # tick, since the back-off returns long before the per-vehicle loop that
+    # knows about it.
+    charge_quiet = bool(vehicles) and not any_trip and any_charge and all(
+        _charge_has_a_reading(session, v.get("vin")) for v in vehicles
+        if state.get(session, state.scoped(state.OPEN_CHARGE_KEY, v.get("vin"))))
     # How long to stay quiet. Longer during the hours this car has essentially
     # never departed in: a recheck at 03:00 guards a departure that has never
     # happened, while one at 06:40 guards the commute, and only the first is
     # worth trading away. The look-ahead in the fit is what makes this safe at
     # the boundary — an hour only qualifies if the next one does too, so a
     # window that spills past the hour cannot spill into a busy one.
-    recheck_min = (_recheck_interval_min(session, sync_mod.now_local())
-                   if all_quiet else settings.sleep_recheck_min)
+    if all_quiet:
+        recheck_min = _recheck_interval_min(session, sync_mod.now_local())
+    elif charge_quiet:
+        # Exactly the read interval, so the next tick to run is the next one
+        # that would have read anyway. Any longer would delay the reading;
+        # any shorter would pay for ticks the throttle will decline.
+        recheck_min = settings.charge_poll_interval_min
+    else:
+        recheck_min = settings.sleep_recheck_min
     state.put(session, state.SUSPEND_KEY,
-              str(now_ts + recheck_min * 60.0) if all_quiet else "")
+              str(now_ts + recheck_min * 60.0) if (all_quiet or charge_quiet) else "")
     # Record that we LOOKED and found the car still, not merely that we intend
     # to look again. list_vehicles reporting no car online is proof of absence
     # of movement: a driving car is online. So each of these stamps closes the
     # window in which an unseen departure could have started, and the departure
     # recovery reads it to tell a rechecked overnight park from a blackout.
+    # Only a genuinely quiet account stamps this. A charging car IS online and
+    # could in principle be unplugged and driven off, so a charge-suspended
+    # window is not proof that no departure could have started — which is the
+    # one thing this marker is read for.
     if all_quiet:
         state.put(session, state.QUIET_SEEN_KEY, str(now_ts))
 
