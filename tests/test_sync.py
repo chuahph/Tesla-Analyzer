@@ -3199,10 +3199,12 @@ def test_snapshot_from_telemetry_keeps_unknown_distinct_from_off():
     assert not is_driving(snap)
 
 
-def _tel(ts, odo_mi, energy, gear="ShiftStateD", speed_mph=20.0, soc=50.0):
+def _tel(ts, odo_mi, energy, gear="ShiftStateD", speed_mph=20.0, soc=50.0,
+         door=False):
     return snapshot_from_telemetry({
         "Odometer": odo_mi, "EnergyRemaining": energy, "Gear": gear,
         "VehicleSpeed": speed_mph, "Soc": soc,
+        "DoorState": {"DriverFront": door},
     }, ts=ts)
 
 
@@ -3218,9 +3220,9 @@ def test_shadow_trip_measures_energy_by_subtraction():
     assert advance_shadow(shadow, _tel(600, 106.0, 28.5, soc=48.0)) is None
     # Stopped, but not yet long enough to count as arrived.
     assert advance_shadow(shadow, _tel(660, 106.0, 28.5, gear="ShiftStateP",
-                                       speed_mph=0.0, soc=48.0)) is None
+                                       speed_mph=0.0, soc=48.0, door=True)) is None
     trip = advance_shadow(shadow, _tel(900, 106.0, 28.5, gear="ShiftStateP",
-                                       speed_mph=0.0, soc=48.0))
+                                       speed_mph=0.0, soc=48.0)) 
     assert trip is not None
     assert round(trip["distance_km"], 1) == 9.7      # 6 miles
     assert trip["energy_kwh"] == 1.5                 # 30.0 - 28.5, measured
@@ -3275,3 +3277,36 @@ def test_shadow_ignores_records_replayed_from_the_car_s_buffer():
     trip = advance_shadow(shadow, _tel(900, 106.0, 28.5, gear="ShiftStateP",
                                        speed_mph=0.0))
     assert trip is None or trip["end_ts"] != 300
+
+
+def test_a_park_with_nobody_getting_out_is_not_an_arrival():
+    """Parking without opening a door is a pause, not the end of a journey.
+
+    Five minutes in P at a queue or on a phone call would otherwise split one
+    journey into two, inventing a trip that never happened. Costs nothing when
+    it guesses wrong, because the end is backdated to the moment P was reached
+    either way.
+    """
+    shadow: dict = {}
+    advance_shadow(shadow, _tel(0, 100.0, 30.0))
+    advance_shadow(shadow, _tel(300, 105.0, 28.8))
+    # In P for five minutes, doors never opened.
+    assert advance_shadow(shadow, _tel(360, 105.0, 28.8, gear="ShiftStateP",
+                                       speed_mph=0.0)) is None
+    assert advance_shadow(shadow, _tel(660, 105.0, 28.8, gear="ShiftStateP",
+                                       speed_mph=0.0)) is None
+    # Then drives on: still one trip.
+    assert advance_shadow(shadow, _tel(700, 105.5, 28.6)) is None
+    assert shadow.get("open") is not None
+    assert shadow["open"]["ts"] == 0
+
+    # Whereas a door opening settles it as an arrival on the short window.
+    shadow2: dict = {}
+    advance_shadow(shadow2, _tel(0, 100.0, 30.0))
+    advance_shadow(shadow2, _tel(300, 105.0, 28.8))
+    advance_shadow(shadow2, _tel(360, 105.0, 28.8, gear="ShiftStateP",
+                                 speed_mph=0.0, door=True))
+    trip = advance_shadow(shadow2, _tel(600, 105.0, 28.8, gear="ShiftStateP",
+                                        speed_mph=0.0))
+    assert trip is not None
+    assert trip["end_ts"] == 360          # when it parked, not when we decided

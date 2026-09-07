@@ -3611,6 +3611,13 @@ def test_telemetry_shadow_trip_appears_in_the_comparison():
                 rec(600, Odometer=106.0, EnergyRemaining=28.5, Soc=48.0,
                     VehicleSpeed=25.0),
                 rec(660, Gear="ShiftStateP", VehicleSpeed=0.0),
+                # Somebody gets out — that is what makes it an arrival rather
+                # than a pause, and settles it on the short window.
+                {"vin": "SHADOW1",
+                 "createdAt": (base + timedelta(seconds=670)).isoformat().replace(
+                     "+00:00", "Z"),
+                 "data": [{"key": "DoorState",
+                           "value": {"doorValue": {"DriverFront": True}}}]},
                 rec(900, VehicleSpeed=0.0),
             ]})
             client.post("/login", data={"passcode": "secret123"})

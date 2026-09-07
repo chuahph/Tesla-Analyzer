@@ -2736,6 +2736,13 @@ def snapshot_from_telemetry(fields: dict[str, Any], ts: float) -> dict[str, Any]
 # a light never reaches this path at all, since is_driving is true whenever
 # the gear is not P.
 SHADOW_SETTLE_SEC = 180.0
+# Longer when nobody got out. A car in P with its doors never opened is more
+# likely pausing — a queue, a phone call, waiting for someone — than arrived,
+# and splitting that into two trips invents a journey that never happened.
+# Costs nothing when it guesses wrong: the trip is backdated to the moment P
+# was reached either way, so a longer wait delays when the trip appears, not
+# when it is recorded as having ended.
+SHADOW_SETTLE_NO_EXIT_SEC = 600.0
 # And closed at the last motion if the stream simply stops: a car that sleeps
 # without sending a final ShiftStateP would otherwise leave a trip open for
 # hours and then absorb the next journey into it.
@@ -2784,10 +2791,16 @@ def advance_shadow(shadow: dict[str, Any], snap: dict[str, Any]) -> dict[str, An
             shadow["max_speed_kmh"] = 0.0
         shadow["still_since"] = None
         shadow.pop("still_snap", None)
+        shadow.pop("exit_seen", None)
         shadow["max_speed_kmh"] = max(
             float(shadow.get("max_speed_kmh") or 0.0), float(snap.get("speed_kmh") or 0.0))
     elif open_at:
         still_since = shadow.get("still_since")
+        # A door opening while parked is the one dependable sign somebody
+        # left. Locked is not: this car reports Locked true mid-journey from
+        # auto-lock, so trusting it would end trips that were still running.
+        if snap.get("doors_open"):
+            shadow["exit_seen"] = True
         if still_since is None:
             # Remember the car as it was when it stopped, not as it will be
             # once the settle window expires. Closing on the later snapshot
@@ -2796,8 +2809,11 @@ def advance_shadow(shadow: dict[str, Any], snap: dict[str, Any]) -> dict[str, An
             # for three minutes of parked accessory draw.
             shadow["still_since"] = ts
             shadow["still_snap"] = dict(snap)
-        elif ts - float(still_since) >= SHADOW_SETTLE_SEC:
-            done = _shadow_close(shadow, shadow.get("still_snap") or snap)
+        else:
+            window = (SHADOW_SETTLE_SEC if shadow.get("exit_seen")
+                      else SHADOW_SETTLE_NO_EXIT_SEC)
+            if ts - float(still_since) >= window:
+                done = _shadow_close(shadow, shadow.get("still_snap") or snap)
 
     shadow["last"] = dict(snap)
     return done
@@ -2809,6 +2825,7 @@ def _shadow_close(shadow: dict[str, Any], end: dict[str, Any]) -> dict[str, Any]
     max_speed = float(shadow.pop("max_speed_kmh", 0.0) or 0.0)
     shadow["still_since"] = None
     shadow.pop("still_snap", None)
+    shadow.pop("exit_seen", None)
     if not start:
         return None
 
