@@ -138,10 +138,14 @@ kill -0 $PROXY_PID 2>/dev/null || die "the proxy exited on startup (see $LOG)"
 #                photographing receipts.
 #   Explanation  ModuleTempMin is the pack's own temperature, which is what
 #                cold losses actually depend on rather than the outside air
-#                the efficiency chart plots today. GradeEstimatePercent is
-#                probably the largest unexplained term in per-trip Wh/km on
-#                this island. Tyre pressure is worth a few percent and is
-#                currently invisible.
+#                the efficiency chart plots today. Tyre pressure is worth a
+#                few percent and is currently invisible.
+#
+# Road gradient is missing and wanted: it is probably the largest unexplained
+# term in per-trip Wh/km on this island. GradeEstimatePercent appears in the
+# proto but Tesla's API rejects it as an unknown field, so either the name
+# differs on this firmware or it is not configurable. Left out rather than
+# left in to fail the whole request.
 say "Building the configuration"
 CA=$(sed ':a;N;$!ba;s/\n/\\n/g' "/etc/letsencrypt/live/$TELEMETRY_HOST/chain.pem")
 cat > "$WORK/config.json" <<EOF
@@ -173,7 +177,6 @@ cat > "$WORK/config.json" <<EOF
       "ChargerPhases":             {"interval_seconds": 60},
       "ChargeLimitSoc":            {"interval_seconds": 300},
       "HvacPower":                 {"interval_seconds": 60},
-      "GradeEstimatePercent":      {"interval_seconds": 60},
       "ModuleTempMin":             {"interval_seconds": 300},
       "InsideTemp":                {"interval_seconds": 300},
       "OutsideTemp":               {"interval_seconds": 300},
