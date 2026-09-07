@@ -26,10 +26,35 @@ BRIDGE_DIR="/opt/tesla-bridge"
 # all rather than as a missing file.
 RAW_BASE="${RAW_BASE:-https://raw.githubusercontent.com/chuahph/Tesla-Analyzer/main/scripts/telemetry}"
 
+LOG="/var/log/tesla-setup.log"
+
 say() { printf '\n\033[1m==> %s\033[0m\n' "$*"; }
 die() { printf '\n\033[31mERROR: %s\033[0m\n' "$*" >&2; exit 1; }
 
 [ "$(id -u)" -eq 0 ] || die "run with sudo: sudo bash $0"
+
+# Everything from here is teed to a file. Run as a GCP startup script there is
+# no terminal to watch, and hunting the reason for a failure through
+# journalctl on a phone keyboard is its own small ordeal — one predictable
+# path to "what went wrong" is worth the two lines.
+exec > >(tee -a "$LOG") 2>&1
+echo "=== $(date -Is) starting ==="
+
+# apt on a freshly booted GCP image is frequently already busy: unattended
+# upgrades and apt-daily fire at boot and hold the dpkg lock. A startup script
+# that runs `apt-get install` immediately loses that race, exits under `set
+# -e`, and leaves nothing behind but an empty /etc/tesla — which is
+# indistinguishable from never having run at all.
+wait_for_apt() {
+  local waited=0
+  while fuser /var/lib/dpkg/lock-frontend /var/lib/apt/lists/lock \
+        /var/cache/apt/archives/lock >/dev/null 2>&1; do
+    [ "$waited" -eq 0 ] && echo "  waiting for another apt/dpkg to finish..."
+    sleep 5
+    waited=$((waited + 5))
+    [ "$waited" -ge 300 ] && die "apt has been locked for 5 minutes; try again later"
+  done
+}
 
 # ---------------------------------------------------------------- inputs
 # Every answer can arrive as an environment variable instead of a prompt, so
@@ -76,10 +101,12 @@ fi
 # --------------------------------------------------------------- packages
 say "Installing packages"
 export DEBIAN_FRONTEND=noninteractive
-apt-get update -qq
+wait_for_apt
+apt-get update -qq || die "apt-get update failed — see $LOG"
+wait_for_apt
 apt-get install -y -qq docker.io certbot openssl curl jq \
-  python3-zmq python3-requests >/dev/null
-systemctl enable --now docker >/dev/null
+  python3-zmq python3-requests || die "package install failed — see $LOG"
+systemctl enable --now docker
 
 # --------------------------------------------------------------- key pair
 # The virtual key. Its public half goes in the repo and is served from the
