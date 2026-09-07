@@ -20,7 +20,11 @@ FT_IMAGE="tesla/fleet-telemetry:${FT_VERSION}"
 KEY_DIR="/etc/tesla/keys"
 CONF_DIR="/etc/fleet-telemetry"
 BRIDGE_DIR="/opt/tesla-bridge"
-RAW_BASE="https://raw.githubusercontent.com/chuahph/Tesla-Analyzer/main/scripts/telemetry"
+# Where this script fetches its siblings from. Overridable because a branch
+# that has not been merged to main yet still has to be runnable — otherwise
+# the failure is a 404 inside a pipe, which reports as nothing happening at
+# all rather than as a missing file.
+RAW_BASE="${RAW_BASE:-https://raw.githubusercontent.com/chuahph/Tesla-Analyzer/main/scripts/telemetry}"
 
 say() { printf '\n\033[1m==> %s\033[0m\n' "$*"; }
 die() { printf '\n\033[31mERROR: %s\033[0m\n' "$*" >&2; exit 1; }
