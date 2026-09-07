@@ -3438,3 +3438,40 @@ def test_the_trip_side_and_the_gap_side_price_a_park_at_the_same_rate():
                 s.commit()
     finally:
         settings.app_passcode = old
+
+
+def test_partner_registration_is_recorded_per_domain(monkeypatch):
+    """Moving the app to a new domain must re-register it with Tesla.
+
+    Registration is Tesla fetching the partner key FROM a domain, so a flag
+    that only remembers "some domain was registered" makes the move silently
+    skip the step — and it surfaces much later, as a car refusing to pair
+    against a domain Tesla was never told about.
+    """
+    from app import auth as auth_mod
+    from app.api import routes as routes_mod
+
+    settings = get_settings()
+    old_pc, old_id, old_secret = (
+        settings.app_passcode, settings.tesla_client_id, settings.tesla_client_secret)
+    settings.app_passcode = ""
+    settings.tesla_client_id = "id"
+    settings.tesla_client_secret = "secret"
+
+    registered: list[str] = []
+    monkeypatch.setattr(auth_mod, "register_partner",
+                        lambda domain: registered.append(domain) or {})
+    monkeypatch.setattr(routes_mod.auth, "register_partner",
+                        lambda domain: registered.append(domain) or {})
+    monkeypatch.setattr(routes_mod.auth, "authorize_url",
+                        lambda uri, state=None: ("https://auth.tesla.com/x", "s"))
+    try:
+        with TestClient(app) as client:
+            for host in ("first.example", "first.example", "second.example"):
+                client.get("/api/link/oauth/start", follow_redirects=False,
+                           headers={"host": host})
+        # Twice from the same host registers once; a new host registers again.
+        assert registered == ["first.example", "second.example"]
+    finally:
+        (settings.app_passcode, settings.tesla_client_id,
+         settings.tesla_client_secret) = old_pc, old_id, old_secret

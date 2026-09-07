@@ -2034,11 +2034,18 @@ def oauth_start(request: Request, session: Session = Depends(get_session)):
         )
     # One-time Fleet API requirement: register this domain with Tesla. Tesla
     # fetches the public key the app serves under /.well-known/ during the call.
-    if state.get(session, "partner_registered") != "yes":
-        domain = request.url.hostname or ""
+    #
+    # Recorded per domain, not once globally. Registration is about a domain —
+    # Tesla goes and reads the key from it — so a flag that only remembers
+    # "some domain was registered" makes moving to a new one silently skip the
+    # step, and the failure surfaces much later as a vehicle refusing to pair
+    # against a domain Tesla was never told about.
+    domain = request.url.hostname or ""
+    registered_key = f"partner_registered:{domain}"
+    if state.get(session, registered_key) != "yes":
         try:
             auth.register_partner(domain)
-            state.put(session, "partner_registered", "yes")
+            state.put(session, registered_key, "yes")
         except Exception as exc:  # noqa: BLE001
             raise HTTPException(
                 400,
