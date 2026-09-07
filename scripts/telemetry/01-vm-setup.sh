@@ -175,12 +175,33 @@ EOF
 say "Starting fleet-telemetry ($FT_VERSION)"
 docker pull -q "$FT_IMAGE" >/dev/null
 docker rm -f fleet-telemetry >/dev/null 2>&1 || true
+
+# The image ships its binary as CMD rather than ENTRYPOINT, so arguments
+# passed to `docker run` REPLACE the command instead of being appended to it —
+# docker then tries to exec a program named "-config=...". Read the binary out
+# of the image and put it back in front, but only when there is no entrypoint
+# to append to, so this keeps working if a later release adds one.
+FT_ARGS=()
+if [ "$(docker inspect -f '{{len .Config.Entrypoint}}' "$FT_IMAGE")" = "0" ]; then
+  FT_ARGS+=("$(docker inspect -f '{{index .Config.Cmd 0}}' "$FT_IMAGE")")
+fi
+FT_ARGS+=("-config=$CONF_DIR/config.json")
+
 # --network host so the container can hold 443 for the car and publish ZMQ on
 # 5284 for the bridge without two layers of port mapping to reason about.
 docker run -d --name fleet-telemetry --restart unless-stopped --network host \
   -v /etc/letsencrypt:/etc/letsencrypt:ro \
   -v "$CONF_DIR":"$CONF_DIR":ro \
-  "$FT_IMAGE" -config="$CONF_DIR/config.json" >/dev/null
+  "$FT_IMAGE" "${FT_ARGS[@]}" >/dev/null
+
+# A container that exits immediately is the same evidence as one that never
+# started, and the reason is only in its logs. Say it here instead.
+sleep 3
+if [ "$(docker inspect -f '{{.State.Status}}' fleet-telemetry)" != "running" ]; then
+  echo "--- fleet-telemetry logs ---"
+  docker logs --tail 30 fleet-telemetry 2>&1 || true
+  die "fleet-telemetry did not stay running (see above and $LOG)"
+fi
 
 # Certificates renew every 60 days; the server reads them once at start, so it
 # has to be told. Without this the car silently stops connecting three months
