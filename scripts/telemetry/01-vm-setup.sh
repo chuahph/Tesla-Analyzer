@@ -187,6 +187,15 @@ if [ "$(docker inspect -f '{{len .Config.Entrypoint}}' "$FT_IMAGE")" = "0" ]; th
 fi
 FT_ARGS+=("-config=$CONF_DIR/config.json")
 
+# Let unprivileged processes bind from 443 upwards. Host networking means the
+# container shares this namespace, so this covers the privileged-port problem
+# regardless of which user the image decides to run as — belt and braces with
+# --user below, because the two failures look identical and each round trip
+# to diagnose one costs a reboot and five minutes of CDN cache.
+sysctl -q -w net.ipv4.ip_unprivileged_port_start=443 || true
+echo 'net.ipv4.ip_unprivileged_port_start=443' \
+  > /etc/sysctl.d/99-fleet-telemetry.conf
+
 # --network host so the container can hold 443 for the car and publish ZMQ on
 # 5284 for the bridge without two layers of port mapping to reason about.
 #
