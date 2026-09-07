@@ -3523,6 +3523,19 @@ def test_telemetry_ingest_records_what_arrived():
 
             assert client.get("/api/telemetry/recent?keys_only=true").json()[
                 "records"] == []
+
+            # The composite maps to a snapshot in the units the app uses.
+            # Two records, each carrying only what changed, must together
+            # describe the car — that is the whole reason for accumulating.
+            client.post("/api/telemetry?key=cronkey", json={"records": [{
+                "vin": "5YJ3TEST",
+                "createdAt": "2026-09-07T14:01:00Z",
+                "data": [{"key": "Soc", "value": {"doubleValue": 40.0}}],
+            }]})
+            snap = client.get("/api/telemetry/recent").json()["snapshot"]["5YJ3TEST"]
+            assert round(snap["odo_km"]) == 19868   # 12345.6 miles, from batch 1
+            assert snap["soc"] == 40.0              # from batch 2
+            assert snap["shift"] == "D"             # still remembered
     finally:
         settings.app_passcode, settings.sync_key = old_pc, old_sk
 

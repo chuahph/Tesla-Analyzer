@@ -2,6 +2,7 @@
 import pytest
 
 from app.sync import (_energy_kwh, close_trip_on_sleep, is_driving,
+                      snapshot_from_telemetry,
                       process_snapshot, snapshot_from_vehicle_data)
 
 T0 = 1_760_000_000.0  # seconds epoch
@@ -3143,3 +3144,56 @@ def test_a_mostly_blind_trip_is_priced_from_the_fleet_not_from_its_own_sliver():
     # to refuse in the first place.
     assert energy_for_blind_distance(0.0, 8.0, 8.0, fleet_wh_per_km=173.0) == \
         pytest.approx(1.384, abs=0.01)
+
+
+def test_snapshot_from_telemetry_uses_the_car_s_own_units():
+    """Telemetry is imperial; the snapshot must be metric.
+
+    Pinned to real values from this car, because the units are not documented
+    and getting them wrong is the exact failure this migration exists to
+    avoid: Odometer read as km rather than miles would make every trip 38%
+    short, and it would look like the car disagreeing with itself.
+    """
+    fields = {
+        "Odometer": 19326.78624168258,       # dashboard reads 31,103 km
+        "RatedRange": 71.47359966327582,     # 452 km at 100% on 25.456% SoC
+        "VehicleSpeed": 26.71896126620536,   # exactly 43 km/h in mph
+        "Soc": 25.456076340162788,
+        "EnergyRemaining": 20.499999541789293,
+        "Gear": "ShiftStateD",
+        "OutsideTemp": 30.5,                 # Celsius, unlike the distances
+        "Location": {"latitude": 5.342846, "longitude": 100.310433},
+        "Locked": True,
+        "SentryMode": "SentryModeStateOff",
+        "DetailedChargeState": "DetailedChargeStateDisconnected",
+        "DoorState": {"DriverFront": False, "TrunkRear": False},
+    }
+    snap = snapshot_from_telemetry(fields, ts=1757260000.0)
+
+    assert round(snap["odo_km"]) == 31103          # matches the dashboard
+    assert round(snap["speed_kmh"]) == 43          # whole km/h, round-tripped
+    assert round(snap["range_km"] / snap["soc"] * 100) == 452
+    assert snap["out_temp"] == 30.5                # NOT converted
+    assert snap["shift"] == "D"
+    assert is_driving(snap)
+    assert snap["charging"] is False
+    assert snap["lat"] == 5.342846 and snap["lon"] == 100.310433
+    assert snap["sentry_mode"] is False            # confirmed off, not unknown
+    assert snap["doors_open"] is False
+    # Energy measured, not derived from SoC and a capacity constant.
+    assert snap["energy_kwh"] == 20.499999541789293
+
+
+def test_snapshot_from_telemetry_keeps_unknown_distinct_from_off():
+    """A field the car does not stream is None, never False.
+
+    The parked-drain code distinguishes "Tesla did not report this" from "this
+    is confirmed off"; inventing False would make a sleeping car look like one
+    with everything verified quiet.
+    """
+    snap = snapshot_from_telemetry({"Soc": 50.0}, ts=1757260000.0)
+    assert snap["sentry_mode"] is None
+    assert snap["doors_open"] is None
+    assert snap["climate_on"] is None
+    assert snap["shift"] == "P"
+    assert not is_driving(snap)

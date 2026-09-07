@@ -2632,3 +2632,98 @@ def process_snapshot(
             charges.append(c)
 
     return drives, charges, open_trip, open_charge
+
+
+# Fleet Telemetry reports distances in miles and speeds in mph regardless of
+# the car's display units — verified against this car three ways: RatedRange
+# 71.47 at 25.456% SoC gives 452 km at 100% (the owner measures 453), every
+# VehicleSpeed sample is the exact mph value of a whole km/h, and Odometer
+# 19326.786 x 1.609344 is 31,103 km, which is what the dashboard shows.
+# Temperature is Celsius, so not everything follows the same convention —
+# check each field rather than assuming.
+_TELEMETRY_SHIFT = {
+    "ShiftStateP": "P", "ShiftStateD": "D", "ShiftStateR": "R",
+    "ShiftStateN": "N", "ShiftStateInvalid": "P", "Unknown": "P",
+}
+
+
+def snapshot_from_telemetry(fields: dict[str, Any], ts: float) -> dict[str, Any]:
+    """Flatten accumulated telemetry field values into a sync snapshot.
+
+    Same shape as snapshot_from_vehicle_data, so everything downstream — the
+    drive/charge state machine, the splitter, the analysis — works unchanged.
+    ``fields`` is the latest value seen for each key, not one message: the car
+    sends only what changed, so a single record never describes the car.
+
+    Fields the car is not configured to stream come back as None rather than a
+    default. None means "unknown" and False means "confirmed off", and the
+    parked-drain code already depends on telling those apart — inventing a
+    False here would make a sleeping car look like one with everything
+    verified off.
+    """
+    def num(key: str) -> float | None:
+        """A number, whatever wrapper Tesla chose for it.
+
+        Strings are accepted because the stream is not typed consistently —
+        the same field can arrive as stringValue or doubleValue — and the
+        alternative failure is silent: a rejected odometer becomes 0.0, which
+        reads downstream as a car that has never moved rather than as a value
+        that could not be parsed.
+        """
+        value = fields.get(key)
+        if isinstance(value, bool) or value is None:
+            return None
+        if isinstance(value, (int, float)):
+            return float(value)
+        try:
+            return float(str(value).strip())
+        except (TypeError, ValueError):
+            return None
+
+    odo = num("Odometer")
+    rated = num("RatedRange")
+    speed = num("VehicleSpeed")
+    charge_state = fields.get("DetailedChargeState") or ""
+    location = fields.get("Location") or {}
+    doors = fields.get("DoorState")
+    sentry = fields.get("SentryMode")
+
+    return {
+        "ts": ts,
+        "odo_km": (odo * MILES_TO_KM) if odo is not None else 0.0,
+        "soc": num("Soc") or 0.0,
+        "range_km": (rated * MILES_TO_KM) if rated is not None else 0.0,
+        "charging": charge_state.endswith("Charging"),
+        "charger_kw": num("ACChargingPower") or 0.0,
+        # Energy straight from the pack, which polling has never had: it is
+        # measured rather than SoC multiplied by an estimated capacity, so a
+        # trip's energy is a subtraction and the capacity constant leaves the
+        # path entirely. Nothing downstream reads this yet.
+        "energy_kwh": num("EnergyRemaining"),
+        # Left at 0 deliberately. ACChargingEnergyIn read 16.70 and
+        # DCChargingEnergyIn 16.00 on a car with 31,000 km, so neither is a
+        # lifetime total, and until a charge shows whether they are
+        # per-session or rolling, a wrong guess here would silently misprice
+        # every charge.
+        "energy_added_kwh": 0.0,
+        "fast": charge_state.startswith("DetailedChargeStateDC"),
+        "out_temp": num("OutsideTemp") if num("OutsideTemp") is not None else 20.0,
+        "shift": _TELEMETRY_SHIFT.get(str(fields.get("Gear") or ""), "P"),
+        "speed_kmh": (speed * MILES_TO_KM) if speed is not None else 0.0,
+        "locked": bool(fields.get("Locked")),
+        "lat": location.get("latitude") if isinstance(location, dict) else None,
+        "lon": location.get("longitude") if isinstance(location, dict) else None,
+        "sentry_mode": (sentry != "SentryModeStateOff") if sentry else None,
+        "doors_open": (any(bool(v) for v in doors.values())
+                       if isinstance(doors, dict) and doors else None),
+        # Not streamed by the configured field set. See the docstring: None is
+        # "unknown", and the parked-drain code relies on that not being False.
+        "user_present": False,
+        "car_wash_mode": False,
+        "windows_open": None,
+        "dashcam_state": None,
+        "center_display_state": None,
+        "climate_on": None,
+        "cabin_overheat_protection": None,
+        "cabin_overheat_protection_actively_cooling": None,
+    }

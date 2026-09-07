@@ -48,6 +48,10 @@ TELEMETRY_RAW_KEY = "telemetry_raw"  # JSON list of the most recent records the
 TELEMETRY_SEEN_KEY = "telemetry_seen"  # JSON {first, last, batches, records}:
 # counters that survive the raw buffer being trimmed, so "is the car streaming
 # at all" stays answerable without keeping every record.
+TELEMETRY_LATEST_KEY = "telemetry_latest"  # JSON {vin: {field: value}} — the
+# latest value the car has sent for each field, per car. A telemetry message
+# carries only what CHANGED, so no single record ever describes the vehicle;
+# the running composite is what a snapshot can be built from.
 SYNC_LOG_KEY = "sync_log"  # JSON: run-length record of what each /api/sync tick did —
 # the only place a blackout can be told from a quiet car after the fact, since
 # LAST_STATUS_KEY is overwritten every tick and keeps no history

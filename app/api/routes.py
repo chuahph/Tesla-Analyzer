@@ -9086,6 +9086,21 @@ def telemetry_ingest(
     buffered = (buffered + kept)[-TELEMETRY_RAW_MAX:]
     state.put(session, state.TELEMETRY_RAW_KEY, _json.dumps(buffered))
 
+    # A telemetry message carries only what changed, so no single record ever
+    # describes the car. Fold each one into a running composite — that is what
+    # a snapshot can be built from.
+    try:
+        latest = _json.loads(state.get(session, state.TELEMETRY_LATEST_KEY) or "{}")
+    except ValueError:
+        latest = {}
+    for record in kept:
+        vin = record.get("vin") or "unknown"
+        car = latest.setdefault(vin, {})
+        car.update(record.get("fields") or {})
+        if record.get("created_at"):
+            car["_ts"] = record["created_at"]
+    state.put(session, state.TELEMETRY_LATEST_KEY, _json.dumps(latest))
+
     try:
         seen = _json.loads(state.get(session, state.TELEMETRY_SEEN_KEY) or "{}")
     except ValueError:
@@ -9128,10 +9143,29 @@ def telemetry_recent(
             fields[key]["count"] += 1
             fields[key]["sample"] = value  # most recent wins
 
+    # The derived snapshot, alongside the raw fields it came from. Shown
+    # rather than acted on: this is how the mapping gets checked against a
+    # real car before anything downstream is allowed to depend on it.
+    try:
+        latest = _json.loads(state.get(session, state.TELEMETRY_LATEST_KEY) or "{}")
+    except ValueError:
+        latest = {}
+    snapshots = {}
+    for vin, car in latest.items():
+        car = dict(car)
+        stamp = car.pop("_ts", None)
+        try:
+            ts = (datetime.fromisoformat(str(stamp).replace("Z", "+00:00")).timestamp()
+                  if stamp else 0.0)
+        except ValueError:
+            ts = 0.0
+        snapshots[vin] = sync_mod.snapshot_from_telemetry(car, ts)
+
     return {
         "seen": seen or {"note": "nothing received yet"},
         "buffered": len(buffered),
         "fields": dict(sorted(fields.items())),
+        "snapshot": snapshots,
         "records": [] if keys_only else buffered[-limit:],
     }
 
