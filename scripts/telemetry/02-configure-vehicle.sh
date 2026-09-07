@@ -57,7 +57,22 @@ echo "  api     : $BASE"
 # subtly wrong signature is rejected by the car with nothing to learn from.
 say "Installing the signing proxy"
 if ! command -v tesla-http-proxy >/dev/null; then
-  apt-get install -y -qq golang-go git >/dev/null || die "could not install Go"
+  apt-get install -y -qq git >/dev/null || die "could not install git"
+
+  # Go from upstream, not from apt. Ubuntu ships 1.22, vehicle-command needs
+  # 1.23, and the Ubuntu build cannot fetch a newer toolchain for itself —
+  # it fails with "toolchain not available", which reads like a network
+  # problem rather than a packaging one.
+  export PATH=/usr/local/go/bin:$PATH
+  if ! go version 2>/dev/null | grep -qE 'go1\.(2[3-9]|[3-9][0-9])'; then
+    GOVER=$(curl -fsSL 'https://go.dev/VERSION?m=text' | head -1)
+    [ -n "$GOVER" ] || die "could not determine the current Go version"
+    echo "  installing $GOVER"
+    curl -fsSL "https://go.dev/dl/${GOVER}.linux-amd64.tar.gz" -o /tmp/go.tgz \
+      || die "could not download $GOVER"
+    rm -rf /usr/local/go && tar -C /usr/local -xzf /tmp/go.tgz && rm -f /tmp/go.tgz
+  fi
+  go version || die "Go is still not usable"
 
   # Linking Go on a 1 GB box is the one step here with any chance of running
   # out of memory, and an OOM during a build reads as an unexplained failure.
