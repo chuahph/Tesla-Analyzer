@@ -3310,3 +3310,37 @@ def test_a_park_with_nobody_getting_out_is_not_an_arrival():
                                         speed_mph=0.0))
     assert trip is not None
     assert trip["end_ts"] == 360          # when it parked, not when we decided
+
+
+def test_shadow_trip_reports_how_it_ended_and_carries_both_energy_measures():
+    """Both energy measures travel together, and neither is trusted yet.
+
+    LifetimeEnergyUsedDrive is the better measure — monotonic, traction only —
+    but its units are undocumented. Carrying it beside the EnergyRemaining
+    delta is what lets one real journey settle the ratio instead of a guess
+    settling it silently.
+    """
+    def snap(ts, odo, energy, drive, regen, gear="ShiftStateD",
+             speed=20.0, seat=True):
+        return snapshot_from_telemetry({
+            "Odometer": odo, "EnergyRemaining": energy, "Gear": gear,
+            "VehicleSpeed": speed, "Soc": 50.0,
+            "LifetimeEnergyUsedDrive": drive,
+            "LifetimeEnergyGainedRegen": regen,
+            "DriverSeatOccupied": seat, "ModuleTempMin": 28.5,
+        }, ts=ts)
+
+    shadow: dict = {}
+    advance_shadow(shadow, snap(0, 100.0, 30.0, 4000.0, 900.0))
+    advance_shadow(shadow, snap(600, 106.0, 28.5, 4001.5, 900.4))
+    # Driver gets out — occupancy says so directly, no door event needed.
+    advance_shadow(shadow, snap(660, 106.0, 28.5, 4001.5, 900.4,
+                                gear="ShiftStateP", speed=0.0, seat=False))
+    trip = advance_shadow(shadow, snap(900, 106.0, 28.5, 4001.5, 900.4,
+                                       gear="ShiftStateP", speed=0.0, seat=False))
+    assert trip is not None
+    assert trip["ended_on"] == "exit"
+    assert trip["energy_kwh"] == 1.5      # pack fell by this
+    assert trip["drive_delta"] == 1.5     # and traction accounts for all of it
+    assert trip["regen_delta"] == 0.4
+    assert trip["pack_temp_c"] == 28.5

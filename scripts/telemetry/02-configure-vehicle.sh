@@ -120,6 +120,28 @@ kill -0 $PROXY_PID 2>/dev/null || die "the proxy exited on startup (see $LOG)"
 # a generous interval costs nothing on a parked car and still catches a
 # departure. Gear is the one that must be tight: it is the signal the polling
 # loop could never see in time, and the entire reason for this migration.
+#
+# A vehicle accepts only a limited number of telemetry configurations, so this
+# list is written once and completely rather than grown a field at a time.
+# What each group is for:
+#
+#   Boundaries   Gear, DriverSeatOccupied, DoorState. Occupancy says whether
+#                anyone actually left, which is what separates an arrival from
+#                a queue and what a door event only implies.
+#   Energy       LifetimeEnergyUsedDrive is monotonic and traction-only, so a
+#                lost record costs nothing and climate does not contaminate a
+#                trip. LifetimeEnergyGainedRegen gives regen, which this app
+#                has never had at all.
+#   Charging     ChargerVoltage x ChargeAmps x ChargerPhases is wall power
+#                measured by the car, against EnergyRemaining for pack energy
+#                — wall-to-pack efficiency on every charge, instead of
+#                photographing receipts.
+#   Explanation  ModuleTempMin is the pack's own temperature, which is what
+#                cold losses actually depend on rather than the outside air
+#                the efficiency chart plots today. GradeEstimatePercent is
+#                probably the largest unexplained term in per-trip Wh/km on
+#                this island. Tyre pressure is worth a few percent and is
+#                currently invisible.
 say "Building the configuration"
 CA=$(sed ':a;N;$!ba;s/\n/\\n/g' "/etc/letsencrypt/live/$TELEMETRY_HOST/chain.pem")
 cat > "$WORK/config.json" <<EOF
@@ -130,21 +152,37 @@ cat > "$WORK/config.json" <<EOF
     "port": 443,
     "ca": "$CA",
     "fields": {
-      "Gear":                 {"interval_seconds": 10},
-      "VehicleSpeed":         {"interval_seconds": 30},
-      "Location":             {"interval_seconds": 60},
-      "Odometer":             {"interval_seconds": 60},
-      "Soc":                  {"interval_seconds": 60},
-      "EnergyRemaining":      {"interval_seconds": 60},
-      "RatedRange":           {"interval_seconds": 300},
-      "DetailedChargeState":  {"interval_seconds": 60},
-      "ACChargingPower":      {"interval_seconds": 60},
-      "ACChargingEnergyIn":   {"interval_seconds": 60},
-      "DCChargingEnergyIn":   {"interval_seconds": 60},
-      "OutsideTemp":          {"interval_seconds": 300},
-      "SentryMode":           {"interval_seconds": 300},
-      "Locked":               {"interval_seconds": 300},
-      "DoorState":            {"interval_seconds": 300}
+      "Gear":                      {"interval_seconds": 5},
+      "DriverSeatOccupied":        {"interval_seconds": 10},
+      "DoorState":                 {"interval_seconds": 10},
+      "VehicleSpeed":              {"interval_seconds": 10},
+      "Odometer":                  {"interval_seconds": 30},
+      "Location":                  {"interval_seconds": 30},
+      "LifetimeEnergyUsedDrive":   {"interval_seconds": 30},
+      "LifetimeEnergyGainedRegen": {"interval_seconds": 60},
+      "EnergyRemaining":           {"interval_seconds": 60},
+      "Soc":                       {"interval_seconds": 60},
+      "RatedRange":                {"interval_seconds": 300},
+      "DetailedChargeState":       {"interval_seconds": 30},
+      "ChargePortLatch":           {"interval_seconds": 60},
+      "ACChargingPower":           {"interval_seconds": 60},
+      "ACChargingEnergyIn":        {"interval_seconds": 60},
+      "DCChargingEnergyIn":        {"interval_seconds": 60},
+      "ChargerVoltage":            {"interval_seconds": 60},
+      "ChargeAmps":                {"interval_seconds": 60},
+      "ChargerPhases":             {"interval_seconds": 60},
+      "ChargeLimitSoc":            {"interval_seconds": 300},
+      "HvacPower":                 {"interval_seconds": 60},
+      "GradeEstimatePercent":      {"interval_seconds": 60},
+      "ModuleTempMin":             {"interval_seconds": 300},
+      "InsideTemp":                {"interval_seconds": 300},
+      "OutsideTemp":               {"interval_seconds": 300},
+      "SentryMode":                {"interval_seconds": 300},
+      "Locked":                    {"interval_seconds": 300},
+      "TpmsPressureFl":            {"interval_seconds": 3600},
+      "TpmsPressureFr":            {"interval_seconds": 3600},
+      "TpmsPressureRl":            {"interval_seconds": 3600},
+      "TpmsPressureRr":            {"interval_seconds": 3600}
     }
   }
 }

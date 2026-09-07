@@ -2726,6 +2726,37 @@ def snapshot_from_telemetry(fields: dict[str, Any], ts: float) -> dict[str, Any]
         "climate_on": None,
         "cabin_overheat_protection": None,
         "cabin_overheat_protection_actively_cooling": None,
+
+        # --- Fields polling has never had. Carried through unconverted.
+        #
+        # The odometer taught this: assuming a unit is the cheapest way to put
+        # a systematic error underneath everything and have it look like the
+        # car disagreeing with itself. Whether these counters are kWh or Wh is
+        # undocumented, so they are recorded raw and checked against a
+        # quantity already known — see the shadow trip, which carries both the
+        # counter's delta and the EnergyRemaining delta so one real journey
+        # settles the ratio.
+        "energy_drive_raw": num("LifetimeEnergyUsedDrive"),
+        "energy_regen_raw": num("LifetimeEnergyGainedRegen"),
+        # Occupancy, which says directly what a door event only implies: a
+        # door can be opened by a passenger, for luggage, or not reported at
+        # all if it opens and shuts inside the streaming interval.
+        "seat_occupied": (bool(fields["DriverSeatOccupied"])
+                          if "DriverSeatOccupied" in fields else None),
+        "hvac_raw": num("HvacPower"),
+        "inside_temp": num("InsideTemp"),
+        # The pack's own temperature. Cold-weather losses are a property of
+        # the battery, not of the air the efficiency chart currently plots.
+        "pack_temp_c": num("ModuleTempMin"),
+        # Road gradient. On this island it is likely the largest unexplained
+        # term in per-trip Wh/km.
+        "grade_pct": num("GradeEstimatePercent"),
+        "charger_v": num("ChargerVoltage"),
+        "charger_a": num("ChargeAmps"),
+        "charger_phases": num("ChargerPhases"),
+        "charge_port_latched": (bool(fields["ChargePortLatch"])
+                                if "ChargePortLatch" in fields else None),
+        "charge_limit_soc": num("ChargeLimitSoc"),
     }
 
 
@@ -2796,10 +2827,14 @@ def advance_shadow(shadow: dict[str, Any], snap: dict[str, Any]) -> dict[str, An
             float(shadow.get("max_speed_kmh") or 0.0), float(snap.get("speed_kmh") or 0.0))
     elif open_at:
         still_since = shadow.get("still_since")
-        # A door opening while parked is the one dependable sign somebody
-        # left. Locked is not: this car reports Locked true mid-journey from
-        # auto-lock, so trusting it would end trips that were still running.
-        if snap.get("doors_open"):
+        # Did anyone actually leave? Occupancy answers it directly; a door
+        # only implies it, and can be opened by a passenger, for luggage, or
+        # not reported at all when it opens and shuts inside the streaming
+        # interval. Locked is no use either — this car reports Locked true
+        # mid-journey from auto-lock, so it would end trips still running.
+        if snap.get("seat_occupied") is False:
+            shadow["exit_seen"] = True
+        elif snap.get("seat_occupied") is None and snap.get("doors_open"):
             shadow["exit_seen"] = True
         if still_since is None:
             # Remember the car as it was when it stopped, not as it will be
@@ -2823,6 +2858,9 @@ def _shadow_close(shadow: dict[str, Any], end: dict[str, Any]) -> dict[str, Any]
     """Emit the open trip, ending at ``end``, and clear the machine."""
     start = shadow.pop("open", None)
     max_speed = float(shadow.pop("max_speed_kmh", 0.0) or 0.0)
+    # Read before clearing: this is reported on the trip, and popping it
+    # first would make every trip claim it ended on a timeout.
+    exit_seen = bool(shadow.get("exit_seen"))
     shadow["still_since"] = None
     shadow.pop("still_snap", None)
     shadow.pop("exit_seen", None)
@@ -2838,6 +2876,17 @@ def _shadow_close(shadow: dict[str, Any], end: dict[str, Any]) -> dict[str, Any]
     # multiplied by a capacity nobody has pinned down.
     e0, e1 = start.get("energy_kwh"), end.get("energy_kwh")
     energy = round(e0 - e1, 3) if e0 is not None and e1 is not None else None
+
+    # The drive counter is the better measure of the two: monotonic, so a
+    # lost record costs nothing, and it counts only traction — where
+    # EnergyRemaining also falls for climate and standby. Its units are
+    # undocumented, so both are carried and neither is trusted over the other
+    # yet. One real journey settles the ratio; until then this is evidence,
+    # not a figure.
+    d0, d1 = start.get("energy_drive_raw"), end.get("energy_drive_raw")
+    drive_delta = round(d1 - d0, 4) if d0 is not None and d1 is not None else None
+    r0, r1 = start.get("energy_regen_raw"), end.get("energy_regen_raw")
+    regen_delta = round(r1 - r0, 4) if r0 is not None and r1 is not None else None
 
     return {
         "start_ts": float(start["ts"]),
@@ -2855,4 +2904,13 @@ def _shadow_close(shadow: dict[str, Any], end: dict[str, Any]) -> dict[str, Any]
         "avg_speed_kmh": round(distance / (minutes / 60.0), 1),
         "start_lat": start.get("lat"), "start_lon": start.get("lon"),
         "end_lat": end.get("lat"), "end_lon": end.get("lon"),
+        # Evidence, not yet figures. drive_delta / energy_kwh is the ratio
+        # that says whether the counter is kWh, Wh, or something else — and
+        # how much of the pack's fall was traction rather than climate.
+        "drive_delta": drive_delta,
+        "regen_delta": regen_delta,
+        "ended_on": "exit" if exit_seen else "timeout",
+        "pack_temp_c": end.get("pack_temp_c"),
+        "inside_temp": end.get("inside_temp"),
+        "out_temp": end.get("out_temp"),
     }
