@@ -189,7 +189,15 @@ FT_ARGS+=("-config=$CONF_DIR/config.json")
 
 # --network host so the container can hold 443 for the car and publish ZMQ on
 # 5284 for the bridge without two layers of port mapping to reason about.
+#
+# --user 0:0 because the image runs as a non-root user and 443 is privileged:
+# without it the server panics with "bind permission denied" and the restart
+# policy turns that into a loop. Host networking means there is no port
+# mapping to bind the privileged half for us. The alternative — raising
+# net.ipv4.ip_unprivileged_port_start on the host — buys nothing here, since
+# this box exists only to run this one container.
 docker run -d --name fleet-telemetry --restart unless-stopped --network host \
+  --user 0:0 \
   -v /etc/letsencrypt:/etc/letsencrypt:ro \
   -v "$CONF_DIR":"$CONF_DIR":ro \
   "$FT_IMAGE" "${FT_ARGS[@]}" >/dev/null
