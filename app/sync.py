@@ -2729,10 +2729,12 @@ def snapshot_from_telemetry(fields: dict[str, Any], ts: float) -> dict[str, Any]
     }
 
 
-# A trip is closed once the car has been still for this long. Telemetry sends
-# Gear the moment it changes, so this is not about detecting the stop — it is
-# about not splitting a journey at a traffic light, where the car sits in D at
-# zero for a minute or two.
+# How long the car must stay in P before the trip is called finished. Not for
+# detecting the stop — Gear arrives the second it changes — but for the brief
+# P that is part of a journey rather than the end of it: a three-point turn's
+# P-R-D, a drive-through window, dropping someone at the door. Sitting in D at
+# a light never reaches this path at all, since is_driving is true whenever
+# the gear is not P.
 SHADOW_SETTLE_SEC = 180.0
 # And closed at the last motion if the stream simply stops: a car that sleeps
 # without sending a final ShiftStateP would otherwise leave a trip open for
@@ -2754,6 +2756,18 @@ def advance_shadow(shadow: dict[str, Any], snap: dict[str, Any]) -> dict[str, An
     the calculation. That is the whole reason this is worth building.
     """
     ts = float(snap.get("ts") or 0.0)
+    # A vehicle out of coverage buffers and replays later — every record
+    # carries isResend for exactly that reason. Replayed records arrive after
+    # newer ones, and taking them at face value would read as the odometer
+    # jumping backwards and the car teleporting. Distance survives either way
+    # because the odometer is cumulative; it is the boundaries that would be
+    # corrupted, so anything older than what the machine has already seen is
+    # counted and skipped.
+    seen_ts = float(shadow.get("seen_ts") or 0.0)
+    if ts and seen_ts and ts < seen_ts:
+        shadow["out_of_order"] = int(shadow.get("out_of_order") or 0) + 1
+        return None
+    shadow["seen_ts"] = max(ts, seen_ts)
     last = shadow.get("last")
     open_at = shadow.get("open")
     done = None

@@ -3255,3 +3255,23 @@ def test_shadow_trip_closes_at_the_last_motion_when_the_stream_stops():
     assert trip is not None
     assert trip["end_ts"] == 300                     # not 11000
     assert round(trip["distance_km"], 1) == 8.0      # 5 miles
+
+
+def test_shadow_ignores_records_replayed_from_the_car_s_buffer():
+    """A car out of coverage buffers and resends; those arrive out of order.
+
+    Taken at face value they read as the odometer running backwards. Distance
+    survives regardless because the odometer is cumulative — it is the trip
+    boundaries that would be corrupted.
+    """
+    shadow: dict = {}
+    advance_shadow(shadow, _tel(0, 100.0, 30.0))
+    advance_shadow(shadow, _tel(600, 106.0, 28.5))
+    # A replay of the tunnel, arriving after the records that followed it.
+    assert advance_shadow(shadow, _tel(300, 103.0, 29.2)) is None
+    assert shadow["out_of_order"] == 1
+    assert shadow["last"]["odo_km"] > 106 * 1.6      # still the newer reading
+
+    trip = advance_shadow(shadow, _tel(900, 106.0, 28.5, gear="ShiftStateP",
+                                       speed_mph=0.0))
+    assert trip is None or trip["end_ts"] != 300
