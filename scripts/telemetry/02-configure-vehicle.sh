@@ -188,14 +188,31 @@ cat > "$WORK/config.json" <<EOF
 }
 EOF
 
+# Tesla validates the field list and reports only the FIRST name it does not
+# recognise, so a list written against the proto can need several attempts —
+# and every attempt is a person running this again. Drop what it rejects and
+# retry instead. Not silent: what was dropped is listed at the end, because a
+# field quietly missing is how an analysis ends up explaining nothing.
 say "Sending it to the car"
-HTTP=$(curl -sS --cacert "$WORK/proxy-cert.pem" -o "$WORK/resp.json" -w '%{http_code}' \
-  -X POST "https://localhost:$PROXY_PORT/api/1/vehicles/fleet_telemetry_config" \
-  -H "Authorization: Bearer $(jq -r .access_token "$WORK/tok.json")" \
-  -H 'Content-Type: application/json' \
-  --data-binary @"$WORK/config.json") || true
+DROPPED=""
+for attempt in $(seq 1 12); do
+  HTTP=$(curl -sS --cacert "$WORK/proxy-cert.pem" -o "$WORK/resp.json" -w '%{http_code}' \
+    -X POST "https://localhost:$PROXY_PORT/api/1/vehicles/fleet_telemetry_config" \
+    -H "Authorization: Bearer $(jq -r .access_token "$WORK/tok.json")" \
+    -H 'Content-Type: application/json' \
+    --data-binary @"$WORK/config.json") || true
+  UNKNOWN=$(jq -r '.error // ""' "$WORK/resp.json" 2>/dev/null \
+            | sed -n 's/^Unknown field \([A-Za-z0-9_]*\).*/\1/p')
+  [ -n "$UNKNOWN" ] || break
+  echo "  this car does not accept '$UNKNOWN' — dropping it and retrying"
+  DROPPED="$DROPPED $UNKNOWN"
+  jq --arg f "$UNKNOWN" 'del(.config.fields[$f])' "$WORK/config.json" \
+    > "$WORK/config.next" && mv "$WORK/config.next" "$WORK/config.json"
+done
 echo "  HTTP $HTTP"
 jq . "$WORK/resp.json" 2>/dev/null || cat "$WORK/resp.json"
+[ -n "$DROPPED" ] && echo "  fields this car rejected:$DROPPED"
+echo "  fields sent: $(jq '.config.fields | length' "$WORK/config.json")"
 
 case "$HTTP" in
   2*) say "Accepted"
