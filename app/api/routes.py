@@ -9150,6 +9150,17 @@ def telemetry_recent(
         latest = _json.loads(state.get(session, state.TELEMETRY_LATEST_KEY) or "{}")
     except ValueError:
         latest = {}
+    # Fold the buffer on top of the stored composite. The composite alone is
+    # only as old as the code that started keeping it, and the buffer alone
+    # loses fields that aged out of it — together they answer "what is the
+    # latest the car has said about each field" in both directions.
+    latest = {vin: dict(car) for vin, car in latest.items()}
+    for record in buffered:
+        car = latest.setdefault(record.get("vin") or "unknown", {})
+        car.update(record.get("fields") or {})
+        if record.get("created_at"):
+            car["_ts"] = record["created_at"]
+
     snapshots = {}
     for vin, car in latest.items():
         car = dict(car)
