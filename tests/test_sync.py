@@ -2,7 +2,7 @@
 import pytest
 
 from app.sync import (_energy_kwh, close_trip_on_sleep, is_driving,
-                      snapshot_from_telemetry,
+                      snapshot_from_telemetry, advance_shadow,
                       process_snapshot, snapshot_from_vehicle_data)
 
 T0 = 1_760_000_000.0  # seconds epoch
@@ -3197,3 +3197,57 @@ def test_snapshot_from_telemetry_keeps_unknown_distinct_from_off():
     assert snap["climate_on"] is None
     assert snap["shift"] == "P"
     assert not is_driving(snap)
+
+
+def _tel(ts, odo_mi, energy, gear="ShiftStateD", speed_mph=20.0, soc=50.0):
+    return snapshot_from_telemetry({
+        "Odometer": odo_mi, "EnergyRemaining": energy, "Gear": gear,
+        "VehicleSpeed": speed_mph, "Soc": soc,
+    }, ts=ts)
+
+
+def test_shadow_trip_measures_energy_by_subtraction():
+    """A shadow trip's energy comes from the pack, not from SoC x capacity.
+
+    This is the point of the whole telemetry migration: polling must turn a
+    whole-percent SoC into kWh using a capacity constant that has never been
+    pinned down, while EnergyRemaining makes it a subtraction.
+    """
+    shadow: dict = {}
+    assert advance_shadow(shadow, _tel(0, 100.0, 30.0, soc=50.0)) is None
+    assert advance_shadow(shadow, _tel(600, 106.0, 28.5, soc=48.0)) is None
+    # Stopped, but not yet long enough to count as arrived.
+    assert advance_shadow(shadow, _tel(660, 106.0, 28.5, gear="ShiftStateP",
+                                       speed_mph=0.0, soc=48.0)) is None
+    trip = advance_shadow(shadow, _tel(900, 106.0, 28.5, gear="ShiftStateP",
+                                       speed_mph=0.0, soc=48.0))
+    assert trip is not None
+    assert round(trip["distance_km"], 1) == 9.7      # 6 miles
+    assert trip["energy_kwh"] == 1.5                 # 30.0 - 28.5, measured
+    assert round(trip["wh_per_km"]) == 155
+    assert trip["duration_min"] == 15.0
+
+
+def test_shadow_trip_does_not_split_at_a_traffic_light():
+    """Sitting still briefly is part of the journey, not the end of it."""
+    shadow: dict = {}
+    advance_shadow(shadow, _tel(0, 100.0, 30.0))
+    # Two minutes stationary in D — a light, not an arrival.
+    assert advance_shadow(shadow, _tel(60, 101.0, 29.8, speed_mph=0.0)) is None
+    assert advance_shadow(shadow, _tel(180, 101.0, 29.8, speed_mph=0.0)) is None
+    assert advance_shadow(shadow, _tel(240, 102.0, 29.6)) is None
+    assert shadow.get("open") is not None            # still one trip
+
+
+def test_shadow_trip_closes_at_the_last_motion_when_the_stream_stops():
+    """A car that sleeps without a final ShiftStateP must not swallow the
+    next journey — the trip ends where the evidence ends."""
+    shadow: dict = {}
+    advance_shadow(shadow, _tel(0, 100.0, 30.0))
+    advance_shadow(shadow, _tel(300, 105.0, 28.8))
+    # Nothing for three hours, then the car wakes elsewhere.
+    trip = advance_shadow(shadow, _tel(11000, 105.0, 28.8, gear="ShiftStateP",
+                                       speed_mph=0.0))
+    assert trip is not None
+    assert trip["end_ts"] == 300                     # not 11000
+    assert round(trip["distance_km"], 1) == 8.0      # 5 miles

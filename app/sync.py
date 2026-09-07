@@ -2727,3 +2727,93 @@ def snapshot_from_telemetry(fields: dict[str, Any], ts: float) -> dict[str, Any]
         "cabin_overheat_protection": None,
         "cabin_overheat_protection_actively_cooling": None,
     }
+
+
+# A trip is closed once the car has been still for this long. Telemetry sends
+# Gear the moment it changes, so this is not about detecting the stop — it is
+# about not splitting a journey at a traffic light, where the car sits in D at
+# zero for a minute or two.
+SHADOW_SETTLE_SEC = 180.0
+# And closed at the last motion if the stream simply stops: a car that sleeps
+# without sending a final ShiftStateP would otherwise leave a trip open for
+# hours and then absorb the next journey into it.
+SHADOW_GAP_SEC = 600.0
+
+
+def advance_shadow(shadow: dict[str, Any], snap: dict[str, Any]) -> dict[str, Any] | None:
+    """Step the shadow trip machine with one telemetry snapshot.
+
+    Mutates ``shadow`` and returns a finished trip, or None. Deliberately does
+    not reuse the polling state machine: almost all of that code exists to
+    reconstruct what happened between two snapshots minutes apart — blind
+    distance, departure premiums, arrival tails, estimated energy. Telemetry
+    reports the gear change itself, so a trip here is bounded by what the car
+    said rather than inferred from what it had done by the time we asked.
+
+    Energy is a subtraction of EnergyRemaining, so no capacity constant enters
+    the calculation. That is the whole reason this is worth building.
+    """
+    ts = float(snap.get("ts") or 0.0)
+    last = shadow.get("last")
+    open_at = shadow.get("open")
+    done = None
+
+    # A stream that stops mid-trip closes it at the last motion seen, not at
+    # the next record — which could be the following morning.
+    if open_at and last and ts - float(last["ts"]) > SHADOW_GAP_SEC:
+        done = _shadow_close(shadow, last)
+        open_at = None
+
+    if is_driving(snap):
+        if not open_at:
+            shadow["open"] = dict(snap)
+            shadow["max_speed_kmh"] = 0.0
+        shadow["still_since"] = None
+        shadow["max_speed_kmh"] = max(
+            float(shadow.get("max_speed_kmh") or 0.0), float(snap.get("speed_kmh") or 0.0))
+    elif open_at:
+        still_since = shadow.get("still_since")
+        if still_since is None:
+            shadow["still_since"] = ts
+        elif ts - float(still_since) >= SHADOW_SETTLE_SEC:
+            done = _shadow_close(shadow, snap)
+
+    shadow["last"] = dict(snap)
+    return done
+
+
+def _shadow_close(shadow: dict[str, Any], end: dict[str, Any]) -> dict[str, Any] | None:
+    """Emit the open trip, ending at ``end``, and clear the machine."""
+    start = shadow.pop("open", None)
+    max_speed = float(shadow.pop("max_speed_kmh", 0.0) or 0.0)
+    shadow["still_since"] = None
+    if not start:
+        return None
+
+    distance = round(float(end.get("odo_km") or 0.0) - float(start.get("odo_km") or 0.0), 3)
+    minutes = max((float(end["ts"]) - float(start["ts"])) / 60.0, 0.0)
+    if distance < TRIP_MIN_KM or minutes <= 0:
+        return None
+
+    # Both ends measured, so this is a subtraction rather than a percentage
+    # multiplied by a capacity nobody has pinned down.
+    e0, e1 = start.get("energy_kwh"), end.get("energy_kwh")
+    energy = round(e0 - e1, 3) if e0 is not None and e1 is not None else None
+
+    return {
+        "start_ts": float(start["ts"]),
+        "end_ts": float(end["ts"]),
+        "start_time": _dt(start["ts"]).isoformat(timespec="seconds"),
+        "end_time": _dt(end["ts"]).isoformat(timespec="seconds"),
+        "distance_km": distance,
+        "duration_min": round(minutes, 1),
+        "energy_kwh": energy,
+        "wh_per_km": round(energy * 1000.0 / distance, 1)
+        if energy and distance > 0 else None,
+        "soc_start": start.get("soc"),
+        "soc_end": end.get("soc"),
+        "max_speed_kmh": round(max_speed, 1),
+        "avg_speed_kmh": round(distance / (minutes / 60.0), 1),
+        "start_lat": start.get("lat"), "start_lon": start.get("lon"),
+        "end_lat": end.get("lat"), "end_lon": end.get("lon"),
+    }

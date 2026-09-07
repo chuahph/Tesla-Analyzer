@@ -52,6 +52,11 @@ TELEMETRY_LATEST_KEY = "telemetry_latest"  # JSON {vin: {field: value}} — the
 # latest value the car has sent for each field, per car. A telemetry message
 # carries only what CHANGED, so no single record ever describes the vehicle;
 # the running composite is what a snapshot can be built from.
+TELEMETRY_SHADOW_KEY = "telemetry_shadow"  # JSON {vin: machine state}: the
+# open shadow trip and what has been seen since it started.
+TELEMETRY_TRIPS_KEY = "telemetry_trips"  # JSON list of finished shadow trips.
+# Kept out of the Drive table on purpose — these are unverified, and a wrong
+# row in the real history is a repair job while a wrong row here is a delete.
 SYNC_LOG_KEY = "sync_log"  # JSON: run-length record of what each /api/sync tick did —
 # the only place a blackout can be told from a quiet car after the fact, since
 # LAST_STATUS_KEY is overwritten every tick and keeps no history

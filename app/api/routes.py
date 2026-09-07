@@ -9025,6 +9025,19 @@ def summary(
 # departure — the moment the polling app was blind to — without letting a
 # key-value row grow without bound.
 TELEMETRY_RAW_MAX = 300
+# Shadow trips kept for comparison. Weeks of driving, which is the window in
+# which telemetry either earns the switch or does not.
+TELEMETRY_TRIPS_MAX = 400
+
+
+def _telemetry_ts(stamp: str | None) -> float:
+    """Epoch seconds from a telemetry record's createdAt, or 0.0."""
+    if not stamp:
+        return 0.0
+    try:
+        return datetime.fromisoformat(str(stamp).replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return 0.0
 
 
 def _telemetry_value(entry: dict) -> Any:
@@ -9093,13 +9106,37 @@ def telemetry_ingest(
         latest = _json.loads(state.get(session, state.TELEMETRY_LATEST_KEY) or "{}")
     except ValueError:
         latest = {}
+    try:
+        shadows = _json.loads(state.get(session, state.TELEMETRY_SHADOW_KEY) or "{}")
+    except ValueError:
+        shadows = {}
+    try:
+        trips = _json.loads(state.get(session, state.TELEMETRY_TRIPS_KEY) or "[]")
+    except ValueError:
+        trips = []
+
     for record in kept:
         vin = record.get("vin") or "unknown"
         car = latest.setdefault(vin, {})
         car.update(record.get("fields") or {})
         if record.get("created_at"):
             car["_ts"] = record["created_at"]
+        # Step the shadow machine on every record, not once per batch: the
+        # batch is an artefact of how the bridge groups posts, and a trip
+        # boundary that fell inside one would be rounded to its edge.
+        ts = _telemetry_ts(record.get("created_at"))
+        if ts:
+            snap = sync_mod.snapshot_from_telemetry(car, ts)
+            shadow = shadows.setdefault(vin, {})
+            finished = sync_mod.advance_shadow(shadow, snap)
+            if finished:
+                finished["vin"] = vin
+                trips.append(finished)
+
     state.put(session, state.TELEMETRY_LATEST_KEY, _json.dumps(latest))
+    state.put(session, state.TELEMETRY_SHADOW_KEY, _json.dumps(shadows))
+    state.put(session, state.TELEMETRY_TRIPS_KEY,
+              _json.dumps(trips[-TELEMETRY_TRIPS_MAX:]))
 
     try:
         seen = _json.loads(state.get(session, state.TELEMETRY_SEEN_KEY) or "{}")
@@ -9224,4 +9261,110 @@ def fleet_token(session: Session = Depends(get_session)):
         "access_token": token,
         "vin": state.active_vin(session),
         "base_url": state.active_base_url(session),
+    }
+
+
+@router.get("/telemetry/compare")
+def telemetry_compare(
+    days: int = Query(14, ge=1, le=90),
+    session: Session = Depends(get_session),
+):
+    """Shadow trips beside the polled trips they overlap.
+
+    This is what decides whether telemetry takes over. Not a calendar: when
+    distance agrees to within a percent or so and the starts telemetry catches
+    are the ones polling was late for, it has earned the switch. Until then
+    the polled rows remain the history and these remain an opinion.
+
+    Matching is by time overlap rather than by identity, because the two
+    sources disagree about exactly the thing being measured — where a trip
+    begins. A polled trip that starts minutes after the car actually moved is
+    the blind departure head this migration exists to remove, and it will show
+    up here as a start_delta_min, not as a failure to match.
+    """
+    import json as _json
+
+    try:
+        shadow_trips = _json.loads(state.get(session, state.TELEMETRY_TRIPS_KEY) or "[]")
+    except ValueError:
+        shadow_trips = []
+
+    since = sync_mod.now_local() - timedelta(days=days)
+    drives = session.scalars(
+        select(Drive).where(Drive.start_time >= since).order_by(Drive.start_time)
+    ).all()
+
+    def pct(new: float | None, old: float | None) -> float | None:
+        if new is None or not old:
+            return None
+        return round((new - old) / old * 100.0, 1)
+
+    rows, matched_ids = [], set()
+    for t in shadow_trips:
+        t_start = sync_mod._dt(t["start_ts"])
+        t_end = sync_mod._dt(t["end_ts"])
+        if t_end < since:
+            continue
+        best = None
+        for d in drives:
+            if d.id in matched_ids or not d.start_time or not d.end_time:
+                continue
+            # Any overlap at all counts. The boundaries are the disagreement.
+            if d.start_time <= t_end and t_start <= d.end_time:
+                overlap = (min(d.end_time, t_end) - max(d.start_time, t_start))
+                if best is None or overlap > best[1]:
+                    best = (d, overlap)
+        d = best[0] if best else None
+        if d:
+            matched_ids.add(d.id)
+        rows.append({
+            "telemetry": {
+                "start": t["start_time"], "end": t["end_time"],
+                "km": t["distance_km"], "kwh": t["energy_kwh"],
+                "wh_per_km": t["wh_per_km"], "min": t["duration_min"],
+            },
+            "polled": None if not d else {
+                "id": d.id,
+                "start": d.start_time.isoformat(timespec="seconds"),
+                "end": d.end_time.isoformat(timespec="seconds"),
+                "km": round(d.distance_km or 0.0, 3),
+                "kwh": round(d.energy_used_kwh or 0.0, 3),
+                "wh_per_km": round((d.energy_used_kwh or 0.0) * 1000.0
+                                   / (d.distance_km or 1e-9), 1),
+                "min": d.duration_min,
+                "estimated_energy": bool(getattr(d, "energy_estimated", False)),
+            },
+            "delta": None if not d else {
+                "km_pct": pct(t["distance_km"], d.distance_km),
+                "kwh_pct": pct(t["energy_kwh"], d.energy_used_kwh),
+                # Positive means polling started the trip LATE — the blind
+                # head, in minutes.
+                "start_delta_min": round(
+                    (d.start_time - t_start).total_seconds() / 60.0, 1),
+                "end_delta_min": round(
+                    (d.end_time - t_end).total_seconds() / 60.0, 1),
+            },
+        })
+
+    paired = [r for r in rows if r["polled"]]
+    km_deltas = [r["delta"]["km_pct"] for r in paired
+                 if r["delta"]["km_pct"] is not None]
+    heads = [r["delta"]["start_delta_min"] for r in paired]
+    return {
+        "days": days,
+        "telemetry_trips": len(rows),
+        "matched": len(paired),
+        "telemetry_only": len(rows) - len(paired),
+        # A polled trip with no telemetry counterpart is expected while both
+        # run: the car only streams when awake, so anything driven before the
+        # configuration landed, or during a stream outage, has no shadow.
+        "polled_only": len([d for d in drives if d.id not in matched_ids]),
+        "summary": {
+            "median_km_delta_pct": round(percentile(km_deltas, 50), 2)
+            if km_deltas else None,
+            "median_blind_head_min": round(percentile(heads, 50), 2)
+            if heads else None,
+            "worst_blind_head_min": round(max(heads), 1) if heads else None,
+        },
+        "trips": rows[-60:],
     }

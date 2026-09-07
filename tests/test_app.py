@@ -3569,3 +3569,59 @@ def test_fleet_token_needs_the_key_and_withholds_the_refresh_token(monkeypatch):
         settings.app_passcode, settings.sync_key = old_pc, old_sk
         with SessionLocal() as s:
             state_mod.delete(s, state_mod.TOKEN_KEY, state_mod.REFRESH_KEY)
+
+
+def test_telemetry_shadow_trip_appears_in_the_comparison():
+    """A stream of records becomes a shadow trip, without touching history.
+
+    The unit tests cover the machine; this covers the wiring — that records
+    arriving over the wire drive it, and that what comes out is visible
+    without a single Drive row being written.
+    """
+    from datetime import timezone
+
+    from app.database import SessionLocal
+    from app.models import Drive
+
+    settings = get_settings()
+    old_pc, old_sk = settings.app_passcode, settings.sync_key
+    settings.app_passcode = "secret123"
+    settings.sync_key = "cronkey"
+
+    base = datetime.now(timezone.utc) - timedelta(hours=2)
+
+    def rec(offset_s, **fields):
+        stamp = (base + timedelta(seconds=offset_s)).isoformat().replace(
+            "+00:00", "Z")
+        return {"vin": "SHADOW1", "createdAt": stamp,
+                "data": [{"key": k, "value": {"doubleValue": v}}
+                         if isinstance(v, (int, float)) else
+                         {"key": k, "value": {"shiftStateValue": v}}
+                         for k, v in fields.items()]}
+
+    try:
+        with TestClient(app) as client:
+            # Counted after startup: entering TestClient seeds demo data, so
+            # a count taken before it would be measuring the seeder.
+            with SessionLocal() as s:
+                before = s.query(Drive).count()
+            client.post("/api/telemetry?key=cronkey", json={"records": [
+                rec(0, Odometer=100.0, EnergyRemaining=30.0, Soc=50.0,
+                    Gear="ShiftStateD", VehicleSpeed=20.0),
+                rec(600, Odometer=106.0, EnergyRemaining=28.5, Soc=48.0,
+                    VehicleSpeed=25.0),
+                rec(660, Gear="ShiftStateP", VehicleSpeed=0.0),
+                rec(900, VehicleSpeed=0.0),
+            ]})
+            client.post("/login", data={"passcode": "secret123"})
+            body = client.get("/api/telemetry/compare?days=1").json()
+
+        assert body["telemetry_trips"] >= 1
+        trip = body["trips"][-1]["telemetry"]
+        assert round(trip["km"], 1) == 9.7        # 6 miles
+        assert trip["kwh"] == 1.5                 # measured, not derived
+        # And nothing was written to the real history.
+        with SessionLocal() as s:
+            assert s.query(Drive).count() == before
+    finally:
+        settings.app_passcode, settings.sync_key = old_pc, old_sk
