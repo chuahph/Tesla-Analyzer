@@ -39,6 +39,15 @@ QUIET_HOURS_KEY = "recheck_quiet_hours"  # JSON {hours, risk, at}: the hours of
 # the day the sleep recheck may run wide in, refitted from the departure
 # history once a day. Cached rather than recomputed per tick because it
 # changes on the timescale of a person's routine, not a poll loop's.
+TELEMETRY_RAW_KEY = "telemetry_raw"  # JSON list of the most recent records the
+# car streamed, newest last. Kept deliberately unparsed. Fleet Telemetry does
+# not document the units of Odometer or EnergyRemaining, and this app's whole
+# accuracy problem is figures that were quietly scaled wrong — so the first
+# batches are recorded verbatim and read by a human before anything maps them
+# onto a snapshot.
+TELEMETRY_SEEN_KEY = "telemetry_seen"  # JSON {first, last, batches, records}:
+# counters that survive the raw buffer being trimmed, so "is the car streaming
+# at all" stays answerable without keeping every record.
 SYNC_LOG_KEY = "sync_log"  # JSON: run-length record of what each /api/sync tick did —
 # the only place a blackout can be told from a quiet car after the fact, since
 # LAST_STATUS_KEY is overwritten every tick and keeps no history

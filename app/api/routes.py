@@ -9019,3 +9019,118 @@ def summary(
         "recommendations": recs,
         "assessment": assessment,
     }
+
+
+# How many streamed records to keep for inspection. Enough to see a whole
+# departure — the moment the polling app was blind to — without letting a
+# key-value row grow without bound.
+TELEMETRY_RAW_MAX = 300
+
+
+def _telemetry_value(entry: dict) -> Any:
+    """Pull a scalar out of one telemetry datum.
+
+    fleet-telemetry's decoded JSON wraps every value in a one-of
+    ({"stringValue": ...}, {"doubleValue": ...}, {"locationValue": {...}}, and
+    more that Tesla adds without notice). Rather than enumerate them, take the
+    single member and hand it on unchanged — this layer is recording what
+    arrived, and a shape nobody anticipated is exactly what it must not lose.
+    """
+    value = entry.get("value")
+    if isinstance(value, dict) and len(value) == 1:
+        return next(iter(value.values()))
+    return value
+
+
+@router.post("/telemetry")
+def telemetry_ingest(
+    payload: dict = Body(...), session: Session = Depends(get_session)
+):
+    """Receive a batch of Fleet Telemetry records from the receiver's bridge.
+
+    Deliberately does not build a snapshot or touch a trip yet. Tesla does not
+    document the units of Odometer or EnergyRemaining, and every accuracy bug
+    this project has chased came from a figure that was quietly scaled wrong —
+    so the first batches are recorded as they arrived and read before anything
+    is derived from them. /api/telemetry/recent is how you read them.
+    """
+    import json as _json
+
+    records = payload.get("records")
+    if not isinstance(records, list):
+        raise HTTPException(400, "Expected {'records': [...]}.")
+
+    now = sync_mod.now_local()
+    kept = []
+    for record in records:
+        if not isinstance(record, dict):
+            continue
+        data = record.get("data")
+        kept.append({
+            "received_at": now.isoformat(timespec="seconds"),
+            "vin": record.get("vin"),
+            "created_at": record.get("createdAt") or record.get("created_at"),
+            # Flattened alongside the original: the flat form is what a human
+            # reads to settle the units question, the original is what proves
+            # the flattening did not lose anything.
+            "fields": {e.get("key"): _telemetry_value(e)
+                       for e in data if isinstance(e, dict) and e.get("key")}
+            if isinstance(data, list) else None,
+            "raw": record,
+        })
+
+    try:
+        buffered = _json.loads(state.get(session, state.TELEMETRY_RAW_KEY) or "[]")
+    except ValueError:
+        buffered = []
+    buffered = (buffered + kept)[-TELEMETRY_RAW_MAX:]
+    state.put(session, state.TELEMETRY_RAW_KEY, _json.dumps(buffered))
+
+    try:
+        seen = _json.loads(state.get(session, state.TELEMETRY_SEEN_KEY) or "{}")
+    except ValueError:
+        seen = {}
+    seen["first"] = seen.get("first") or now.isoformat(timespec="seconds")
+    seen["last"] = now.isoformat(timespec="seconds")
+    seen["batches"] = int(seen.get("batches") or 0) + 1
+    seen["records"] = int(seen.get("records") or 0) + len(kept)
+    state.put(session, state.TELEMETRY_SEEN_KEY, _json.dumps(seen))
+
+    return {"accepted": len(kept), "buffered": len(buffered), "seen": seen}
+
+
+@router.get("/telemetry/recent")
+def telemetry_recent(
+    limit: int = Query(30, ge=1, le=TELEMETRY_RAW_MAX),
+    keys_only: bool = Query(False),
+    session: Session = Depends(get_session),
+):
+    """What the car has actually streamed, newest last.
+
+    ``keys_only`` answers the first question worth asking — which fields is
+    the car sending at all — without the volume of their values.
+    """
+    import json as _json
+
+    try:
+        buffered = _json.loads(state.get(session, state.TELEMETRY_RAW_KEY) or "[]")
+    except ValueError:
+        buffered = []
+    try:
+        seen = _json.loads(state.get(session, state.TELEMETRY_SEEN_KEY) or "{}")
+    except ValueError:
+        seen = {}
+
+    fields: dict[str, Any] = {}
+    for record in buffered:
+        for key, value in (record.get("fields") or {}).items():
+            fields.setdefault(key, {"count": 0, "sample": value})
+            fields[key]["count"] += 1
+            fields[key]["sample"] = value  # most recent wins
+
+    return {
+        "seen": seen or {"note": "nothing received yet"},
+        "buffered": len(buffered),
+        "fields": dict(sorted(fields.items())),
+        "records": [] if keys_only else buffered[-limit:],
+    }

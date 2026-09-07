@@ -3475,3 +3475,53 @@ def test_partner_registration_is_recorded_per_domain(monkeypatch):
     finally:
         (settings.app_passcode, settings.tesla_client_id,
          settings.tesla_client_secret) = old_pc, old_id, old_secret
+
+
+def test_telemetry_ingest_records_what_arrived():
+    """The bridge's batch is stored verbatim and readable back.
+
+    Nothing is derived from it on purpose: Tesla does not document the units
+    of Odometer or EnergyRemaining, and this app's accuracy history is a list
+    of figures that were quietly scaled wrong. So the contract here is only
+    that what the car sent is what comes back.
+    """
+    settings = get_settings()
+    old_pc, old_sk = settings.app_passcode, settings.sync_key
+    settings.app_passcode = "secret123"
+    settings.sync_key = "cronkey"
+    try:
+        with TestClient(app) as client:
+            batch = {"records": [{
+                "vin": "5YJ3TEST",
+                "createdAt": "2026-09-07T14:00:00Z",
+                "data": [
+                    {"key": "Odometer", "value": {"stringValue": "12345.6"}},
+                    {"key": "EnergyRemaining", "value": {"doubleValue": 51.2}},
+                    {"key": "Gear", "value": {"shiftStateValue": "ShiftStateD"}},
+                    # A shape nobody anticipated must survive, not be dropped.
+                    {"key": "Location",
+                     "value": {"locationValue": {"latitude": 5.3, "longitude": 100.3}}},
+                ],
+            }]}
+            # No key: refused.
+            assert client.post("/api/telemetry", json=batch).status_code == 401
+            posted = client.post("/api/telemetry?key=cronkey", json=batch)
+            assert posted.status_code == 200
+            assert posted.json()["accepted"] == 1
+
+            client.post("/login", data={"passcode": "secret123"})
+            seen = client.get("/api/telemetry/recent").json()
+            assert seen["seen"]["records"] == 1
+            # Every key the car sent is listed, with its latest value.
+            assert seen["fields"]["Odometer"]["sample"] == "12345.6"
+            assert seen["fields"]["EnergyRemaining"]["sample"] == 51.2
+            assert seen["fields"]["Gear"]["sample"] == "ShiftStateD"
+            assert seen["fields"]["Location"]["sample"] == {
+                "latitude": 5.3, "longitude": 100.3}
+            # And the original is kept beside the flattened form.
+            assert seen["records"][-1]["raw"] == batch["records"][0]
+
+            assert client.get("/api/telemetry/recent?keys_only=true").json()[
+                "records"] == []
+    finally:
+        settings.app_passcode, settings.sync_key = old_pc, old_sk

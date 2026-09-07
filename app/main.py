@@ -132,7 +132,11 @@ async def _passcode_gate(request: Request, call_next):
     if (
         sync_key
         and path in ("/api/sync", "/api/backup", "/api/reports/monthly",
-                     "/api/alerts/check", "/api/repair-arrivals")
+                     "/api/alerts/check", "/api/repair-arrivals",
+                     # The telemetry bridge on the receiver box posts here.
+                     # It holds the same key the cron does and has no way to
+                     # hold a passcode cookie.
+                     "/api/telemetry")
         and hmac.compare_digest(request.query_params.get("key", ""), sync_key)
     ):
         return await call_next(request)
