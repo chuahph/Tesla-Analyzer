@@ -214,12 +214,29 @@ jq . "$WORK/resp.json" 2>/dev/null || cat "$WORK/resp.json"
 [ -n "$DROPPED" ] && echo "  fields this car rejected:$DROPPED"
 echo "  fields sent: $(jq '.config.fields | length' "$WORK/config.json")"
 
+# Accepted is not the same as applied. Tesla stores the configuration and
+# delivers it when the car next connects, so a config sent to a sleeping or
+# out-of-coverage car reports success here and reaches the vehicle hours
+# later. Its own synced flag is the only thing that says it arrived.
+if [ "${HTTP:0:1}" = "2" ]; then
+  say "Checking whether the car has it yet"
+  curl -sS "$BASE/api/1/vehicles/$VIN/fleet_telemetry_config" \
+    -H "Authorization: Bearer $(jq -r .access_token "$WORK/tok.json")" \
+    -o "$WORK/state.json" 2>/dev/null || true
+  SYNCED=$(jq -r '.response.synced // "unknown"' "$WORK/state.json" 2>/dev/null)
+  echo "  synced: $SYNCED"
+  [ "$SYNCED" = "true" ] || echo "  (not yet — the car applies it when it next wakes)"
+fi
+
 case "$HTTP" in
   2*) say "Accepted"
       cat <<EOF
 
 The car has the configuration. It connects when it next wakes, so an idle
 log until then is expected rather than a fault.
+
+Confirm the car has taken it (synced turns true once it wakes):
+  $APP_URL/api/telemetry/recent      # new fields appearing is the proof
 
 Watch it arrive:
   docker logs -f fleet-telemetry     # the car's connection
