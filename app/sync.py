@@ -2769,14 +2769,21 @@ def advance_shadow(shadow: dict[str, Any], snap: dict[str, Any]) -> dict[str, An
             shadow["open"] = dict(snap)
             shadow["max_speed_kmh"] = 0.0
         shadow["still_since"] = None
+        shadow.pop("still_snap", None)
         shadow["max_speed_kmh"] = max(
             float(shadow.get("max_speed_kmh") or 0.0), float(snap.get("speed_kmh") or 0.0))
     elif open_at:
         still_since = shadow.get("still_since")
         if still_since is None:
+            # Remember the car as it was when it stopped, not as it will be
+            # once the settle window expires. Closing on the later snapshot
+            # would add up to SHADOW_SETTLE_SEC to every trip's duration,
+            # understate its average speed by the same amount, and charge it
+            # for three minutes of parked accessory draw.
             shadow["still_since"] = ts
+            shadow["still_snap"] = dict(snap)
         elif ts - float(still_since) >= SHADOW_SETTLE_SEC:
-            done = _shadow_close(shadow, snap)
+            done = _shadow_close(shadow, shadow.get("still_snap") or snap)
 
     shadow["last"] = dict(snap)
     return done
@@ -2787,6 +2794,7 @@ def _shadow_close(shadow: dict[str, Any], end: dict[str, Any]) -> dict[str, Any]
     start = shadow.pop("open", None)
     max_speed = float(shadow.pop("max_speed_kmh", 0.0) or 0.0)
     shadow["still_since"] = None
+    shadow.pop("still_snap", None)
     if not start:
         return None
 

@@ -3225,7 +3225,11 @@ def test_shadow_trip_measures_energy_by_subtraction():
     assert round(trip["distance_km"], 1) == 9.7      # 6 miles
     assert trip["energy_kwh"] == 1.5                 # 30.0 - 28.5, measured
     assert round(trip["wh_per_km"]) == 155
-    assert trip["duration_min"] == 15.0
+    # 11 minutes — when the car stopped, NOT when the settle window expired
+    # three minutes later. Closing on the later snapshot would inflate every
+    # duration and understate every average speed.
+    assert trip["duration_min"] == 11.0
+    assert trip["end_ts"] == 660
 
 
 def test_shadow_trip_does_not_split_at_a_traffic_light():
