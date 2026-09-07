@@ -57,11 +57,27 @@ echo "  api     : $BASE"
 # subtly wrong signature is rejected by the car with nothing to learn from.
 say "Installing the signing proxy"
 if ! command -v tesla-http-proxy >/dev/null; then
-  apt-get install -y -qq golang-go >/dev/null || die "could not install Go"
-  GOBIN=/usr/local/bin go install \
-    github.com/teslamotors/vehicle-command/cmd/tesla-http-proxy@latest \
-    || die "could not build tesla-http-proxy"
+  apt-get install -y -qq golang-go git >/dev/null || die "could not install Go"
+
+  # Linking Go on a 1 GB box is the one step here with any chance of running
+  # out of memory, and an OOM during a build reads as an unexplained failure.
+  if [ "$(free -m | awk '/Mem:/{print $2}')" -lt 2048 ] && [ ! -f /swapfile ]; then
+    echo "  adding 2G of swap for the build"
+    fallocate -l 2G /swapfile && chmod 600 /swapfile \
+      && mkswap -q /swapfile && swapon /swapfile || true
+  fi
+
+  # Built from a clone rather than `go install ...@latest`: the module's
+  # go.mod carries replace directives, and go install refuses those outright.
+  # Inside the module they are honoured, so the same build works here.
+  SRC=/usr/local/src/vehicle-command
+  rm -rf "$SRC"
+  git clone -q --depth 1 https://github.com/teslamotors/vehicle-command "$SRC" \
+    || die "could not clone vehicle-command"
+  (cd "$SRC" && go build -o /usr/local/bin/tesla-http-proxy ./cmd/tesla-http-proxy) \
+    || die "could not build tesla-http-proxy (see $LOG)"
 fi
+command -v tesla-http-proxy >/dev/null || die "tesla-http-proxy is still not on PATH"
 
 # The proxy serves HTTPS locally; this certificate is only ever presented to
 # curl on this machine, so it is self-signed and pinned below with --cacert.
