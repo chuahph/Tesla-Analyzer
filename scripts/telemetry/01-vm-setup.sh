@@ -28,15 +28,28 @@ die() { printf '\n\033[31mERROR: %s\033[0m\n' "$*" >&2; exit 1; }
 [ "$(id -u)" -eq 0 ] || die "run with sudo: sudo bash $0"
 
 # ---------------------------------------------------------------- inputs
+# Every answer can arrive as an environment variable instead of a prompt, so
+# the whole thing can run as a GCP startup script. That is not a convenience:
+# Google's SSH-in-browser will neither paste nor upload reliably on iOS, which
+# leaves pasting a block into the instance's metadata form as the only way
+# some people can get this script onto the box at all.
 say "Configuration"
-read -rp "Telemetry hostname [telemetry.evperkm.xyz]: " TELEMETRY_HOST
+if [ -t 0 ]; then
+  [ -n "${TELEMETRY_HOST:-}" ] || {
+    read -rp "Telemetry hostname [telemetry.evperkm.xyz]: " TELEMETRY_HOST; }
+  [ -n "${APP_URL:-}" ] || { read -rp "App URL [https://evperkm.xyz]: " APP_URL; }
+  [ -n "${SYNC_KEY:-}" ] || {
+    read -rsp "SYNC_KEY (same value as the app's env var): " SYNC_KEY; echo; }
+  [ -n "${LE_EMAIL:-}" ] || {
+    read -rp "Email for Let's Encrypt expiry notices (blank to skip): " LE_EMAIL; }
+fi
 TELEMETRY_HOST=${TELEMETRY_HOST:-telemetry.evperkm.xyz}
-read -rp "App URL [https://evperkm.xyz]: " APP_URL
 APP_URL=${APP_URL:-https://evperkm.xyz}
-read -rsp "SYNC_KEY (same value as the app's env var): " SYNC_KEY; echo
-read -rp "Email for Let's Encrypt expiry notices (blank to skip): " LE_EMAIL
+LE_EMAIL=${LE_EMAIL:-}
 
-[ -n "$SYNC_KEY" ] || die "SYNC_KEY is required — the app rejects unauthenticated posts"
+[ -n "${SYNC_KEY:-}" ] || die "SYNC_KEY is required — the app rejects unauthenticated posts.
+  Interactively you are asked for it; unattended, set it in the environment:
+    SYNC_KEY=... bash $0"
 
 # ------------------------------------------------------------------ DNS
 # Checked before anything is installed. certbot's HTTP-01 challenge needs the
@@ -185,7 +198,9 @@ systemctl restart tesla-bridge
 
 # -------------------------------------------------------------- report
 say "Done"
-cat <<EOF
+# Also written to a file: in startup-script mode nobody sees this stdout,
+# and the public key below is the one thing that has to leave this box.
+cat > /etc/tesla/NEXT-STEPS.txt <<EOF
 
   fleet-telemetry : $(docker inspect -f '{{.State.Status}}' fleet-telemetry)
   bridge          : $(systemctl is-active tesla-bridge)
@@ -215,3 +230,4 @@ Useful afterwards:
   journalctl -u tesla-bridge -f       # what is being forwarded
 
 EOF
+cat /etc/tesla/NEXT-STEPS.txt
