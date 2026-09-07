@@ -3525,3 +3525,34 @@ def test_telemetry_ingest_records_what_arrived():
                 "records"] == []
     finally:
         settings.app_passcode, settings.sync_key = old_pc, old_sk
+
+
+def test_fleet_token_needs_the_key_and_withholds_the_refresh_token(monkeypatch):
+    """The receiver box gets an access token; it never gets the refresh token.
+
+    That asymmetry is the whole point: what leaks if the sync key leaks then
+    expires on its own in hours, rather than lasting until someone notices.
+    """
+    from app import state as state_mod
+    from app.api import routes as routes_mod
+    from app.database import SessionLocal
+
+    settings = get_settings()
+    old_pc, old_sk = settings.app_passcode, settings.sync_key
+    settings.app_passcode = "secret123"
+    settings.sync_key = "cronkey"
+    with SessionLocal() as s:
+        state_mod.put(s, state_mod.TOKEN_KEY, "access-abc")
+        state_mod.put(s, state_mod.REFRESH_KEY, "refresh-xyz")
+    monkeypatch.setattr(routes_mod.auth, "oauth_configured", lambda: False)
+    try:
+        with TestClient(app) as client:
+            assert client.get("/api/fleet-token").status_code == 401
+            body = client.get("/api/fleet-token?key=cronkey").json()
+            assert body["access_token"] == "access-abc"
+            assert "refresh_token" not in body
+            assert "vin" in body and "base_url" in body
+    finally:
+        settings.app_passcode, settings.sync_key = old_pc, old_sk
+        with SessionLocal() as s:
+            state_mod.delete(s, state_mod.TOKEN_KEY, state_mod.REFRESH_KEY)

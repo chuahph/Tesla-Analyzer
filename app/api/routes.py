@@ -9134,3 +9134,49 @@ def telemetry_recent(
         "fields": dict(sorted(fields.items())),
         "records": [] if keys_only else buffered[-limit:],
     }
+
+
+@router.get("/fleet-token")
+def fleet_token(session: Session = Depends(get_session)):
+    """Hand the telemetry box a Tesla access token for one configuration call.
+
+    Telling a car to stream requires a payload signed by the virtual key, and
+    that key deliberately never leaves the receiver box — so the token has to
+    go the other way. This is the narrowest version of that trade I could
+    find:
+
+      * the ACCESS token only. The refresh token stays here, so what leaks if
+        this key leaks expires by itself in hours rather than lasting until
+        someone notices.
+      * refreshed first, so the caller gets a full lifetime and never has to
+        come back mid-run.
+      * the VIN and API base alongside it, because the alternative is the
+        caller guessing them, and a configuration sent to the wrong car is
+        one of only three a vehicle will accept.
+
+    Guarded by the same key as /api/sync (see main.py). Rotate that key if it
+    is ever exposed — with this endpoint in place it is no longer only worth
+    a sync tick.
+    """
+    token = state.active_token(session)
+    if not token:
+        raise HTTPException(400, "No linked Tesla account — link your account first.")
+
+    # Refresh when we can. An access token that expires halfway through the
+    # configuration call fails in a way that looks like the car refusing it.
+    refresh = state.get(session, state.REFRESH_KEY)
+    if refresh and auth.oauth_configured():
+        try:
+            tokens = auth.refresh_tokens(refresh)
+            token = tokens["access_token"]
+            state.put(session, state.TOKEN_KEY, token)
+            if tokens.get("refresh_token"):
+                state.put(session, state.REFRESH_KEY, tokens["refresh_token"])
+        except (httpx.HTTPError, KeyError):
+            pass  # the stored token may still be good; let the caller find out
+
+    return {
+        "access_token": token,
+        "vin": state.active_vin(session),
+        "base_url": state.active_base_url(session),
+    }

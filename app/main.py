@@ -136,7 +136,13 @@ async def _passcode_gate(request: Request, call_next):
                      # The telemetry bridge on the receiver box posts here.
                      # It holds the same key the cron does and has no way to
                      # hold a passcode cookie.
-                     "/api/telemetry")
+                     "/api/telemetry",
+                     # And the receiver box asks here for the token it needs to
+                     # send the car its telemetry configuration. That call has
+                     # to be signed by a private key that deliberately never
+                     # leaves that box, so the token has to travel instead —
+                     # see fleet_token for what is and is not handed over.
+                     "/api/fleet-token")
         and hmac.compare_digest(request.query_params.get("key", ""), sync_key)
     ):
         return await call_next(request)
