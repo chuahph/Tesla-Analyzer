@@ -2930,7 +2930,19 @@ def advance_shadow(shadow: dict[str, Any], snap: dict[str, Any]) -> dict[str, An
         # first driving snapshot arrives before the first odometer one. A trip
         # opened there measures from zero and closes against the real reading:
         # 31,127 km, written as a single journey.
-        if not open_at and float(snap.get("odo_km") or 0.0) > 0.0:
+        #
+        # Nor without actual motion. A trip CONTINUES on gear alone, because a
+        # car stopped at a light is still in Drive and still on its journey.
+        # It must not BEGIN on gear alone: Gear streams only when it changes,
+        # so a car that loses signal mid-manoeuvre and never sends
+        # ShiftStateP leaves the composite reading Drive for as long as it
+        # stays offline — observed, reversing into an underground bay. When it
+        # reconnects, still parked, that stale gear would open a journey it is
+        # not on. Speed is reported every ten seconds and refreshes on
+        # reconnect, so requiring it to open is what keeps a stale gear from
+        # inventing a trip.
+        if (not open_at and float(snap.get("odo_km") or 0.0) > 0.0
+                and float(snap.get("speed_kmh") or 0.0) > 0.0):
             shadow["open"] = dict(snap)
             shadow["max_speed_kmh"] = 0.0
             open_at = shadow["open"]

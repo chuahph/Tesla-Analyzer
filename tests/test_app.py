@@ -4643,3 +4643,38 @@ def test_second_field_set_is_recorded_but_not_yet_believed():
     # Nothing derived from it: energy still comes from EnergyRemaining alone.
     assert trip["wh_per_km"] == pytest.approx(
         trip["energy_kwh"] * 1000 / trip["distance_km"], abs=0.1)
+
+
+def test_a_stale_gear_cannot_open_a_trip():
+    """Gear streams only on change, so it can read Drive for hours.
+
+    A car that loses signal while manoeuvring into an underground bay never
+    sends ShiftStateP. The composite then reads Drive for as long as it stays
+    offline, and on reconnect — still parked — that stale gear would open a
+    journey the car is not on. Speed refreshes every ten seconds, so requiring
+    motion to BEGIN a trip is what keeps a stale gear from inventing one. A
+    trip still CONTINUES on gear alone: a car at a red light is in Drive and
+    still on its journey.
+    """
+    from app import sync as sync_mod
+
+    def snap(ts, mph, gear, mi=19348.0):
+        return sync_mod.snapshot_from_telemetry(
+            {"Odometer": mi, "VehicleSpeed": mph, "Gear": gear}, ts)
+
+    t = 1_788_909_241.0
+    parked_but_says_drive = snap(t, 0.0, "ShiftStateD")
+    # The machine agrees the car is "driving" — that is the trap.
+    assert sync_mod.is_driving(parked_but_says_drive)
+
+    shadow: dict = {}
+    for i in range(6):                    # six minutes of reconnected silence
+        sync_mod.advance_shadow(shadow, snap(t + i * 60, 0.0, "ShiftStateD"))
+    assert not shadow.get("open"), "a stale gear opened a trip on a parked car"
+
+    # Real motion still opens one immediately.
+    sync_mod.advance_shadow(shadow, snap(t + 400, 20.0, "ShiftStateD"))
+    assert shadow.get("open")
+    # And a stop at a light does not end it.
+    sync_mod.advance_shadow(shadow, snap(t + 460, 0.0, "ShiftStateD", mi=19348.5))
+    assert shadow.get("open") and shadow.get("still_since") is None
