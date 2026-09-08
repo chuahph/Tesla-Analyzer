@@ -9564,6 +9564,67 @@ def _compare_row(t: dict, d, t_start, car_by_drive: dict, pct) -> dict:
     }
 
 
+@router.api_route("/telemetry/drop-trips", methods=["GET", "POST"])
+def telemetry_drop_trips(
+    since: str = Query(..., description="Local ISO datetime, e.g. 2026-09-08T19:00"),
+    apply: bool = Query(False),
+    session: Session = Depends(get_session),
+):
+    """Delete shadow trips recorded from ``since`` onwards.
+
+    Shadow trips are a derived record, rebuilt from what the car streams, and
+    a bug in the code that closes them can therefore write a batch of trips
+    that never happened — as one did: a clock eight hours out closed the open
+    trip on every sync tick, and one evening's driving landed as eleven
+    one-minute fragments. Nothing recomputes them, so they sit in the
+    comparison poisoning its medians until removed by hand.
+
+    Deliberately narrow. It takes a boundary and deletes forward from it, so
+    the trips it removes are the ones the operator can see in the comparison
+    and has decided are wrong. It cannot alter a trip, cannot touch the polled
+    history, and previews unless asked to apply — GET without apply=true
+    reports exactly what would go.
+    """
+    import json as _json
+
+    try:
+        cutoff = datetime.fromisoformat(since)
+    except ValueError:
+        raise HTTPException(422, f"{since!r} is not an ISO datetime "
+                                 f"like 2026-09-08T19:00") from None
+
+    try:
+        trips = _json.loads(state.get(session, state.TELEMETRY_TRIPS_KEY) or "[]") or []
+    except ValueError:
+        raise HTTPException(500, "The stored trips are not readable JSON.")
+
+    def starts_at(trip: dict) -> datetime | None:
+        try:
+            return sync_mod._dt(float(trip["start_ts"]))
+        except (KeyError, TypeError, ValueError, OSError):
+            return None
+
+    doomed, kept = [], []
+    for trip in trips:
+        at = starts_at(trip)
+        # A trip whose start cannot be read is kept: this deletes by a
+        # boundary, and one that cannot be placed against that boundary has
+        # not been shown to be on the wrong side of it.
+        (doomed if at is not None and at >= cutoff else kept).append(trip)
+
+    listing = [{"start": t.get("start_time"), "end": t.get("end_time"),
+                "km": t.get("distance_km"), "min": t.get("duration_min")}
+               for t in doomed]
+    if not apply:
+        return {"would_drop": len(doomed), "would_keep": len(kept),
+                "trips": listing,
+                "how": "Add &apply=true to this URL to delete them."}
+
+    state.put(session, state.TELEMETRY_TRIPS_KEY, _json.dumps(kept))
+    session.commit()
+    return {"dropped": len(doomed), "kept": len(kept), "trips": listing}
+
+
 @router.get("/telemetry/compare")
 def telemetry_compare(
     days: int = Query(14, ge=1, le=90),

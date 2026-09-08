@@ -4257,3 +4257,56 @@ def test_settle_does_not_close_a_live_trip():
         state.put(sess, state.TELEMETRY_TRIPS_KEY, prev_trips or "[]")
         sess.commit()
         sess.close()
+
+
+def test_drop_trips_previews_before_it_deletes():
+    """Shadow trips are derived, so a bug in the closing code writes trips that
+    never happened. Nothing recomputes them, so they need removing by hand —
+    and a hand-run delete should show its work before doing it."""
+    import json as _json
+
+    from app.database import SessionLocal
+    from app import state, sync as sync_mod
+
+    settings = get_settings()
+    old_pc = settings.app_passcode
+    settings.app_passcode = ""
+    sess = SessionLocal()
+    prev = state.get(sess, state.TELEMETRY_TRIPS_KEY)
+    try:
+        def trip(hh, mm, km):
+            at = datetime(2026, 9, 8, hh, mm)
+            return {"start_ts": at.timestamp() - 8 * 3600, "end_ts": at.timestamp() - 8 * 3600 + 600,
+                    "start_time": at.isoformat(timespec="seconds"),
+                    "end_time": at.isoformat(timespec="seconds"),
+                    "distance_km": km, "duration_min": 10.0}
+
+        good, frag1, frag2 = trip(17, 9, 10.89), trip(20, 24, 0.325), trip(20, 25, 0.857)
+        unreadable = {"start_time": "no start_ts here"}
+        state.put(sess, state.TELEMETRY_TRIPS_KEY,
+                  _json.dumps([good, frag1, frag2, unreadable]))
+        sess.commit()
+
+        with TestClient(app) as client:
+            body = client.get("/api/telemetry/drop-trips?since=2026-09-08T19:00").json()
+            assert body["would_drop"] == 2 and body["would_keep"] == 2
+            # Nothing changed yet: a preview that deletes is not a preview.
+            assert len(_json.loads(state.get(SessionLocal(), state.TELEMETRY_TRIPS_KEY))) == 4
+
+            body = client.get(
+                "/api/telemetry/drop-trips?since=2026-09-08T19:00&apply=true").json()
+            assert body["dropped"] == 2
+
+        left = _json.loads(state.get(SessionLocal(), state.TELEMETRY_TRIPS_KEY))
+        assert [t.get("distance_km") for t in left] == [10.89, None]
+        # A trip whose start cannot be read is kept, not swept up: it has not
+        # been shown to be on the wrong side of the boundary.
+        assert any(t.get("start_time") == "no start_ts here" for t in left)
+
+        with TestClient(app) as client:
+            assert client.get("/api/telemetry/drop-trips?since=not-a-date").status_code == 422
+    finally:
+        state.put(sess, state.TELEMETRY_TRIPS_KEY, prev or "[]")
+        sess.commit()
+        sess.close()
+        settings.app_passcode = old_pc
