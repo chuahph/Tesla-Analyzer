@@ -9543,6 +9543,9 @@ def _compare_row(t: dict, d, t_start, car_by_drive: dict, pct) -> dict:
             # units are undocumented, and the gap between the two figures is
             # the measurement, not a nuisance to be reconciled away.
             "used_delta": t.get("used_delta"),
+            # exit / timeout / stream_lost — how the ending was decided, and
+            # so how much the final odometer is worth. See _shadow_close.
+            "ended_on": t.get("ended_on"),
         },
         "polled": None if not d else {
             "id": d.id,

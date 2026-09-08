@@ -2882,6 +2882,7 @@ def settle_shadow(shadow: dict[str, Any], now_ts: float) -> dict[str, Any] | Non
     # Never seen stationary — the stream died mid-drive rather than on
     # arrival. Close at the last motion seen; anything after that is unknown.
     if now_ts - last_ts > SHADOW_GAP_SEC:
+        shadow["stream_lost"] = True
         return _shadow_close(shadow, last)
     return None
 
@@ -3157,7 +3158,19 @@ def _shadow_close(shadow: dict[str, Any], end: dict[str, Any],
         # A lifetime counter only counts up and has no such step, so the gap
         # between the two says how much of a disagreement is quantisation.
         "used_delta": used_delta,
-        "ended_on": "exit" if exit_seen else "timeout",
+        # How the journey's end was decided, because that is what says how
+        # much to trust its final odometer:
+        #   exit        the driver was seen to leave, and readings kept
+        #               arriving afterwards — the arrival is measured
+        #   timeout     the car sat still long enough while still reporting
+        #   stream_lost the car went silent mid-journey and never said it had
+        #               parked. The end is the last thing it managed to send,
+        #               so the arrival is short by whatever it drove after
+        #               that — typically a hundred metres or two here, and
+        #               systematic rather than random, because it is the same
+        #               carpark every time.
+        "ended_on": ("stream_lost" if shadow.pop("stream_lost", False)
+                     else "exit" if exit_seen else "timeout"),
         "pack_temp_c": end.get("pack_temp_c"),
         "inside_temp": end.get("inside_temp"),
         "out_temp": end.get("out_temp"),

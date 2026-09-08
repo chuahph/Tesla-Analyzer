@@ -4678,3 +4678,44 @@ def test_a_stale_gear_cannot_open_a_trip():
     # And a stop at a light does not end it.
     sync_mod.advance_shadow(shadow, snap(t + 460, 0.0, "ShiftStateD", mi=19348.5))
     assert shadow.get("open") and shadow.get("still_since") is None
+
+
+def test_a_trip_says_how_its_end_was_decided():
+    """An arrival measured after parking is worth more than a last gasp.
+
+    This car loses signal as it reaches its bay, so ShiftStateP never arrives
+    and the journey is closed on silence instead. The end is then the last
+    thing the car managed to send, and the trip is short by whatever it drove
+    after that — the same carpark every evening, so a bias rather than noise.
+    The trip has to carry which of those happened, or the two are averaged
+    together as if equally measured.
+    """
+    from app import sync as sync_mod
+
+    def snap(ts, mi, mph=0.0, gear="ShiftStateP", seat=True, doors=False):
+        return sync_mod.snapshot_from_telemetry(
+            {"Odometer": mi, "VehicleSpeed": mph, "Gear": gear,
+             "DriverSeatOccupied": seat, "EnergyRemaining": 55.0,
+             "DoorState": {"DriverFront": doors}}, ts)
+
+    t, m = 1_788_909_000.0, 19000.0
+
+    # Parked properly, with readings still arriving afterwards.
+    sh: dict = {}
+    sync_mod.advance_shadow(sh, snap(t, m, mph=20, gear="ShiftStateD"))
+    sync_mod.advance_shadow(sh, snap(t + 600, m + 5, mph=20, gear="ShiftStateD"))
+    sync_mod.advance_shadow(sh, snap(t + 900, m + 8, seat=False, doors=True))
+    done = sync_mod.advance_shadow(sh, snap(t + 1100, m + 8, seat=False, doors=True))
+    assert done["ended_on"] == "exit"
+
+    # Signal lost on the way into the bay: no P, no readings after.
+    sh = {}
+    sync_mod.advance_shadow(sh, snap(t, m, mph=20, gear="ShiftStateD"))
+    sync_mod.advance_shadow(sh, snap(t + 600, m + 5, mph=20, gear="ShiftStateD"))
+    # Last thing it managed to send: still in Drive, almost stopped.
+    sync_mod.advance_shadow(sh, snap(t + 660, m + 5.4, mph=1, gear="ShiftStateD"))
+    done = sync_mod.settle_shadow(sh, t + 660 + 700)
+    assert done["ended_on"] == "stream_lost"
+    assert done["end_ts"] == t + 660
+    # And the marker does not leak into the next journey.
+    assert "stream_lost" not in sh
