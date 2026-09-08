@@ -4657,20 +4657,38 @@ def push_unsubscribe(payload: dict = Body(...), session: Session = Depends(get_s
     return {"unsubscribed": True}
 
 
-@router.post("/push/test")
+@router.api_route("/push/test", methods=["GET", "POST"])
 def push_test(session: Session = Depends(get_session)):
-    """Send a test notification to every subscribed device — the "does this
-    actually reach my phone" check. Returns how many devices it was delivered
-    to (0 means push isn't configured or nothing is subscribed yet)."""
-    if not notifications.enabled():
-        raise HTTPException(404, "Push notifications aren't configured on this server.")
+    """Send a test notification through every configured channel.
+
+    GET as well as POST, and no longer refused when web push is unconfigured.
+    This is the "does an alert actually reach my phone" check, and the person
+    running it is on a phone where the address bar is the only way to issue a
+    request — so POST-only made it unreachable by the person who needs it.
+    Gating it on push alone was wrong for the same reason: notify() also
+    reaches Telegram and the event webhook, and someone using those has no
+    other way to find out whether they work before an alarm depends on it.
+    """
+    settings = get_settings()
+    channels = {
+        "push": notifications.enabled(),
+        "telegram": bool(settings.telegram_bot_token.strip()
+                         and settings.telegram_chat_id.strip()),
+        "webhook": bool(settings.event_webhook_url.strip()),
+    }
+    if not any(channels.values()):
+        raise HTTPException(
+            404, "No notification channel is configured — set TELEGRAM_BOT_TOKEN "
+                 "and TELEGRAM_CHAT_ID, EVENT_WEBHOOK_URL, or the VAPID keys.")
     sent = notifications.notify(
         session,
         "Tesla Analyzer",
         "Test notification — if you can see this, alerts are working. 🎉",
         "test",
     )
-    return {"sent": sent}
+    # sent counts push subscriptions only, so report what was attempted too —
+    # otherwise a working Telegram setup reads as {"sent": 0} and looks broken.
+    return {"sent": sent, "channels_configured": channels}
 
 
 # GET as well as POST: these are hand-run repair tools, and the person
