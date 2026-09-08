@@ -3783,3 +3783,23 @@ def test_telegram_chat_id_lookup():
             assert "BotFather" in resp.json()["detail"]
     finally:
         settings.app_passcode, settings.telegram_bot_token = old_pc, old_tok
+
+
+def test_script_shortcuts_are_reachable_without_the_passcode():
+    """The receiver box is set up by typing a command into Google's
+    SSH-in-browser, which does not paste on iOS — so the URL has to be short,
+    and curl there carries no passcode cookie."""
+    settings = get_settings()
+    old_pc = settings.app_passcode
+    settings.app_passcode = "secret"
+    try:
+        with TestClient(app) as client:
+            for path, script in (("/vm", "vm.sh"), ("/car", "car.sh")):
+                resp = client.get(path, follow_redirects=False)
+                assert resp.status_code == 302, path
+                assert resp.headers["location"].endswith("/" + script)
+                # Not behind the gate: a redirect to /login would hand curl
+                # an HTML page and bash would try to run it.
+                assert "/login" not in resp.headers["location"]
+    finally:
+        settings.app_passcode = old_pc

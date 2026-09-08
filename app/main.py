@@ -100,7 +100,9 @@ LOGIN_HTML = """<!DOCTYPE html>
 # health endpoint (cloud hosts probe it to decide the deploy succeeded), and
 # Tesla's partner public key (Tesla fetches it to verify the registered domain).
 TESLA_KEY_PATH = "/.well-known/appspecific/com.tesla.3p.public-key.pem"
-_OPEN_PATHS = {"/login", "/api/health", TESLA_KEY_PATH}
+# /vm and /car join them: curl running on the receiver box has no passcode
+# cookie, and both only hand back a public GitHub URL.
+_OPEN_PATHS = {"/login", "/api/health", TESLA_KEY_PATH, "/vm", "/car"}
 
 
 @app.middleware("http")
@@ -204,6 +206,31 @@ def service_worker() -> FileResponse:
 @app.get("/manifest.webmanifest")
 def manifest() -> FileResponse:
     return FileResponse(STATIC_DIR / "manifest.webmanifest", media_type="application/manifest+json")
+
+
+# Typing shortcuts for the two setup scripts. Google's SSH-in-browser will
+# not reliably paste on iOS, so the receiver box is set up by TYPING a
+# command — and a raw.githubusercontent URL is ~130 characters of
+# case-sensitive path to get right by thumb. These cut it to
+# `curl -sL evperkm.xyz/car`, on a domain already being typed all day.
+#
+# Not an open redirect: the targets are fixed here, nothing about them comes
+# from the request. Both scripts are public on GitHub already, so serving a
+# pointer to one gives away nothing the repository does not.
+_SCRIPT_URLS = {
+    "vm": "https://raw.githubusercontent.com/chuahph/Tesla-Analyzer/main/vm.sh",
+    "car": "https://raw.githubusercontent.com/chuahph/Tesla-Analyzer/main/car.sh",
+}
+
+
+@app.get("/vm")
+def vm_script() -> RedirectResponse:
+    return RedirectResponse(_SCRIPT_URLS["vm"], status_code=302)
+
+
+@app.get("/car")
+def car_script() -> RedirectResponse:
+    return RedirectResponse(_SCRIPT_URLS["car"], status_code=302)
 
 
 @app.get(TESLA_KEY_PATH)

@@ -286,7 +286,7 @@ Next, and none of it can be done from this box:
      developer.tesla.com
   3. Register the partner domain, then pair the virtual key to the car
   4. Send the signed telemetry config to the car:
-       sudo bash <(curl -sL ${RAW_BASE%/scripts/telemetry}/car.sh)
+       sudo bash <(curl -sL $APP_URL/car)
 
 Until step 4 the car does not know this server exists, so an idle log here is
 expected rather than a fault. Re-run step 4 after any change to the field
