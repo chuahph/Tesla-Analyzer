@@ -2812,6 +2812,44 @@ def _process_vehicle(
     return vehicle, snap, len(drives), len(charges), open_trip
 
 
+def _settle_shadows(session: Session) -> int:
+    """Close any shadow trip whose stream went quiet. Returns how many.
+
+    The shadow machine is driven by arriving records, so a car that parks and
+    goes to sleep leaves its last trip open indefinitely — and the whole point
+    of telemetry is that it sees the journey the moment it happens, not the
+    next time the car wakes up. Runs on the sync tick, and again whenever the
+    comparison is read, so the trip is there when it is looked for.
+    """
+    import json as _json
+
+    try:
+        shadows = _json.loads(state.get(session, state.TELEMETRY_SHADOW_KEY) or "{}")
+    except ValueError:
+        return 0
+    if not shadows:
+        return 0
+    now_ts = sync_mod.now_local().timestamp()
+    finished = []
+    for vin, shadow in shadows.items():
+        done = sync_mod.settle_shadow(shadow, now_ts)
+        if done:
+            done["vin"] = vin
+            finished.append(done)
+    if not finished:
+        return 0
+    try:
+        trips = _json.loads(state.get(session, state.TELEMETRY_TRIPS_KEY) or "[]")
+    except ValueError:
+        trips = []
+    trips.extend(finished)
+    state.put(session, state.TELEMETRY_TRIPS_KEY,
+              _json.dumps(trips[-TELEMETRY_TRIPS_MAX:]))
+    state.put(session, state.TELEMETRY_SHADOW_KEY, _json.dumps(shadows))
+    session.commit()
+    return len(finished)
+
+
 @router.get("/sync")  # GET so external cron/uptime services can trigger it
 @router.post("/sync")
 def sync_now(wake: bool = Query(False), session: Session = Depends(get_session)):
@@ -2820,6 +2858,9 @@ def sync_now(wake: bool = Query(False), session: Session = Depends(get_session))
     ``wake=1`` (the manual Sync button) nudges a sleeping car online first.
     The cron never wakes the car, so it can't drain the battery overnight.
     """
+    # Before anything else, since it needs no network and a failure to reach
+    # Tesla must not also cost the trip the car already streamed.
+    _settle_shadows(session)
     try:
         return _sync_now_impl(wake, session)
     except HTTPException as exc:
@@ -9501,6 +9542,9 @@ def telemetry_compare(
     """
     import json as _json
 
+    # A trip whose stream ended when the car went to sleep is still open, and
+    # would otherwise be missing from the very report asking where it went.
+    _settle_shadows(session)
     try:
         shadow_trips = _json.loads(state.get(session, state.TELEMETRY_TRIPS_KEY) or "[]")
     except ValueError:

@@ -3901,3 +3901,57 @@ def test_no_caller_passes_percentile_a_percentage():
                 if float(arg) > 1.0:
                     offenders.append(f"{path}:{num}: {arg}")
     assert not offenders, "percentile takes a fraction: " + "; ".join(offenders)
+
+
+def _snap(ts, **kw):
+    base = {"ts": ts, "odo_km": 100.0, "soc": 80.0, "energy_kwh": 55.0,
+            "speed_kmh": 0.0, "shift": "P", "charging": False,
+            "seat_occupied": True, "doors_open": False, "lat": 5.3, "lon": 100.3}
+    base.update(kw)
+    return base
+
+
+def test_shadow_trip_closes_after_the_car_sleeps():
+    """A parked Tesla stops streaming, so nothing arrives to close the trip.
+
+    advance_shadow only runs on an incoming record. Left at that, the last
+    drive of the day stays open until the next one — which reads, from
+    outside, as telemetry having missed the journey altogether.
+    """
+    from app import sync as sync_mod
+
+    shadow: dict = {}
+    t = 1_000_000.0
+    # Drive, then stop. The stop is the last thing the car ever says.
+    sync_mod.advance_shadow(shadow, _snap(t, speed_kmh=40.0, shift="D"))
+    sync_mod.advance_shadow(shadow, _snap(t + 600, odo_km=110.0, energy_kwh=53.0,
+                                          speed_kmh=40.0, shift="D"))
+    last = _snap(t + 660, odo_km=111.0, energy_kwh=52.8,
+                 seat_occupied=False, doors_open=True)
+    assert sync_mod.advance_shadow(shadow, last) is None
+    assert shadow.get("open")                      # still open, as it should be
+
+    # Silence. Too soon to act: a live stream must keep ownership of the
+    # decision, because it knows more than the clock does.
+    assert sync_mod.settle_shadow(shadow, t + 700) is None
+    # Quiet long enough, and past the settle window.
+    done = sync_mod.settle_shadow(shadow, t + 660 + 400)
+    assert done is not None
+    # The trip ends when the car stopped, not when this noticed.
+    assert done["end_ts"] == t + 660
+    assert done["distance_km"] == pytest.approx(11.0, abs=0.01)
+    assert not shadow.get("open")                  # and the machine is clear
+
+
+def test_shadow_trip_closes_when_the_stream_dies_mid_drive():
+    """No stationary snapshot ever arrived — close at the last motion seen."""
+    from app import sync as sync_mod
+
+    shadow: dict = {}
+    t = 2_000_000.0
+    sync_mod.advance_shadow(shadow, _snap(t, speed_kmh=40.0, shift="D"))
+    sync_mod.advance_shadow(shadow, _snap(t + 300, odo_km=105.0, energy_kwh=54.0,
+                                          speed_kmh=40.0, shift="D"))
+    assert sync_mod.settle_shadow(shadow, t + 400) is None      # still driving
+    done = sync_mod.settle_shadow(shadow, t + 300 + 700)
+    assert done is not None and done["end_ts"] == t + 300

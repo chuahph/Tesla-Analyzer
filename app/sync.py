@@ -2780,6 +2780,55 @@ SHADOW_SETTLE_NO_EXIT_SEC = 600.0
 SHADOW_GAP_SEC = 600.0
 
 
+# How long the stream must have been silent before a trip is closed without
+# it. Only a safety margin: the trip's own end time comes from the snapshot
+# taken when the car stopped, so waiting longer costs nothing but the delay
+# before the trip appears. It exists so this can never race a live stream,
+# where advance_shadow is the thing that should close the trip.
+SHADOW_QUIET_SEC = 120.0
+
+
+def settle_shadow(shadow: dict[str, Any], now_ts: float) -> dict[str, Any] | None:
+    """Close a trip the car stopped reporting on, without a new snapshot.
+
+    advance_shadow only runs when a record arrives, so every path out of an
+    open trip needed the car to keep talking. It does not: a Tesla goes to
+    sleep shortly after it is parked and the telemetry connection goes with
+    it. The last record of the day is then the one that would have started the
+    settle window, and the trip stays open until the next drive — which reads,
+    from outside, as telemetry having missed the journey entirely.
+
+    Called on a schedule instead. The end of the trip is still the moment the
+    car stopped, not now, so a trip closed this way is the same trip that
+    would have been emitted had the stream continued.
+    """
+    open_at, last = shadow.get("open"), shadow.get("last")
+    if not open_at or not last:
+        return None
+    last_ts = float(last.get("ts") or 0.0)
+    # Only ever act on a stream that has actually gone away. While records are
+    # arriving, advance_shadow owns the decision and knows more than this does.
+    if now_ts - last_ts < SHADOW_QUIET_SEC:
+        return None
+
+    still_since = shadow.get("still_since")
+    if still_since is not None:
+        window = (SHADOW_SETTLE_SEC if shadow.get("exit_seen")
+                  else SHADOW_SETTLE_NO_EXIT_SEC)
+        if now_ts - float(still_since) >= window:
+            # Same rule as the live path: time from when it stopped, readings
+            # from the last thing the car said while parked in that spot.
+            return _shadow_close(shadow, shadow.get("still_snap") or last,
+                                 readings=last)
+        return None
+
+    # Never seen stationary — the stream died mid-drive rather than on
+    # arrival. Close at the last motion seen; anything after that is unknown.
+    if now_ts - last_ts > SHADOW_GAP_SEC:
+        return _shadow_close(shadow, last)
+    return None
+
+
 def advance_shadow(shadow: dict[str, Any], snap: dict[str, Any]) -> dict[str, Any] | None:
     """Step the shadow trip machine with one telemetry snapshot.
 
