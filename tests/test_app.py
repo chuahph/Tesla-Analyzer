@@ -4310,3 +4310,51 @@ def test_drop_trips_previews_before_it_deletes():
         sess.commit()
         sess.close()
         settings.app_passcode = old_pc
+
+
+def test_no_trip_without_a_real_odometer():
+    """A composite that has not yet seen an Odometer record reads 0.0.
+
+    Odometer streams every 30 seconds and VehicleSpeed every 10, so after any
+    reset of the store the first driving snapshot arrives before the first
+    odometer one. Opening a trip there measures from zero and closes against
+    the real reading: a single journey of 31,127 km, which looks exactly like
+    data and poisons every median it touches.
+    """
+    from app import sync as sync_mod
+
+    shadow: dict = {}
+    t = 1_788_900_000.0
+    moving_only = sync_mod.snapshot_from_telemetry({"VehicleSpeed": 14.0}, t)
+    assert moving_only["odo_km"] == 0.0 and sync_mod.is_driving(moving_only)
+    sync_mod.advance_shadow(shadow, moving_only)
+    assert not shadow.get("open"), "opened a trip with no odometer to measure from"
+
+    # It opens as soon as there is something to measure from, and the trip
+    # that results is the real one.
+    sync_mod.advance_shadow(shadow, sync_mod.snapshot_from_telemetry(
+        {"VehicleSpeed": 14.0, "Odometer": 19341.0}, t + 30))
+    assert shadow["open"]["odo_km"] == pytest.approx(31126.245, abs=0.01)
+    sync_mod.advance_shadow(shadow, sync_mod.snapshot_from_telemetry(
+        {"VehicleSpeed": 0.0, "Gear": "ShiftStateP", "Odometer": 19341.4,
+         "DriverSeatOccupied": False}, t + 60))
+    done = sync_mod.settle_shadow(shadow, t + 760)
+    assert done["distance_km"] == pytest.approx(0.644, abs=0.002)
+
+
+def test_absurd_distance_is_refused_rather_than_recorded():
+    """A boundary that went wrong should leave a gap, not a plausible record.
+
+    A missing trip is visible as missing. A trip carrying an impossible number
+    is indistinguishable from a real one until someone reads it closely.
+    """
+    from app import sync as sync_mod
+
+    shadow = {
+        "open": {"ts": 1_788_900_000.0, "odo_km": 5.0, "energy_kwh": 55.0,
+                 "soc": 80.0, "lat": 5.3, "lon": 100.3},
+        "max_speed_kmh": 60.0,
+    }
+    end = {"ts": 1_788_900_600.0, "odo_km": 31127.0, "soc": 79.0,
+           "energy_kwh": 54.0}
+    assert sync_mod._shadow_close(shadow, end) is None

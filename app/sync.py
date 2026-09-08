@@ -2818,6 +2818,11 @@ SHADOW_SETTLE_NO_EXIT_SEC = 600.0
 # without sending a final ShiftStateP would otherwise leave a trip open for
 # hours and then absorb the next journey into it.
 SHADOW_GAP_SEC = 600.0
+# No single shadow trip is longer than this. Not a real driving limit — a
+# floor under nonsense, so a boundary that went wrong shows up as a missing
+# trip rather than as a plausible-looking record with an impossible number in
+# it. The car's whole odometer reads about 31,000 km.
+SHADOW_MAX_KM = 2000.0
 
 
 # How long the stream must have been silent before a trip is closed without
@@ -2906,9 +2911,21 @@ def advance_shadow(shadow: dict[str, Any], snap: dict[str, Any]) -> dict[str, An
         open_at = None
 
     if is_driving(snap):
-        if not open_at:
+        # Not without an odometer to start from. A telemetry message carries
+        # only what changed, so a composite that has not yet seen an Odometer
+        # record reports 0.0 — and Odometer is streamed every 30 seconds while
+        # VehicleSpeed comes every 10, so after any reset of the store the
+        # first driving snapshot arrives before the first odometer one. A trip
+        # opened there measures from zero and closes against the real reading:
+        # 31,127 km, written as a single journey.
+        if not open_at and float(snap.get("odo_km") or 0.0) > 0.0:
             shadow["open"] = dict(snap)
             shadow["max_speed_kmh"] = 0.0
+            open_at = shadow["open"]
+        elif not open_at:
+            # Nothing to open yet, and nothing to measure until there is.
+            shadow["last"] = dict(snap)
+            return done
         shadow["still_since"] = None
         shadow.pop("still_snap", None)
         shadow.pop("exit_seen", None)
@@ -3047,10 +3064,16 @@ def _shadow_close(shadow: dict[str, Any], end: dict[str, Any],
     if not start:
         return None
 
-    distance = round(float(final.get("odo_km") or 0.0)
-                     - float(start.get("odo_km") or 0.0), 3)
+    start_odo = float(start.get("odo_km") or 0.0)
+    distance = round(float(final.get("odo_km") or 0.0) - start_odo, 3)
     minutes = max((float(end["ts"]) - float(start["ts"])) / 60.0, 0.0)
     if distance < TRIP_MIN_KM or minutes <= 0:
+        return None
+    # Both ends have to be real odometer readings, and the gap between them
+    # has to be a journey. A trip measured from a missing reading is not a
+    # long trip, it is an arithmetic accident, and it enters the record
+    # looking exactly like data.
+    if start_odo <= 0.0 or distance > SHADOW_MAX_KM:
         return None
 
     # Both ends measured, so this is a subtraction rather than a percentage
