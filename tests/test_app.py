@@ -3521,6 +3521,18 @@ def test_telemetry_ingest_records_what_arrived():
             # And the original is kept beside the flattened form.
             assert seen["records"][-1]["raw"] == batch["records"][0]
 
+            # "invalid" is the car saying it has no reading, not a reading of
+            # true — and it must not erase what the car last did tell us.
+            client.post("/api/telemetry?key=cronkey", json={"records": [{
+                "vin": "5YJ3TEST",
+                "createdAt": "2026-09-07T14:00:30Z",
+                "data": [{"key": "Gear", "value": {"invalid": True}},
+                         {"key": "Soc", "value": {"doubleValue": 33.0}}],
+            }]})
+            after = client.get("/api/telemetry/recent").json()
+            assert after["snapshot"]["5YJ3TEST"]["shift"] == "D"
+            assert after["snapshot"]["5YJ3TEST"]["soc"] == 33.0
+
             assert client.get("/api/telemetry/recent?keys_only=true").json()[
                 "records"] == []
 

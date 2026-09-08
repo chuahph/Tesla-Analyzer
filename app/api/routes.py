@@ -9051,7 +9051,14 @@ def _telemetry_value(entry: dict) -> Any:
     """
     value = entry.get("value")
     if isinstance(value, dict) and len(value) == 1:
-        return next(iter(value.values()))
+        key, inner = next(iter(value.items()))
+        # {"invalid": true} is the car saying it has no reading for this
+        # field, not a reading of true. Unwrapped naively it becomes the
+        # boolean, and this has already happened on real data: Gear,
+        # VehicleSpeed and ChargerPhases all arrived as true in one batch.
+        if key == "invalid":
+            return None
+        return inner
     return value
 
 
@@ -9118,7 +9125,9 @@ def telemetry_ingest(
     for record in kept:
         vin = record.get("vin") or "unknown"
         car = latest.setdefault(vin, {})
-        car.update(record.get("fields") or {})
+        # A field the car could not read must not erase what it last told us.
+        car.update({k: v for k, v in (record.get("fields") or {}).items()
+                    if v is not None})
         if record.get("created_at"):
             car["_ts"] = record["created_at"]
         # Step the shadow machine on every record, not once per batch: the
@@ -9194,7 +9203,8 @@ def telemetry_recent(
     latest = {vin: dict(car) for vin, car in latest.items()}
     for record in buffered:
         car = latest.setdefault(record.get("vin") or "unknown", {})
-        car.update(record.get("fields") or {})
+        car.update({k: v for k, v in (record.get("fields") or {}).items()
+                    if v is not None})
         if record.get("created_at"):
             car["_ts"] = record["created_at"]
 
