@@ -13,8 +13,6 @@ def _settings(**overrides):
         vapid_subject_email="test@example.com",
         event_webhook_url="",
         telegram_bot_token="", telegram_chat_id="",
-        whatsapp_phone="", whatsapp_apikey="",
-        ntfy_topic="", ntfy_server="https://ntfy.sh",
     )
     base.update(overrides)
     return SimpleNamespace(**base)
@@ -224,68 +222,3 @@ def test_telegram_is_skipped_until_both_halves_are_configured(monkeypatch):
                                           telegram_chat_id="123"))
     assert notifications.send_telegram("Sentry alert", "movement") is True
     assert "api.telegram.org/botabc/sendMessage" in calls[0][0]
-
-
-def test_whatsapp_runs_beside_telegram_not_instead_of_it(monkeypatch):
-    """Both channels fire, so the unofficial one going quiet costs nothing.
-
-    CallMeBot is one person's free relay; Telegram is a first-party API. An
-    alarm should not depend on the former, but there is no reason not to have
-    both.
-    """
-    hit = []
-    monkeypatch.setattr("app.notifications.httpx.post",
-                        lambda url, **k: hit.append(("post", url)) or httpx.Response(
-                            200, request=httpx.Request("POST", url)))
-    monkeypatch.setattr("app.notifications.httpx.get",
-                        lambda url, **k: hit.append(("get", url)) or httpx.Response(
-                            200, request=httpx.Request("GET", url)))
-    monkeypatch.setattr("app.notifications.get_settings",
-                        lambda: _settings(telegram_bot_token="abc",
-                                          telegram_chat_id="123",
-                                          whatsapp_phone="+60123456789",
-                                          whatsapp_apikey="key"))
-    assert notifications.send_telegram("Sentry alert", "movement") is True
-    assert notifications.send_whatsapp("Sentry alert", "movement") is True
-    assert [k for k, _ in hit] == ["post", "get"]
-    assert "callmebot.com/whatsapp.php" in hit[1][1]
-
-
-def test_whatsapp_is_skipped_until_both_halves_are_configured(monkeypatch):
-    """A phone number without a key would post to CallMeBot and be refused."""
-    calls = []
-    monkeypatch.setattr("app.notifications.httpx.get",
-                        lambda url, **k: calls.append(url) or httpx.Response(
-                            200, request=httpx.Request("GET", url)))
-    monkeypatch.setattr("app.notifications.get_settings",
-                        lambda: _settings(whatsapp_phone="+60123456789"))
-    assert notifications.send_whatsapp("t", "b") is False
-    assert calls == []
-
-
-def test_ntfy_marks_a_sentry_alert_urgent(monkeypatch):
-    """An alarm should break through a silenced phone; a charge should not."""
-    sent = []
-
-    def fake_post(url, **kw):
-        sent.append((url, kw.get("headers", {})))
-        return httpx.Response(200, request=httpx.Request("POST", url))
-
-    monkeypatch.setattr("app.notifications.httpx.post", fake_post)
-    monkeypatch.setattr("app.notifications.get_settings",
-                        lambda: _settings(ntfy_topic="a-long-random-topic"))
-
-    assert notifications.send_ntfy("Sentry alert", "movement", urgent=True) is True
-    assert notifications.send_ntfy("Charge complete", "80%") is True
-    assert sent[0][0].endswith("/a-long-random-topic")
-    assert sent[0][1]["Priority"] == "urgent"
-    assert sent[1][1]["Priority"] == "default"
-
-
-def test_ntfy_is_skipped_without_a_topic(monkeypatch):
-    calls = []
-    monkeypatch.setattr("app.notifications.httpx.post",
-                        lambda url, **k: calls.append(url))
-    monkeypatch.setattr("app.notifications.get_settings", lambda: _settings())
-    assert notifications.send_ntfy("t", "b") is False
-    assert calls == []

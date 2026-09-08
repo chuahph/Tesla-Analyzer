@@ -115,59 +115,6 @@ def send_telegram(title: str, body: str) -> bool:
         return False
 
 
-def send_whatsapp(title: str, body: str) -> bool:
-    """WhatsApp via CallMeBot, if configured.
-
-    A convenience channel rather than a dependable one — see the config note.
-    It runs beside Telegram rather than instead of it, so this being slow or
-    down never costs the message.
-    """
-    settings = get_settings()
-    phone = getattr(settings, "whatsapp_phone", "").strip()
-    apikey = getattr(settings, "whatsapp_apikey", "").strip()
-    if not phone or not apikey:
-        return False
-    try:
-        resp = httpx.get(
-            "https://api.callmebot.com/whatsapp.php",
-            params={"phone": phone, "text": f"{title}\n{body}", "apikey": apikey},
-            timeout=10.0,
-        )
-        return resp.status_code < 300
-    except Exception:  # noqa: BLE001 — never block the caller
-        return False
-
-
-def send_ntfy(title: str, body: str, urgent: bool = False) -> bool:
-    """Push through ntfy, if a topic is configured.
-
-    No account and no key — which also means the topic is the only thing
-    keeping the message private, and a Sentry alert carries coordinates. The
-    config note says to make it long and random; nothing here can enforce it.
-    """
-    settings = get_settings()
-    topic = getattr(settings, "ntfy_topic", "").strip()
-    if not topic:
-        return False
-    server = getattr(settings, "ntfy_server", "https://ntfy.sh").strip().rstrip("/")
-    try:
-        resp = httpx.post(
-            f"{server}/{topic}",
-            content=body.encode(),
-            headers={
-                "Title": title,
-                # Alarms should break through a silenced phone; a charge
-                # finishing should not.
-                "Priority": "urgent" if urgent else "default",
-                "Tags": "rotating_light" if urgent else "car",
-            },
-            timeout=10.0,
-        )
-        return resp.status_code < 300
-    except Exception:  # noqa: BLE001 — never block the caller
-        return False
-
-
 def notify(session: Session, title: str, body: str, tag: str | None = None) -> int:
     """Send a notification to every subscribed device, and fire the generic
     event webhook if configured (see fire_webhook — independent of push).
@@ -182,8 +129,6 @@ def notify(session: Session, title: str, body: str, tag: str | None = None) -> i
     settings = get_settings()
     fire_webhook(tag or "notification", title, body)
     send_telegram(title, body)
-    send_whatsapp(title, body)
-    send_ntfy(title, body, urgent=(tag == "sentry"))
     if not enabled(settings):
         return 0
     subs = session.scalars(select(PushSubscription)).all()
