@@ -174,6 +174,30 @@ def login_submit(passcode: str = Form("")):
     )
 
 
+# A 500 in a browser is a blank "Internal Server Error" page, and the person
+# who hits it here is the only person who runs this app — usually on a phone,
+# where the host's log viewer is not a realistic thing to go and read. Without
+# this, diagnosing a failure means guessing, deploying, and asking them to try
+# again, which is slower and worse than saying what broke.
+#
+# So report the exception and the last few frames that led to it. Safe to
+# expose because of who can reach it: everything under /api/ is already behind
+# the passcode or the sync key, and the frames name this repository's own
+# files, which are not a secret. Nothing of the request or of any value is
+# echoed back — only where the code stopped.
+@app.exception_handler(Exception)
+async def _report_failure(request: Request, exc: Exception) -> JSONResponse:
+    import traceback
+    frames = [
+        f"{Path(fr.filename).name}:{fr.lineno} in {fr.name}"
+        for fr in traceback.extract_tb(exc.__traceback__)[-4:]
+    ]
+    return JSONResponse(
+        {"error": type(exc).__name__, "detail": str(exc), "where": frames},
+        status_code=500,
+    )
+
+
 @app.on_event("startup")
 def _startup() -> None:
     init_db()

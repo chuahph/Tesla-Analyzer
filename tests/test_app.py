@@ -3847,3 +3847,28 @@ def test_compare_survives_an_unreadable_shadow_trip():
         sess.commit()
         sess.close()
         settings.app_passcode = old_pc
+
+
+def test_unhandled_failure_says_what_broke():
+    """A 500 must name the exception and where it happened.
+
+    The only person who runs this app is on a phone, where reading the host's
+    log viewer is not realistic — so a blank "Internal Server Error" means the
+    next step is guesswork and another deploy.
+    """
+    @app.get("/api/_boom_for_test")
+    def _boom():
+        raise ValueError("kaboom")
+
+    try:
+        with TestClient(app, raise_server_exceptions=False) as client:
+            resp = client.get("/api/_boom_for_test")
+        assert resp.status_code == 500
+        body = resp.json()
+        assert body["error"] == "ValueError" and body["detail"] == "kaboom"
+        assert any("test_app.py" in frame for frame in body["where"])
+    finally:
+        app.router.routes[:] = [
+            r for r in app.router.routes
+            if getattr(r, "path", None) != "/api/_boom_for_test"
+        ]
