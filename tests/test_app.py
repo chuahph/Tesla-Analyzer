@@ -3728,8 +3728,14 @@ def test_telegram_chat_id_lookup():
             assert client.get("/api/telegram/chat-id").status_code == 404
 
             settings.telegram_bot_token = "123:ABC"
+
+            def _replies(*payloads):
+                """getUpdates first, then getMe — one canned reply each."""
+                return [SimpleNamespace(json=lambda p=p: p) for p in payloads]
+
+            me = {"ok": True, "result": {"username": "eV_Tesla_Analyzer_bot"}}
             with mock.patch("app.api.routes.httpx.get") as get:
-                get.return_value = SimpleNamespace(json=lambda: {
+                get.side_effect = _replies({
                     "ok": True,
                     "result": [
                         {"message": {"chat": {"id": 987654321, "type": "private",
@@ -3738,17 +3744,34 @@ def test_telegram_chat_id_lookup():
                         {"message": {"chat": {"id": 987654321, "type": "private",
                                               "first_name": "Ph"}, "text": "hi again"}},
                     ],
-                })
+                }, me)
                 body = client.get("/api/telegram/chat-id").json()
             assert body["chats"] == [
                 {"chat_id": 987654321, "type": "private", "name": "Ph"}]
+            assert body["bot"] == "@eV_Tesla_Analyzer_bot"
 
             # No messages yet is a normal state, not an error: it means the
-            # bot has not been spoken to, so say that rather than failing.
+            # bot has not been spoken to — or that the token belongs to a
+            # different bot than the one being messaged, which is why the
+            # hint has to name the bot rather than just say "your bot".
             with mock.patch("app.api.routes.httpx.get") as get:
-                get.return_value = SimpleNamespace(json=lambda: {"ok": True, "result": []})
+                get.side_effect = _replies({"ok": True, "result": []}, me)
                 body = client.get("/api/telegram/chat-id").json()
             assert body["chats"] == [] and "tap Start" in body["hint"]
+            assert "@eV_Tesla_Analyzer_bot" in body["hint"]
+
+            # getMe failing is a lost diagnostic, not a lost answer.
+            with mock.patch("app.api.routes.httpx.get") as get:
+                get.side_effect = [
+                    SimpleNamespace(json=lambda: {
+                        "ok": True,
+                        "result": [{"message": {"chat": {"id": 5, "type": "private",
+                                                         "first_name": "Ph"}}}],
+                    }),
+                    RuntimeError("network"),
+                ]
+                body = client.get("/api/telegram/chat-id").json()
+            assert body["chats"][0]["chat_id"] == 5 and body["bot"] == ""
 
             # A token Telegram rejects must not be reported as a mistyped URL:
             # this URL is built in code, so the token is the only suspect.

@@ -4725,6 +4725,19 @@ def telegram_chat_id():
             "was pasted whole — send /token to @BotFather to see it again."
             % (payload.get("error_code"), payload.get("description"))))
 
+    # Name the bot the token belongs to. An empty result reads as "Telegram
+    # never saw my messages", but the likelier cause after a few rounds of
+    # /newbot and /revoke is that the token is a different bot's — in which
+    # case the messages did arrive, just not to this one. Only the username
+    # is reported; it is public, unlike the token that produced it.
+    bot = ""
+    try:
+        me = httpx.get(f"https://api.telegram.org/bot{token}/getMe", timeout=15.0).json()
+        if me.get("ok"):
+            bot = "@" + (me["result"].get("username") or "")
+    except Exception:  # noqa: BLE001 — a diagnostic, never the reason to fail
+        pass
+
     chats: list[dict] = []
     for update in payload.get("result", []):
         for key in ("message", "edited_message", "channel_post", "my_chat_member"):
@@ -4741,11 +4754,14 @@ def telegram_chat_id():
 
     if not chats:
         return {
+            "bot": bot,
             "chats": [],
-            "hint": "No messages yet. Open your bot in Telegram, tap Start, "
-                    "send it any text, then reload this page.",
+            "hint": f"No messages yet for {bot or 'this bot'}. Open exactly "
+                    f"that bot in Telegram — check the username matches — tap "
+                    f"Start, send it any text, then reload this page.",
         }
     return {
+        "bot": bot,
         "chats": chats,
         "hint": "Set TELEGRAM_CHAT_ID to the chat_id above, then open "
                 "/api/push/test to confirm a message arrives.",
