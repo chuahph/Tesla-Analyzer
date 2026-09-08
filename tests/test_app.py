@@ -4126,3 +4126,48 @@ def test_late_reading_never_reaches_past_the_newest_trip():
         sess.commit()
         sess.close()
         settings.app_passcode, settings.sync_key = old_pc, old_key
+
+
+def test_ingest_keeps_the_field_composite_when_no_trip_is_running():
+    """The per-vehicle composite must survive a record that starts no trip.
+
+    A telemetry message carries only what changed, so the composite is the
+    only thing that ever describes the whole car. A local named `latest` in
+    the tail-recovery branch shadowed it, and the save below wrote null over
+    every vehicle's fields on any ingest where that branch ran — which is
+    every ingest while the car sits parked.
+    """
+    import json as _json
+
+    from app.database import SessionLocal
+    from app import state
+
+    settings = get_settings()
+    old_pc = settings.app_passcode
+    settings.app_passcode = ""
+    sess = SessionLocal()
+    prev = state.get(sess, state.TELEMETRY_LATEST_KEY)
+    try:
+        with TestClient(app) as client:
+            client.post("/api/telemetry", json={"records": [{
+                "vin": "COMPOSITE1",
+                "createdAt": "2026-09-08T10:00:00Z",
+                "data": [{"key": "Soc", "value": {"doubleValue": 77.0}},
+                         {"key": "Gear", "value": {"stringValue": "ShiftStateP"}}],
+            }]})
+            # A second, disjoint field: it must join the first, not replace it.
+            client.post("/api/telemetry", json={"records": [{
+                "vin": "COMPOSITE1",
+                "createdAt": "2026-09-08T10:00:30Z",
+                "data": [{"key": "OutsideTemp", "value": {"doubleValue": 32.0}}],
+            }]})
+
+        stored = _json.loads(state.get(SessionLocal(), state.TELEMETRY_LATEST_KEY))
+        assert stored is not None, "the composite was overwritten with null"
+        assert stored["COMPOSITE1"]["Soc"] == 77.0
+        assert stored["COMPOSITE1"]["OutsideTemp"] == 32.0
+    finally:
+        state.put(sess, state.TELEMETRY_LATEST_KEY, prev or "{}")
+        sess.commit()
+        sess.close()
+        settings.app_passcode = old_pc

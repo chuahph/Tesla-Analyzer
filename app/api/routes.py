@@ -9344,9 +9344,10 @@ def telemetry_ingest(
                 # newest trip for adding nothing, then accepted by the one
                 # before, which swallowed the newer trip whole and counted its
                 # distance twice.
-                latest = next((t for t in reversed(trips)
-                               if t.get("vin") == vin), None)
-                if latest is not None and sync_mod.amend_closed_trip(latest, snap):
+                newest_trip = next((t for t in reversed(trips)
+                                    if t.get("vin") == vin), None)
+                if newest_trip is not None and sync_mod.amend_closed_trip(
+                        newest_trip, snap):
                     amended += 1
 
     state.put(session, state.TELEMETRY_LATEST_KEY, _json.dumps(latest))
