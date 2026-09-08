@@ -2848,14 +2848,29 @@ def advance_shadow(shadow: dict[str, Any], snap: dict[str, Any]) -> dict[str, An
             window = (SHADOW_SETTLE_SEC if shadow.get("exit_seen")
                       else SHADOW_SETTLE_NO_EXIT_SEC)
             if ts - float(still_since) >= window:
-                done = _shadow_close(shadow, shadow.get("still_snap") or snap)
+                # Time from when it stopped; readings from now. The car has
+                # not moved in between, so the odometer and energy that have
+                # arrived since are the true end-of-trip values — while the
+                # ones held at the instant P was reached can be half a minute
+                # stale, which on this car's 30-second Odometer interval loses
+                # a quarter of a kilometre off every arrival.
+                done = _shadow_close(shadow, shadow.get("still_snap") or snap,
+                                     readings=snap)
 
     shadow["last"] = dict(snap)
     return done
 
 
-def _shadow_close(shadow: dict[str, Any], end: dict[str, Any]) -> dict[str, Any] | None:
-    """Emit the open trip, ending at ``end``, and clear the machine."""
+def _shadow_close(shadow: dict[str, Any], end: dict[str, Any],
+                  readings: dict[str, Any] | None = None) -> dict[str, Any] | None:
+    """Emit the open trip, ending at ``end``, and clear the machine.
+
+    ``readings`` supplies the closing odometer and energy when they are known
+    to be better than ``end``'s — a stationary car keeps reporting, so a
+    reading taken after it parked measures the same moment more accurately
+    than one taken at the instant it stopped. Time still comes from ``end``.
+    """
+    final = readings or end
     start = shadow.pop("open", None)
     max_speed = float(shadow.pop("max_speed_kmh", 0.0) or 0.0)
     # Read before clearing: this is reported on the trip, and popping it
@@ -2867,14 +2882,15 @@ def _shadow_close(shadow: dict[str, Any], end: dict[str, Any]) -> dict[str, Any]
     if not start:
         return None
 
-    distance = round(float(end.get("odo_km") or 0.0) - float(start.get("odo_km") or 0.0), 3)
+    distance = round(float(final.get("odo_km") or 0.0)
+                     - float(start.get("odo_km") or 0.0), 3)
     minutes = max((float(end["ts"]) - float(start["ts"])) / 60.0, 0.0)
     if distance < TRIP_MIN_KM or minutes <= 0:
         return None
 
     # Both ends measured, so this is a subtraction rather than a percentage
     # multiplied by a capacity nobody has pinned down.
-    e0, e1 = start.get("energy_kwh"), end.get("energy_kwh")
+    e0, e1 = start.get("energy_kwh"), final.get("energy_kwh")
     energy = round(e0 - e1, 3) if e0 is not None and e1 is not None else None
 
     # The drive counter is the better measure of the two: monotonic, so a
@@ -2883,9 +2899,9 @@ def _shadow_close(shadow: dict[str, Any], end: dict[str, Any]) -> dict[str, Any]
     # undocumented, so both are carried and neither is trusted over the other
     # yet. One real journey settles the ratio; until then this is evidence,
     # not a figure.
-    d0, d1 = start.get("energy_drive_raw"), end.get("energy_drive_raw")
+    d0, d1 = start.get("energy_drive_raw"), final.get("energy_drive_raw")
     drive_delta = round(d1 - d0, 4) if d0 is not None and d1 is not None else None
-    r0, r1 = start.get("energy_regen_raw"), end.get("energy_regen_raw")
+    r0, r1 = start.get("energy_regen_raw"), final.get("energy_regen_raw")
     regen_delta = round(r1 - r0, 4) if r0 is not None and r1 is not None else None
 
     return {

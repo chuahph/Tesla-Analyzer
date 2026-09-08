@@ -3344,3 +3344,26 @@ def test_shadow_trip_reports_how_it_ended_and_carries_both_energy_measures():
     assert trip["drive_delta"] == 1.5     # and traction accounts for all of it
     assert trip["regen_delta"] == 0.4
     assert trip["pack_temp_c"] == 28.5
+
+
+def test_arrival_readings_come_from_after_the_car_stopped():
+    """The odometer that arrives after parking measures the arrival better.
+
+    Odometer streams on a 30-second minimum, so the reading held at the
+    instant P is reached can be half a minute stale — a quarter of a
+    kilometre at city speed, lost off the end of every trip. The car has not
+    moved since, so a later reading is the same moment, measured properly.
+    """
+    shadow: dict = {}
+    advance_shadow(shadow, _tel(0, 100.0, 30.0))
+    # Parks. The odometer here is stale — it last reported 25 seconds ago.
+    advance_shadow(shadow, _tel(300, 105.0, 28.8, gear="ShiftStateP",
+                                speed_mph=0.0, door=True))
+    # A fresher reading lands while it sits there.
+    advance_shadow(shadow, _tel(320, 105.2, 28.75, gear="ShiftStateP",
+                                speed_mph=0.0))
+    trip = advance_shadow(shadow, _tel(500, 105.2, 28.75, gear="ShiftStateP",
+                                       speed_mph=0.0))
+    assert trip is not None
+    assert trip["end_ts"] == 300                      # when it stopped
+    assert round(trip["distance_km"], 1) == 8.4       # 5.2 miles, not 5.0
