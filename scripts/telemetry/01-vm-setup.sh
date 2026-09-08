@@ -285,10 +285,12 @@ Next, and none of it can be done from this box:
      $APP_URL/api/link/oauth/callback as an Allowed Redirect URI at
      developer.tesla.com
   3. Register the partner domain, then pair the virtual key to the car
-  4. Run 02-configure-vehicle.sh to send the signed telemetry config
+  4. Send the signed telemetry config to the car:
+       sudo bash <(curl -sL ${RAW_BASE%/scripts/telemetry}/car.sh)
 
 Until step 4 the car does not know this server exists, so an idle log here is
-expected rather than a fault.
+expected rather than a fault. Re-run step 4 after any change to the field
+list or its intervals: the car keeps streaming the last config it accepted.
 
 ------------------------- PUBLIC KEY (safe to share) -------------------------
 $(cat "$KEY_DIR/public-key.pem")
