@@ -2680,6 +2680,29 @@ def snapshot_from_telemetry(fields: dict[str, Any], ts: float) -> dict[str, Any]
         except (TypeError, ValueError):
             return None
 
+    def enum_str(key: str) -> str | None:
+        """The enum string the car sent, unaltered, or None."""
+        value = fields.get(key)
+        return value if isinstance(value, str) and value else None
+
+    # Enum values Tesla uses for "the car did not answer". They are not the
+    # same as the field being absent, but they mean the same thing here.
+    _UNREADABLE = ("SNA", "Unknown", "Invalid")
+
+    def enum_flag(key: str, true_when: tuple[str, ...]) -> bool | None:
+        """A boolean read off an enum string, by suffix.
+
+        bool() of one of these is not a reading: every non-empty string is
+        true, so ChargePortLatchDisengaged and ChargePortLatchEngaged both
+        come out True and the latch can never report itself open. Suffixes are
+        matched instead, and a value the car could not supply stays None
+        rather than becoming a confident False.
+        """
+        raw = enum_str(key)
+        if raw is None or any(raw.endswith(u) for u in _UNREADABLE):
+            return None
+        return any(raw.endswith(t) for t in true_when)
+
     odo = num("Odometer")
     rated = num("RatedRange")
     speed = num("VehicleSpeed")
@@ -2722,10 +2745,23 @@ def snapshot_from_telemetry(fields: dict[str, Any], ts: float) -> dict[str, Any]
         "car_wash_mode": False,
         "windows_open": None,
         "dashcam_state": None,
+        # CenterDisplay IS streamed, and is deliberately not mapped here.
+        # Polling stores this as Tesla's integer code; telemetry reports an
+        # enum string (DisplayStateDriving, DisplayStateSentry, ...) whose
+        # correspondence to those integers is undocumented. Writing a guessed
+        # mapping into the same column would put a silent error under every
+        # comparison of the two sources — the odometer already taught that
+        # lesson. The string is carried below instead, under its own name.
         "center_display_state": None,
-        "climate_on": None,
         "cabin_overheat_protection": None,
         "cabin_overheat_protection_actively_cooling": None,
+        "display_state_raw": enum_str("CenterDisplay"),
+        # HvacPower is an enum, not a number: HvacPowerStateOn / ...Off /
+        # ...Precondition / ...OverheatProtect. Anything that is not plainly
+        # off means the system is drawing power, which is what climate_on
+        # means to every caller of it.
+        "climate_on": enum_flag("HvacPower", ("On", "Precondition",
+                                              "OverheatProtect")),
 
         # --- Fields polling has never had. Carried through unconverted.
         #
@@ -2743,7 +2779,9 @@ def snapshot_from_telemetry(fields: dict[str, Any], ts: float) -> dict[str, Any]
         # all if it opens and shuts inside the streaming interval.
         "seat_occupied": (bool(fields["DriverSeatOccupied"])
                           if "DriverSeatOccupied" in fields else None),
-        "hvac_raw": num("HvacPower"),
+        # Kept for the raw record. num() is None here because the value is an
+        # enum string; climate_on above is the reading of it.
+        "hvac_raw": enum_str("HvacPower"),
         "inside_temp": num("InsideTemp"),
         # The pack's own temperature. Cold-weather losses are a property of
         # the battery, not of the air the efficiency chart currently plots.
@@ -2754,8 +2792,10 @@ def snapshot_from_telemetry(fields: dict[str, Any], ts: float) -> dict[str, Any]
         "charger_v": num("ChargerVoltage"),
         "charger_a": num("ChargeAmps"),
         "charger_phases": num("ChargerPhases"),
-        "charge_port_latched": (bool(fields["ChargePortLatch"])
-                                if "ChargePortLatch" in fields else None),
+        # ChargePortLatchEngaged / ...Disengaged / ...Blocking / ...SNA. This
+        # was bool() of the string, which is true for every one of them — a
+        # latch that could never report itself open.
+        "charge_port_latched": enum_flag("ChargePortLatch", ("Engaged",)),
         "charge_limit_soc": num("ChargeLimitSoc"),
     }
 

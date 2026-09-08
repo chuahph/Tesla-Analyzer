@@ -4026,3 +4026,37 @@ def test_late_arrival_reading_is_refused_when_it_cannot_be_the_arrival():
     assert not sync_mod.amend_closed_trip(
         trip, _snap(t + 700, odo_km=111.0, speed_kmh=30.0, shift="D"))
     assert trip == base
+
+
+def test_enum_fields_are_read_not_coerced():
+    """Tesla sends these as enum strings, and bool() of one is not a reading.
+
+    bool("ChargePortLatchDisengaged") is True, exactly like
+    bool("ChargePortLatchEngaged") — so a latch coerced this way can never
+    report itself open. Same trap for HvacPower, whose value is a state name
+    rather than the number the field's old name implied.
+    """
+    from app import sync as sync_mod
+
+    def snap(**fields):
+        return sync_mod.snapshot_from_telemetry(fields, 1_000_000.0)
+
+    assert snap(ChargePortLatch="ChargePortLatchEngaged")["charge_port_latched"] is True
+    assert snap(ChargePortLatch="ChargePortLatchDisengaged")["charge_port_latched"] is False
+    assert snap(ChargePortLatch="ChargePortLatchBlocking")["charge_port_latched"] is False
+    # A value the car could not supply is unknown, not a confident False.
+    assert snap(ChargePortLatch="ChargePortLatchSNA")["charge_port_latched"] is None
+    assert snap()["charge_port_latched"] is None
+
+    assert snap(HvacPower="HvacPowerStateOn")["climate_on"] is True
+    assert snap(HvacPower="HvacPowerStatePrecondition")["climate_on"] is True
+    assert snap(HvacPower="HvacPowerStateOverheatProtect")["climate_on"] is True
+    assert snap(HvacPower="HvacPowerStateOff")["climate_on"] is False
+    assert snap()["climate_on"] is None
+
+    # CenterDisplay is streamed but deliberately unmapped: polling stores an
+    # integer code and telemetry sends an enum string on an undocumented
+    # scale, so the shared column stays empty and the string is kept as-is.
+    s = snap(CenterDisplay="DisplayStateDriving")
+    assert s["center_display_state"] is None
+    assert s["display_state_raw"] == "DisplayStateDriving"
