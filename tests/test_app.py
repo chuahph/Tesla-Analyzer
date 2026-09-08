@@ -4060,3 +4060,69 @@ def test_enum_fields_are_read_not_coerced():
     s = snap(CenterDisplay="DisplayStateDriving")
     assert s["center_display_state"] is None
     assert s["display_state_raw"] == "DisplayStateDriving"
+
+
+def test_late_reading_never_reaches_past_the_newest_trip():
+    """A reading that adds nothing to the newest trip must not fall through.
+
+    Two contiguous fragments of one journey, 31118.637 -> 31119.297 ->
+    31119.946. A reading at the end of the second was refused by it (no gain)
+    and then accepted by the first, which extended to 31119.946 and counted
+    the second fragment's 0.649 km a second time. An older trip's end is
+    bounded by the start of the trip after it; only the newest is a candidate.
+    """
+    import json as _json
+
+    from app.database import SessionLocal
+    from app import state
+
+    settings = get_settings()
+    old_pc, old_key = settings.app_passcode, settings.sync_key
+    settings.app_passcode = ""
+    sess = SessionLocal()
+    prev_trips = state.get(sess, state.TELEMETRY_TRIPS_KEY)
+    prev_shadow = state.get(sess, state.TELEMETRY_SHADOW_KEY)
+    vin = "TESTVIN0000000001"
+    try:
+        base = 1_788_800_000.0
+        earlier = {"vin": vin, "end_ts": base, "start_odo_km": 31118.637,
+                   "end_odo_km": 31119.297, "distance_km": 0.66,
+                   "duration_min": 0.9, "start_energy_kwh": 55.0,
+                   "end_energy_kwh": 54.62}
+        newest = {"vin": vin, "end_ts": base + 64, "start_odo_km": 31119.297,
+                  "end_odo_km": 31119.946, "distance_km": 0.649,
+                  "duration_min": 1.0, "start_energy_kwh": 54.62,
+                  "end_energy_kwh": 54.54}
+        state.put(sess, state.TELEMETRY_TRIPS_KEY, _json.dumps([earlier, newest]))
+        state.put(sess, state.TELEMETRY_SHADOW_KEY, _json.dumps({vin: {}}))
+        sess.commit()
+
+        # A stationary reading at the newest trip's own ending: adds nothing.
+        with TestClient(app) as client:
+            resp = client.post("/api/telemetry", json={"records": [{
+                "vin": vin,
+                # base + 124s: inside the fifteen-minute tail window of both
+                # trips, so only the newest-trip rule can keep it out.
+                "createdAt": "2026-09-07T16:55:24.000000000Z",
+                # 19337.08601 miles is 31119.946 km: exactly where the newest
+                # trip ended, so it offers that trip nothing and the older one
+                # everything — which is the trap.
+                "data": [{"key": "Odometer",
+                          "value": {"doubleValue": 19337.08601041421}},
+                         {"key": "VehicleSpeed", "value": {"doubleValue": 0}},
+                         {"key": "Gear", "value": {"stringValue": "ShiftStateP"}}],
+            }]})
+        assert resp.status_code == 200
+
+        stored = _json.loads(state.get(SessionLocal(), state.TELEMETRY_TRIPS_KEY))
+        by_start = {round(t["start_odo_km"], 3): t for t in stored}
+        # The earlier fragment is untouched: it must not reach into the newer.
+        assert by_start[31118.637]["end_odo_km"] == 31119.297
+        assert by_start[31118.637]["distance_km"] == 0.66
+        assert "tail_amended_km" not in by_start[31118.637]
+    finally:
+        state.put(sess, state.TELEMETRY_TRIPS_KEY, prev_trips or "[]")
+        state.put(sess, state.TELEMETRY_SHADOW_KEY, prev_shadow or "{}")
+        sess.commit()
+        sess.close()
+        settings.app_passcode, settings.sync_key = old_pc, old_key

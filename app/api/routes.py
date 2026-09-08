@@ -9164,10 +9164,6 @@ TELEMETRY_RAW_MAX = 300
 # Shadow trips kept for comparison. Weeks of driving, which is the window in
 # which telemetry either earns the switch or does not.
 TELEMETRY_TRIPS_MAX = 400
-# How far back a late arrival reading may reach. A replay can only ever
-# describe a recent trip, and scanning further would let a stray reading
-# rewrite history.
-TELEMETRY_TAIL_LOOKBACK = 5
 
 
 # A Sentry state can flicker — someone walks past twice. One message per
@@ -9338,15 +9334,20 @@ def telemetry_ingest(
             elif not shadow.get("open"):
                 # No trip is running, so this record may be the arrival of the
                 # last one turning up late — the normal case for a car that
-                # parks out of coverage and replays on reconnect. Only recent
-                # trips are candidates; amend_closed_trip decides whether this
-                # reading actually describes one of them.
-                for closed in reversed(trips[-TELEMETRY_TAIL_LOOKBACK:]):
-                    if closed.get("vin") != vin:
-                        continue
-                    if sync_mod.amend_closed_trip(closed, snap):
-                        amended += 1
-                        break
+                # parks out of coverage and replays on reconnect.
+                #
+                # Only the most recent trip, and never one behind it. An older
+                # trip's end is bounded by the start of the trip that followed
+                # it, so a reading that reaches past it is not that trip's
+                # arrival: it is ground the next trip already covers. Trying
+                # them in turn did exactly that — a reading was refused by the
+                # newest trip for adding nothing, then accepted by the one
+                # before, which swallowed the newer trip whole and counted its
+                # distance twice.
+                latest = next((t for t in reversed(trips)
+                               if t.get("vin") == vin), None)
+                if latest is not None and sync_mod.amend_closed_trip(latest, snap):
+                    amended += 1
 
     state.put(session, state.TELEMETRY_LATEST_KEY, _json.dumps(latest))
     state.put(session, state.TELEMETRY_SHADOW_KEY, _json.dumps(shadows))
