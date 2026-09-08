@@ -9030,6 +9030,46 @@ TELEMETRY_RAW_MAX = 300
 TELEMETRY_TRIPS_MAX = 400
 
 
+# A Sentry state can flicker — someone walks past twice. One message per
+# escalation is a warning; six is noise that gets muted, and a muted alarm is
+# worse than none.
+SENTRY_COOLDOWN_SEC = 300.0
+
+
+def _sentry_alert(session: Session, vin: str, sentry_state: str, what: str,
+                  car: dict) -> None:
+    """Tell someone the car noticed something, at most once every few minutes.
+
+    Named sentry_state, not state: the module of that name is what records the
+    cooldown, and shadowing it here would have meant reaching for globals().
+    """
+    import json as _json
+
+    key = f"sentry_alerted:{vin}"
+    now = time.time()
+    try:
+        seen = _json.loads(state.get(session, key) or "{}")
+    except ValueError:
+        seen = {}
+    if now - float(seen.get("at") or 0) < SENTRY_COOLDOWN_SEC:
+        return
+    state.put(session, key, _json.dumps({"at": now, "state": sentry_state}))
+
+    where = ""
+    location = car.get("Location")
+    if isinstance(location, dict):
+        lat, lon = location.get("latitude"), location.get("longitude")
+        if lat and lon:
+            where = f"\nhttps://maps.google.com/?q={lat},{lon}"
+
+    notifications.notify(
+        session,
+        "Sentry alert",
+        f"The car {what} at {sync_mod.now_local():%H:%M}.{where}",
+        tag="sentry",
+    )
+
+
 def _telemetry_ts(stamp: str | None) -> float:
     """Epoch seconds from a telemetry record's createdAt, or 0.0."""
     if not stamp:
@@ -9122,9 +9162,15 @@ def telemetry_ingest(
     except ValueError:
         trips = []
 
+    # States that mean the car noticed something. Off/Idle/Armed/Quiet are
+    # the car minding its own business; these two are not.
+    SENTRY_ALERT = {"SentryModeStateAware": "movement detected",
+                    "SentryModeStatePanic": "alarm triggered"}
+
     for record in kept:
         vin = record.get("vin") or "unknown"
         car = latest.setdefault(vin, {})
+        was_sentry = car.get("SentryMode")
         # A field the car could not read must not erase what it last told us.
         car.update({k: v for k, v in (record.get("fields") or {}).items()
                     if v is not None})
@@ -9133,6 +9179,13 @@ def telemetry_ingest(
         # Step the shadow machine on every record, not once per batch: the
         # batch is an artefact of how the bridge groups posts, and a trip
         # boundary that fell inside one would be rounded to its edge.
+        # Sentry. Polling could never see this — vehicle_data reports a bare
+        # on/off boolean, which is why the app's own note says the alarm state
+        # is not visible in the API. It is visible here, as a transition.
+        now_sentry = car.get("SentryMode")
+        if now_sentry in SENTRY_ALERT and now_sentry != was_sentry:
+            _sentry_alert(session, vin, now_sentry, SENTRY_ALERT[now_sentry], car)
+
         ts = _telemetry_ts(record.get("created_at"))
         if ts:
             snap = sync_mod.snapshot_from_telemetry(car, ts)

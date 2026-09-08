@@ -167,6 +167,14 @@ class Settings(BaseSettings):
     # without VAPID configured, and vice versa). Empty = disabled.
     event_webhook_url: str = ""
 
+    # Telegram, as a messenger that reaches a phone without a browser being
+    # subscribed to anything. Create a bot with @BotFather for the token, then
+    # message it once and read your chat id from
+    # api.telegram.org/bot<TOKEN>/getUpdates. Both empty = disabled. Every
+    # notification the app sends goes here too, not only the urgent ones.
+    telegram_bot_token: str = ""
+    telegram_chat_id: str = ""
+
     # Web push notifications (charge complete, low battery, ...). Generate a
     # keypair once with `python -m app.push_keys` and set both here — empty
     # (either) disables notifications entirely; the subscribe UI stays

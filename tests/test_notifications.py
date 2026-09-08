@@ -12,6 +12,7 @@ def _settings(**overrides):
         vapid_private_key_pem="", vapid_public_key_pem="",
         vapid_subject_email="test@example.com",
         event_webhook_url="",
+        telegram_bot_token="", telegram_chat_id="",
     )
     base.update(overrides)
     return SimpleNamespace(**base)
@@ -194,3 +195,30 @@ def test_notify_fires_webhook_independently_of_push(session, monkeypatch):
     assert sent_count == 0
     assert sent["json"]["event"] == "low-soc"
     assert sent["json"]["title"] == "Battery low"
+
+
+def test_telegram_is_skipped_until_both_halves_are_configured(monkeypatch):
+    """A half-configured messenger must not post to a malformed URL.
+
+    A token without a chat id would build .../sendMessage with no recipient —
+    which fails at Telegram rather than here, silently, on the one message
+    that mattered.
+    """
+    calls = []
+    monkeypatch.setattr("app.notifications.httpx.post",
+                        lambda *a, **k: calls.append(a) or httpx.Response(
+                            200, request=httpx.Request("POST", "https://x")))
+
+    monkeypatch.setattr("app.notifications.get_settings",
+                        lambda: _settings(telegram_bot_token="abc"))
+    assert notifications.send_telegram("t", "b") is False
+    monkeypatch.setattr("app.notifications.get_settings",
+                        lambda: _settings(telegram_chat_id="123"))
+    assert notifications.send_telegram("t", "b") is False
+    assert calls == []
+
+    monkeypatch.setattr("app.notifications.get_settings",
+                        lambda: _settings(telegram_bot_token="abc",
+                                          telegram_chat_id="123"))
+    assert notifications.send_telegram("Sentry alert", "movement") is True
+    assert "api.telegram.org/botabc/sendMessage" in calls[0][0]

@@ -3644,3 +3644,42 @@ def test_telemetry_shadow_trip_appears_in_the_comparison():
             assert s.query(Drive).count() == before
     finally:
         settings.app_passcode, settings.sync_key = old_pc, old_sk
+
+
+def test_sentry_escalation_raises_an_alert_once(monkeypatch):
+    """Aware and Panic mean the car noticed something; Armed does not.
+
+    Polling could never tell these apart — vehicle_data reports a bare on/off
+    boolean, which is why this app's own note says the alarm state is not
+    visible in the API. It is visible in the stream, as a transition.
+    """
+    from app.api import routes as routes_mod
+
+    settings = get_settings()
+    old_sk = settings.sync_key
+    settings.sync_key = "cronkey"
+    alerts: list[tuple] = []
+    monkeypatch.setattr(routes_mod.notifications, "notify",
+                        lambda s, title, body, tag=None: alerts.append((title, body, tag)))
+
+    def sentry(state, at):
+        return {"vin": "SENTRY1", "createdAt": at,
+                "data": [{"key": "SentryMode",
+                          "value": {"sentryModeStateValue": state}}]}
+
+    try:
+        with TestClient(app) as client:
+            client.post("/api/telemetry?key=cronkey", json={"records": [
+                sentry("SentryModeStateArmed", "2026-09-08T10:00:00Z"),
+                sentry("SentryModeStateAware", "2026-09-08T10:01:00Z"),
+                # Flicker: someone walks past again inside the cooldown.
+                sentry("SentryModeStateArmed", "2026-09-08T10:01:30Z"),
+                sentry("SentryModeStatePanic", "2026-09-08T10:02:00Z"),
+            ]})
+        # Armed is the car minding its own business; only the escalation
+        # speaks, and the cooldown keeps a flicker from becoming six messages.
+        assert len(alerts) == 1
+        assert alerts[0][0] == "Sentry alert"
+        assert alerts[0][2] == "sentry"
+    finally:
+        settings.sync_key = old_sk

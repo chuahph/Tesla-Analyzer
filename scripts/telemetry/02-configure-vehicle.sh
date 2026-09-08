@@ -136,6 +136,12 @@ kill -0 $PROXY_PID 2>/dev/null || die "the proxy exited on startup (see $LOG)"
 #                measured by the car, against EnergyRemaining for pack energy
 #                — wall-to-pack efficiency on every charge, instead of
 #                photographing receipts.
+#   Security     SentryMode is a state machine, not a switch: Off, Idle,
+#                Armed, Aware, Panic, Quiet. Aware means the car noticed
+#                something and Panic means the alarm went off — neither is
+#                visible through vehicle_data, which reports a bare boolean.
+#                At ten seconds an escalation is caught; at the old three
+#                hundred, an entire incident could pass between readings.
 #   Explanation  ModuleTempMin is the pack's own temperature, which is what
 #                cold losses actually depend on rather than the outside air
 #                the efficiency chart plots today. Tyre pressure is worth a
@@ -180,7 +186,8 @@ cat > "$WORK/config.json" <<EOF
       "ModuleTempMin":             {"interval_seconds": 300},
       "InsideTemp":                {"interval_seconds": 300},
       "OutsideTemp":               {"interval_seconds": 300},
-      "SentryMode":                {"interval_seconds": 300},
+      "SentryMode":                {"interval_seconds": 10},
+      "CenterDisplay":             {"interval_seconds": 30},
       "Locked":                    {"interval_seconds": 300},
       "TpmsPressureFl":            {"interval_seconds": 3600},
       "TpmsPressureFr":            {"interval_seconds": 3600},

@@ -91,6 +91,30 @@ def fire_webhook(event: str, title: str, body: str) -> bool:
         return False
 
 
+def send_telegram(title: str, body: str) -> bool:
+    """Message a Telegram chat, if one is configured.
+
+    A messenger reaches a locked phone without a browser having subscribed to
+    anything, and without the app being open — which is what a Sentry alarm
+    needs and what web push cannot promise. Failure is swallowed for the same
+    reason as fire_webhook: this is called from inside the sync loop.
+    """
+    settings = get_settings()
+    token = settings.telegram_bot_token.strip()
+    chat = settings.telegram_chat_id.strip()
+    if not token or not chat:
+        return False
+    try:
+        resp = httpx.post(
+            f"https://api.telegram.org/bot{token}/sendMessage",
+            json={"chat_id": chat, "text": f"{title}\n{body}"},
+            timeout=10.0,
+        )
+        return resp.status_code < 300
+    except Exception:  # noqa: BLE001 — never block the caller
+        return False
+
+
 def notify(session: Session, title: str, body: str, tag: str | None = None) -> int:
     """Send a notification to every subscribed device, and fire the generic
     event webhook if configured (see fire_webhook — independent of push).
@@ -104,6 +128,7 @@ def notify(session: Session, title: str, body: str, tag: str | None = None) -> i
     """
     settings = get_settings()
     fire_webhook(tag or "notification", title, body)
+    send_telegram(title, body)
     if not enabled(settings):
         return 0
     subs = session.scalars(select(PushSubscription)).all()
