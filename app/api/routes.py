@@ -9289,6 +9289,16 @@ def telemetry_compare(
     except ValueError:
         shadow_trips = []
 
+    # The car's own Current Drive panel, where one was recorded. It is the
+    # referee rather than a third contestant: polling and telemetry are both
+    # measured against it, because "which of our two numbers is right" is not
+    # a question either of them can answer about itself.
+    try:
+        car_rows = _json.loads(state.get(session, state.CAR_READINGS_KEY) or "[]")
+    except ValueError:
+        car_rows = []
+    car_by_drive = {int(r["drive_id"]): r for r in car_rows}
+
     since = sync_mod.now_local() - timedelta(days=days)
     drives = session.scalars(
         select(Drive).where(Drive.start_time >= since).order_by(Drive.start_time)
@@ -9334,6 +9344,25 @@ def telemetry_compare(
                 "min": d.duration_min,
                 "estimated_energy": bool(getattr(d, "energy_estimated", False)),
             },
+            "car": None if not d or d.id not in car_by_drive else {
+                "km": car_by_drive[d.id]["km"],
+                "kwh": round(car_by_drive[d.id]["wh_per_km"]
+                             * car_by_drive[d.id]["km"] / 1000.0, 3),
+                "wh_per_km": car_by_drive[d.id]["wh_per_km"],
+            },
+            # Signed error against the car. Negative km means that source
+            # recorded a shorter trip than the car did — which is what a lost
+            # departure or arrival looks like, and it inflates Wh/km by the
+            # same proportion.
+            "vs_car": None if not d or d.id not in car_by_drive else {
+                "polled_km_pct": pct(d.distance_km, car_by_drive[d.id]["km"]),
+                "telemetry_km_pct": pct(t["distance_km"], car_by_drive[d.id]["km"]),
+                "polled_whkm_pct": pct(
+                    (d.energy_used_kwh or 0.0) * 1000.0 / (d.distance_km or 1e-9),
+                    car_by_drive[d.id]["wh_per_km"]),
+                "telemetry_whkm_pct": pct(t["wh_per_km"],
+                                          car_by_drive[d.id]["wh_per_km"]),
+            },
             "delta": None if not d else {
                 "km_pct": pct(t["distance_km"], d.distance_km),
                 "kwh_pct": pct(t["energy_kwh"], d.energy_used_kwh),
@@ -9347,6 +9376,8 @@ def telemetry_compare(
         })
 
     paired = [r for r in rows if r["polled"]]
+    judged = [r for r in paired
+              if r["vs_car"] and r["vs_car"]["telemetry_km_pct"] is not None]
     km_deltas = [r["delta"]["km_pct"] for r in paired
                  if r["delta"]["km_pct"] is not None]
     heads = [r["delta"]["start_delta_min"] for r in paired]
@@ -9359,6 +9390,20 @@ def telemetry_compare(
         # run: the car only streams when awake, so anything driven before the
         # configuration landed, or during a stream outage, has no shadow.
         "polled_only": len([d for d in drives if d.id not in matched_ids]),
+        # Judged, where the car has spoken. Two medians of the same quantity
+        # against the same reference is the only comparison that settles which
+        # source to believe — everything else is the two of them disagreeing.
+        "judged": len(judged),
+        "vs_car": None if not judged else {
+            "polled_km_err_pct": round(percentile(
+                [r["vs_car"]["polled_km_pct"] for r in judged], 50), 2),
+            "telemetry_km_err_pct": round(percentile(
+                [r["vs_car"]["telemetry_km_pct"] for r in judged], 50), 2),
+            "polled_whkm_err_pct": round(percentile(
+                [r["vs_car"]["polled_whkm_pct"] for r in judged], 50), 2),
+            "telemetry_whkm_err_pct": round(percentile(
+                [r["vs_car"]["telemetry_whkm_pct"] for r in judged], 50), 2),
+        },
         "summary": {
             "median_km_delta_pct": round(percentile(km_deltas, 50), 2)
             if km_deltas else None,
