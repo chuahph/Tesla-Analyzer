@@ -9537,6 +9537,12 @@ def _compare_row(t: dict, d, t_start, car_by_drive: dict, pct) -> dict:
             # Present when the arrival was recovered from a replay rather than
             # measured live — the km that would otherwise have been lost.
             "tail_recovered_km": t.get("tail_amended_km"),
+            # The same trip's energy read a second way: the difference of a
+            # monotonic lifetime counter, which has no 0.02 kWh step of its
+            # own. Beside kwh above rather than instead of it — the counter's
+            # units are undocumented, and the gap between the two figures is
+            # the measurement, not a nuisance to be reconciled away.
+            "used_delta": t.get("used_delta"),
         },
         "polled": None if not d else {
             "id": d.id,
