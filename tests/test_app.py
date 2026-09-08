@@ -1,6 +1,8 @@
 """App-level tests: passcode gate boundaries and the Tesla partner key path."""
 import pytest
 from datetime import datetime, timedelta
+from types import SimpleNamespace
+from unittest import mock
 
 from fastapi.testclient import TestClient
 
@@ -279,9 +281,11 @@ def test_push_endpoints_404_when_not_configured():
                 "keys": {"p256dh": "a", "auth": "b"},
             })
             assert resp.status_code == 404
-            # The test-notification endpoint is likewise a 404 when push isn't
-            # configured (nothing to deliver to).
+            # The test-notification endpoint is likewise a 404 when no channel
+            # at all is configured (nothing to deliver to). It is deliberately
+            # not gated on push alone — Telegram and the webhook keep it alive.
             assert client.post("/api/push/test").status_code == 404
+            assert client.get("/api/push/test").status_code == 404
     finally:
         settings.app_passcode = old_pc
         settings.vapid_private_key_pem, settings.vapid_public_key_pem = old_priv, old_pub
@@ -3683,3 +3687,76 @@ def test_sentry_escalation_raises_an_alert_once(monkeypatch):
         assert alerts[0][2] == "sentry"
     finally:
         settings.sync_key = old_sk
+
+
+def test_push_test_lives_on_telegram_alone():
+    """Telegram-only setups must be able to check that alerts arrive.
+
+    The endpoint used to require VAPID push, which left someone whose only
+    channel is Telegram with no way to test it before an alarm depended on it.
+    """
+    settings = get_settings()
+    old_pc, old_tok, old_chat = (settings.app_passcode,
+                                 settings.telegram_bot_token, settings.telegram_chat_id)
+    old_priv, old_pub = settings.vapid_private_key_pem, settings.vapid_public_key_pem
+    settings.app_passcode = ""
+    settings.vapid_private_key_pem = settings.vapid_public_key_pem = ""
+    settings.telegram_bot_token, settings.telegram_chat_id = "123:ABC", "456"
+    try:
+        with TestClient(app) as client:
+            with mock.patch("app.notifications.httpx.post") as post:
+                post.return_value = SimpleNamespace(status_code=200)
+                body = client.get("/api/push/test").json()
+            assert body["channels_configured"] == {
+                "push": False, "telegram": True, "webhook": False}
+            assert post.call_args.args[0].endswith("/sendMessage")
+    finally:
+        settings.app_passcode = old_pc
+        settings.telegram_bot_token, settings.telegram_chat_id = old_tok, old_chat
+        settings.vapid_private_key_pem, settings.vapid_public_key_pem = old_priv, old_pub
+
+
+def test_telegram_chat_id_lookup():
+    """Reads the chat ID off getUpdates so nobody has to type a token into
+    Safari — one autocorrected character there returns a bare 404."""
+    settings = get_settings()
+    old_pc, old_tok = settings.app_passcode, settings.telegram_bot_token
+    settings.app_passcode = ""
+    try:
+        settings.telegram_bot_token = ""
+        with TestClient(app) as client:
+            assert client.get("/api/telegram/chat-id").status_code == 404
+
+            settings.telegram_bot_token = "123:ABC"
+            with mock.patch("app.api.routes.httpx.get") as get:
+                get.return_value = SimpleNamespace(json=lambda: {
+                    "ok": True,
+                    "result": [
+                        {"message": {"chat": {"id": 987654321, "type": "private",
+                                              "first_name": "Ph"}, "text": "hi"}},
+                        # A second message from the same chat must not appear twice.
+                        {"message": {"chat": {"id": 987654321, "type": "private",
+                                              "first_name": "Ph"}, "text": "hi again"}},
+                    ],
+                })
+                body = client.get("/api/telegram/chat-id").json()
+            assert body["chats"] == [
+                {"chat_id": 987654321, "type": "private", "name": "Ph"}]
+
+            # No messages yet is a normal state, not an error: it means the
+            # bot has not been spoken to, so say that rather than failing.
+            with mock.patch("app.api.routes.httpx.get") as get:
+                get.return_value = SimpleNamespace(json=lambda: {"ok": True, "result": []})
+                body = client.get("/api/telegram/chat-id").json()
+            assert body["chats"] == [] and "tap Start" in body["hint"]
+
+            # A token Telegram rejects must not be reported as a mistyped URL:
+            # this URL is built in code, so the token is the only suspect.
+            with mock.patch("app.api.routes.httpx.get") as get:
+                get.return_value = SimpleNamespace(json=lambda: {
+                    "ok": False, "error_code": 404, "description": "Not Found"})
+                resp = client.get("/api/telegram/chat-id")
+            assert resp.status_code == 502
+            assert "BotFather" in resp.json()["detail"]
+    finally:
+        settings.app_passcode, settings.telegram_bot_token = old_pc, old_tok

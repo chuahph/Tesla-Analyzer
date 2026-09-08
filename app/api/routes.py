@@ -4691,6 +4691,67 @@ def push_test(session: Session = Depends(get_session)):
     return {"sent": sent, "channels_configured": channels}
 
 
+@router.get("/telegram/chat-id")
+def telegram_chat_id():
+    """Look up the Telegram chat ID for the configured bot.
+
+    Telegram's own answer to "which chat should I send to" is to fetch
+    api.telegram.org/bot<TOKEN>/getUpdates yourself. That is fine at a
+    keyboard and miserable on a phone: the token is ~46 characters, one
+    autocorrected capital or a missing "bot" prefix returns a bare 404 that
+    names no cause, and the token ends up in browser history either way.
+
+    So do it here instead. The token is already on the server; this reads
+    the pending updates and reports just the chat IDs seen, leaving the
+    caller to paste a 10-digit number rather than a secret. Setup order is
+    then: TELEGRAM_BOT_TOKEN first, this endpoint, TELEGRAM_CHAT_ID second.
+    """
+    token = get_settings().telegram_bot_token.strip()
+    if not token:
+        raise HTTPException(
+            404, "TELEGRAM_BOT_TOKEN is not set. Add it first, then reload this.")
+    try:
+        resp = httpx.get(
+            f"https://api.telegram.org/bot{token}/getUpdates", timeout=15.0)
+        payload = resp.json()
+    except Exception as exc:  # noqa: BLE001 — surface the cause, don't 500
+        raise HTTPException(502, f"Could not reach Telegram: {exc}")
+
+    if not payload.get("ok"):
+        # 404 here means Telegram rejected the token, not that the URL was
+        # mistyped — this one is built in code. Say which it is.
+        raise HTTPException(502, (
+            "Telegram rejected the token (%s: %s). Check TELEGRAM_BOT_TOKEN "
+            "was pasted whole — send /mytoken to @BotFather to see it again."
+            % (payload.get("error_code"), payload.get("description"))))
+
+    chats: list[dict] = []
+    for update in payload.get("result", []):
+        for key in ("message", "edited_message", "channel_post", "my_chat_member"):
+            chat = (update.get(key) or {}).get("chat")
+            if not chat or any(c["chat_id"] == chat.get("id") for c in chats):
+                continue
+            chats.append({
+                "chat_id": chat.get("id"),
+                "type": chat.get("type"),
+                "name": chat.get("title") or " ".join(
+                    p for p in (chat.get("first_name"), chat.get("last_name")) if p
+                ) or chat.get("username") or "",
+            })
+
+    if not chats:
+        return {
+            "chats": [],
+            "hint": "No messages yet. Open your bot in Telegram, tap Start, "
+                    "send it any text, then reload this page.",
+        }
+    return {
+        "chats": chats,
+        "hint": "Set TELEGRAM_CHAT_ID to the chat_id above, then open "
+                "/api/push/test to confirm a message arrives.",
+    }
+
+
 # GET as well as POST: these are hand-run repair tools, and the person
 # running them is on a phone where the only way to issue a request is the
 # address bar — which sends GET. POST-only made them look like they had
