@@ -175,6 +175,19 @@ class Settings(BaseSettings):
     telegram_bot_token: str = ""
     telegram_chat_id: str = ""
 
+    # WhatsApp via CallMeBot, which is a free relay rather than Meta's API:
+    # message +34 621 331 709 with "I allow callmebot to send me messages",
+    # and it replies with your key. Both empty = disabled.
+    #
+    # Deliberately secondary to Telegram. Meta's official route needs a
+    # Business account and a message template they approve before you may
+    # send anything, because an alert is business-initiated — which is why
+    # every hobby project ends up here instead. It is one person's free
+    # service, so it is a convenience channel, not the one an alarm should
+    # depend on. Both fire, so this going quiet costs nothing.
+    whatsapp_phone: str = ""
+    whatsapp_apikey: str = ""
+
     # Web push notifications (charge complete, low battery, ...). Generate a
     # keypair once with `python -m app.push_keys` and set both here — empty
     # (either) disables notifications entirely; the subscribe UI stays
