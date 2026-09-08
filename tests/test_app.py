@@ -3955,3 +3955,74 @@ def test_shadow_trip_closes_when_the_stream_dies_mid_drive():
     assert sync_mod.settle_shadow(shadow, t + 400) is None      # still driving
     done = sync_mod.settle_shadow(shadow, t + 300 + 700)
     assert done is not None and done["end_ts"] == t + 300
+
+
+def test_late_arrival_reading_extends_the_closed_trip():
+    """A car parked out of coverage replays its arrival after the trip closed.
+
+    The readings that measure where the journey truly ended are transmitted —
+    just late. Discarding them loses the same tail on every trip that ends in
+    the same underground carpark, which is a bias, not noise.
+    """
+    from app import sync as sync_mod
+
+    shadow: dict = {}
+    t = 3_000_000.0
+    sync_mod.advance_shadow(shadow, _snap(t, odo_km=100.0, energy_kwh=55.0,
+                                          speed_kmh=40.0, shift="D"))
+    sync_mod.advance_shadow(shadow, _snap(t + 600, odo_km=110.0, energy_kwh=53.0,
+                                          speed_kmh=40.0, shift="D"))
+    # Signal dies here; this stale odometer is what the trip closes on.
+    sync_mod.advance_shadow(shadow, _snap(t + 660, odo_km=110.7, energy_kwh=52.9,
+                                          seat_occupied=False, doors_open=True))
+    trip = sync_mod.settle_shadow(shadow, t + 660 + 400)
+    assert trip["distance_km"] == pytest.approx(10.7, abs=0.001)
+
+    # Coverage returns; the car replays what it measured while parked.
+    late = _snap(t + 700, odo_km=111.0, energy_kwh=52.8, soc=76.0)
+    assert sync_mod.amend_closed_trip(trip, late) is True
+    assert trip["distance_km"] == pytest.approx(11.0, abs=0.001)
+    assert trip["end_odo_km"] == pytest.approx(111.0, abs=0.001)
+    assert trip["tail_amended_km"] == pytest.approx(0.3, abs=0.001)
+    assert trip["energy_kwh"] == pytest.approx(2.2, abs=0.001)
+    assert trip["wh_per_km"] == pytest.approx(200.0, abs=0.1)
+    assert trip["soc_end"] == 76.0
+    # Time is untouched: the car stopped when it stopped.
+    assert trip["end_ts"] == t + 660
+    assert trip["duration_min"] == pytest.approx(11.0, abs=0.1)
+
+    # Applying it again from an even later reading refines the same trip
+    # rather than compounding — every figure is recomputed from the bracket.
+    assert sync_mod.amend_closed_trip(trip, _snap(t + 720, odo_km=111.1,
+                                                  energy_kwh=52.8)) is True
+    assert trip["distance_km"] == pytest.approx(11.1, abs=0.001)
+    assert trip["energy_kwh"] == pytest.approx(2.2, abs=0.001)
+
+
+def test_late_arrival_reading_is_refused_when_it_cannot_be_the_arrival():
+    from app import sync as sync_mod
+
+    shadow: dict = {}
+    t = 4_000_000.0
+    sync_mod.advance_shadow(shadow, _snap(t, odo_km=100.0, energy_kwh=55.0,
+                                          speed_kmh=40.0, shift="D"))
+    sync_mod.advance_shadow(shadow, _snap(t + 600, odo_km=110.0, energy_kwh=53.0,
+                                          speed_kmh=40.0, shift="D"))
+    sync_mod.advance_shadow(shadow, _snap(t + 660, odo_km=110.7, energy_kwh=52.9,
+                                          seat_occupied=False, doors_open=True))
+    trip = sync_mod.settle_shadow(shadow, t + 660 + 400)
+    base = dict(trip)
+
+    # Before the end: stale in the ordinary sense.
+    assert not sync_mod.amend_closed_trip(trip, _snap(t + 600, odo_km=111.0))
+    # Long after: belongs to whatever the car did next.
+    assert not sync_mod.amend_closed_trip(trip, _snap(t + 660 + 5000, odo_km=111.0))
+    # Too far: not an arrival tail, a journey.
+    assert not sync_mod.amend_closed_trip(trip, _snap(t + 700, odo_km=118.0))
+    # Backwards, and unchanged.
+    assert not sync_mod.amend_closed_trip(trip, _snap(t + 700, odo_km=110.0))
+    assert not sync_mod.amend_closed_trip(trip, _snap(t + 700, odo_km=110.7))
+    # Still moving: this is a trip, not an arrival.
+    assert not sync_mod.amend_closed_trip(
+        trip, _snap(t + 700, odo_km=111.0, speed_kmh=30.0, shift="D"))
+    assert trip == base

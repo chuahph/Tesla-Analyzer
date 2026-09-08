@@ -9164,6 +9164,10 @@ TELEMETRY_RAW_MAX = 300
 # Shadow trips kept for comparison. Weeks of driving, which is the window in
 # which telemetry either earns the switch or does not.
 TELEMETRY_TRIPS_MAX = 400
+# How far back a late arrival reading may reach. A replay can only ever
+# describe a recent trip, and scanning further would let a stray reading
+# rewrite history.
+TELEMETRY_TAIL_LOOKBACK = 5
 
 
 # A Sentry state can flicker — someone walks past twice. One message per
@@ -9258,6 +9262,7 @@ def telemetry_ingest(
 
     now = sync_mod.now_local()
     kept = []
+    amended = 0
     for record in records:
         if not isinstance(record, dict):
             continue
@@ -9330,6 +9335,18 @@ def telemetry_ingest(
             if finished:
                 finished["vin"] = vin
                 trips.append(finished)
+            elif not shadow.get("open"):
+                # No trip is running, so this record may be the arrival of the
+                # last one turning up late — the normal case for a car that
+                # parks out of coverage and replays on reconnect. Only recent
+                # trips are candidates; amend_closed_trip decides whether this
+                # reading actually describes one of them.
+                for closed in reversed(trips[-TELEMETRY_TAIL_LOOKBACK:]):
+                    if closed.get("vin") != vin:
+                        continue
+                    if sync_mod.amend_closed_trip(closed, snap):
+                        amended += 1
+                        break
 
     state.put(session, state.TELEMETRY_LATEST_KEY, _json.dumps(latest))
     state.put(session, state.TELEMETRY_SHADOW_KEY, _json.dumps(shadows))
@@ -9346,7 +9363,10 @@ def telemetry_ingest(
     seen["records"] = int(seen.get("records") or 0) + len(kept)
     state.put(session, state.TELEMETRY_SEEN_KEY, _json.dumps(seen))
 
-    return {"accepted": len(kept), "buffered": len(buffered), "seen": seen}
+    return {"accepted": len(kept), "buffered": len(buffered),
+            # Readings that arrived after their trip had been closed and were
+            # folded into its ending rather than dropped.
+            "amended_tails": amended, "seen": seen}
 
 
 @router.get("/telemetry/recent")
@@ -9478,6 +9498,9 @@ def _compare_row(t: dict, d, t_start, car_by_drive: dict, pct) -> dict:
             "wh_per_km": t["wh_per_km"], "min": t["duration_min"],
             "odo": None if t.get("start_odo_km") is None else
                    [t.get("start_odo_km"), t.get("end_odo_km")],
+            # Present when the arrival was recovered from a replay rather than
+            # measured live — the km that would otherwise have been lost.
+            "tail_recovered_km": t.get("tail_amended_km"),
         },
         "polled": None if not d else {
             "id": d.id,

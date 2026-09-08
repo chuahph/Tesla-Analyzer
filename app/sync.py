@@ -2910,6 +2910,82 @@ def advance_shadow(shadow: dict[str, Any], snap: dict[str, Any]) -> dict[str, An
     return done
 
 
+# How long after a trip ended a late reading may still describe its arrival,
+# and how far the odometer may move in that window. A car buffers while out of
+# coverage and replays on reconnect, so the reading that measures where a trip
+# truly ended can arrive minutes — or a night — after the trip was closed.
+SHADOW_TAIL_SEC = 900.0
+SHADOW_TAIL_MAX_KM = 1.0
+
+
+def amend_closed_trip(trip: dict[str, Any], snap: dict[str, Any]) -> bool:
+    """Fold a late arrival reading into a trip that has already been closed.
+
+    This is the same correction the live path makes with ``readings``: a
+    stationary car keeps reporting, and a reading taken shortly after it parked
+    measures the end of the journey better than one taken at the instant it
+    stopped, which on a 30-second Odometer interval can be a quarter of a
+    kilometre stale. The live path can only apply it when the reading arrives
+    before the trip closes.
+
+    It often does not. A car parked underground buffers what it cannot send and
+    replays it on reconnect, so the readings that measure the arrival turn up
+    after the trip has been closed on a timeout — measured, transmitted, and
+    then discarded for being late. Trips that end in the same carpark every
+    evening lose the same tail every evening, which is a bias rather than
+    noise.
+
+    Time is not touched. The car stopped when it stopped; only what it had
+    driven and spent by then is being read more accurately.
+
+    The window and the distance cap are what keep this honest. A car shunted a
+    few metres in the same carpark within the window would have that movement
+    folded into the trip it just finished rather than recorded separately — a
+    misattribution the bounds keep under a kilometre, and the alternative is
+    discarding every real arrival to avoid it.
+    """
+    if not trip or is_driving(snap):
+        return False
+    end_ts, ts = trip.get("end_ts"), snap.get("ts")
+    odo, end_odo = snap.get("odo_km"), trip.get("end_odo_km")
+    if end_ts is None or ts is None or odo is None or end_odo is None:
+        return False
+    # Only the window just after this trip, and only forwards. A reading from
+    # before the end is stale in the ordinary sense; one from far after belongs
+    # to whatever the car did next.
+    if not 0.0 <= float(ts) - float(end_ts) <= SHADOW_TAIL_SEC:
+        return False
+    gain = round(float(odo) - float(end_odo), 3)
+    if gain <= 0.0 or gain > SHADOW_TAIL_MAX_KM:
+        return False
+
+    start_odo = trip.get("start_odo_km")
+    if start_odo is None:
+        return False
+    distance = round(float(odo) - float(start_odo), 3)
+    trip["end_odo_km"] = round(float(odo), 3)
+    trip["distance_km"] = distance
+    # Cumulative, so re-running this on a later reading refines the same trip
+    # rather than compounding — the figures above are recomputed from the
+    # bracket each time, never adjusted by a delta.
+    trip["tail_amended_km"] = round(
+        float(trip.get("tail_amended_km") or 0.0) + gain, 3)
+
+    e0, e1 = trip.get("start_energy_kwh"), snap.get("energy_kwh")
+    if e0 is not None and e1 is not None:
+        trip["end_energy_kwh"] = e1
+        trip["energy_kwh"] = round(e0 - e1, 3)
+    energy = trip.get("energy_kwh")
+    trip["wh_per_km"] = (round(energy * 1000.0 / distance, 1)
+                         if energy and distance > 0 else None)
+    minutes = float(trip.get("duration_min") or 0.0)
+    if minutes > 0:
+        trip["avg_speed_kmh"] = round(distance / (minutes / 60.0), 1)
+    if snap.get("soc") is not None:
+        trip["soc_end"] = snap.get("soc")
+    return True
+
+
 def _shadow_close(shadow: dict[str, Any], end: dict[str, Any],
                   readings: dict[str, Any] | None = None) -> dict[str, Any] | None:
     """Emit the open trip, ending at ``end``, and clear the machine.
@@ -2980,6 +3056,11 @@ def _shadow_close(shadow: dict[str, Any], end: dict[str, Any],
         # boundary.
         "start_odo_km": round(float(start.get("odo_km") or 0.0), 3),
         "end_odo_km": round(float(final.get("odo_km") or 0.0), 3),
+        # The energy bracket, kept rather than only its difference: a reading
+        # that arrives after the trip closed can then be folded in by
+        # subtraction, instead of the trip having to remember how it got here.
+        "start_energy_kwh": e0,
+        "end_energy_kwh": e1,
         "drive_delta": drive_delta,
         "regen_delta": regen_delta,
         "ended_on": "exit" if exit_seen else "timeout",
