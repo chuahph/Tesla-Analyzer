@@ -9332,6 +9332,8 @@ def telemetry_compare(
                 "start": t["start_time"], "end": t["end_time"],
                 "km": t["distance_km"], "kwh": t["energy_kwh"],
                 "wh_per_km": t["wh_per_km"], "min": t["duration_min"],
+                "odo": None if t.get("start_odo_km") is None else
+                       [t.get("start_odo_km"), t.get("end_odo_km")],
             },
             "polled": None if not d else {
                 "id": d.id,

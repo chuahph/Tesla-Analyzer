@@ -2923,6 +2923,14 @@ def _shadow_close(shadow: dict[str, Any], end: dict[str, Any],
         # Evidence, not yet figures. drive_delta / energy_kwh is the ratio
         # that says whether the counter is kWh, Wh, or something else — and
         # how much of the pack's fall was traction rather than climate.
+        # The raw bracket, so a distance argument can be settled rather than
+        # inferred. Both are read while the car is stationary, so their
+        # difference IS the distance travelled — if that still disagrees with
+        # the car's own trip meter, the disagreement is between the vehicle's
+        # two measures and not something this app can fix by moving a
+        # boundary.
+        "start_odo_km": round(float(start.get("odo_km") or 0.0), 3),
+        "end_odo_km": round(float(final.get("odo_km") or 0.0), 3),
         "drive_delta": drive_delta,
         "regen_delta": regen_delta,
         "ended_on": "exit" if exit_seen else "timeout",
