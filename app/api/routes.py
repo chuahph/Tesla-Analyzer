@@ -4722,7 +4722,7 @@ def telegram_chat_id():
         # mistyped — this one is built in code. Say which it is.
         raise HTTPException(502, (
             "Telegram rejected the token (%s: %s). Check TELEGRAM_BOT_TOKEN "
-            "was pasted whole — send /mytoken to @BotFather to see it again."
+            "was pasted whole — send /token to @BotFather to see it again."
             % (payload.get("error_code"), payload.get("description"))))
 
     chats: list[dict] = []
