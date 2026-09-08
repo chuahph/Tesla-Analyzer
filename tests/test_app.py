@@ -4171,3 +4171,45 @@ def test_ingest_keeps_the_field_composite_when_no_trip_is_running():
         sess.commit()
         sess.close()
         settings.app_passcode = old_pc
+
+
+def test_ingest_recovers_from_a_corrupt_state_row():
+    """A store holding the literal null must not keep rejecting the bridge.
+
+    json.loads("null") is None, so a single bad write left every subsequent
+    ingest raising AttributeError — the receiver's posts failing, and the
+    records in them lost, long after the bug that wrote it was fixed. Guarding
+    only the write is not enough when the damage is already on disk.
+    """
+    import json as _json
+
+    from app.database import SessionLocal
+    from app import state
+
+    settings = get_settings()
+    old_pc = settings.app_passcode
+    settings.app_passcode = ""
+    sess = SessionLocal()
+    prev = {k: state.get(sess, k) for k in (
+        state.TELEMETRY_LATEST_KEY, state.TELEMETRY_SHADOW_KEY,
+        state.TELEMETRY_TRIPS_KEY, state.TELEMETRY_SEEN_KEY)}
+    try:
+        for key in prev:
+            state.put(sess, key, "null")
+        sess.commit()
+
+        with TestClient(app) as client:
+            resp = client.post("/api/telemetry", json={"records": [{
+                "vin": "CORRUPT1",
+                "createdAt": "2026-09-08T10:00:00Z",
+                "data": [{"key": "Soc", "value": {"doubleValue": 60.0}}],
+            }]})
+        assert resp.status_code == 200, resp.text
+        stored = _json.loads(state.get(SessionLocal(), state.TELEMETRY_LATEST_KEY))
+        assert stored["CORRUPT1"]["Soc"] == 60.0
+    finally:
+        for key, was in prev.items():
+            state.put(sess, key, was or "")
+        sess.commit()
+        sess.close()
+        settings.app_passcode = old_pc

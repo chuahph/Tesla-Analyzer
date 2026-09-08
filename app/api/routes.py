@@ -2824,7 +2824,7 @@ def _settle_shadows(session: Session) -> int:
     import json as _json
 
     try:
-        shadows = _json.loads(state.get(session, state.TELEMETRY_SHADOW_KEY) or "{}")
+        shadows = _json.loads(state.get(session, state.TELEMETRY_SHADOW_KEY) or "{}") or {}
     except ValueError:
         return 0
     if not shadows:
@@ -2839,7 +2839,7 @@ def _settle_shadows(session: Session) -> int:
     if not finished:
         return 0
     try:
-        trips = _json.loads(state.get(session, state.TELEMETRY_TRIPS_KEY) or "[]")
+        trips = _json.loads(state.get(session, state.TELEMETRY_TRIPS_KEY) or "[]") or []
     except ValueError:
         trips = []
     trips.extend(finished)
@@ -9277,25 +9277,33 @@ def telemetry_ingest(
         })
 
     try:
-        buffered = _json.loads(state.get(session, state.TELEMETRY_RAW_KEY) or "[]")
+        buffered = _json.loads(state.get(session, state.TELEMETRY_RAW_KEY) or "[]") or []
     except ValueError:
         buffered = []
     buffered = (buffered + kept)[-TELEMETRY_RAW_MAX:]
     state.put(session, state.TELEMETRY_RAW_KEY, _json.dumps(buffered))
 
+    # `or {}` after the parse as well as before it, here and everywhere this
+    # store is read. The empty string covers a key that was never written;
+    # this covers one that was written badly. A bug here stored the literal
+    # null, and json.loads("null") is None, which every reader then crashed
+    # on — so the store stayed broken and the receiver's posts kept being
+    # rejected long after the bug that wrote it had been fixed. State this
+    # process wrote is not automatically state it can parse.
+    #
     # A telemetry message carries only what changed, so no single record ever
     # describes the car. Fold each one into a running composite — that is what
     # a snapshot can be built from.
     try:
-        latest = _json.loads(state.get(session, state.TELEMETRY_LATEST_KEY) or "{}")
+        latest = _json.loads(state.get(session, state.TELEMETRY_LATEST_KEY) or "{}") or {}
     except ValueError:
         latest = {}
     try:
-        shadows = _json.loads(state.get(session, state.TELEMETRY_SHADOW_KEY) or "{}")
+        shadows = _json.loads(state.get(session, state.TELEMETRY_SHADOW_KEY) or "{}") or {}
     except ValueError:
         shadows = {}
     try:
-        trips = _json.loads(state.get(session, state.TELEMETRY_TRIPS_KEY) or "[]")
+        trips = _json.loads(state.get(session, state.TELEMETRY_TRIPS_KEY) or "[]") or []
     except ValueError:
         trips = []
 
@@ -9356,7 +9364,7 @@ def telemetry_ingest(
               _json.dumps(trips[-TELEMETRY_TRIPS_MAX:]))
 
     try:
-        seen = _json.loads(state.get(session, state.TELEMETRY_SEEN_KEY) or "{}")
+        seen = _json.loads(state.get(session, state.TELEMETRY_SEEN_KEY) or "{}") or {}
     except ValueError:
         seen = {}
     seen["first"] = seen.get("first") or now.isoformat(timespec="seconds")
@@ -9385,11 +9393,11 @@ def telemetry_recent(
     import json as _json
 
     try:
-        buffered = _json.loads(state.get(session, state.TELEMETRY_RAW_KEY) or "[]")
+        buffered = _json.loads(state.get(session, state.TELEMETRY_RAW_KEY) or "[]") or []
     except ValueError:
         buffered = []
     try:
-        seen = _json.loads(state.get(session, state.TELEMETRY_SEEN_KEY) or "{}")
+        seen = _json.loads(state.get(session, state.TELEMETRY_SEEN_KEY) or "{}") or {}
     except ValueError:
         seen = {}
 
@@ -9404,7 +9412,7 @@ def telemetry_recent(
     # rather than acted on: this is how the mapping gets checked against a
     # real car before anything downstream is allowed to depend on it.
     try:
-        latest = _json.loads(state.get(session, state.TELEMETRY_LATEST_KEY) or "{}")
+        latest = _json.loads(state.get(session, state.TELEMETRY_LATEST_KEY) or "{}") or {}
     except ValueError:
         latest = {}
     # Fold the buffer on top of the stored composite. The composite alone is
@@ -9571,7 +9579,7 @@ def telemetry_compare(
     # would otherwise be missing from the very report asking where it went.
     _settle_shadows(session)
     try:
-        shadow_trips = _json.loads(state.get(session, state.TELEMETRY_TRIPS_KEY) or "[]")
+        shadow_trips = _json.loads(state.get(session, state.TELEMETRY_TRIPS_KEY) or "[]") or []
     except ValueError:
         shadow_trips = []
 
