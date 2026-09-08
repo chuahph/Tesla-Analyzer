@@ -5,7 +5,14 @@
 # which makes a ~130-character raw.githubusercontent URL a real obstacle
 # rather than a cosmetic one.
 #
-#   sudo bash <(curl -sL evperkm.xyz/vm)
+#   curl -sL evperkm.xyz/vm -o v.sh && sudo bash v.sh
+#
+# Downloaded first rather than `sudo bash <(curl ...)`. sudo on Ubuntu 24.04
+# closes file descriptors above stderr, so the process substitution is already
+# gone by the time bash tries to open it — `/dev/fd/63: No such file or
+# directory`. Piping into `sudo bash` instead would consume stdin, which the
+# setup script needs for its prompts. A file costs one more word and keeps
+# both.
 #
 # Fetched to a file and checked before running, rather than `bash <(curl ...)`.
 # Process substitution hands bash whatever came back, and an empty body — a

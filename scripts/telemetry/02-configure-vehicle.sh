@@ -8,6 +8,10 @@
 #
 #   sudo bash 02-configure-vehicle.sh
 #
+# or, from anywhere:
+#
+#   curl -sL https://evperkm.xyz/car -o c.sh && sudo bash c.sh
+#
 # (it reads the same values back out of /etc/tesla/bridge.env).
 #
 # The configuration has to be SIGNED by the virtual key paired to the vehicle,

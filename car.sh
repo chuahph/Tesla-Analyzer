@@ -5,7 +5,14 @@
 # which makes a ~130-character raw.githubusercontent URL a real obstacle
 # rather than a cosmetic one.
 #
-#   sudo bash <(curl -sL evperkm.xyz/car)
+#   curl -sL evperkm.xyz/car -o c.sh && sudo bash c.sh
+#
+# Downloaded first rather than `sudo bash <(curl ...)`. sudo on Ubuntu 24.04
+# closes file descriptors above stderr, so the process substitution is already
+# gone by the time bash tries to open it — `/dev/fd/63: No such file or
+# directory`. Piping into `sudo bash` instead would consume stdin, which the
+# setup script needs for its prompts. A file costs one more word and keeps
+# both.
 #
 # Re-run this whenever the field list or its intervals change: the car keeps
 # streaming the LAST config it accepted until a new signed one replaces it,
