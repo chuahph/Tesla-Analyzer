@@ -4719,3 +4719,45 @@ def test_a_trip_says_how_its_end_was_decided():
     assert done["end_ts"] == t + 660
     # And the marker does not leak into the next journey.
     assert "stream_lost" not in sh
+
+
+def test_silence_is_read_differently_depending_on_the_last_speed():
+    """A car that went quiet at walking pace has arrived; at road speed it has not.
+
+    This car reaches its bay underground and loses signal before it can send
+    ShiftStateP — the journey is over and waiting ten minutes to say so leaves
+    a finished trip absent. A car that goes quiet at 45 km/h is in a tunnel,
+    and closing early would cut one drive into two. The wait changes no figure
+    either way: the trip ends at the last record, and the wait only decides
+    how soon it can be read.
+    """
+    from app import sync as sync_mod
+
+    def snap(ts, mi, mph, gear="ShiftStateD"):
+        return sync_mod.snapshot_from_telemetry(
+            {"Odometer": mi, "VehicleSpeed": mph, "Gear": gear,
+             "EnergyRemaining": 55.0}, ts)
+
+    t, m = 1_788_909_000.0, 19000.0
+
+    def drive_then_go_quiet(final_mph):
+        sh: dict = {}
+        sync_mod.advance_shadow(sh, snap(t, m, 20.0))
+        sync_mod.advance_shadow(sh, snap(t + 600, m + 5, 20.0))
+        sync_mod.advance_shadow(sh, snap(t + 660, m + 5.4, final_mph))
+        return sh
+
+    # Walking pace, then silence: this is an arrival.
+    arriving = drive_then_go_quiet(0.6)          # ~1 km/h
+    assert sync_mod.settle_shadow(arriving, t + 660 + 100) is None
+    done = sync_mod.settle_shadow(arriving, t + 660 + 200)
+    assert done is not None, "an arrival waited longer than three minutes"
+    assert done["ended_on"] == "stream_lost"
+    assert done["end_ts"] == t + 660          # the last record, not the close
+
+    # Road speed, then silence: a tunnel, and the journey continues.
+    driving = drive_then_go_quiet(28.0)          # ~45 km/h
+    assert sync_mod.settle_shadow(driving, t + 660 + 200) is None
+    assert sync_mod.settle_shadow(driving, t + 660 + 550) is None
+    still = sync_mod.settle_shadow(driving, t + 660 + 700)
+    assert still is not None and still["end_ts"] == t + 660

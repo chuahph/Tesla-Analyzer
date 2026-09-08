@@ -2830,6 +2830,11 @@ SHADOW_SETTLE_NO_EXIT_SEC = 600.0
 # without sending a final ShiftStateP would otherwise leave a trip open for
 # hours and then absorb the next journey into it.
 SHADOW_GAP_SEC = 600.0
+# How long to wait before closing a journey that went silent having just
+# reported itself at walking pace or less. Same three minutes as the settle
+# window a car gets when it parks in coverage, because it is the same event —
+# the car has arrived, it simply could not say so.
+SHADOW_ARRIVED_QUIET_SEC = 180.0
 # No single shadow trip is longer than this. Not a real driving limit — a
 # floor under nonsense, so a boundary that went wrong shows up as a missing
 # trip rather than as a plausible-looking record with an impossible number in
@@ -2879,9 +2884,25 @@ def settle_shadow(shadow: dict[str, Any], now_ts: float) -> dict[str, Any] | Non
                                  readings=last)
         return None
 
-    # Never seen stationary — the stream died mid-drive rather than on
-    # arrival. Close at the last motion seen; anything after that is unknown.
-    if now_ts - last_ts > SHADOW_GAP_SEC:
+    # The car never reported itself stationary, so it went silent while the
+    # machine still considered it under way. Two very different things look
+    # like this, and the last speed it managed to send separates them.
+    #
+    # Arriving: it reported walking pace or less and then stopped talking.
+    # This car does that every day — it reaches its bay underground, loses
+    # signal before it can send ShiftStateP, and the journey is over. Waiting
+    # ten minutes to say so is ten minutes of a finished trip being absent.
+    #
+    # Still going: it reported road speed and then stopped talking. That is a
+    # tunnel or a dead zone, the journey continues, and closing it early would
+    # cut one drive into two.
+    #
+    # Neither wait affects a single figure. The trip ends at the last record
+    # either way; the wait only decides how soon it can be read, and how
+    # confident we are that there is nothing more to come.
+    arriving = float(last.get("speed_kmh") or 0.0) <= ZERO_SPEED_KMH
+    if now_ts - last_ts > (SHADOW_ARRIVED_QUIET_SEC if arriving
+                           else SHADOW_GAP_SEC):
         shadow["stream_lost"] = True
         return _shadow_close(shadow, last)
     return None
