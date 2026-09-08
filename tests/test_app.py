@@ -4358,3 +4358,186 @@ def test_absurd_distance_is_refused_rather_than_recorded():
     end = {"ts": 1_788_900_600.0, "odo_km": 31127.0, "soc": 79.0,
            "energy_kwh": 54.0}
     assert sync_mod._shadow_close(shadow, end) is None
+
+
+def _tele_record(vin, ts, resend=False, **kv):
+    """One telemetry record in the wire shape the bridge posts."""
+    from datetime import timezone as _tz
+
+    keys = {"odo": "Odometer", "mph": "VehicleSpeed", "gear": "Gear",
+            "kwh": "EnergyRemaining", "soc": "Soc", "seat": "DriverSeatOccupied"}
+    data = []
+    for short, value in kv.items():
+        key = keys[short]
+        wrap = ({"stringValue": value} if key == "Gear"
+                else {"booleanValue": value} if key == "DriverSeatOccupied"
+                else {"doubleValue": value})
+        data.append({"key": key, "value": wrap})
+    stamp = datetime.fromtimestamp(ts, _tz.utc).isoformat().replace("+00:00", "Z")
+    return {"vin": vin, "createdAt": stamp, "data": data, "isResend": resend}
+
+
+def test_a_whole_drive_through_the_real_ingest_path():
+    """One journey, posted the way the car sends it, checked against the car.
+
+    The unit tests drive the state machine directly. This drives it the way
+    production does: one field per record, state serialised to JSON and read
+    back between every batch. The figures are the 11 km trip the car itself
+    displayed as 10.9 km / 178.3 Wh/km.
+    """
+    import json as _json
+
+    from app.database import SessionLocal
+    from app import state, sync as sync_mod
+
+    settings = get_settings()
+    old_pc = settings.app_passcode
+    settings.app_passcode = ""
+    sess = SessionLocal()
+    prev_trips = state.get(sess, state.TELEMETRY_TRIPS_KEY)
+    prev_shadow = state.get(sess, state.TELEMETRY_SHADOW_KEY)
+    prev_latest = state.get(sess, state.TELEMETRY_LATEST_KEY)
+    vin = "WHOLEDRIVE000001"
+    mi = sync_mod.MILES_TO_KM
+    start_mi, end_mi = 31107.098 / mi, 31117.988 / mi
+    try:
+        state.put(sess, state.TELEMETRY_TRIPS_KEY, "[]")
+        state.put(sess, state.TELEMETRY_SHADOW_KEY, "{}")
+        sess.commit()
+
+        t = 1_788_866_978.0
+        with TestClient(app) as client:
+            def post(*records):
+                resp = client.post("/api/telemetry", json={"records": list(records)})
+                assert resp.status_code == 200, resp.text
+
+            post(_tele_record(vin, t, odo=start_mi, mph=0.0,
+                              gear="ShiftStateP", kwh=56.56, soc=80.0))
+            t += 10
+            post(_tele_record(vin, t, mph=25.0, gear="ShiftStateD"))
+            steps = 57
+            for i in range(1, steps + 1):
+                frac = i / steps
+                t += 28
+                post(_tele_record(vin, t, odo=start_mi + (end_mi - start_mi) * frac))
+                t += 1
+                post(_tele_record(vin, t, kwh=56.56 - 1.96 * frac))
+                t += 1
+                post(_tele_record(vin, t, soc=80.0 - 3.0 * frac))
+            stop = t + 1
+            post(_tele_record(vin, stop, mph=0.0, gear="ShiftStateP", seat=False))
+            # Stationary readings after parking measure the arrival better than
+            # the ones held at the instant P was reached.
+            post(_tele_record(vin, stop + 30, odo=end_mi, kwh=54.60, soc=77.0))
+            post(_tele_record(vin, stop + 200, mph=0.0))
+
+        trips = _json.loads(state.get(SessionLocal(), state.TELEMETRY_TRIPS_KEY))
+        assert len(trips) == 1, trips
+        trip = trips[0]
+        assert trip["distance_km"] == pytest.approx(10.890, abs=0.002)
+        assert trip["energy_kwh"] == pytest.approx(1.96, abs=0.001)
+        assert trip["wh_per_km"] == pytest.approx(180.0, abs=0.1)
+        assert trip["soc_start"] == 80.0 and trip["soc_end"] == 77.0
+        assert trip["ended_on"] == "exit"
+        # Closed by the live path, so the machine is clear and reusable.
+        shadow = _json.loads(state.get(SessionLocal(), state.TELEMETRY_SHADOW_KEY))[vin]
+        assert not shadow.get("open") and not shadow.get("out_of_order")
+    finally:
+        state.put(sess, state.TELEMETRY_TRIPS_KEY, prev_trips or "[]")
+        state.put(sess, state.TELEMETRY_SHADOW_KEY, prev_shadow or "{}")
+        state.put(sess, state.TELEMETRY_LATEST_KEY, prev_latest or "{}")
+        sess.commit()
+        sess.close()
+        settings.app_passcode = old_pc
+
+
+def test_carpark_blackout_and_replay_end_to_end():
+    """Park underground, lose the stream, get it back on the way out.
+
+    The arrival is measured and transmitted, just late. Losing it costs the
+    same tail on every trip that ends in the same carpark, so this checks the
+    recovery lands exactly and does not bleed into the journey that follows.
+    """
+    import json as _json
+    import time as _time
+
+    from app.database import SessionLocal
+    from app.api import routes as routes_mod
+    from app import state, sync as sync_mod
+
+    settings = get_settings()
+    old_pc = settings.app_passcode
+    settings.app_passcode = ""
+    sess = SessionLocal()
+    prev_trips = state.get(sess, state.TELEMETRY_TRIPS_KEY)
+    prev_shadow = state.get(sess, state.TELEMETRY_SHADOW_KEY)
+    vin = "CARPARK000000001"
+    mi = sync_mod.MILES_TO_KM
+    start_km, end_km, lost_km = 31200.0, 31211.0, 0.278
+    try:
+        state.put(sess, state.TELEMETRY_TRIPS_KEY, "[]")
+        state.put(sess, state.TELEMETRY_SHADOW_KEY, "{}")
+        sess.commit()
+
+        # Anchored near now, because settle_shadow works in true epoch seconds.
+        t = _time.time() - 3000
+        with TestClient(app) as client:
+            def post(*records):
+                resp = client.post("/api/telemetry", json={"records": list(records)})
+                assert resp.status_code == 200, resp.text
+
+            post(_tele_record(vin, t, odo=start_km / mi, mph=0.0,
+                              gear="ShiftStateP", kwh=56.0, soc=80.0))
+            t += 10
+            post(_tele_record(vin, t, mph=25.0, gear="ShiftStateD"))
+            steps = 40
+            for i in range(1, steps + 1):
+                frac = i / steps
+                t += 28
+                post(_tele_record(vin, t, odo=(start_km + (end_km - start_km - lost_km) * frac) / mi))
+                t += 2
+                post(_tele_record(vin, t, kwh=56.0 - 2.0 * frac))
+            stop = t + 1
+            post(_tele_record(vin, stop, mph=0.0, gear="ShiftStateP", seat=False))
+            # Signal dies here: the last odometer seen is short by lost_km.
+
+            assert routes_mod._settle_shadows(SessionLocal()) == 1
+            short = _json.loads(state.get(SessionLocal(), state.TELEMETRY_TRIPS_KEY))[0]
+            assert short["distance_km"] == pytest.approx(11.0 - lost_km, abs=0.002)
+            closed_at = short["end_time"]
+
+            # Coverage returns and the car replays what it buffered.
+            post(_tele_record(vin, stop + 20, resend=True,
+                              odo=end_km / mi, kwh=54.0, soc=77.0),
+                 _tele_record(vin, stop + 40, resend=True, mph=0.0))
+
+            healed = _json.loads(state.get(SessionLocal(), state.TELEMETRY_TRIPS_KEY))
+            assert len(healed) == 1, "the replay must not become a second trip"
+            assert healed[0]["distance_km"] == pytest.approx(11.0, abs=0.002)
+            assert healed[0]["tail_amended_km"] == pytest.approx(lost_km, abs=0.002)
+            # Only what it had driven is re-read; when it stopped is not.
+            assert healed[0]["end_time"] == closed_at
+
+            # Drive away again. The second journey must neither be swallowed
+            # by the first nor swallow it.
+            t2 = stop + 1200
+            post(_tele_record(vin, t2, mph=20.0, gear="ShiftStateD"))
+            for i in range(1, 9):
+                t2 += 30
+                post(_tele_record(vin, t2, odo=(end_km + 0.25 * i) / mi,
+                                  kwh=54.0 - 0.05 * i))
+            t2 += 10
+            post(_tele_record(vin, t2, mph=0.0, gear="ShiftStateP", seat=False))
+            post(_tele_record(vin, t2 + 200, odo=(end_km + 2.0) / mi, kwh=53.6))
+
+        both = _json.loads(state.get(SessionLocal(), state.TELEMETRY_TRIPS_KEY))
+        assert len(both) == 2
+        spans = [(x["start_odo_km"], x["end_odo_km"]) for x in both]
+        assert all(a[1] <= b[0] for a, b in zip(spans, spans[1:])), \
+            f"odometer spans overlap, so distance is counted twice: {spans}"
+    finally:
+        state.put(sess, state.TELEMETRY_TRIPS_KEY, prev_trips or "[]")
+        state.put(sess, state.TELEMETRY_SHADOW_KEY, prev_shadow or "{}")
+        sess.commit()
+        sess.close()
+        settings.app_passcode = old_pc
