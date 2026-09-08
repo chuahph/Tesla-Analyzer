@@ -9590,18 +9590,18 @@ def telemetry_compare(
         "judged": len(judged),
         "vs_car": None if not judged else {
             "polled_km_err_pct": round(percentile(
-                [r["vs_car"]["polled_km_pct"] for r in judged], 50), 2),
+                [r["vs_car"]["polled_km_pct"] for r in judged], 0.5), 2),
             "telemetry_km_err_pct": round(percentile(
-                [r["vs_car"]["telemetry_km_pct"] for r in judged], 50), 2),
+                [r["vs_car"]["telemetry_km_pct"] for r in judged], 0.5), 2),
             "polled_whkm_err_pct": round(percentile(
-                [r["vs_car"]["polled_whkm_pct"] for r in judged], 50), 2),
+                [r["vs_car"]["polled_whkm_pct"] for r in judged], 0.5), 2),
             "telemetry_whkm_err_pct": round(percentile(
-                [r["vs_car"]["telemetry_whkm_pct"] for r in judged], 50), 2),
+                [r["vs_car"]["telemetry_whkm_pct"] for r in judged], 0.5), 2),
         },
         "summary": {
-            "median_km_delta_pct": round(percentile(km_deltas, 50), 2)
+            "median_km_delta_pct": round(percentile(km_deltas, 0.5), 2)
             if km_deltas else None,
-            "median_blind_head_min": round(percentile(heads, 50), 2)
+            "median_blind_head_min": round(percentile(heads, 0.5), 2)
             if heads else None,
             "worst_blind_head_min": round(max(heads), 1) if heads else None,
         },

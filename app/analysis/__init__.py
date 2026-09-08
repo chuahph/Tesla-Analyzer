@@ -43,6 +43,17 @@ def linregress(xs: Sequence[float], ys: Sequence[float]) -> tuple[float, float]:
 
 
 def percentile(values: Sequence[float], pct: float) -> float:
+    """Linear-interpolated percentile. ``pct`` is a FRACTION: 0.5 is the median.
+
+    The fraction is checked rather than assumed. Passing 50 for the median
+    computes an index of (len-1) x 50, which lands inside the list only while
+    the list has one element — so the mistake reads as correct until a second
+    measurement arrives, and then fails as an IndexError from in here, far from
+    the call that was wrong.
+    """
+    if not 0.0 <= pct <= 1.0:
+        raise ValueError(f"pct must be a fraction between 0 and 1, got {pct!r}"
+                         f" — 0.5 is the median, not 50")
     if not values:
         return 0.0
     ordered = sorted(values)

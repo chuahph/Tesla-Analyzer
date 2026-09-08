@@ -3872,3 +3872,32 @@ def test_unhandled_failure_says_what_broke():
             r for r in app.router.routes
             if getattr(r, "path", None) != "/api/_boom_for_test"
         ]
+
+
+def test_percentile_rejects_a_percentage():
+    """0.5 is the median; 50 is a bug that hides until the second data point.
+
+    percentile indexes at (len-1) x pct, so 50 lands inside the list while the
+    list holds one element and runs off the end once a second arrives. That is
+    how six such calls reached production in the telemetry comparison and only
+    failed after a second shadow trip was recorded.
+    """
+    from app.analysis import percentile
+
+    assert percentile([2.0, 4.0], 0.5) == 3.0
+    with pytest.raises(ValueError, match="fraction"):
+        percentile([2.0, 4.0], 50)
+
+
+def test_no_caller_passes_percentile_a_percentage():
+    """Repo-wide, because the failure surfaces far from the call that is wrong."""
+    import re
+    from pathlib import Path
+
+    offenders = []
+    for path in Path("app").rglob("*.py"):
+        for num, line in enumerate(path.read_text().splitlines(), 1):
+            for arg in re.findall(r"percentile\([^()]*,\s*([0-9.]+)\s*\)", line):
+                if float(arg) > 1.0:
+                    offenders.append(f"{path}:{num}: {arg}")
+    assert not offenders, "percentile takes a fraction: " + "; ".join(offenders)
