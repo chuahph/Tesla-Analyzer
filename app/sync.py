@@ -2772,8 +2772,20 @@ def snapshot_from_telemetry(fields: dict[str, Any], ts: float) -> dict[str, Any]
         # quantity already known — see the shadow trip, which carries both the
         # counter's delta and the EnergyRemaining delta so one real journey
         # settles the ratio.
+        # LifetimeEnergyUsedDrive is marked "Semi-truck only" in Tesla's proto
+        # and has never arrived on this car. Kept because a record that asked
+        # for it should say so, not because it is expected.
         "energy_drive_raw": num("LifetimeEnergyUsedDrive"),
         "energy_regen_raw": num("LifetimeEnergyGainedRegen"),
+        # The one that is not model-restricted, and the point of the second
+        # field set. Carried raw: its units are undocumented, and assuming a
+        # unit is how a systematic error gets buried under everything.
+        "energy_used_raw": num("LifetimeEnergyUsed"),
+        # The pack's own notion of driving (BMSStateDrive). Trip boundaries
+        # are inferred from Gear and speed; this is the car's own answer, and
+        # is recorded to be compared against that inference rather than to
+        # replace it before it has been checked.
+        "bms_state": enum_str("BMSState"),
         # Occupancy, which says directly what a door event only implies: a
         # door can be opened by a passenger, for luggage, or not reported at
         # all if it opens and shuts inside the streaming interval.
@@ -3087,6 +3099,8 @@ def _shadow_close(shadow: dict[str, Any], end: dict[str, Any],
     # undocumented, so both are carried and neither is trusted over the other
     # yet. One real journey settles the ratio; until then this is evidence,
     # not a figure.
+    u0, u1 = start.get("energy_used_raw"), final.get("energy_used_raw")
+    used_delta = round(u1 - u0, 4) if u0 is not None and u1 is not None else None
     d0, d1 = start.get("energy_drive_raw"), final.get("energy_drive_raw")
     drive_delta = round(d1 - d0, 4) if d0 is not None and d1 is not None else None
     r0, r1 = start.get("energy_regen_raw"), final.get("energy_regen_raw")
@@ -3108,8 +3122,8 @@ def _shadow_close(shadow: dict[str, Any], end: dict[str, Any],
         "avg_speed_kmh": round(distance / (minutes / 60.0), 1),
         "start_lat": start.get("lat"), "start_lon": start.get("lon"),
         "end_lat": end.get("lat"), "end_lon": end.get("lon"),
-        # Evidence, not yet figures. drive_delta / energy_kwh is the ratio
-        # that says whether the counter is kWh, Wh, or something else — and
+        # Evidence, not yet figures. A counter's delta over energy_kwh is the
+        # ratio that says whether it counts kWh, Wh, or something else — and
         # how much of the pack's fall was traction rather than climate.
         # The raw bracket, so a distance argument can be settled rather than
         # inferred. Both are read while the car is stationary, so their
@@ -3126,6 +3140,11 @@ def _shadow_close(shadow: dict[str, Any], end: dict[str, Any],
         "end_energy_kwh": e1,
         "drive_delta": drive_delta,
         "regen_delta": regen_delta,
+        # The reason for measuring this twice: EnergyRemaining moves in steps
+        # of 0.02 kWh, which is the floor under every short-trip figure here.
+        # A lifetime counter only counts up and has no such step, so the gap
+        # between the two says how much of a disagreement is quantisation.
+        "used_delta": used_delta,
         "ended_on": "exit" if exit_seen else "timeout",
         "pack_temp_c": end.get("pack_temp_c"),
         "inside_temp": end.get("inside_temp"),

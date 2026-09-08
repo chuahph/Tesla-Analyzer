@@ -156,6 +156,38 @@ kill -0 $PROXY_PID 2>/dev/null || die "the proxy exited on startup (see $LOG)"
 # proto but Tesla's API rejects it as an unknown field, so either the name
 # differs on this firmware or it is not configurable. Left out rather than
 # left in to fail the whole request.
+# --- The second set, sent only when asked for -------------------------------
+#
+# Run with TELEMETRY_V2=1 to add these:
+#
+#   curl -sL https://evperkm.xyz/car -o c.sh && sudo TELEMETRY_V2=1 bash c.sh
+#
+# LifetimeEnergyUsed is the reason this exists. Trip energy is currently the
+# difference of two EnergyRemaining readings, and that field moves in steps of
+# 0.02 kWh — which is +-8% on a half-kilowatt-hour trip and is the floor under
+# every short-trip figure this project has produced. A monotonic lifetime
+# counter has no such step, so the same trip measured both ways says how much
+# of the disagreement is quantisation and how much is real.
+#
+# LifetimeEnergyUsedDrive, which the current set asks for, is marked
+# "Semi-truck only" in Tesla's proto. It has never arrived and never will; it
+# is replaced here rather than kept alongside.
+#
+# BMSState carries the pack's own notion of driving (BMSStateDrive). Trip
+# boundaries are inferred today from Gear and speed, which has measured exact
+# in simulation but is an inference; this is the car's own answer.
+#
+# Kept out of the default set deliberately. A field list is only changed
+# between measurement runs, never in the middle of one — the point of the
+# comparison is that the two sides differ in one thing at a time.
+EXTRA_FIELDS=""
+DEFAULT_DRIVE_COUNTER='      "LifetimeEnergyUsedDrive":   {"interval_seconds": 30},'
+if [ "${TELEMETRY_V2:-0}" = "1" ]; then
+  DEFAULT_DRIVE_COUNTER='      "LifetimeEnergyUsed":        {"interval_seconds": 30},'
+  EXTRA_FIELDS='      "BMSState":                  {"interval_seconds": 10}'
+  say "TELEMETRY_V2 set: LifetimeEnergyUsed replaces the Semi-only drive counter, BMSState added"
+fi
+
 say "Building the configuration"
 CA=$(sed ':a;N;$!ba;s/\n/\\n/g' "/etc/letsencrypt/live/$TELEMETRY_HOST/chain.pem")
 cat > "$WORK/config.json" <<EOF
@@ -172,7 +204,7 @@ cat > "$WORK/config.json" <<EOF
       "VehicleSpeed":              {"interval_seconds": 10},
       "Odometer":                  {"interval_seconds": 30},
       "Location":                  {"interval_seconds": 30},
-      "LifetimeEnergyUsedDrive":   {"interval_seconds": 30},
+$DEFAULT_DRIVE_COUNTER
       "LifetimeEnergyGainedRegen": {"interval_seconds": 60},
       "EnergyRemaining":           {"interval_seconds": 60},
       "Soc":                       {"interval_seconds": 60},
@@ -196,7 +228,8 @@ cat > "$WORK/config.json" <<EOF
       "TpmsPressureFl":            {"interval_seconds": 3600},
       "TpmsPressureFr":            {"interval_seconds": 3600},
       "TpmsPressureRl":            {"interval_seconds": 3600},
-      "TpmsPressureRr":            {"interval_seconds": 3600}
+      "TpmsPressureRr":            {"interval_seconds": 3600}${EXTRA_FIELDS:+,
+$EXTRA_FIELDS}
     }
   }
 }

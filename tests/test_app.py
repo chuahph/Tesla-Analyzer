@@ -4593,3 +4593,53 @@ def test_compare_reports_distance_no_trip_covers():
         sess.commit()
         sess.close()
         settings.app_passcode = old_pc
+
+
+def test_second_field_set_is_recorded_but_not_yet_believed():
+    """LifetimeEnergyUsed and BMSState are carried raw, and derived from later.
+
+    EnergyRemaining moves in steps of 0.02 kWh, which is the floor under every
+    short-trip figure this project has produced. A lifetime counter has no such
+    step, so measuring the same trip both ways says how much of a disagreement
+    is quantisation. Its units are undocumented, though, and assuming one is
+    how a systematic error gets buried — so it is recorded, not used.
+    """
+    from app import sync as sync_mod
+
+    snap = sync_mod.snapshot_from_telemetry(
+        {"Odometer": 19000.0, "LifetimeEnergyUsed": 4321.5,
+         "BMSState": "BMSStateDrive", "VehicleSpeed": 30.0}, 1_788_900_000.0)
+    assert snap["energy_used_raw"] == 4321.5      # unscaled
+    assert snap["bms_state"] == "BMSStateDrive"
+    # Absent on the current field set, and that must read as unknown.
+    bare = sync_mod.snapshot_from_telemetry({"Odometer": 19000.0}, 1_788_900_000.0)
+    assert bare["energy_used_raw"] is None and bare["bms_state"] is None
+    # Semi-truck only, per Tesla's proto: it has never arrived on this car.
+    assert bare["energy_drive_raw"] is None
+
+    # A trip carries the counter's bracket as a difference, beside the
+    # EnergyRemaining one, so the two can be compared on the same journey.
+    shadow: dict = {}
+    t = 1_788_900_000.0
+
+    def s(ts, mi, **kw):
+        base = {"Odometer": mi, "EnergyRemaining": kw.pop("kwh", 55.0),
+                "LifetimeEnergyUsed": kw.pop("used", 4000.0), "Soc": 80.0}
+        base.update(kw)
+        return sync_mod.snapshot_from_telemetry(base, ts)
+
+    sync_mod.advance_shadow(shadow, s(t, 19000.0))
+    sync_mod.advance_shadow(shadow, s(t + 10, 19000.0, VehicleSpeed=30.0,
+                                      Gear="ShiftStateD"))
+    sync_mod.advance_shadow(shadow, s(t + 610, 19005.0, VehicleSpeed=30.0,
+                                      Gear="ShiftStateD", kwh=53.4, used=4001.6))
+    sync_mod.advance_shadow(shadow, s(t + 900, 19008.0, kwh=53.0, used=4002.0,
+                                      DriverSeatOccupied=False))
+    trip = sync_mod.advance_shadow(shadow, s(t + 1100, 19008.0, kwh=53.0,
+                                             used=4002.0, DriverSeatOccupied=False))
+    assert trip is not None
+    assert trip["used_delta"] == pytest.approx(2.0, abs=0.001)
+    assert trip["energy_kwh"] == pytest.approx(2.0, abs=0.001)
+    # Nothing derived from it: energy still comes from EnergyRemaining alone.
+    assert trip["wh_per_km"] == pytest.approx(
+        trip["energy_kwh"] * 1000 / trip["distance_km"], abs=0.1)
