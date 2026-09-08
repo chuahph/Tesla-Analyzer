@@ -4213,3 +4213,47 @@ def test_ingest_recovers_from_a_corrupt_state_row():
         sess.commit()
         sess.close()
         settings.app_passcode = old_pc
+
+
+def test_settle_does_not_close_a_live_trip():
+    """The settle clock must share the record timestamps' time base.
+
+    Record timestamps are true epochs from _telemetry_ts. now_local() is naive
+    MYT wall-clock, and .timestamp() on a naive value reads it in the server's
+    timezone — eight hours out on the deployed host. Every call then saw 28,800
+    seconds of silence and closed whatever trip was open, so a cron ticking
+    each minute chopped one evening's driving into eleven one-minute fragments.
+    """
+    import json as _json
+    import time as _time
+
+    from app.database import SessionLocal
+    from app.api import routes as routes_mod
+    from app import state
+
+    sess = SessionLocal()
+    prev_shadow = state.get(sess, state.TELEMETRY_SHADOW_KEY)
+    prev_trips = state.get(sess, state.TELEMETRY_TRIPS_KEY)
+    vin = "LIVETRIP00000001"
+    try:
+        now = _time.time()
+        driving = {"ts": now - 5, "odo_km": 120.0, "energy_kwh": 50.0,
+                   "speed_kmh": 40.0, "shift": "D", "soc": 70.0,
+                   "charging": False, "seat_occupied": True, "doors_open": False}
+        shadow = {"open": dict(driving, ts=now - 600, odo_km=110.0,
+                               energy_kwh=52.0),
+                  "last": driving, "seen_ts": now - 5, "max_speed_kmh": 60.0}
+        state.put(sess, state.TELEMETRY_SHADOW_KEY, _json.dumps({vin: shadow}))
+        state.put(sess, state.TELEMETRY_TRIPS_KEY, "[]")
+        sess.commit()
+
+        assert routes_mod._settle_shadows(SessionLocal()) == 0
+
+        after = _json.loads(state.get(SessionLocal(), state.TELEMETRY_SHADOW_KEY))
+        assert after[vin].get("open"), "a live trip was closed"
+        assert _json.loads(state.get(SessionLocal(), state.TELEMETRY_TRIPS_KEY)) == []
+    finally:
+        state.put(sess, state.TELEMETRY_SHADOW_KEY, prev_shadow or "{}")
+        state.put(sess, state.TELEMETRY_TRIPS_KEY, prev_trips or "[]")
+        sess.commit()
+        sess.close()

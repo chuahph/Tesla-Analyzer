@@ -2829,7 +2829,16 @@ def _settle_shadows(session: Session) -> int:
         return 0
     if not shadows:
         return 0
-    now_ts = sync_mod.now_local().timestamp()
+    # A true epoch, because that is what the record timestamps are: they come
+    # from _telemetry_ts, which parses an ISO string carrying its own offset.
+    #
+    # now_local() is naive MYT wall-clock, and .timestamp() on a naive value
+    # reads it in the SERVER's timezone — UTC on the deployed host. That made
+    # "now" eight hours after every record, so this saw 28,800 seconds of
+    # silence on every call and closed whatever trip was open. Running each
+    # time the sync cron ticked, it chopped a single evening's driving into
+    # eleven fragments, most of them exactly one minute long.
+    now_ts = time.time()
     finished = []
     for vin, shadow in shadows.items():
         done = sync_mod.settle_shadow(shadow, now_ts)
