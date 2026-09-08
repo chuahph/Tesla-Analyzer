@@ -3803,3 +3803,47 @@ def test_script_shortcuts_are_reachable_without_the_passcode():
                 assert "/login" not in resp.headers["location"]
     finally:
         settings.app_passcode = old_pc
+
+
+def test_compare_survives_an_unreadable_shadow_trip():
+    """A record the store cannot read is a named skip, not a 500.
+
+    Shadow trips are written by a state machine that has changed shape several
+    times while the car kept streaming, so the store can hold records from more
+    than one version of it. "How did that drive go" should not answer with a
+    server error because one old record is missing a key.
+    """
+    import json as _json
+
+    from app.database import SessionLocal
+    from app import state, sync as sync_mod
+
+    settings = get_settings()
+    old_pc = settings.app_passcode
+    settings.app_passcode = ""
+    sess = SessionLocal()
+    previous = state.get(sess, state.TELEMETRY_TRIPS_KEY)
+    try:
+        now = sync_mod.now_local()
+        start, end = now - timedelta(minutes=20), now - timedelta(minutes=2)
+        good = {
+            "start_ts": start.timestamp(), "end_ts": end.timestamp(),
+            "start_time": start.isoformat(timespec="seconds"),
+            "end_time": end.isoformat(timespec="seconds"),
+            "distance_km": 10.4, "duration_min": 18.0, "energy_kwh": 1.52,
+            "wh_per_km": 146.2, "start_odo_km": 12000.0, "end_odo_km": 12010.4,
+        }
+        state.put(sess, state.TELEMETRY_TRIPS_KEY,
+                  _json.dumps([good, {"start_time": "broken-row"}]))
+        sess.commit()
+
+        with TestClient(app) as client:
+            body = client.get("/api/telemetry/compare").json()
+        assert body["telemetry_trips"] == 1          # the good one still reported
+        assert len(body["skipped"]) == 1
+        assert body["skipped"][0]["why"].startswith("KeyError")
+    finally:
+        state.put(sess, state.TELEMETRY_TRIPS_KEY, previous or "[]")
+        sess.commit()
+        sess.close()
+        settings.app_passcode = old_pc

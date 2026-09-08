@@ -9422,6 +9422,65 @@ def fleet_token(session: Session = Depends(get_session)):
     }
 
 
+def _compare_row(t: dict, d, t_start, car_by_drive: dict, pct) -> dict:
+    """One telemetry trip beside the polled trip it overlaps, and beside
+    the car's own figures where those were recorded.
+
+    Split out of telemetry_compare so a record the store cannot read is a
+    skipped row with a reason rather than a 500 over the whole report.
+    """
+    t_end = sync_mod._dt(t["end_ts"])
+    return {
+        "telemetry": {
+            "start": t["start_time"], "end": t["end_time"],
+            "km": t["distance_km"], "kwh": t["energy_kwh"],
+            "wh_per_km": t["wh_per_km"], "min": t["duration_min"],
+            "odo": None if t.get("start_odo_km") is None else
+                   [t.get("start_odo_km"), t.get("end_odo_km")],
+        },
+        "polled": None if not d else {
+            "id": d.id,
+            "start": d.start_time.isoformat(timespec="seconds"),
+            "end": d.end_time.isoformat(timespec="seconds"),
+            "km": round(d.distance_km or 0.0, 3),
+            "kwh": round(d.energy_used_kwh or 0.0, 3),
+            "wh_per_km": round((d.energy_used_kwh or 0.0) * 1000.0
+                               / (d.distance_km or 1e-9), 1),
+            "min": d.duration_min,
+            "estimated_energy": bool(getattr(d, "energy_estimated", False)),
+        },
+        "car": None if not d or d.id not in car_by_drive else {
+            "km": car_by_drive[d.id]["km"],
+            "kwh": round(car_by_drive[d.id]["wh_per_km"]
+                         * car_by_drive[d.id]["km"] / 1000.0, 3),
+            "wh_per_km": car_by_drive[d.id]["wh_per_km"],
+        },
+        # Signed error against the car. Negative km means that source
+        # recorded a shorter trip than the car did — which is what a lost
+        # departure or arrival looks like, and it inflates Wh/km by the
+        # same proportion.
+        "vs_car": None if not d or d.id not in car_by_drive else {
+            "polled_km_pct": pct(d.distance_km, car_by_drive[d.id]["km"]),
+            "telemetry_km_pct": pct(t["distance_km"], car_by_drive[d.id]["km"]),
+            "polled_whkm_pct": pct(
+                (d.energy_used_kwh or 0.0) * 1000.0 / (d.distance_km or 1e-9),
+                car_by_drive[d.id]["wh_per_km"]),
+            "telemetry_whkm_pct": pct(t["wh_per_km"],
+                                      car_by_drive[d.id]["wh_per_km"]),
+        },
+        "delta": None if not d else {
+            "km_pct": pct(t["distance_km"], d.distance_km),
+            "kwh_pct": pct(t["energy_kwh"], d.energy_used_kwh),
+            # Positive means polling started the trip LATE — the blind
+            # head, in minutes.
+            "start_delta_min": round(
+                (d.start_time - t_start).total_seconds() / 60.0, 1),
+            "end_delta_min": round(
+                (d.end_time - t_end).total_seconds() / 60.0, 1),
+        },
+    }
+
+
 @router.get("/telemetry/compare")
 def telemetry_compare(
     days: int = Query(14, ge=1, le=90),
@@ -9455,7 +9514,8 @@ def telemetry_compare(
         car_rows = _json.loads(state.get(session, state.CAR_READINGS_KEY) or "[]")
     except ValueError:
         car_rows = []
-    car_by_drive = {int(r["drive_id"]): r for r in car_rows}
+    car_by_drive = {int(r["drive_id"]): r for r in car_rows
+                    if isinstance(r, dict) and r.get("drive_id") is not None}
 
     since = sync_mod.now_local() - timedelta(days=days)
     drives = session.scalars(
@@ -9467,10 +9527,19 @@ def telemetry_compare(
             return None
         return round((new - old) / old * 100.0, 1)
 
-    rows, matched_ids = [], set()
+    # One unreadable shadow record must not cost the whole comparison. These
+    # are written by a machine that has been changed several times while the
+    # car kept streaming, so the store can hold rows from more than one shape
+    # of this code — and the answer to "how did that drive go" should not be a
+    # 500 because a record from three deploys ago is missing a key.
+    rows, matched_ids, skipped = [], set(), []
     for t in shadow_trips:
-        t_start = sync_mod._dt(t["start_ts"])
-        t_end = sync_mod._dt(t["end_ts"])
+        try:
+            t_start = sync_mod._dt(t["start_ts"])
+            t_end = sync_mod._dt(t["end_ts"])
+        except (KeyError, TypeError, ValueError, OSError) as exc:
+            skipped.append({"record": str(t)[:120], "why": f"{type(exc).__name__}: {exc}"})
+            continue
         if t_end < since:
             continue
         best = None
@@ -9485,64 +9554,29 @@ def telemetry_compare(
         d = best[0] if best else None
         if d:
             matched_ids.add(d.id)
-        rows.append({
-            "telemetry": {
-                "start": t["start_time"], "end": t["end_time"],
-                "km": t["distance_km"], "kwh": t["energy_kwh"],
-                "wh_per_km": t["wh_per_km"], "min": t["duration_min"],
-                "odo": None if t.get("start_odo_km") is None else
-                       [t.get("start_odo_km"), t.get("end_odo_km")],
-            },
-            "polled": None if not d else {
-                "id": d.id,
-                "start": d.start_time.isoformat(timespec="seconds"),
-                "end": d.end_time.isoformat(timespec="seconds"),
-                "km": round(d.distance_km or 0.0, 3),
-                "kwh": round(d.energy_used_kwh or 0.0, 3),
-                "wh_per_km": round((d.energy_used_kwh or 0.0) * 1000.0
-                                   / (d.distance_km or 1e-9), 1),
-                "min": d.duration_min,
-                "estimated_energy": bool(getattr(d, "energy_estimated", False)),
-            },
-            "car": None if not d or d.id not in car_by_drive else {
-                "km": car_by_drive[d.id]["km"],
-                "kwh": round(car_by_drive[d.id]["wh_per_km"]
-                             * car_by_drive[d.id]["km"] / 1000.0, 3),
-                "wh_per_km": car_by_drive[d.id]["wh_per_km"],
-            },
-            # Signed error against the car. Negative km means that source
-            # recorded a shorter trip than the car did — which is what a lost
-            # departure or arrival looks like, and it inflates Wh/km by the
-            # same proportion.
-            "vs_car": None if not d or d.id not in car_by_drive else {
-                "polled_km_pct": pct(d.distance_km, car_by_drive[d.id]["km"]),
-                "telemetry_km_pct": pct(t["distance_km"], car_by_drive[d.id]["km"]),
-                "polled_whkm_pct": pct(
-                    (d.energy_used_kwh or 0.0) * 1000.0 / (d.distance_km or 1e-9),
-                    car_by_drive[d.id]["wh_per_km"]),
-                "telemetry_whkm_pct": pct(t["wh_per_km"],
-                                          car_by_drive[d.id]["wh_per_km"]),
-            },
-            "delta": None if not d else {
-                "km_pct": pct(t["distance_km"], d.distance_km),
-                "kwh_pct": pct(t["energy_kwh"], d.energy_used_kwh),
-                # Positive means polling started the trip LATE — the blind
-                # head, in minutes.
-                "start_delta_min": round(
-                    (d.start_time - t_start).total_seconds() / 60.0, 1),
-                "end_delta_min": round(
-                    (d.end_time - t_end).total_seconds() / 60.0, 1),
-            },
-        })
+        try:
+            rows.append(_compare_row(t, d, t_start, car_by_drive, pct))
+        except Exception as exc:  # noqa: BLE001 — name the bad record, keep the rest
+            skipped.append({"record": t.get("start_time", str(t)[:60]),
+                            "why": f"{type(exc).__name__}: {exc}"})
 
     paired = [r for r in rows if r["polled"]]
-    judged = [r for r in paired
-              if r["vs_car"] and r["vs_car"]["telemetry_km_pct"] is not None]
+    # Every median below is taken over these same rows, so a row qualifies
+    # only when all four figures exist. Gating on telemetry_km_pct alone let a
+    # trip through whose Wh/km is None — which happens whenever the energy
+    # counter did not move — and percentile() cannot order None against a
+    # float, so one such trip took down the whole report.
+    judged = [r for r in paired if r["vs_car"] and all(
+        r["vs_car"][k] is not None for k in
+        ("polled_km_pct", "telemetry_km_pct", "polled_whkm_pct", "telemetry_whkm_pct"))]
     km_deltas = [r["delta"]["km_pct"] for r in paired
                  if r["delta"]["km_pct"] is not None]
     heads = [r["delta"]["start_delta_min"] for r in paired]
     return {
         "days": days,
+        # Records the store held but this could not read. Empty is the normal
+        # case; anything here names what went wrong with that one trip.
+        "skipped": skipped,
         "telemetry_trips": len(rows),
         "matched": len(paired),
         "telemetry_only": len(rows) - len(paired),
