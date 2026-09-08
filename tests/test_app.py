@@ -4541,3 +4541,55 @@ def test_carpark_blackout_and_replay_end_to_end():
         sess.commit()
         sess.close()
         settings.app_passcode = old_pc
+
+
+def test_compare_reports_distance_no_trip_covers():
+    """A trip should end where the next one begins.
+
+    When it does not, the odometer moved during a stretch no trip covers —
+    a departure lost while the car was out of coverage, or a boundary drawn
+    wrongly. Inventing a trip to hold it would be a guess; absorbing it into a
+    neighbour would be worse. Report it, so an incomplete record cannot look
+    complete. The real stream showed 31117.988 -> 31118.140 across one
+    carpark blackout: 0.152 km driven that nothing accounts for.
+    """
+    import json as _json
+
+    from app.database import SessionLocal
+    from app import state, sync as sync_mod
+
+    settings = get_settings()
+    old_pc = settings.app_passcode
+    settings.app_passcode = ""
+    sess = SessionLocal()
+    prev = state.get(sess, state.TELEMETRY_TRIPS_KEY)
+    try:
+        now = sync_mod.now_local()
+
+        def trip(mins_ago, start_odo, end_odo):
+            at = now - timedelta(minutes=mins_ago)
+            end = at + timedelta(minutes=10)
+            return {"start_ts": at.timestamp(), "end_ts": end.timestamp(),
+                    "start_time": at.isoformat(timespec="seconds"),
+                    "end_time": end.isoformat(timespec="seconds"),
+                    "distance_km": round(end_odo - start_odo, 3),
+                    "duration_min": 10.0, "energy_kwh": 1.0, "wh_per_km": 100.0,
+                    "start_odo_km": start_odo, "end_odo_km": end_odo}
+
+        state.put(sess, state.TELEMETRY_TRIPS_KEY, _json.dumps([
+            trip(120, 31107.098, 31117.988),
+            trip(60, 31118.140, 31120.640),      # 0.152 km unaccounted before it
+            trip(30, 31120.640, 31121.640),      # continuous: no gap
+        ]))
+        sess.commit()
+
+        with TestClient(app) as client:
+            body = client.get("/api/telemetry/compare").json()
+        gaps = [r["telemetry"]["odo_gap_before_km"] for r in body["trips"]]
+        assert gaps == [None, pytest.approx(0.152, abs=0.001), None], gaps
+        assert body["summary"]["unaccounted_km"] == pytest.approx(0.152, abs=0.001)
+    finally:
+        state.put(sess, state.TELEMETRY_TRIPS_KEY, prev or "[]")
+        sess.commit()
+        sess.close()
+        settings.app_passcode = old_pc

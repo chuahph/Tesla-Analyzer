@@ -9321,14 +9321,31 @@ def telemetry_ingest(
     SENTRY_ALERT = {"SentryModeStateAware": "movement detected",
                     "SentryModeStatePanic": "alarm triggered"}
 
-    for record in kept:
+    # In record order, not arrival order. A car replays what it buffered while
+    # out of coverage, so a batch can carry a record older than the one before
+    # it, and the machine below reads a batch as a sequence of moments.
+    for record in sorted(kept, key=lambda r: _telemetry_ts(r.get("created_at"))):
         vin = record.get("vin") or "unknown"
         car = latest.setdefault(vin, {})
         was_sentry = car.get("SentryMode")
         # A field the car could not read must not erase what it last told us.
-        car.update({k: v for k, v in (record.get("fields") or {}).items()
-                    if v is not None})
-        if record.get("created_at"):
+        fields = {k: v for k, v in (record.get("fields") or {}).items()
+                  if v is not None}
+        ts = _telemetry_ts(record.get("created_at"))
+        composite_ts = _telemetry_ts(car.get("_ts"))
+        if ts and composite_ts and ts < composite_ts:
+            # Older than what the composite already describes. Its values are
+            # the past, and this composite means "the car as of the newest
+            # thing it has said" — letting a replay overwrite here rewinds the
+            # odometer, and the next record that carries no odometer of its own
+            # inherits the rewind. Measured on a replay ten minutes late: the
+            # car went backwards ten kilometres without moving.
+            #
+            # It may still fill a hole, since a value never seen is not being
+            # contradicted by anything.
+            fields = {k: v for k, v in fields.items() if k not in car}
+        car.update(fields)
+        if ts >= composite_ts and record.get("created_at"):
             car["_ts"] = record["created_at"]
         # Step the shadow machine on every record, not once per batch: the
         # batch is an artefact of how the bridge groups posts, and a trip
@@ -9680,6 +9697,7 @@ def telemetry_compare(
     # of this code — and the answer to "how did that drive go" should not be a
     # 500 because a record from three deploys ago is missing a key.
     rows, matched_ids, skipped = [], set(), []
+    prev_end_odo, unaccounted = None, 0.0
     for t in shadow_trips:
         try:
             t_start = sync_mod._dt(t["start_ts"])
@@ -9702,10 +9720,28 @@ def telemetry_compare(
         if d:
             matched_ids.add(d.id)
         try:
-            rows.append(_compare_row(t, d, t_start, car_by_drive, pct))
+            row = _compare_row(t, d, t_start, car_by_drive, pct)
         except Exception as exc:  # noqa: BLE001 — name the bad record, keep the rest
             skipped.append({"record": t.get("start_time", str(t)[:60]),
                             "why": f"{type(exc).__name__}: {exc}"})
+            continue
+        # Distance the odometer says was driven between one trip and the next.
+        # It should be nothing: a trip ends where the following one begins.
+        # Anything here is real driving that no trip covers — a departure lost
+        # while the car was out of coverage, or a boundary drawn wrongly. The
+        # figure is reported rather than absorbed, because inventing a trip to
+        # hold it would be a guess, and hiding it makes an incomplete record
+        # look complete.
+        gap = None
+        if (prev_end_odo is not None and t.get("start_odo_km") is not None):
+            gap = round(float(t["start_odo_km"]) - prev_end_odo, 3)
+            gap = gap if gap > 0.001 else None
+        row["telemetry"]["odo_gap_before_km"] = gap
+        if gap:
+            unaccounted += gap
+        if t.get("end_odo_km") is not None:
+            prev_end_odo = float(t["end_odo_km"])
+        rows.append(row)
 
     paired = [r for r in rows if r["polled"]]
     # Every median below is taken over these same rows, so a row qualifies
@@ -9746,6 +9782,9 @@ def telemetry_compare(
                 [r["vs_car"]["telemetry_whkm_pct"] for r in judged], 0.5), 2),
         },
         "summary": {
+            # Kilometres the odometer recorded between trips rather than
+            # inside one. Zero is the healthy answer.
+            "unaccounted_km": round(unaccounted, 3),
             "median_km_delta_pct": round(percentile(km_deltas, 0.5), 2)
             if km_deltas else None,
             "median_blind_head_min": round(percentile(heads, 0.5), 2)
