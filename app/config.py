@@ -188,6 +188,15 @@ class Settings(BaseSettings):
     whatsapp_phone: str = ""
     whatsapp_apikey: str = ""
 
+    # ntfy.sh — install the ntfy app, invent a topic, done. No account, no
+    # key, and it is built for alerts rather than adapted into one.
+    #
+    # The topic IS the credential: anyone who guesses it reads your
+    # notifications, and a Sentry alert carries the car's coordinates. Use
+    # something long and random, not "tesla" or your name. Empty = disabled.
+    ntfy_topic: str = ""
+    ntfy_server: str = "https://ntfy.sh"
+
     # Web push notifications (charge complete, low battery, ...). Generate a
     # keypair once with `python -m app.push_keys` and set both here — empty
     # (either) disables notifications entirely; the subscribe UI stays

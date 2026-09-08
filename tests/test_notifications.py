@@ -14,6 +14,7 @@ def _settings(**overrides):
         event_webhook_url="",
         telegram_bot_token="", telegram_chat_id="",
         whatsapp_phone="", whatsapp_apikey="",
+        ntfy_topic="", ntfy_server="https://ntfy.sh",
     )
     base.update(overrides)
     return SimpleNamespace(**base)
@@ -259,4 +260,32 @@ def test_whatsapp_is_skipped_until_both_halves_are_configured(monkeypatch):
     monkeypatch.setattr("app.notifications.get_settings",
                         lambda: _settings(whatsapp_phone="+60123456789"))
     assert notifications.send_whatsapp("t", "b") is False
+    assert calls == []
+
+
+def test_ntfy_marks_a_sentry_alert_urgent(monkeypatch):
+    """An alarm should break through a silenced phone; a charge should not."""
+    sent = []
+
+    def fake_post(url, **kw):
+        sent.append((url, kw.get("headers", {})))
+        return httpx.Response(200, request=httpx.Request("POST", url))
+
+    monkeypatch.setattr("app.notifications.httpx.post", fake_post)
+    monkeypatch.setattr("app.notifications.get_settings",
+                        lambda: _settings(ntfy_topic="a-long-random-topic"))
+
+    assert notifications.send_ntfy("Sentry alert", "movement", urgent=True) is True
+    assert notifications.send_ntfy("Charge complete", "80%") is True
+    assert sent[0][0].endswith("/a-long-random-topic")
+    assert sent[0][1]["Priority"] == "urgent"
+    assert sent[1][1]["Priority"] == "default"
+
+
+def test_ntfy_is_skipped_without_a_topic(monkeypatch):
+    calls = []
+    monkeypatch.setattr("app.notifications.httpx.post",
+                        lambda url, **k: calls.append(url))
+    monkeypatch.setattr("app.notifications.get_settings", lambda: _settings())
+    assert notifications.send_ntfy("t", "b") is False
     assert calls == []
