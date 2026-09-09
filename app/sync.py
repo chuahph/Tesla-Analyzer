@@ -2816,9 +2816,20 @@ def snapshot_from_telemetry(fields: dict[str, Any], ts: float) -> dict[str, Any]
         "paired_keys": num("PairedPhoneKeyAndKeyFobQty"),
         "charge_port_door_open": (bool(fields["ChargePortDoorOpen"])
                                   if "ChargePortDoorOpen" in fields else None),
-        # Somebody got in AND buckled up, which says more than a door opening.
-        "driver_belt": (bool(fields["DriverSeatBelt"])
-                        if "DriverSeatBelt" in fields else None),
+        # NOT read as "the driver is belted", because it is not. Observed
+        # reading false while the car was being driven at 17 km/h by a driver
+        # who was belted, and who unbuckles only after shifting to Park. So it
+        # is either inverted, or it reports something else — a warning state, a
+        # latch, a chime — and Tesla's proto declares the field with no
+        # semantics at all, only a number.
+        #
+        # Carried raw under a name that claims nothing, and driver_belt is left
+        # unknown so nothing can quietly start believing it. Its changes are in
+        # the mode log; when they line up with buckling or with Park, the
+        # meaning will be established rather than assumed. That was the lesson
+        # of the odometer, and of LifetimeEnergyUsed a day later.
+        "driver_belt_raw": fields.get("DriverSeatBelt"),
+        "driver_belt": None,
         # The pack's own notion of driving (BMSStateDrive). Trip boundaries
         # are inferred from Gear and speed; this is the car's own answer, and
         # is recorded to be compared against that inference rather than to

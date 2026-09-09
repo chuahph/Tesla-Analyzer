@@ -4995,11 +4995,16 @@ def test_the_other_third_set_fields_are_recorded_raw():
          "ChargePortDoorOpen": True, "DriverSeatBelt": False}, 1_788_900_000.0)
     assert s["paired_keys"] == 3.0
     assert s["charge_port_door_open"] is True
-    assert s["driver_belt"] is False
+    # NOT read as "belted": observed false while a belted driver drove at
+    # 17 km/h. Carried raw, claimed as nothing, until its transitions say
+    # what it reports.
+    assert s["driver_belt_raw"] is False
+    assert s["driver_belt"] is None
 
     bare = sync_mod.snapshot_from_telemetry({"Odometer": 19000.0}, 1_788_900_000.0)
     assert bare["paired_keys"] is None
-    assert bare["charge_port_door_open"] is None and bare["driver_belt"] is None
+    assert bare["charge_port_door_open"] is None
+    assert bare["driver_belt_raw"] is None and bare["driver_belt"] is None
 
 
 def test_sentry_alert_reports_a_window(monkeypatch):

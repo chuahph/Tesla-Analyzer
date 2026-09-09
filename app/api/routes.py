@@ -9196,7 +9196,12 @@ TELEMETRY_MODE_FIELDS = ("BMSState", "CenterDisplay", "Gear",
                          # A key added to the car is how a stolen Tesla is
                          # prepared. Logged rather than alerted on until it is
                          # known what this reads normally.
-                         "PairedPhoneKeyAndKeyFobQty")
+                         "PairedPhoneKeyAndKeyFobQty",
+                         # Read false while a belted driver was driving. Logged
+                         # so its transitions can be lined up against buckling
+                         # and against Park, which is the only way to find out
+                         # what it actually reports.
+                         "DriverSeatBelt")
 TELEMETRY_MODES_MAX = 400
 # Silence longer than this is a gap worth recording. Records arrive every few
 # seconds while the car is awake, so two minutes is unambiguous — and a parked
