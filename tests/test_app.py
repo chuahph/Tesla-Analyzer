@@ -3680,11 +3680,15 @@ def test_sentry_escalation_raises_an_alert_once(monkeypatch):
                 sentry("SentryModeStateArmed", "2026-09-08T10:01:30Z"),
                 sentry("SentryModeStatePanic", "2026-09-08T10:02:00Z"),
             ]})
-        # Armed is the car minding its own business; only the escalation
-        # speaks, and the cooldown keeps a flicker from becoming six messages.
-        assert len(alerts) == 1
-        assert alerts[0][0] == "Sentry alert"
-        assert alerts[0][2] == "sentry"
+        # Armed is the car minding its own business, and the cooldown keeps a
+        # flicker from becoming six messages — but the alarm is not a flicker.
+        # Someone triggering Aware and then setting the alarm off two minutes
+        # later is the sequence that matters most, and the quiet period earned
+        # by the first must not swallow the second.
+        assert [a[0] for a in alerts] == ["Sentry", "Sentry: alarm"], alerts
+        assert all(a[2] == "sentry" for a in alerts)
+        assert "moved near the car" in alerts[0][1]
+        assert "ALARM went off" in alerts[1][1]
     finally:
         settings.sync_key = old_sk
 
@@ -4883,3 +4887,67 @@ def test_only_changed_state_is_written_on_a_telemetry_batch():
         sess.commit()
         sess.close()
         settings.app_passcode = old_pc
+
+
+def test_sentry_alert_says_what_actually_happened(monkeypatch):
+    """"The car movement detected" said the opposite of what Aware means.
+
+    Aware is the car noticing something NEAR it — someone walking past. The car
+    has not moved and nothing has been touched. Panic is the alarm going off.
+    Tesla streams no camera, zone or sensor, so which side of the car cannot be
+    answered; what can be answered is whether anything actually happened to it,
+    which is the question at one in the morning.
+    """
+    from app.api import routes as routes_mod
+
+    settings = get_settings()
+    old_sk = settings.sync_key
+    settings.sync_key = "cronkey"
+    alerts: list[tuple] = []
+    monkeypatch.setattr(routes_mod.notifications, "notify",
+                        lambda s, title, body, tag=None: alerts.append((title, body, tag)))
+    monkeypatch.setattr(routes_mod, "SENTRY_COOLDOWN_SEC", 0.0)
+
+    def batch(vin, *entries):
+        return {"records": [{"vin": vin, "createdAt": at, "data": data}
+                            for at, data in entries]}
+
+    def sentry(state):
+        return [{"key": "SentryMode", "value": {"sentryModeStateValue": state}}]
+
+    try:
+        with TestClient(app) as client:
+            client.post("/api/telemetry?key=cronkey", json=batch(
+                "SENTRYWORDS00001",
+                ("2026-09-09T09:00:00Z", [
+                    {"key": "Locked", "value": {"booleanValue": True}},
+                    {"key": "Soc", "value": {"doubleValue": 70.4}},
+                    {"key": "DoorState", "value": {"doorValue": {
+                        "DriverFront": False, "TrunkRear": False}}}]),
+                ("2026-09-09T09:00:10Z", sentry("SentryModeStateArmed")),
+                ("2026-09-09T09:00:20Z", sentry("SentryModeStateAware"))))
+
+        assert len(alerts) == 1, alerts
+        title, body, tag = alerts[0]
+        assert title == "Sentry" and tag == "sentry"
+        assert "moved near the car" in body
+        assert "The car has not moved." in body
+        assert "all doors shut" in body and "locked" in body and "70%" in body
+
+        alerts.clear()
+        with TestClient(app) as client:
+            client.post("/api/telemetry?key=cronkey", json=batch(
+                "SENTRYWORDS00002",
+                ("2026-09-09T09:10:00Z", [
+                    {"key": "Locked", "value": {"booleanValue": False}},
+                    {"key": "DoorState", "value": {"doorValue": {
+                        "DriverFront": True, "TrunkRear": False}}}]),
+                ("2026-09-09T09:10:10Z", sentry("SentryModeStatePanic"))))
+
+        title, body, _ = alerts[0]
+        # An alarm reads differently from someone walking past, and the two
+        # facts that matter are that it is open and unlocked.
+        assert title == "Sentry: alarm" and "ALARM went off" in body
+        assert "OPEN: DriverFront" in body and "UNLOCKED" in body
+    finally:
+        settings.sync_key = old_sk

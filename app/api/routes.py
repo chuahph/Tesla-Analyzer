@@ -9217,9 +9217,49 @@ def _sentry_alert(session: Session, vin: str, sentry_state: str, what: str,
         seen = _json.loads(state.get(session, key) or "{}")
     except ValueError:
         seen = {}
-    if now - float(seen.get("at") or 0) < SENTRY_COOLDOWN_SEC:
+    # The cooldown stops a person walking back and forth becoming six messages.
+    # It must not stop the alarm: someone triggering Aware and then setting the
+    # alarm off two minutes later is exactly the sequence that matters most,
+    # and the quiet period earned by the first event would have swallowed the
+    # second. An escalation to Panic always gets through; a second Panic
+    # inside the window does not.
+    escalating = (sentry_state == "SentryModeStatePanic"
+                  and seen.get("state") != "SentryModeStatePanic")
+    if (not escalating
+            and now - float(seen.get("at") or 0) < SENTRY_COOLDOWN_SEC):
         return
     state.put(session, key, _json.dumps({"at": now, "state": sentry_state}))
+
+    # Tesla streams one sentry field and no more: SentryMode, with six states.
+    # There is no camera, no zone, no sensor and no clip reason anywhere in the
+    # 270 fields it publishes, so "which side of the car" cannot be answered
+    # and this must not pretend otherwise.
+    #
+    # What CAN be said is whether anything actually happened to the car, and
+    # that is the question being asked at one in the morning. Every field below
+    # is already streaming for other reasons.
+    if what == "panic":
+        headline = f"ALARM went off at {sync_mod.now_local():%H:%M}."
+    else:
+        # Not "the car moved" — the car noticed something near it. The old
+        # wording said the opposite of what Aware means.
+        headline = (f"Something moved near the car at "
+                    f"{sync_mod.now_local():%H:%M}. The car has not moved.")
+
+    facts = []
+    doors = car.get("DoorState")
+    if isinstance(doors, dict) and doors:
+        opened = [name for name, is_open in doors.items() if is_open]
+        facts.append("OPEN: " + ", ".join(sorted(opened)) if opened
+                     else "all doors shut")
+    locked = car.get("Locked")
+    if locked is not None:
+        facts.append("locked" if locked else "UNLOCKED")
+    if car.get("DriverSeatOccupied"):
+        facts.append("someone in the driver's seat")
+    soc = car.get("Soc")
+    if isinstance(soc, (int, float)):
+        facts.append(f"{soc:.0f}%")
 
     where = ""
     location = car.get("Location")
@@ -9228,10 +9268,11 @@ def _sentry_alert(session: Session, vin: str, sentry_state: str, what: str,
         if lat and lon:
             where = f"\nhttps://maps.google.com/?q={lat},{lon}"
 
+    detail = ("\n" + " · ".join(facts)) if facts else ""
     notifications.notify(
         session,
-        "Sentry alert",
-        f"The car {what} at {sync_mod.now_local():%H:%M}.{where}",
+        "Sentry: alarm" if what == "panic" else "Sentry",
+        f"{headline}{detail}{where}",
         tag="sentry",
     )
 
@@ -9343,8 +9384,13 @@ def telemetry_ingest(
 
     # States that mean the car noticed something. Off/Idle/Armed/Quiet are
     # the car minding its own business; these two are not.
-    SENTRY_ALERT = {"SentryModeStateAware": "movement detected",
-                    "SentryModeStatePanic": "alarm triggered"}
+    # What each state actually means, in the words the alert will use. Aware
+    # is the car noticing something NEAR it — a person walking past, a trolley,
+    # a cat. The car has not moved and nothing has been touched. Panic is the
+    # alarm going off, which is a different message and deserves a different
+    # reaction at one in the morning.
+    SENTRY_ALERT = {"SentryModeStateAware": "aware",
+                    "SentryModeStatePanic": "panic"}
 
     # In record order, not arrival order. A car replays what it buffered while
     # out of coverage, so a batch can carry a record older than the one before
