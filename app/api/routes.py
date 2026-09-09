@@ -9169,7 +9169,22 @@ def summary(
 # How many streamed records to keep for inspection. Enough to see a whole
 # departure — the moment the polling app was blind to — without letting a
 # key-value row grow without bound.
-TELEMETRY_RAW_MAX = 300
+# Small on purpose. This buffer exists to be READ BY A HUMAN — Tesla does not
+# document the units of Odometer or EnergyRemaining, so records were kept
+# verbatim until someone had checked what the car actually sends. That job is
+# done: miles, mph, Celsius, and EnergyRemaining's 0.02 kWh step were all
+# established from it.
+#
+# What remained was its cost. Every batch appends a few records and rewrites
+# the whole blob, so the buffer's size is paid ~2000 times a day rather than
+# once. At 300 records that was about 100 KB per batch, some 200 MB of writes
+# a day to carry under 1 MB of new data. Forty records still answers "what is
+# the car sending right now", which is all anyone asks of it now.
+#
+# The other telemetry blobs do not have this problem: SQLAlchemy emits no
+# UPDATE when a value is unchanged, and trips and mode changes are unchanged
+# on almost every batch.
+TELEMETRY_RAW_MAX = 40
 # Shadow trips kept for comparison. Weeks of driving, which is the window in
 # which telemetry either earns the switch or does not.
 TELEMETRY_TRIPS_MAX = 400

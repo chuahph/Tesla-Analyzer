@@ -4818,3 +4818,68 @@ def test_mode_changes_are_logged_with_the_moment_they_happened():
         sess.commit()
         sess.close()
         settings.app_passcode = old_pc
+
+
+def test_only_changed_state_is_written_on_a_telemetry_batch():
+    """The buffer's size is paid on every batch, not once.
+
+    Each POST appends a few records and rewrites the whole raw blob, so a
+    300-record buffer cost ~100 KB per batch — some 200 MB of writes a day to
+    carry under 1 MB of new data. The other blobs are fine: no UPDATE is
+    emitted when a value has not changed, and trips and mode changes are
+    unchanged on almost every batch. This pins both halves of that.
+    """
+    import json as _json
+
+    from sqlalchemy import event
+
+    from app.database import SessionLocal, engine
+    from app import state
+    from app.api import routes as routes_mod
+
+    assert routes_mod.TELEMETRY_RAW_MAX <= 60, "the raw buffer is a diagnostic, not an archive"
+
+    settings = get_settings()
+    old_pc = settings.app_passcode
+    settings.app_passcode = ""
+    sess = SessionLocal()
+    prev = {k: state.get(sess, k) for k in (
+        state.TELEMETRY_RAW_KEY, state.TELEMETRY_TRIPS_KEY,
+        state.TELEMETRY_MODES_KEY, state.TELEMETRY_LATEST_KEY)}
+    vin = "WRITES0000000001"
+    updated: list[str] = []
+
+    def _watch(conn, cursor, statement, params, context, executemany):
+        if statement.strip().upper().startswith("UPDATE SETTINGS"):
+            updated.append(str(params))
+
+    try:
+        state.put(sess, state.TELEMETRY_TRIPS_KEY, "[]")
+        state.put(sess, state.TELEMETRY_MODES_KEY, "[]")
+        sess.commit()
+        with TestClient(app) as client:
+            def post(ts, speed):
+                r = client.post("/api/telemetry", json={"records": [{
+                    "vin": vin, "createdAt": ts,
+                    "data": [{"key": "VehicleSpeed", "value": {"doubleValue": speed}}]}]})
+                assert r.status_code == 200, r.text
+
+            post("2026-09-09T15:00:00Z", 20.0)          # warm the state up
+            event.listen(engine, "before_cursor_execute", _watch)
+            try:
+                post("2026-09-09T15:00:10Z", 21.0)
+            finally:
+                event.remove(engine, "before_cursor_execute", _watch)
+
+        written = " ".join(updated)
+        # Speed changed, so the raw buffer and the composite must be written.
+        assert "telemetry_raw" in written and "telemetry_latest" in written
+        # Nothing closed and no mode moved, so these must NOT be rewritten.
+        assert "telemetry_trips" not in written, "unchanged trips were rewritten"
+        assert "telemetry_modes" not in written, "unchanged mode log was rewritten"
+    finally:
+        for key, was in prev.items():
+            state.put(sess, key, was or "")
+        sess.commit()
+        sess.close()
+        settings.app_passcode = old_pc
