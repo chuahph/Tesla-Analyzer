@@ -4814,6 +4814,10 @@ def test_mode_changes_are_logged_with_the_moment_they_happened():
             leaving = [m for m in body["recent"]
                        if m["to"] == "BMSStateStandby"][0]
             assert leaving["ts"].endswith("22:40:00")   # 14:40Z in local time
+            # And when this heard about it, which is a different question once
+            # the car has been out of coverage: a change made underground is
+            # reported on reconnect and arrives looking like one made just now.
+            assert leaving["seen"] and leaving["lag_sec"] is not None
 
             one = client.get("/api/telemetry/modes?field=BMSState").json()
             assert {m["field"] for m in one["recent"]} == {"BMSState"}

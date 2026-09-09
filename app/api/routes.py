@@ -9439,9 +9439,20 @@ def telemetry_ingest(
         # the app can answer when the car decided it had stopped driving.
         for key in TELEMETRY_MODE_FIELDS:
             if key in fields and fields[key] != car.get(key):
+                # Both clocks. `ts` is when the car says it happened; `seen`
+                # is when this heard about it. They are usually seconds apart
+                # and the difference is noise — until the car has been out of
+                # coverage, when a change made underground is only reported on
+                # reconnect and arrives looking like a change made just now.
+                # Without both, a gear shifted to Park at 17:39 and heard at
+                # 17:50 is indistinguishable from one shifted at 17:50, and a
+                # trip's end is eleven minutes wrong with nothing to show it.
                 modes.append({
                     "ts": (sync_mod._dt(ts).isoformat(timespec="seconds")
                            if ts else None),
+                    "seen": now.isoformat(timespec="seconds"),
+                    "lag_sec": round(now.timestamp() - sync_mod._dt(ts).timestamp())
+                    if ts else None,
                     "vin": vin, "field": key,
                     "from": car.get(key), "to": fields[key],
                 })
