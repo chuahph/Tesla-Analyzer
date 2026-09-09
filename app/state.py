@@ -54,6 +54,12 @@ TELEMETRY_LATEST_KEY = "telemetry_latest"  # JSON {vin: {field: value}} — the
 # the running composite is what a snapshot can be built from.
 TELEMETRY_SHADOW_KEY = "telemetry_shadow"  # JSON {vin: machine state}: the
 # open shadow trip and what has been seen since it started.
+TELEMETRY_MODES_KEY = "telemetry_modes"  # JSON list of {ts, vin, field, from,
+# to}: every change of the handful of fields that say what the car thinks it
+# is doing. They stream only when they change, so the composite holds the
+# current value and nothing holds the moment it moved — and the question these
+# answer ("when does the car decide a journey is over?") can only be answered
+# from the moment.
 TELEMETRY_TRIPS_KEY = "telemetry_trips"  # JSON list of finished shadow trips.
 # Kept out of the Drive table on purpose — these are unverified, and a wrong
 # row in the real history is a repair job while a wrong row here is a delete.

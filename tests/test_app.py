@@ -4761,3 +4761,60 @@ def test_silence_is_read_differently_depending_on_the_last_speed():
     assert sync_mod.settle_shadow(driving, t + 660 + 550) is None
     still = sync_mod.settle_shadow(driving, t + 660 + 700)
     assert still is not None and still["end_ts"] == t + 660
+
+
+def test_mode_changes_are_logged_with_the_moment_they_happened():
+    """BMSState and friends stream only when they change.
+
+    The composite therefore holds the current value and nothing holds the
+    moment it moved — and the moment is the question: a car parked with its
+    driver aboard is ambiguous to this app for ten minutes by a timer, while
+    the car itself decides at some point that the journey is over. If the pack
+    leaves Drive, that is the car's own answer.
+    """
+    import json as _json
+
+    from app.database import SessionLocal
+    from app import state
+
+    settings = get_settings()
+    old_pc = settings.app_passcode
+    settings.app_passcode = ""
+    sess = SessionLocal()
+    prev = state.get(sess, state.TELEMETRY_MODES_KEY)
+    vin = "MODES00000000001"
+    try:
+        state.put(sess, state.TELEMETRY_MODES_KEY, "[]")
+        sess.commit()
+
+        with TestClient(app) as client:
+            def post(ts, key, value, wrap="stringValue"):
+                r = client.post("/api/telemetry", json={"records": [{
+                    "vin": vin, "createdAt": ts,
+                    "data": [{"key": key, "value": {wrap: value}}]}]})
+                assert r.status_code == 200, r.text
+
+            post("2026-09-09T14:00:00Z", "BMSState", "BMSStateDrive")
+            post("2026-09-09T14:00:30Z", "CenterDisplay", "DisplayStateDriving")
+            # Repeats are not changes and must not fill the log.
+            post("2026-09-09T14:01:00Z", "BMSState", "BMSStateDrive")
+            post("2026-09-09T14:40:00Z", "BMSState", "BMSStateStandby")
+
+            body = client.get("/api/telemetry/modes").json()
+            assert body["changes"] == 3, body["recent"]
+            moves = [(m["field"], m["from"], m["to"]) for m in body["recent"]]
+            assert ("BMSState", None, "BMSStateDrive") in moves
+            assert ("BMSState", "BMSStateDrive", "BMSStateStandby") in moves
+            assert ("CenterDisplay", None, "DisplayStateDriving") in moves
+            # The moment is what matters, and it is the record's, not now's.
+            leaving = [m for m in body["recent"]
+                       if m["to"] == "BMSStateStandby"][0]
+            assert leaving["ts"].endswith("22:40:00")   # 14:40Z in local time
+
+            one = client.get("/api/telemetry/modes?field=BMSState").json()
+            assert {m["field"] for m in one["recent"]} == {"BMSState"}
+    finally:
+        state.put(sess, state.TELEMETRY_MODES_KEY, prev or "[]")
+        sess.commit()
+        sess.close()
+        settings.app_passcode = old_pc

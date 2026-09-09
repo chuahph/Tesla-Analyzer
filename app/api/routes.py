@@ -9173,6 +9173,12 @@ TELEMETRY_RAW_MAX = 300
 # Shadow trips kept for comparison. Weeks of driving, which is the window in
 # which telemetry either earns the switch or does not.
 TELEMETRY_TRIPS_MAX = 400
+# Fields that say what the car thinks it is doing, and how many of their
+# changes to keep. They stream only on change, so this is a log of moments
+# rather than a sample of values — a few hundred covers weeks.
+TELEMETRY_MODE_FIELDS = ("BMSState", "CenterDisplay", "Gear",
+                         "DriverSeatOccupied", "SentryMode", "HvacPower")
+TELEMETRY_MODES_MAX = 400
 
 
 # A Sentry state can flicker — someone walks past twice. One message per
@@ -9315,6 +9321,10 @@ def telemetry_ingest(
         trips = _json.loads(state.get(session, state.TELEMETRY_TRIPS_KEY) or "[]") or []
     except ValueError:
         trips = []
+    try:
+        modes = _json.loads(state.get(session, state.TELEMETRY_MODES_KEY) or "[]") or []
+    except ValueError:
+        modes = []
 
     # States that mean the car noticed something. Off/Idle/Armed/Quiet are
     # the car minding its own business; these two are not.
@@ -9344,6 +9354,18 @@ def telemetry_ingest(
             # It may still fill a hole, since a value never seen is not being
             # contradicted by anything.
             fields = {k: v for k, v in fields.items() if k not in car}
+        # Before the composite is updated, because what is being recorded is
+        # the moment a value MOVED, and after the update the old one is gone.
+        # These fields are streamed only when they change, so nothing else in
+        # the app can answer when the car decided it had stopped driving.
+        for key in TELEMETRY_MODE_FIELDS:
+            if key in fields and fields[key] != car.get(key):
+                modes.append({
+                    "ts": (sync_mod._dt(ts).isoformat(timespec="seconds")
+                           if ts else None),
+                    "vin": vin, "field": key,
+                    "from": car.get(key), "to": fields[key],
+                })
         car.update(fields)
         if ts >= composite_ts and record.get("created_at"):
             car["_ts"] = record["created_at"]
@@ -9384,6 +9406,8 @@ def telemetry_ingest(
                         newest_trip, snap):
                     amended += 1
 
+    state.put(session, state.TELEMETRY_MODES_KEY,
+              _json.dumps(modes[-TELEMETRY_MODES_MAX:]))
     state.put(session, state.TELEMETRY_LATEST_KEY, _json.dumps(latest))
     state.put(session, state.TELEMETRY_SHADOW_KEY, _json.dumps(shadows))
     state.put(session, state.TELEMETRY_TRIPS_KEY,
@@ -9649,6 +9673,38 @@ def telemetry_drop_trips(
     state.put(session, state.TELEMETRY_TRIPS_KEY, _json.dumps(kept))
     session.commit()
     return {"dropped": len(doomed), "kept": len(kept), "trips": listing}
+
+
+@router.get("/telemetry/modes")
+def telemetry_modes(
+    limit: int = Query(60, ge=1, le=TELEMETRY_MODES_MAX),
+    field: str = Query(""),
+    session: Session = Depends(get_session),
+):
+    """When the car changed its mind about what it was doing.
+
+    BMSState, CenterDisplay, Gear and the rest are streamed only when they
+    change, so the running composite holds the current value and nothing holds
+    the moment it moved. That moment is the whole question here: a car sitting
+    in Park with its driver still aboard is ambiguous to this app for ten
+    minutes by a timer, while the car itself evidently decides at some point
+    that the journey is over — it applies Easy Entry, and its own Current
+    Drive panel resets. If BMSState leaves Drive, or CenterDisplay leaves
+    DisplayStateDriving, that is the car's own answer, and worth far more than
+    a threshold picked by hand.
+
+    Nothing reads this yet. It is here to be looked at.
+    """
+    import json as _json
+
+    try:
+        modes = _json.loads(state.get(session, state.TELEMETRY_MODES_KEY) or "[]") or []
+    except ValueError:
+        modes = []
+    if field:
+        modes = [m for m in modes if m.get("field") == field]
+    return {"changes": len(modes), "watching": list(TELEMETRY_MODE_FIELDS),
+            "recent": modes[-limit:]}
 
 
 @router.get("/telemetry/compare")
