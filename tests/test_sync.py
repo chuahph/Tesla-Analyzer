@@ -3,7 +3,8 @@ import pytest
 
 from app.sync import (_energy_kwh, close_trip_on_sleep, is_driving,
                       snapshot_from_telemetry, advance_shadow,
-                      process_snapshot, snapshot_from_vehicle_data)
+                      process_snapshot, snapshot_from_vehicle_data,
+                      recover_sleep_gap, ENERGY_QUANTUM_KWH, MILES_TO_KM)
 
 T0 = 1_760_000_000.0  # seconds epoch
 
@@ -3257,6 +3258,128 @@ def test_shadow_trip_closes_at_the_last_motion_when_the_stream_stops():
     assert trip is not None
     assert trip["end_ts"] == 300                     # not 11000
     assert round(trip["distance_km"], 1) == 8.0      # 5 miles
+
+
+def _bms_tel(ts, odo_mi, energy, bms, gear="ShiftStateD", speed_mph=20.0,
+             seat=True):
+    return snapshot_from_telemetry({
+        "Odometer": odo_mi, "EnergyRemaining": energy, "Gear": gear,
+        "VehicleSpeed": speed_mph, "Soc": 50.0, "BMSState": bms,
+        "DriverSeatOccupied": seat,
+    }, ts=ts)
+
+
+def test_the_car_s_own_bms_ends_a_trip_while_the_driver_is_still_seated():
+    """BMSState leaving Drive is the end of the journey, timer or not.
+
+    A driver who parks and stays in the seat is the case this app handled
+    worst: no exit to see, so it waited SHADOW_SETTLE_NO_EXIT_SEC — ninety
+    minutes — before believing a finished trip was finished. Measured
+    against five real boundaries, the BMS left Drive within half a minute of
+    every one of them, and it held Drive through a five-minute idle rather
+    than being fooled by the gear.
+    """
+    shadow: dict = {}
+    advance_shadow(shadow, _bms_tel(0, 100.0, 30.0, "BMSStateDrive"))
+    advance_shadow(shadow, _bms_tel(600, 106.0, 28.5, "BMSStateDrive"))
+    # Parked, driver still aboard. Nothing here says the journey is over.
+    assert advance_shadow(shadow, _bms_tel(660, 106.0, 28.5, "BMSStateDrive",
+                                           gear="ShiftStateP", speed_mph=0.0)) is None
+    assert advance_shadow(shadow, _bms_tel(700, 106.0, 28.5, "BMSStateDrive",
+                                           gear="ShiftStateP", speed_mph=0.0)) is None
+    assert shadow.get("open") is not None, "the timer alone would wait 90 minutes"
+
+    trip = advance_shadow(shadow, _bms_tel(720, 106.02, 28.4, "BMSStateSupport",
+                                           gear="ShiftStateP", speed_mph=0.0))
+    assert trip is not None
+    assert trip["ended_on"] == "bms"
+    # Ends when the car STOPPED, not when the BMS got round to saying so.
+    assert trip["end_ts"] == 660
+    # ...but measured with the newer odometer, which is what a settled
+    # arrival reading is for.
+    assert trip["end_odo_km"] == pytest.approx(106.02 * MILES_TO_KM, abs=0.01)
+
+
+def test_a_bms_never_seen_in_drive_cannot_end_a_trip():
+    """The composite holds the last value sent, and BMSState is sent on change.
+
+    A trip that opens while the composite still reads Support from hours ago
+    would be closed by that stale value at the first red light — the same
+    trap as the stale gear that once invented a journey out of a car
+    reversing into a bay.
+    """
+    shadow: dict = {}
+    advance_shadow(shadow, _bms_tel(0, 100.0, 30.0, "BMSStateSupport"))
+    out = advance_shadow(shadow, _bms_tel(60, 100.1, 29.9, "BMSStateSupport",
+                                          gear="ShiftStateD", speed_mph=0.0))
+    assert out is None
+    assert shadow.get("open") is not None
+
+
+def test_a_trip_carries_what_the_energy_step_is_worth_on_it():
+    """0.02 kWh is a rounding error on a long trip and the figure on a short one."""
+    shadow: dict = {}
+    advance_shadow(shadow, _tel(0, 100.0, 30.0))
+    advance_shadow(shadow, _tel(600, 106.0, 28.5))
+    advance_shadow(shadow, _tel(660, 106.0, 28.5, gear="ShiftStateP",
+                                speed_mph=0.0, door=True))
+    trip = advance_shadow(shadow, _tel(900, 106.0, 28.5, gear="ShiftStateP",
+                                       speed_mph=0.0))
+    assert trip["energy_unc_kwh"] == ENERGY_QUANTUM_KWH
+    assert trip["energy_unc_pct"] == pytest.approx(
+        ENERGY_QUANTUM_KWH * 100.0 / trip["energy_kwh"], abs=0.1)
+
+
+def test_the_odometer_gives_back_what_a_sleeping_car_never_sent():
+    """The real trip 535, and the 338 metres it drove after its last record.
+
+    Measured: it ended stream_lost at 31,161.861 and the next trip opened at
+    31,162.199. The car parked underground, lost signal, and slept before it
+    could flush — so unlike a blackout it drove through, that arrival was
+    never transmitted at all. Against the car's own 4.1 km this turns -7.4%
+    into +0.8%.
+    """
+    prev = {"start_odo_km": 31158.066, "end_odo_km": 31161.861,
+            "distance_km": 3.795, "energy_kwh": 0.88, "wh_per_km": 231.9,
+            "duration_min": 17.2, "ended_on": "stream_lost"}
+    assert recover_sleep_gap(prev, {"start_odo_km": 31162.199}) is True
+    assert prev["distance_km"] == 4.133
+    assert prev["recovered_km"] == 0.338
+    # Energy follows the distance at the trip's own efficiency, so the three
+    # figures stay consistent with each other.
+    assert prev["recovered_kwh"] == 0.078
+    assert prev["wh_per_km"] == pytest.approx(231.9, abs=0.2)
+    # Duration is untouched: the odometer counts up, the clock does not.
+    assert prev["duration_min"] == 17.2
+
+    # Recomputed from the bracket, so running it again finds nothing left.
+    assert recover_sleep_gap(prev, {"start_odo_km": 31162.199}) is False
+    assert prev["distance_km"] == 4.133
+
+
+def test_a_whole_journey_driven_offline_is_not_glued_onto_the_last_arrival():
+    """The cap is the difference between recovering an arrival and inventing one.
+
+    An arrival roll is a few hundred metres. A journey is kilometres. Above
+    the cap this refuses and the distance stays in unaccounted_km, where it
+    can be seen rather than silently attributed to a trip that did not drive
+    it.
+    """
+    def trip():
+        return {"start_odo_km": 31158.066, "end_odo_km": 31161.861,
+                "distance_km": 3.795, "energy_kwh": 0.88, "wh_per_km": 231.9,
+                "duration_min": 17.2, "ended_on": "stream_lost"}
+
+    over = trip()
+    assert recover_sleep_gap(over, {"start_odo_km": 31173.2}) is False
+    assert over["distance_km"] == 3.795
+
+    # And only for an ending nobody confirmed. A trip the car said goodbye to
+    # was measured; a gap after it belongs to whatever happened next.
+    for ending in ("bms", "exit", "timeout"):
+        clean = dict(trip(), ended_on=ending)
+        assert recover_sleep_gap(clean, {"start_odo_km": 31162.199}) is False
+        assert clean["distance_km"] == 3.795
 
 
 def test_shadow_ignores_records_replayed_from_the_car_s_buffer():

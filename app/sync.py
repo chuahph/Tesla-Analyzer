@@ -2901,6 +2901,34 @@ SHADOW_ARRIVED_QUIET_SEC = 180.0
 # it. The car's whole odometer reads about 31,000 km.
 SHADOW_MAX_KM = 2000.0
 
+# The car's own answer to "is this journey over".
+#
+# BMSState is the battery management system's operating mode, and it is not a
+# guess: measured against five boundaries this app derived independently, it
+# entered Drive 1 to 13 seconds before the trip started and left it 3 to 27
+# seconds after the trip ended. Nothing else available comes close.
+#
+# It is better than Gear for the question that has caused the most trouble
+# here — a driver who shifts to Park and stays in the seat. Gear says Park
+# the moment the lever moves, which is why this app had to wait ninety
+# minutes before believing it; BMSState held Drive through a five-minute
+# idle at 17:39 and only released at 17:50, when the drive was genuinely
+# finished. The car knows, and says so.
+#
+# Drive means the drivetrain is live, not that the wheels are turning: the
+# BMS sat in Drive for sixteen minutes at a standstill with the odometer
+# unchanged. So this ends a trip; it never starts one, and distance still
+# decides whether there was a trip at all.
+BMS_DRIVE = "BMSStateDrive"
+
+# EnergyRemaining is reported in steps of 0.02 kWh. A trip's energy is the
+# difference of two of those readings, so each end contributes up to half a
+# step of error and the figure carries one full step of uncertainty — 0.02
+# kWh, whether the trip spent 0.3 kWh or 3. On a short drive that is several
+# percent before anything else goes wrong, which is why a 487-metre trip can
+# report 698 Wh/km and be neither a bug nor a measurement.
+ENERGY_QUANTUM_KWH = 0.02
+
 
 # How long the stream must have been silent before a trip is closed without
 # it. Only a safety margin: the trip's own end time comes from the snapshot
@@ -2960,6 +2988,17 @@ def settle_shadow(shadow: dict[str, Any], now_ts: float) -> dict[str, Any] | Non
     # Neither wait affects a single figure. The trip ends at the last record
     # either way; the wait only decides how soon it can be read, and how
     # confident we are that there is nothing more to come.
+    # If the last thing the car said was that its drivetrain had shut down,
+    # there is nothing to wait for. advance_shadow closes on that the moment
+    # it arrives, so this only catches the case where the record landed and
+    # the car then went quiet inside SHADOW_QUIET_SEC — but that is exactly
+    # what parking underground looks like.
+    if (shadow.get("bms_seen_drive")
+            and last.get("bms_state") not in (None, BMS_DRIVE)):
+        shadow["ended_by_bms"] = True
+        return _shadow_close(shadow, shadow.get("still_snap") or last,
+                             readings=last)
+
     arriving = float(last.get("speed_kmh") or 0.0) <= ZERO_SPEED_KMH
     if now_ts - last_ts > (SHADOW_ARRIVED_QUIET_SEC if arriving
                            else SHADOW_GAP_SEC):
@@ -3004,6 +3043,23 @@ def advance_shadow(shadow: dict[str, Any], snap: dict[str, Any]) -> dict[str, An
         done = _shadow_close(shadow, last)
         open_at = None
 
+    # The car's own verdict, taken before the gear is consulted. Checked here
+    # rather than inside the stopped branch because a car that loses signal
+    # mid-manoeuvre leaves the composite reading Drive, and a trip held open
+    # by a stale gear would never reach that branch to be closed at all.
+    #
+    # The journey ends where the car stopped, not where the BMS got round to
+    # saying so — still_snap if it was seen to stop, otherwise the last thing
+    # it sent. The closing odometer comes from this snapshot, which is newer
+    # and measures the arrival better.
+    if open_at and shadow.get("bms_seen_drive"):
+        bms_now = snap.get("bms_state")
+        if bms_now is not None and bms_now != BMS_DRIVE:
+            shadow["ended_by_bms"] = True
+            done = _shadow_close(shadow, shadow.get("still_snap") or last or snap,
+                                 readings=snap) or done
+            open_at = None
+
     if is_driving(snap):
         # Not without an odometer to start from. A telemetry message carries
         # only what changed, so a composite that has not yet seen an Odometer
@@ -3037,6 +3093,14 @@ def advance_shadow(shadow: dict[str, Any], snap: dict[str, Any]) -> dict[str, An
         shadow.pop("exit_seen", None)
         shadow["max_speed_kmh"] = max(
             float(shadow.get("max_speed_kmh") or 0.0), float(snap.get("speed_kmh") or 0.0))
+        # Only a BMS that was seen in Drive during THIS trip may end it. The
+        # composite holds the last value the car sent, and BMSState is sent
+        # only when it changes — so a trip opened while the composite still
+        # reads Support from hours ago would be closed by its own stale
+        # value at the first red light. Same trap as the stale gear, same
+        # answer: require the evidence to have arrived during the journey.
+        if snap.get("bms_state") == BMS_DRIVE:
+            shadow["bms_seen_drive"] = True
     elif open_at:
         still_since = shadow.get("still_since")
         # Did anyone actually leave? Occupancy answers it directly; a door
@@ -3149,6 +3213,75 @@ def amend_closed_trip(trip: dict[str, Any], snap: dict[str, Any]) -> bool:
     return True
 
 
+def recover_sleep_gap(prev: dict[str, Any], nxt: dict[str, Any]) -> bool:
+    """Give a trip back the metres it drove after its last transmission.
+
+    The mechanism, measured rather than assumed. A car out of coverage
+    buffers what it cannot send and replays it in order when the signal
+    returns — an entire 35-minute drive arrived 36 minutes late this way and
+    reconstructed to within 0.4% of the car's own figure. The buffer does not
+    survive the car going to sleep. Park underground, lose signal, sleep
+    before it comes back, and the last hundred metres are gone for good:
+    there is no BMSState leaving Drive anywhere in the log for that arrival,
+    because the car never got to send one.
+
+    What is not gone is the odometer. It counts up and it does not reset, so
+    the next trip's opening reading measures the same ground the lost one
+    covered. Trip 535 ended at 31,161.861 and the next began at 31,162.199 —
+    338 metres the car definitely drove and this app definitely did not see.
+    Against the car's own 4.1 km that turns -7.4% into +0.8%.
+
+    Two bounds keep it honest. The previous trip must have ended
+    ``stream_lost``, which is the only ending that means the arrival was
+    never confirmed; and the gap must be under ``SHADOW_TAIL_MAX_KM``. The
+    cap is not a taste: an arrival roll is a few hundred metres, while a
+    whole journey driven offline is kilometres, and gluing one of those onto
+    the previous trip would be a worse error than losing it. Over the cap
+    this refuses, and the distance stays in unaccounted_km where it can be
+    seen.
+
+    The recovered energy is inferred, and says so. EnergyRemaining at the
+    next trip's start includes a night of standby drain, so it cannot be
+    used as this trip's closing reading; the assumption instead is that the
+    unseen metres were driven at the same Wh/km as the seen ones. That keeps
+    distance, energy and Wh/km consistent with each other, which leaving it
+    out would not.
+    """
+    if not prev or not nxt or prev.get("ended_on") != "stream_lost":
+        return False
+    end_odo, next_start = prev.get("end_odo_km"), nxt.get("start_odo_km")
+    start_odo = prev.get("start_odo_km")
+    if end_odo is None or next_start is None or start_odo is None:
+        return False
+    gain = round(float(next_start) - float(end_odo), 3)
+    if gain <= 0.0 or gain > SHADOW_TAIL_MAX_KM:
+        return False
+
+    whkm = prev.get("wh_per_km")
+    distance = round(float(next_start) - float(start_odo), 3)
+    # Recomputed from the bracket, never adjusted by a delta — so if this
+    # ever runs twice on the same pair the second call finds no gap and
+    # refuses, rather than counting the same metres again.
+    prev["end_odo_km"] = round(float(next_start), 3)
+    prev["distance_km"] = distance
+    prev["recovered_km"] = round(
+        float(prev.get("recovered_km") or 0.0) + gain, 3)
+    if whkm and prev.get("energy_kwh") is not None:
+        gained_kwh = round(gain * float(whkm) / 1000.0, 3)
+        prev["energy_kwh"] = round(float(prev["energy_kwh"]) + gained_kwh, 3)
+        prev["recovered_kwh"] = round(
+            float(prev.get("recovered_kwh") or 0.0) + gained_kwh, 3)
+        prev["wh_per_km"] = round(
+            float(prev["energy_kwh"]) * 1000.0 / distance, 1) if distance > 0 else None
+    minutes = float(prev.get("duration_min") or 0.0)
+    # Time is not touched, and cannot be. The odometer is cumulative so the
+    # distance comes back; nothing was listening while the clock ran, so the
+    # duration stays a lower bound and the average speed with it.
+    if minutes > 0:
+        prev["avg_speed_kmh"] = round(distance / (minutes / 60.0), 1)
+    return True
+
+
 def _shadow_close(shadow: dict[str, Any], end: dict[str, Any],
                   readings: dict[str, Any] | None = None) -> dict[str, Any] | None:
     """Emit the open trip, ending at ``end``, and clear the machine.
@@ -3164,9 +3297,11 @@ def _shadow_close(shadow: dict[str, Any], end: dict[str, Any],
     # Read before clearing: this is reported on the trip, and popping it
     # first would make every trip claim it ended on a timeout.
     exit_seen = bool(shadow.get("exit_seen"))
+    ended_by_bms = bool(shadow.pop("ended_by_bms", False))
     shadow["still_since"] = None
     shadow.pop("still_snap", None)
     shadow.pop("exit_seen", None)
+    shadow.pop("bms_seen_drive", None)
     if not start:
         return None
 
@@ -3210,6 +3345,15 @@ def _shadow_close(shadow: dict[str, Any], end: dict[str, Any],
         "energy_kwh": energy,
         "wh_per_km": round(energy * 1000.0 / distance, 1)
         if energy and distance > 0 else None,
+        # What the 0.02 kWh step is worth on THIS trip. Reported rather than
+        # used to hide the figure: 698 Wh/km over 487 metres is the honest
+        # answer to "energy per kilometre" and only misleads when read as
+        # efficiency. Carried so a reader — and the accuracy report — can
+        # tell a measurement from a rounding artefact instead of guessing
+        # from the trip's length.
+        "energy_unc_kwh": ENERGY_QUANTUM_KWH if energy is not None else None,
+        "energy_unc_pct": round(ENERGY_QUANTUM_KWH * 100.0 / abs(energy), 1)
+        if energy else None,
         "soc_start": start.get("soc"),
         "soc_end": end.get("soc"),
         "max_speed_kmh": round(max_speed, 1),
@@ -3241,6 +3385,9 @@ def _shadow_close(shadow: dict[str, Any], end: dict[str, Any],
         "used_delta": used_delta,
         # How the journey's end was decided, because that is what says how
         # much to trust its final odometer:
+        #   bms         the car's battery management system left Drive. Its
+        #               own answer, within seconds of the truth, and it does
+        #               not care whether the driver stayed in the seat
         #   exit        the driver was seen to leave, and readings kept
         #               arriving afterwards — the arrival is measured
         #   timeout     the car sat still long enough while still reporting
@@ -3251,6 +3398,7 @@ def _shadow_close(shadow: dict[str, Any], end: dict[str, Any],
         #               systematic rather than random, because it is the same
         #               carpark every time.
         "ended_on": ("stream_lost" if shadow.pop("stream_lost", False)
+                     else "bms" if ended_by_bms
                      else "exit" if exit_seen else "timeout"),
         "pack_temp_c": end.get("pack_temp_c"),
         "inside_temp": end.get("inside_temp"),

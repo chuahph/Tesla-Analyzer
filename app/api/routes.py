@@ -2812,6 +2812,25 @@ def _process_vehicle(
     return vehicle, snap, len(drives), len(charges), open_trip
 
 
+def _append_trip(trips: list, finished: dict) -> bool:
+    """Add a finished trip to the store, paying back the one before it.
+
+    Both paths that close a trip come through here — the live one in
+    telemetry_ingest and the scheduled one in _settle_shadows — because the
+    correction belongs to the pair, not to either route. Wired into only the
+    live path first, it never fired at all: a car that parks and sleeps has
+    both its trips closed by the schedule, which is precisely the case this
+    exists for.
+
+    Returns whether the previous trip got anything back.
+    """
+    previous = next((t for t in reversed(trips)
+                     if t.get("vin") == finished.get("vin")), None)
+    paid = previous is not None and sync_mod.recover_sleep_gap(previous, finished)
+    trips.append(finished)
+    return bool(paid)
+
+
 def _settle_shadows(session: Session) -> int:
     """Close any shadow trip whose stream went quiet. Returns how many.
 
@@ -2851,7 +2870,8 @@ def _settle_shadows(session: Session) -> int:
         trips = _json.loads(state.get(session, state.TELEMETRY_TRIPS_KEY) or "[]") or []
     except ValueError:
         trips = []
-    trips.extend(finished)
+    for done in finished:
+        _append_trip(trips, done)
     state.put(session, state.TELEMETRY_TRIPS_KEY,
               _json.dumps(trips[-TELEMETRY_TRIPS_MAX:]))
     state.put(session, state.TELEMETRY_SHADOW_KEY, _json.dumps(shadows))
@@ -9208,6 +9228,16 @@ TELEMETRY_MODES_MAX = 400
 # car that has gone to sleep produces gaps of hours, which are expected and
 # harmless because no journey spans them.
 TELEMETRY_GAP_MIN_SEC = 120.0
+# Above this, a trip's energy figure carries more of EnergyRemaining's 0.02
+# kWh step than the effect being measured, and it is kept out of the accuracy
+# medians. Not a judgement on the trip — a 0.34 kWh journey is a real journey
+# — only on its ability to referee. The question these medians answer is
+# whether one source is a few percent better than the other; a trip whose own
+# energy is uncertain by six percent cannot vote on that. Measured: the five
+# judged trips run 1.0, 1.0, 1.1 and 2.3 percent, with the 0.42 kWh one at
+# 4.8 — so this line falls in a real gap rather than through the middle of
+# the evidence.
+TELEMETRY_UNC_MAX_PCT = 3.0
 TELEMETRY_GAPS_MAX = 200
 
 
@@ -9359,6 +9389,7 @@ def telemetry_ingest(
     now = sync_mod.now_local()
     kept = []
     amended = 0
+    recovered = 0
     for record in records:
         if not isinstance(record, dict):
             continue
@@ -9527,7 +9558,12 @@ def telemetry_ingest(
             finished = sync_mod.advance_shadow(shadow, snap)
             if finished:
                 finished["vin"] = vin
-                trips.append(finished)
+                # The trip before this one, if it ended in silence, may be
+                # short by whatever the car drove after its last record. This
+                # trip's opening odometer is the first reading taken since,
+                # so it measures that ground.
+                if _append_trip(trips, finished):
+                    recovered += 1
             elif not shadow.get("open"):
                 # No trip is running, so this record may be the arrival of the
                 # last one turning up late — the normal case for a car that
@@ -9570,7 +9606,8 @@ def telemetry_ingest(
     return {"accepted": len(kept), "buffered": len(buffered),
             # Readings that arrived after their trip had been closed and were
             # folded into its ending rather than dropped.
-            "amended_tails": amended, "seen": seen}
+            "amended_tails": amended, "recovered_gaps": recovered,
+            "seen": seen}
 
 
 @router.get("/telemetry/recent")
@@ -9705,14 +9742,26 @@ def _compare_row(t: dict, d, t_start, car_by_drive: dict, pct) -> dict:
             # Present when the arrival was recovered from a replay rather than
             # measured live — the km that would otherwise have been lost.
             "tail_recovered_km": t.get("tail_amended_km"),
+            # Metres the car drove after its last record and before its next
+            # one, read back off the odometer because it counts up. Present
+            # only where the previous trip ended in silence. Distance is
+            # measured; the energy beside it is inferred at the trip's own
+            # Wh/km, and the duration is not corrected at all.
+            "recovered_km": t.get("recovered_km"),
+            "recovered_kwh": t.get("recovered_kwh"),
+            # What EnergyRemaining's 0.02 kWh step is worth here. A trip
+            # whose energy figure is mostly rounding cannot judge anything,
+            # and is kept out of the medians below rather than dropped.
+            "energy_unc_pct": t.get("energy_unc_pct"),
             # The same trip's energy read a second way: the difference of a
             # monotonic lifetime counter, which has no 0.02 kWh step of its
             # own. Beside kwh above rather than instead of it — the counter's
             # units are undocumented, and the gap between the two figures is
             # the measurement, not a nuisance to be reconciled away.
             "used_delta": t.get("used_delta"),
-            # exit / timeout / stream_lost — how the ending was decided, and
-            # so how much the final odometer is worth. See _shadow_close.
+            # bms / exit / timeout / stream_lost — how the ending was
+            # decided, and so how much the final odometer is worth. See
+            # _shadow_close.
             "ended_on": t.get("ended_on"),
         },
         "polled": None if not d else {
@@ -10044,6 +10093,27 @@ def telemetry_compare(
     judged = [r for r in paired if r["vs_car"] and all(
         r["vs_car"][k] is not None for k in
         ("polled_km_pct", "telemetry_km_pct", "polled_whkm_pct", "telemetry_whkm_pct"))]
+    # Two kinds of trip cannot judge anything, and averaging them in makes
+    # the verdict worse rather than more cautious.
+    #
+    # A trip with no odometer bracket was measured before that fix existed;
+    # its distance came from somewhere this app no longer uses, and it is
+    # the -12.5% outlier dragging the median around. It is history, not a
+    # live defect.
+    #
+    # A trip whose energy is mostly the 0.02 kWh step cannot say whether
+    # anything is 3% out. Ten percent is where the step stops being noise
+    # and starts being the figure.
+    excluded = [{"start": r["telemetry"]["start"],
+                 "why": ("no odometer bracket" if r["telemetry"]["odo"] is None
+                         else "energy is "
+                              f"{r['telemetry']['energy_unc_pct']}% quantisation")}
+                for r in judged
+                if r["telemetry"]["odo"] is None
+                or (r["telemetry"]["energy_unc_pct"] or 0.0) > TELEMETRY_UNC_MAX_PCT]
+    judged = [r for r in judged
+              if r["telemetry"]["odo"] is not None
+              and (r["telemetry"]["energy_unc_pct"] or 0.0) <= TELEMETRY_UNC_MAX_PCT]
     km_deltas = [r["delta"]["km_pct"] for r in paired
                  if r["delta"]["km_pct"] is not None]
     heads = [r["delta"]["start_delta_min"] for r in paired]
@@ -10063,6 +10133,10 @@ def telemetry_compare(
         # against the same reference is the only comparison that settles which
         # source to believe — everything else is the two of them disagreeing.
         "judged": len(judged),
+        # Trips the car spoke for but which cannot referee, and why. Listed
+        # rather than silently dropped: a shrinking judged count with no
+        # explanation is how a comparison quietly stops meaning anything.
+        "not_judged": excluded,
         "vs_car": None if not judged else {
             "polled_km_err_pct": round(percentile(
                 [r["vs_car"]["polled_km_pct"] for r in judged], 0.5), 2),

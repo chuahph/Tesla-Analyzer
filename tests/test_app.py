@@ -4381,6 +4381,98 @@ def _tele_record(vin, ts, resend=False, **kv):
     return {"vin": vin, "createdAt": stamp, "data": data, "isResend": resend}
 
 
+def test_the_next_morning_s_departure_pays_back_last_night_s_arrival():
+    """Two journeys through the real ingest path, and the metres between them.
+
+    The car parks underground, loses signal before it can send ShiftStateP,
+    and sleeps — so unlike a blackout it drives through, nothing is replayed
+    and that arrival is never transmitted at all. The odometer does not care:
+    it counts up, so the next morning's opening reading measures the ground
+    the lost arrival covered.
+
+    Driven through the HTTP path rather than the state machine because the
+    wiring is where this can go wrong — the last time a trip was corrected
+    from a neighbouring one it reached past the newest trip and counted a
+    whole journey twice.
+    """
+    import json as _json
+    import time as _time
+
+    from app.database import SessionLocal
+    from app.api import routes as routes_mod
+    from app import state, sync as sync_mod
+
+    settings = get_settings()
+    old_pc = settings.app_passcode
+    settings.app_passcode = ""
+    sess = SessionLocal()
+    prev_trips = state.get(sess, state.TELEMETRY_TRIPS_KEY)
+    prev_shadow = state.get(sess, state.TELEMETRY_SHADOW_KEY)
+    vin = "SLEEPGAP00000001"
+    mi = sync_mod.MILES_TO_KM
+    lost_km = 0.338                       # the real one, off trip 535
+    try:
+        state.put(sess, state.TELEMETRY_TRIPS_KEY, "[]")
+        state.put(sess, state.TELEMETRY_SHADOW_KEY, "{}")
+        sess.commit()
+
+        # Far enough back that the morning is a night away from the night —
+        # beyond SHADOW_TAIL_SEC, so the late-arrival path cannot claim these
+        # metres and this is genuinely the sleep case.
+        t = _time.time() - 50000
+        with TestClient(app) as client:
+            def post(*records):
+                resp = client.post("/api/telemetry", json={"records": list(records)})
+                assert resp.status_code == 200, resp.text
+                return resp.json()
+
+            def drive(from_km, to_km, at):
+                post(_tele_record(vin, at, odo=from_km / mi, mph=0.0,
+                                  gear="ShiftStateP", kwh=56.0, soc=80.0))
+                at += 10
+                post(_tele_record(vin, at, mph=25.0, gear="ShiftStateD"))
+                for i in range(1, 21):
+                    at += 30
+                    post(_tele_record(vin, at,
+                                      odo=(from_km + (to_km - from_km) * i / 20) / mi,
+                                      kwh=56.0 - 1.0 * i / 20))
+                return at
+
+            # Last night: reaches 31,161.861 and the signal dies there.
+            t = drive(31158.066, 31161.861, t)
+            assert routes_mod._settle_shadows(SessionLocal()) == 1
+            first = _json.loads(state.get(SessionLocal(), state.TELEMETRY_TRIPS_KEY))[0]
+            assert first["ended_on"] == "stream_lost"
+            assert first["end_odo_km"] == pytest.approx(31161.861, abs=0.002)
+
+            # This morning, 0.338 km further on than it was last seen.
+            t = drive(31161.861 + lost_km, 31166.0, t + 43000)
+            post(_tele_record(vin, t + 5, mph=0.0, gear="ShiftStateP", seat=False))
+            assert routes_mod._settle_shadows(SessionLocal()) == 1
+
+            trips = _json.loads(state.get(SessionLocal(), state.TELEMETRY_TRIPS_KEY))
+
+        assert len(trips) == 2, [t_["start_time"] for t_ in trips]
+        night, morning = trips
+        assert night["recovered_km"] == pytest.approx(lost_km, abs=0.002)
+        # And by this path, not the late-arrival one, which the night ruled out.
+        assert night.get("tail_amended_km") is None
+        assert night["end_odo_km"] == pytest.approx(morning["start_odo_km"], abs=0.002)
+        # Distance recomputed from the bracket, so the two trips now meet and
+        # nothing is left in the gap between them.
+        assert night["distance_km"] == pytest.approx(3.795 + lost_km, abs=0.003)
+        # The morning's own distance is untouched — the gap is paid to the
+        # trip that drove it, not taken from the one that found it.
+        assert morning["distance_km"] == pytest.approx(31166.0 - 31161.861 - lost_km,
+                                                       abs=0.01)
+    finally:
+        state.put(sess, state.TELEMETRY_TRIPS_KEY, prev_trips or "[]")
+        state.put(sess, state.TELEMETRY_SHADOW_KEY, prev_shadow or "{}")
+        sess.commit()
+        sess.close()
+        settings.app_passcode = old_pc
+
+
 def test_a_whole_drive_through_the_real_ingest_path():
     """One journey, posted the way the car sends it, checked against the car.
 
@@ -4542,6 +4634,96 @@ def test_carpark_blackout_and_replay_end_to_end():
     finally:
         state.put(sess, state.TELEMETRY_TRIPS_KEY, prev_trips or "[]")
         state.put(sess, state.TELEMETRY_SHADOW_KEY, prev_shadow or "{}")
+        sess.commit()
+        sess.close()
+        settings.app_passcode = old_pc
+
+
+def test_a_trip_that_is_mostly_rounding_does_not_referee_the_others():
+    """Two kinds of trip cannot judge, and averaging them in makes it worse.
+
+    A 0.34 kWh trip carries a 0.02 kWh step, so nearly six percent of its
+    energy figure is quantisation — it cannot say whether either source is
+    three percent out. And a trip with no odometer bracket was measured
+    before that fix existed; it is the -12.5% outlier dragging the median
+    around, and it is history rather than a live defect.
+
+    Both stay in the report. Neither enters the medians, and the reason is
+    named, because a judged count that quietly shrinks is how a comparison
+    stops meaning anything without anyone noticing.
+    """
+    import json as _json
+
+    from app.database import SessionLocal
+    from app import state, sync as sync_mod
+    from app.models import Drive, Vehicle
+
+    settings = get_settings()
+    old_pc = settings.app_passcode
+    settings.app_passcode = ""
+    sess = SessionLocal()
+    prev = {k: state.get(sess, k) for k in
+            (state.TELEMETRY_TRIPS_KEY, state.CAR_READINGS_KEY)}
+    made = []
+    try:
+        now = sync_mod.now_local()
+
+        def _epoch(local):
+            return local.replace(tzinfo=sync_mod.MYT).timestamp()
+
+        vehicle = Vehicle(vin="TESTVIN-REFEREE", name="Test", model="Model 3")
+        sess.add(vehicle)
+        sess.commit()
+
+        def pair(mins_ago, km, kwh, odo, unc_energy):
+            at = now - timedelta(minutes=mins_ago)
+            end = at + timedelta(minutes=10)
+            d = Drive(vehicle_id=vehicle.id, start_time=at, end_time=end,
+                      distance_km=km, duration_min=10, start_soc=60, end_soc=59,
+                      energy_used_kwh=kwh, avg_speed_kmh=km * 6,
+                      max_speed_kmh=60, outside_temp_c=29)
+            sess.add(d)
+            sess.commit()
+            made.append(d.id)
+            # Naive MYT wall-clock in, true epoch out. at.timestamp() would
+            # read the naive value as the container's own zone and land the
+            # trip eight hours from the drive it is meant to match.
+            t = {"start_ts": _epoch(at), "end_ts": _epoch(end),
+                 "start_time": at.isoformat(timespec="seconds"),
+                 "end_time": end.isoformat(timespec="seconds"),
+                 "distance_km": km, "duration_min": 10.0, "energy_kwh": kwh,
+                 "wh_per_km": round(kwh * 1000.0 / km, 1),
+                 "energy_unc_kwh": sync_mod.ENERGY_QUANTUM_KWH,
+                 "energy_unc_pct": unc_energy}
+            if odo:
+                t["start_odo_km"], t["end_odo_km"] = odo, round(odo + km, 3)
+            return t, {"drive_id": d.id, "km": km,
+                       "wh_per_km": round(kwh * 1000.0 / km, 1),
+                       "pct": round(kwh / 68.0 * 100.0, 2)}
+
+        with TestClient(app) as client:      # startup may reseed, so build after
+            good, r1 = pair(180, 10.8, 1.9, 31138.7, 1.1)
+            tiny, r2 = pair(120, 0.49, 0.34, 31150.0, 5.9)   # mostly the step
+            old, r3 = pair(60, 3.0, 0.51, None, 3.9)         # no odometer bracket
+            state.put(sess, state.TELEMETRY_TRIPS_KEY, _json.dumps([good, tiny, old]))
+            state.put(sess, state.CAR_READINGS_KEY, _json.dumps([r1, r2, r3]))
+            sess.commit()
+            body = client.get("/api/telemetry/compare").json()
+
+        assert body["telemetry_trips"] == 3, "all three still reported"
+        assert body["matched"] == 3, [r["polled"] for r in body["trips"]]
+        assert body["judged"] == 1, body["not_judged"]
+        whys = " ".join(e["why"] for e in body["not_judged"])
+        assert "quantisation" in whys and "no odometer bracket" in whys, whys
+    finally:
+        for drive_id in made:
+            d = sess.get(Drive, drive_id)
+            if d is not None:
+                sess.delete(d)
+        sess.commit()
+        sess.delete(vehicle)
+        for key, was in prev.items():
+            state.put(sess, key, was or "")
         sess.commit()
         sess.close()
         settings.app_passcode = old_pc
