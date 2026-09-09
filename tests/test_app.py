@@ -5297,3 +5297,64 @@ def test_a_change_reported_late_is_logged_even_though_it_is_not_adopted():
         sess.commit()
         sess.close()
         settings.app_passcode = old_pc
+
+
+def test_a_trip_is_only_compared_against_its_own_car():
+    """Two vehicles in one account are driven at much the same times.
+
+    A commute and a school run overlap almost every morning, and matching on
+    time alone scored one car's telemetry against the other car's polled trip
+    — a number that measures nothing while looking exactly like a measurement.
+    """
+    import json as _json
+    import time as _time
+
+    from app.database import SessionLocal
+    from app.models import Drive, Vehicle
+    from app import state, sync as sync_mod
+
+    settings = get_settings()
+    old_pc = settings.app_passcode
+    settings.app_passcode = ""
+    sess = SessionLocal()
+    prev = state.get(sess, state.TELEMETRY_TRIPS_KEY)
+    try:
+        mine = Vehicle(name="Mine", vin="OWNCARVIN0000001")
+        theirs = Vehicle(name="Theirs", vin="OTHERCARVIN00001")
+        sess.add_all([mine, theirs])
+        sess.commit()
+
+        # True epochs converted with _dt, which is the convention the stored
+        # timestamps use. Building them from now_local() instead puts every
+        # value eight hours out, twice over.
+        start_ts, end_ts = _time.time() - 2400, _time.time() - 600
+        start, end = sync_mod._dt(start_ts), sync_mod._dt(end_ts)
+
+        # Only the OTHER car has a polled drive across this window.
+        sess.add(Drive(vehicle_id=theirs.id, start_time=start, end_time=end,
+                       distance_km=11.0, energy_used_kwh=2.0, duration_min=30))
+        sess.commit()
+        state.put(sess, state.TELEMETRY_TRIPS_KEY, _json.dumps([{
+            "vin": mine.vin, "start_ts": start_ts, "end_ts": end_ts,
+            "start_time": start.isoformat(timespec="seconds"),
+            "end_time": end.isoformat(timespec="seconds"),
+            "distance_km": 5.0, "duration_min": 30.0, "energy_kwh": 1.0,
+            "wh_per_km": 200.0, "start_odo_km": 100.0, "end_odo_km": 105.0}]))
+        sess.commit()
+
+        with TestClient(app) as client:
+            row = client.get("/api/telemetry/compare").json()["trips"][0]
+            assert row["polled"] is None, \
+                f"matched another car's drive: {row['polled']}"
+
+            sess.add(Drive(vehicle_id=mine.id, start_time=start, end_time=end,
+                           distance_km=5.1, energy_used_kwh=1.05, duration_min=30))
+            sess.commit()
+            row = client.get("/api/telemetry/compare").json()["trips"][0]
+        assert row["polled"] is not None, "its own car's drive was not matched"
+        assert row["polled"]["km"] == pytest.approx(5.1, abs=0.01)
+    finally:
+        state.put(sess, state.TELEMETRY_TRIPS_KEY, prev or "[]")
+        sess.commit()
+        sess.close()
+        settings.app_passcode = old_pc

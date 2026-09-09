@@ -9941,6 +9941,9 @@ def telemetry_compare(
         except (KeyError, TypeError, ValueError):
             continue
 
+    vin_to_vehicle = {
+        v.vin: v.id for v in session.scalars(select(Vehicle)).all() if v.vin}
+
     rows, matched_ids, skipped = [], set(), []
     prev_end_odo, unaccounted = None, 0.0
     for t in shadow_trips:
@@ -9953,8 +9956,18 @@ def telemetry_compare(
         if t_end < since:
             continue
         best = None
+        # Only this car's drives. Two vehicles in one account are driven at
+        # much the same times — a commute and a school run overlap almost
+        # every morning — and matching on time alone would score one car's
+        # telemetry against the other car's polled trip, which is not a
+        # measurement of anything. Falls back to time alone when the streaming
+        # VIN is not a linked vehicle, since then there is nothing to confuse
+        # it with.
+        want_vehicle = vin_to_vehicle.get(t.get("vin"))
         for d in drives:
             if d.id in matched_ids or not d.start_time or not d.end_time:
+                continue
+            if want_vehicle is not None and d.vehicle_id != want_vehicle:
                 continue
             # Any overlap at all counts. The boundaries are the disagreement.
             if d.start_time <= t_end and t_start <= d.end_time:
