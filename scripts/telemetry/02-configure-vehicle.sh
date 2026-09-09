@@ -202,6 +202,19 @@ kill -0 $PROXY_PID 2>/dev/null || die "the proxy exited on startup (see $LOG)"
 # of these change only when something happens, so they cost almost no stream.
 EXTRA_FIELDS=""
 DEFAULT_DRIVE_COUNTER='      "LifetimeEnergyUsedDrive":   {"interval_seconds": 30},'
+# What was sent last time, unless this run says otherwise. Re-running this
+# script is normal — after a certificate renewal, or because the car was
+# asleep — and without this, a plain `bash c.sh` would quietly send the
+# smallest set and take back whatever had been added. Fields would simply stop
+# arriving, with nothing anywhere to say why.
+LEVEL_FILE=/etc/tesla/telemetry-level
+if [ -z "${TELEMETRY_V2:-}" ] && [ -z "${TELEMETRY_V3:-}" ] && [ -r "$LEVEL_FILE" ]; then
+  case "$(cat "$LEVEL_FILE")" in
+    3) TELEMETRY_V3=1; say "Re-sending the set this car already has (V3)" ;;
+    2) TELEMETRY_V2=1; say "Re-sending the set this car already has (V2)" ;;
+  esac
+fi
+
 # V3 includes V2: the sets are cumulative, so asking for the newer one never
 # silently drops the older one's fields.
 if [ "${TELEMETRY_V3:-0}" = "1" ]; then TELEMETRY_V2=1; fi
@@ -310,7 +323,13 @@ if [ "${HTTP:0:1}" = "2" ]; then
 fi
 
 case "$HTTP" in
-  2*) say "Accepted"
+  2*) # Remember what the car now has, so the next run cannot take it back.
+      # Written only on a request Tesla accepted: a failed send has changed
+      # nothing on the car, and must not change what the next run believes.
+      printf '%s\n' "$([ "${TELEMETRY_V3:-0}" = 1 ] && echo 3 \
+                      || { [ "${TELEMETRY_V2:-0}" = 1 ] && echo 2 || echo 1; })" \
+        > /etc/tesla/telemetry-level
+      say "Accepted"
       cat <<EOF
 
 The car has the configuration. It connects when it next wakes, so an idle
