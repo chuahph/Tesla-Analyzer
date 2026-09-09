@@ -5208,6 +5208,50 @@ def _tele_post(client, vin, ts, key, value, wrap="stringValue"):
     assert resp.status_code == 200, resp.text
 
 
+def test_the_gap_log_reports_how_many_records_arrived_late():
+    """Whether the car replays a blackout is a measurement, not an opinion.
+
+    The trip machine counts every record older than one it has already read
+    and discards it. Nothing read that count, so the one number that says
+    whether a lost arrival is recoverable — the car buffered and sent it — or
+    genuinely gone was being written and thrown away every time.
+    """
+    import time as _time
+
+    from app.database import SessionLocal
+    from app import state
+
+    settings = get_settings()
+    old_pc = settings.app_passcode
+    settings.app_passcode = ""
+    sess = SessionLocal()
+    prev = {k: state.get(sess, k) for k in
+            (state.TELEMETRY_GAPS_KEY, state.TELEMETRY_SEEN_KEY,
+             state.TELEMETRY_SHADOW_KEY, state.TELEMETRY_LATEST_KEY)}
+    vin = "REPLAYCAR0000001"
+    try:
+        for key in prev:
+            state.put(sess, key, "")
+        sess.commit()
+        t = _time.time() - 3600
+        with TestClient(app) as client:
+            _tele_post(client, vin, t, "VehicleSpeed", 40.0, "doubleValue")
+            assert client.get("/api/telemetry/gaps").json()["replayed_total"] == 0
+
+            # The car resurfaces and replays what it buffered: a record older
+            # than the one already read.
+            _tele_post(client, vin, t - 60, "VehicleSpeed", 35.0, "doubleValue")
+            body = client.get("/api/telemetry/gaps").json()
+        assert body["replayed_total"] == 1, body
+        assert body["replayed"][vin] == 1, body
+    finally:
+        for key, was in prev.items():
+            state.put(sess, key, was or "")
+        sess.commit()
+        sess.close()
+        settings.app_passcode = old_pc
+
+
 def test_silence_is_a_property_of_one_car_not_of_the_app():
     """One vehicle streaming must not hide another's outage.
 

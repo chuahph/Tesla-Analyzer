@@ -9868,6 +9868,16 @@ def telemetry_gaps(
     The silence cannot recover what was lost. It can say that something was
     lost, which is the difference between an answer that is wrong and one that
     admits it does not know.
+
+    Unless it was not lost. Fleet Telemetry buffers while the car is out of
+    coverage and replays afterwards, flagging each replayed record isResend,
+    and the trip machine counts every record that arrives older than one it
+    has already read and then discards it. That count is `replayed` below,
+    and it is the whole question: at zero, the car sends nothing after a
+    blackout and the missing distance is genuinely gone; above zero, the car
+    does send it and this app is throwing it away. Nothing should be built on
+    top of a guess about which, so the counter is reported rather than acted
+    on.
     """
     import json as _json
 
@@ -9875,7 +9885,14 @@ def telemetry_gaps(
         gaps = _json.loads(state.get(session, state.TELEMETRY_GAPS_KEY) or "[]") or []
     except ValueError:
         gaps = []
+    try:
+        shadows = _json.loads(state.get(session, state.TELEMETRY_SHADOW_KEY) or "{}") or {}
+    except ValueError:
+        shadows = {}
+    replayed = {vin: int((sh or {}).get("out_of_order") or 0)
+                for vin, sh in shadows.items() if isinstance(sh, dict)}
     return {"gaps": len(gaps), "over_seconds": TELEMETRY_GAP_MIN_SEC,
+            "replayed": replayed, "replayed_total": sum(replayed.values()),
             "recent": gaps[-limit:]}
 
 
