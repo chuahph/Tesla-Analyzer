@@ -9250,12 +9250,25 @@ def _sentry_alert(session: Session, vin: str, sentry_state: str, what: str,
         headline = (f"Something moved near the car at "
                     f"{sync_mod.now_local():%H:%M}. The car has not moved.")
 
+    # Tesla's own key names, in words. TrunkFront is the frunk, which nobody
+    # reading an alert at one in the morning should have to translate.
+    DOOR_NAMES = {
+        "DriverFront": "driver door", "DriverRear": "driver rear door",
+        "PassengerFront": "passenger door", "PassengerRear": "passenger rear door",
+        "TrunkFront": "frunk", "TrunkRear": "boot",
+    }
+
     facts = []
     doors = car.get("DoorState")
     if isinstance(doors, dict) and doors:
-        opened = [name for name, is_open in doors.items() if is_open]
-        facts.append("OPEN: " + ", ".join(sorted(opened)) if opened
-                     else "all doors shut")
+        opened = sorted(DOOR_NAMES.get(name, name)
+                        for name, is_open in doors.items() if is_open)
+        facts.append("OPEN: " + ", ".join(opened) if opened else "all doors shut")
+    # Windows, once the third field set is sent. Same rule as doors: unknown
+    # is not a confirmed shut, so it says nothing rather than reassuring.
+    windows = sync_mod._any_window_open(car)
+    if windows is not None:
+        facts.append("A WINDOW IS OPEN" if windows else "windows shut")
     locked = car.get("Locked")
     if locked is not None:
         facts.append("locked" if locked else "UNLOCKED")
@@ -9263,7 +9276,8 @@ def _sentry_alert(session: Session, vin: str, sentry_state: str, what: str,
         facts.append("someone in the driver's seat")
     soc = car.get("Soc")
     if isinstance(soc, (int, float)):
-        facts.append(f"{soc:.0f}%")
+        # Labelled. On its own a bare percentage could be anything.
+        facts.append(f"battery {soc:.0f}%")
 
     where = ""
     location = car.get("Location")

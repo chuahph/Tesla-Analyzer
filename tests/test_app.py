@@ -4932,7 +4932,8 @@ def test_sentry_alert_says_what_actually_happened(monkeypatch):
         assert title == "Sentry" and tag == "sentry"
         assert "moved near the car" in body
         assert "The car has not moved." in body
-        assert "all doors shut" in body and "locked" in body and "70%" in body
+        assert "all doors shut" in body and "locked" in body
+        assert "battery 70%" in body, "a bare percentage could be anything"
 
         alerts.clear()
         with TestClient(app) as client:
@@ -4948,7 +4949,9 @@ def test_sentry_alert_says_what_actually_happened(monkeypatch):
         # An alarm reads differently from someone walking past, and the two
         # facts that matter are that it is open and unlocked.
         assert title == "Sentry: alarm" and "ALARM went off" in body
-        assert "OPEN: DriverFront" in body and "UNLOCKED" in body
+        # Tesla's key names in words: nobody should have to translate
+        # TrunkFront into "frunk" while reading an alert at one in the morning.
+        assert "OPEN: driver door" in body and "UNLOCKED" in body
     finally:
         settings.sync_key = old_sk
 
@@ -4993,3 +4996,43 @@ def test_the_other_third_set_fields_are_recorded_raw():
     bare = sync_mod.snapshot_from_telemetry({"Odometer": 19000.0}, 1_788_900_000.0)
     assert bare["paired_keys"] is None
     assert bare["charge_port_door_open"] is None and bare["driver_belt"] is None
+
+
+def test_sentry_alert_reports_a_window(monkeypatch):
+    """Once the third field set is sent, a window is the thing worth saying.
+
+    It is the classic way in, and until now the stream could not see it.
+    Unknown must still say nothing rather than reassure.
+    """
+    from app.api import routes as routes_mod
+
+    settings = get_settings()
+    old_sk = settings.sync_key
+    settings.sync_key = "cronkey"
+    alerts: list[tuple] = []
+    monkeypatch.setattr(routes_mod.notifications, "notify",
+                        lambda s, title, body, tag=None: alerts.append((title, body, tag)))
+    monkeypatch.setattr(routes_mod, "SENTRY_COOLDOWN_SEC", 0.0)
+
+    def run(vin, windows):
+        data = [{"key": k, "value": {"windowStateValue": v}}
+                for k, v in windows.items()]
+        with TestClient(app) as client:
+            client.post("/api/telemetry?key=cronkey", json={"records": [
+                {"vin": vin, "createdAt": "2026-09-09T16:00:00Z", "data": data},
+                {"vin": vin, "createdAt": "2026-09-09T16:00:10Z", "data": [
+                    {"key": "SentryMode",
+                     "value": {"sentryModeStateValue": "SentryModeStateAware"}}]}]})
+        return alerts[-1][1]
+
+    shut = {"FdWindow": "WindowStateClosed", "FpWindow": "WindowStateClosed",
+            "RdWindow": "WindowStateClosed", "RpWindow": "WindowStateClosed"}
+    try:
+        assert "windows shut" in run("SENTRYWIN0000001", shut)
+        assert "A WINDOW IS OPEN" in run(
+            "SENTRYWIN0000002", dict(shut, RdWindow="WindowStatePartiallyOpen"))
+        # Not configured: say nothing rather than claim the car is sealed.
+        body = run("SENTRYWIN0000003", {})
+        assert "window" not in body.lower()
+    finally:
+        settings.sync_key = old_sk
