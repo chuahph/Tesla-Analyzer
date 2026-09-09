@@ -4951,3 +4951,45 @@ def test_sentry_alert_says_what_actually_happened(monkeypatch):
         assert "OPEN: DriverFront" in body and "UNLOCKED" in body
     finally:
         settings.sync_key = old_sk
+
+
+def test_windows_are_read_so_the_intrusion_check_can_see_them():
+    """The app has always alerted on a car opened while parked and locked, and
+    that check covers windows as well as doors — but this path reported them as
+    unknown, so a window was the one way in the stream could not see."""
+    from app import sync as sync_mod
+
+    def snap(**fields):
+        fields.setdefault("Odometer", 19000.0)
+        return sync_mod.snapshot_from_telemetry(fields, 1_788_900_000.0)
+
+    shut = dict(FdWindow="WindowStateClosed", FpWindow="WindowStateClosed",
+                RdWindow="WindowStateClosed", RpWindow="WindowStateClosed")
+    assert snap(**shut)["windows_open"] is False
+    # A window lowered an inch is a way in, and is what one forced from
+    # outside looks like.
+    assert snap(**dict(shut, RdWindow="WindowStatePartiallyOpen"))["windows_open"] is True
+    assert snap(**dict(shut, FdWindow="WindowStateOpened"))["windows_open"] is True
+
+    # Unknown is not a confirmed shut. The intrusion check treats None and
+    # False very differently, and a sealed car nobody looked at is not sealed.
+    assert snap(**{k: "WindowStateUnknown" for k in shut})["windows_open"] is None
+    assert snap()["windows_open"] is None
+    # One readable window among unknowns is still an answer.
+    assert snap(FdWindow="WindowStateUnknown",
+                RdWindow="WindowStateOpened")["windows_open"] is True
+
+
+def test_the_other_third_set_fields_are_recorded_raw():
+    from app import sync as sync_mod
+
+    s = sync_mod.snapshot_from_telemetry(
+        {"Odometer": 19000.0, "PairedPhoneKeyAndKeyFobQty": 3,
+         "ChargePortDoorOpen": True, "DriverSeatBelt": False}, 1_788_900_000.0)
+    assert s["paired_keys"] == 3.0
+    assert s["charge_port_door_open"] is True
+    assert s["driver_belt"] is False
+
+    bare = sync_mod.snapshot_from_telemetry({"Odometer": 19000.0}, 1_788_900_000.0)
+    assert bare["paired_keys"] is None
+    assert bare["charge_port_door_open"] is None and bare["driver_belt"] is None

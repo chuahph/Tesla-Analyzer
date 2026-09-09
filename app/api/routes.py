@@ -9192,7 +9192,11 @@ TELEMETRY_TRIPS_MAX = 400
 # changes to keep. They stream only on change, so this is a log of moments
 # rather than a sample of values — a few hundred covers weeks.
 TELEMETRY_MODE_FIELDS = ("BMSState", "CenterDisplay", "Gear",
-                         "DriverSeatOccupied", "SentryMode", "HvacPower")
+                         "DriverSeatOccupied", "SentryMode", "HvacPower",
+                         # A key added to the car is how a stolen Tesla is
+                         # prepared. Logged rather than alerted on until it is
+                         # known what this reads normally.
+                         "PairedPhoneKeyAndKeyFobQty")
 TELEMETRY_MODES_MAX = 400
 
 

@@ -180,12 +180,46 @@ kill -0 $PROXY_PID 2>/dev/null || die "the proxy exited on startup (see $LOG)"
 # Kept out of the default set deliberately. A field list is only changed
 # between measurement runs, never in the middle of one — the point of the
 # comparison is that the two sides differ in one thing at a time.
+# --- The third set: what a break-in would look like ---------------------------
+#
+# Run with TELEMETRY_V3=1 (which includes everything V2 adds):
+#
+#   curl -sL https://evperkm.xyz/car -o c.sh && sudo TELEMETRY_V3=1 bash c.sh
+#
+# The four window fields are the reason. The app already alerts on a car being
+# opened while parked and locked, and already writes a SecurityEvent row for
+# it — and that code reads windows as well as doors. On the telemetry path it
+# has been reading them as "unknown" since the day it was written, because
+# they were never configured. A window lowered or broken is the classic way
+# in, and it has been the one the stream could not see.
+#
+# PairedPhoneKeyAndKeyFobQty is the other one worth having. A key being ADDED
+# to a car is how a stolen Tesla is prepared, and nothing else in 270 fields
+# would show it.
+#
+# ChargePortDoorOpen and DriverSeatBelt are cheaper evidence of the same
+# question: somebody opened the port, or somebody got in and buckled up. All
+# of these change only when something happens, so they cost almost no stream.
 EXTRA_FIELDS=""
 DEFAULT_DRIVE_COUNTER='      "LifetimeEnergyUsedDrive":   {"interval_seconds": 30},'
+# V3 includes V2: the sets are cumulative, so asking for the newer one never
+# silently drops the older one's fields.
+if [ "${TELEMETRY_V3:-0}" = "1" ]; then TELEMETRY_V2=1; fi
 if [ "${TELEMETRY_V2:-0}" = "1" ]; then
   DEFAULT_DRIVE_COUNTER='      "LifetimeEnergyUsed":        {"interval_seconds": 30},'
   EXTRA_FIELDS='      "BMSState":                  {"interval_seconds": 10}'
   say "TELEMETRY_V2 set: LifetimeEnergyUsed replaces the Semi-only drive counter, BMSState added"
+fi
+if [ "${TELEMETRY_V3:-0}" = "1" ]; then
+  EXTRA_FIELDS="$EXTRA_FIELDS,
+      \"FdWindow\":                  {\"interval_seconds\": 10},
+      \"FpWindow\":                  {\"interval_seconds\": 10},
+      \"RdWindow\":                  {\"interval_seconds\": 10},
+      \"RpWindow\":                  {\"interval_seconds\": 10},
+      \"PairedPhoneKeyAndKeyFobQty\": {\"interval_seconds\": 300},
+      \"ChargePortDoorOpen\":         {\"interval_seconds\": 60},
+      \"DriverSeatBelt\":             {\"interval_seconds\": 30}"
+  say "TELEMETRY_V3 set: four windows, paired-key count, charge port door, driver seat belt"
 fi
 
 say "Building the configuration"

@@ -2647,6 +2647,27 @@ _TELEMETRY_SHIFT = {
 }
 
 
+# The car's four windows, in the order the polling path names them.
+_TELEMETRY_WINDOWS = ("FdWindow", "FpWindow", "RdWindow", "RpWindow")
+
+
+def _any_window_open(fields: dict[str, Any]) -> bool | None:
+    """Whether any window reads as open, or None if the car said nothing.
+
+    WindowStateClosed / PartiallyOpen / Opened / Unknown. Partially open is
+    open: a window lowered an inch is a way in, and it is also what a window
+    forced from outside looks like. Unknown is not a confirmed shut, so a car
+    reporting nothing but Unknown stays unknown — the intrusion check treats
+    None and False very differently, and inventing a False here would report a
+    sealed car that nobody has actually looked at.
+    """
+    seen = [str(fields[k]) for k in _TELEMETRY_WINDOWS
+            if fields.get(k) is not None and not str(fields[k]).endswith("Unknown")]
+    if not seen:
+        return None
+    return any(v.endswith(("Opened", "PartiallyOpen")) for v in seen)
+
+
 def snapshot_from_telemetry(fields: dict[str, Any], ts: float) -> dict[str, Any]:
     """Flatten accumulated telemetry field values into a sync snapshot.
 
@@ -2743,7 +2764,12 @@ def snapshot_from_telemetry(fields: dict[str, Any], ts: float) -> dict[str, Any]
         # "unknown", and the parked-drain code relies on that not being False.
         "user_present": False,
         "car_wash_mode": False,
-        "windows_open": None,
+        # Read at last. The app has alerted on a car opened while parked since
+        # long before telemetry existed, and that check covers windows as well
+        # as doors — but this path reported them as unknown, so a window was
+        # the one way in the stream could not see. Partially open counts:
+        # a window lowered an inch is not shut.
+        "windows_open": _any_window_open(fields),
         "dashcam_state": None,
         # CenterDisplay IS streamed, and is deliberately not mapped here.
         # Polling stores this as Tesla's integer code; telemetry reports an
@@ -2781,6 +2807,18 @@ def snapshot_from_telemetry(fields: dict[str, Any], ts: float) -> dict[str, Any]
         # field set. Carried raw: its units are undocumented, and assuming a
         # unit is how a systematic error gets buried under everything.
         "energy_used_raw": num("LifetimeEnergyUsed"),
+        # How many phone keys and fobs the car will answer to. A key being
+        # ADDED is how a stolen Tesla is prepared, and nothing else in the 270
+        # fields would show it. Recorded, not yet alerted on: what this reads
+        # normally — whether it settles, or ticks as phones come and go — has
+        # not been watched yet, and an alarm built on an unwatched baseline
+        # cries wolf until it is ignored.
+        "paired_keys": num("PairedPhoneKeyAndKeyFobQty"),
+        "charge_port_door_open": (bool(fields["ChargePortDoorOpen"])
+                                  if "ChargePortDoorOpen" in fields else None),
+        # Somebody got in AND buckled up, which says more than a door opening.
+        "driver_belt": (bool(fields["DriverSeatBelt"])
+                        if "DriverSeatBelt" in fields else None),
         # The pack's own notion of driving (BMSStateDrive). Trip boundaries
         # are inferred from Gear and speed; this is the car's own answer, and
         # is recorded to be compared against that inference rather than to
