@@ -9413,7 +9413,11 @@ def telemetry_ingest(
         seen_so_far = _json.loads(state.get(session, state.TELEMETRY_SEEN_KEY) or "{}") or {}
     except ValueError:
         seen_so_far = {}
-    prev_record_ts = float(seen_so_far.get("last_record_ts") or 0.0)
+    # Per vehicle. Silence is a property of one car's connection, and a
+    # single figure across all of them means a second car streaming normally
+    # hides the first one's outage completely — the gap log would go quiet
+    # exactly when it matters most.
+    last_seen_by_vin = dict(seen_so_far.get("last_record_ts_by_vin") or {})
 
     # States that mean the car noticed something. Off/Idle/Armed/Quiet are
     # the car minding its own business; these two are not.
@@ -9435,21 +9439,27 @@ def telemetry_ingest(
         # A field the car could not read must not erase what it last told us.
         fields = {k: v for k, v in (record.get("fields") or {}).items()
                   if v is not None}
+        # Kept before the composite has its say. What the car reported is a
+        # fact about the car; whether this composite will adopt the value is a
+        # separate question, and the mode log wants the first of those.
+        reported = dict(fields)
         ts = _telemetry_ts(record.get("created_at"))
+        composite_ts = _telemetry_ts(car.get("_ts"))
         # Silence, noted before anything is folded in. What the car did while
         # it was quiet is unrecoverable — a gear change made underground is
         # never transmitted at all, so it does not arrive late, it simply does
         # not arrive — and the gap is the only evidence that a boundary inside
         # it cannot be trusted.
+        prev_record_ts = float(last_seen_by_vin.get(vin) or 0.0)
         if ts and prev_record_ts and ts - prev_record_ts > TELEMETRY_GAP_MIN_SEC:
             gaps.append({
+                "vin": vin,
                 "from": sync_mod._dt(prev_record_ts).isoformat(timespec="seconds"),
                 "to": sync_mod._dt(ts).isoformat(timespec="seconds"),
                 "seconds": round(ts - prev_record_ts),
             })
         if ts:
-            prev_record_ts = max(prev_record_ts, ts)
-        composite_ts = _telemetry_ts(car.get("_ts"))
+            last_seen_by_vin[vin] = max(prev_record_ts, ts)
         if ts and composite_ts and ts < composite_ts:
             # Older than what the composite already describes. Its values are
             # the past, and this composite means "the car as of the newest
@@ -9465,8 +9475,9 @@ def telemetry_ingest(
         # the moment a value MOVED, and after the update the old one is gone.
         # These fields are streamed only when they change, so nothing else in
         # the app can answer when the car decided it had stopped driving.
+        stale = bool(ts and composite_ts and ts < composite_ts)
         for key in TELEMETRY_MODE_FIELDS:
-            if key in fields and fields[key] != car.get(key):
+            if key in reported and reported[key] != car.get(key):
                 # Both clocks. `ts` is when the car says it happened; `seen`
                 # is when this heard about it. They are usually seconds apart
                 # and the difference is noise — until the car has been out of
@@ -9482,7 +9493,14 @@ def telemetry_ingest(
                     "lag_sec": round(now.timestamp() - sync_mod._dt(ts).timestamp())
                     if ts else None,
                     "vin": vin, "field": key,
-                    "from": car.get(key), "to": fields[key],
+                    "from": car.get(key), "to": reported[key],
+                    # An older record than the composite already holds. Its
+                    # value is not adopted — that is what stops a replay
+                    # rewinding the car — but the fact that the car reported
+                    # it, and when, is exactly what a late-reported change
+                    # looks like, and dropping it here made lag_sec incapable
+                    # of ever being anything but nothing.
+                    **({"stale": True} if stale else {}),
                 })
         car.update(fields)
         if ts >= composite_ts and record.get("created_at"):
@@ -9539,7 +9557,7 @@ def telemetry_ingest(
         seen = {}
     seen["first"] = seen.get("first") or now.isoformat(timespec="seconds")
     seen["last"] = now.isoformat(timespec="seconds")
-    seen["last_record_ts"] = prev_record_ts
+    seen["last_record_ts_by_vin"] = last_seen_by_vin
     seen["batches"] = int(seen.get("batches") or 0) + 1
     seen["records"] = int(seen.get("records") or 0) + len(kept)
     state.put(session, state.TELEMETRY_SEEN_KEY, _json.dumps(seen))
@@ -9918,7 +9936,8 @@ def telemetry_compare(
     for g in gaps:
         try:
             gap_spans.append((datetime.fromisoformat(g["from"]),
-                              datetime.fromisoformat(g["to"])))
+                              datetime.fromisoformat(g["to"]),
+                              g.get("vin")))
         except (KeyError, TypeError, ValueError):
             continue
 
@@ -9968,9 +9987,14 @@ def telemetry_compare(
         # Seconds of silence inside this journey. Not an error in itself — but
         # a boundary that falls in one is a boundary nobody saw, and the trip's
         # duration is then a lower bound rather than a measurement.
+        # A trip is only charged with its own car's silence. Entries written
+        # before gaps carried a vin have none, and are counted for everyone —
+        # there was only one car then, so that is the truth about them.
         blackout = sum(
             (min(b, t_end) - max(a, t_start)).total_seconds()
-            for a, b in gap_spans if a < t_end and t_start < b)
+            for a, b, gap_vin in gap_spans
+            if a < t_end and t_start < b
+            and (gap_vin is None or gap_vin == t.get("vin")))
         row["telemetry"]["blackout_sec"] = round(blackout) or None
         if t.get("end_odo_km") is not None:
             prev_end_odo = float(t["end_odo_km"])

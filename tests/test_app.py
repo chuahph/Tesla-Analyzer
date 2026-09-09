@@ -5191,3 +5191,109 @@ def test_silence_is_recorded_and_charged_to_the_trip_it_falls_in():
         sess.commit()
         sess.close()
         settings.app_passcode = old_pc
+
+
+def _tele_post(client, vin, ts, key, value, wrap="stringValue"):
+    from datetime import timezone as _tz
+
+    stamp = datetime.fromtimestamp(ts, _tz.utc).isoformat().replace("+00:00", "Z")
+    resp = client.post("/api/telemetry", json={"records": [
+        {"vin": vin, "createdAt": stamp,
+         "data": [{"key": key, "value": {wrap: value}}]}]})
+    assert resp.status_code == 200, resp.text
+
+
+def test_silence_is_a_property_of_one_car_not_of_the_app():
+    """One vehicle streaming must not hide another's outage.
+
+    A single last-seen timestamp across all cars means the gap log goes quiet
+    exactly when it matters — a second car reporting normally keeps the clock
+    moving while the first is off the air for ten minutes.
+    """
+    import time as _time
+
+    from app.database import SessionLocal
+    from app import state
+
+    settings = get_settings()
+    old_pc = settings.app_passcode
+    settings.app_passcode = ""
+    sess = SessionLocal()
+    prev = {k: state.get(sess, k) for k in
+            (state.TELEMETRY_GAPS_KEY, state.TELEMETRY_SEEN_KEY)}
+    a, b = "GAPCARA000000001", "GAPCARB000000002"
+    try:
+        state.put(sess, state.TELEMETRY_GAPS_KEY, "[]")
+        state.put(sess, state.TELEMETRY_SEEN_KEY, "{}")
+        sess.commit()
+        t = _time.time() - 3600
+        with TestClient(app) as client:
+            for off in (0, 10, 20, 30):
+                _tele_post(client, a, t + off, "VehicleSpeed", 20.0, "doubleValue")
+                _tele_post(client, b, t + off + 1, "VehicleSpeed", 20.0, "doubleValue")
+            assert client.get("/api/telemetry/gaps").json()["gaps"] == 0
+
+            # A goes quiet for 700 seconds; B never stops.
+            for off in range(60, 720, 60):
+                _tele_post(client, b, t + off, "VehicleSpeed", 20.0, "doubleValue")
+            _tele_post(client, a, t + 730, "VehicleSpeed", 0.0, "doubleValue")
+
+            body = client.get("/api/telemetry/gaps").json()
+        assert body["gaps"] == 1, body["recent"]
+        entry = body["recent"][0]
+        assert entry["vin"] == a, "the gap must name the car it belongs to"
+        assert entry["seconds"] == pytest.approx(700, abs=5)
+    finally:
+        for key, was in prev.items():
+            state.put(sess, key, was or "")
+        sess.commit()
+        sess.close()
+        settings.app_passcode = old_pc
+
+
+def test_a_change_reported_late_is_logged_even_though_it_is_not_adopted():
+    """lag_sec exists to expose a change reported long after it happened.
+
+    The composite refuses values older than it already holds — that is what
+    stops a replay rewinding the odometer — and it ran first, so a stale
+    change never reached the mode log and lag_sec could never be anything but
+    nothing. The fact that the car reported it, and when, is recorded; the
+    value is still not adopted.
+    """
+    import json as _json
+    import time as _time
+
+    from app.database import SessionLocal
+    from app import state
+
+    settings = get_settings()
+    old_pc = settings.app_passcode
+    settings.app_passcode = ""
+    sess = SessionLocal()
+    prev = {k: state.get(sess, k) for k in
+            (state.TELEMETRY_MODES_KEY, state.TELEMETRY_LATEST_KEY)}
+    vin = "LATECHANGE000001"
+    try:
+        state.put(sess, state.TELEMETRY_MODES_KEY, "[]")
+        sess.commit()
+        t = _time.time() - 3600
+        with TestClient(app) as client:
+            _tele_post(client, vin, t, "Gear", "ShiftStateP")
+            _tele_post(client, vin, t + 600, "Gear", "ShiftStateD")
+            _tele_post(client, vin, t - 1800, "Gear", "ShiftStateR")   # stale
+
+            entries = [m for m in client.get("/api/telemetry/modes").json()["recent"]
+                       if m["vin"] == vin]
+        late = [m for m in entries if m["to"] == "ShiftStateR"]
+        assert late, "a stale change vanished, so lag_sec could never fire"
+        assert late[0]["lag_sec"] > 1700
+        assert late[0]["stale"] is True
+        # And the composite is unmoved: a replay must not rewind the car.
+        car = _json.loads(state.get(SessionLocal(), state.TELEMETRY_LATEST_KEY))[vin]
+        assert car["Gear"] == "ShiftStateD"
+    finally:
+        for key, was in prev.items():
+            state.put(sess, key, was or "")
+        sess.commit()
+        sess.close()
+        settings.app_passcode = old_pc
