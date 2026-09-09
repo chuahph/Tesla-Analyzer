@@ -5036,3 +5036,69 @@ def test_sentry_alert_reports_a_window(monkeypatch):
         assert "window" not in body.lower()
     finally:
         settings.sync_key = old_sk
+
+
+def test_waiting_in_the_seat_does_not_end_the_journey():
+    """Park with the driver still aboard is waiting, not arriving.
+
+    Measured: a 35-minute drive with a pause in the middle came back as 14
+    minutes and 2.2 km of 4.9, because ten minutes of stillness was taken for
+    an arrival. The driver never left the seat — someone was being waited for.
+    """
+    from app import sync as sync_mod
+
+    def snap(ts, mi, *, mph=0.0, gear="ShiftStateP", seat=True, doors=False):
+        return sync_mod.snapshot_from_telemetry(
+            {"Odometer": mi, "VehicleSpeed": mph, "Gear": gear,
+             "DriverSeatOccupied": seat, "EnergyRemaining": 55.0,
+             "DoorState": {"DriverFront": doors}}, ts)
+
+    t, m = 1_788_900_000.0, 19000.0
+    sh: dict = {}
+    sync_mod.advance_shadow(sh, snap(t, m, mph=20, gear="ShiftStateD"))
+    sync_mod.advance_shadow(sh, snap(t + 600, m + 1.5, mph=20, gear="ShiftStateD"))
+    # Shifts to P and waits, seated. Twenty minutes of it.
+    for i in range(1, 21):
+        assert sync_mod.advance_shadow(sh, snap(t + 600 + i * 60, m + 1.5)) is None, \
+            f"the journey was cut short after {i} minutes of waiting"
+    assert sh.get("open")
+    # Drives on, and it is still the same journey.
+    sync_mod.advance_shadow(sh, snap(t + 1900, m + 1.5, mph=20, gear="ShiftStateD"))
+    sync_mod.advance_shadow(sh, snap(t + 2400, m + 3.0, mph=20, gear="ShiftStateD"))
+    # Arrives properly: the driver gets out.
+    sync_mod.advance_shadow(sh, snap(t + 2500, m + 3.2, seat=False, doors=True))
+    done = sync_mod.advance_shadow(sh, snap(t + 2700, m + 3.2, seat=False, doors=True))
+    assert done is not None, "leaving the seat must still end the journey"
+    assert done["ended_on"] == "exit"
+    # One trip covering both legs, ending when the car actually stopped.
+    assert done["end_ts"] == t + 2500
+    assert done["distance_km"] == pytest.approx(3.2 * sync_mod.MILES_TO_KM, abs=0.01)
+
+
+def test_a_long_wait_does_not_delay_a_real_arrival():
+    """Waiting is generous, arriving is not made slower by it.
+
+    The short window is measured from when the car STOPPED, so by the time
+    someone finally leaves the seat it has long since passed and the trip
+    closes at once — with the end time being when it first parked, not when
+    the door opened.
+    """
+    from app import sync as sync_mod
+
+    def snap(ts, mi, *, mph=0.0, gear="ShiftStateP", seat=True):
+        return sync_mod.snapshot_from_telemetry(
+            {"Odometer": mi, "VehicleSpeed": mph, "Gear": gear,
+             "DriverSeatOccupied": seat, "EnergyRemaining": 55.0}, ts)
+
+    t, m = 1_788_900_000.0, 19000.0
+    sh: dict = {}
+    sync_mod.advance_shadow(sh, snap(t, m, mph=20, gear="ShiftStateD"))
+    sync_mod.advance_shadow(sh, snap(t + 600, m + 5, mph=20, gear="ShiftStateD"))
+    stopped = t + 700
+    sync_mod.advance_shadow(sh, snap(stopped, m + 5.4))          # parks, stays in
+    for i in range(1, 40):                                       # 39 minutes
+        sync_mod.advance_shadow(sh, snap(stopped + i * 60, m + 5.4))
+    assert sh.get("open")
+    done = sync_mod.advance_shadow(sh, snap(stopped + 2400, m + 5.4, seat=False))
+    assert done is not None, "leaving after a long wait must close it immediately"
+    assert done["end_ts"] == stopped, "the trip ended when the car stopped"

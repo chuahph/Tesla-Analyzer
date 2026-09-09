@@ -2857,13 +2857,24 @@ def snapshot_from_telemetry(fields: dict[str, Any], ts: float) -> dict[str, Any]
 # a light never reaches this path at all, since is_driving is true whenever
 # the gear is not P.
 SHADOW_SETTLE_SEC = 180.0
-# Longer when nobody got out. A car in P with its doors never opened is more
-# likely pausing — a queue, a phone call, waiting for someone — than arrived,
-# and splitting that into two trips invents a journey that never happened.
-# Costs nothing when it guesses wrong: the trip is backdated to the moment P
-# was reached either way, so a longer wait delays when the trip appears, not
-# when it is recorded as having ended.
-SHADOW_SETTLE_NO_EXIT_SEC = 600.0
+# Park with the driver still in the seat is WAITING, not arriving — someone
+# is being picked up, a call is being finished, a queue is being sat in. The
+# journey has not ended, and the car agrees: it kept one such drive whole as
+# 35 minutes while this closed it at 14, because ten minutes of stillness was
+# taken for an arrival.
+#
+# Ninety minutes instead. It costs nothing to be generous here, which is the
+# part worth understanding: the trip's end is the moment P was engaged, not
+# the moment this timer expires, so a longer wait cannot lengthen a trip. And
+# a real arrival does not wait it out — the moment the driver leaves the seat
+# the window becomes SHADOW_SETTLE_SEC measured from when the car first
+# stopped, which by then has already passed, so it closes at once with the
+# right end time.
+#
+# What the ninety minutes actually bounds is the case where nobody ever
+# leaves and the car never sleeps. Left unbounded the trip would stay open
+# forever; this closes it eventually without cutting anybody's wait in half.
+SHADOW_SETTLE_NO_EXIT_SEC = 5400.0
 # And closed at the last motion if the stream simply stops: a car that sleeps
 # without sending a final ShiftStateP would otherwise leave a trip open for
 # hours and then absorb the next journey into it.
