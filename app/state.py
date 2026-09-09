@@ -54,6 +54,12 @@ TELEMETRY_LATEST_KEY = "telemetry_latest"  # JSON {vin: {field: value}} — the
 # the running composite is what a snapshot can be built from.
 TELEMETRY_SHADOW_KEY = "telemetry_shadow"  # JSON {vin: machine state}: the
 # open shadow trip and what has been seen since it started.
+TELEMETRY_GAPS_KEY = "telemetry_gaps"  # JSON list of {from, to, seconds}:
+# stretches the car said nothing. A gear change made while the car is out of
+# coverage is never sent — it does not arrive late, it does not arrive at all
+# — so the only evidence that a trip's boundary might be wrong is the silence
+# around it. Recorded rather than reasoned about, for the same reason as
+# unaccounted_km: the missing thing cannot be recovered, only declared.
 TELEMETRY_MODES_KEY = "telemetry_modes"  # JSON list of {ts, vin, field, from,
 # to}: every change of the handful of fields that say what the car thinks it
 # is doing. They stream only when they change, so the composite holds the

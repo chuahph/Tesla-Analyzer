@@ -5106,3 +5106,88 @@ def test_a_long_wait_does_not_delay_a_real_arrival():
     done = sync_mod.advance_shadow(sh, snap(stopped + 2400, m + 5.4, seat=False))
     assert done is not None, "leaving after a long wait must close it immediately"
     assert done["end_ts"] == stopped, "the trip ended when the car stopped"
+
+
+def test_silence_is_recorded_and_charged_to_the_trip_it_falls_in():
+    """A gear change made out of coverage is never transmitted.
+
+    It does not arrive late — it does not arrive. Measured: a park at 17:39
+    and the departure after it are both simply absent, and the stream resumes
+    with the car in Drive, so every rule reads it as one unbroken journey. The
+    silence cannot recover what was lost; it can say that something was lost,
+    which is the difference between an answer that is wrong and one that
+    admits it does not know.
+    """
+    import json as _json
+    from datetime import timezone as _tz
+
+    from app.database import SessionLocal
+    from app import state, sync as sync_mod
+
+    settings = get_settings()
+    old_pc = settings.app_passcode
+    settings.app_passcode = ""
+    sess = SessionLocal()
+    prev = {k: state.get(sess, k) for k in (
+        state.TELEMETRY_GAPS_KEY, state.TELEMETRY_SEEN_KEY,
+        state.TELEMETRY_TRIPS_KEY, state.TELEMETRY_SHADOW_KEY)}
+    vin = "BLACKOUT00000001"
+    try:
+        for key in (state.TELEMETRY_GAPS_KEY, state.TELEMETRY_TRIPS_KEY):
+            state.put(sess, key, "[]")
+        state.put(sess, state.TELEMETRY_SEEN_KEY, "{}")
+        state.put(sess, state.TELEMETRY_SHADOW_KEY, "{}")
+        sess.commit()
+
+        # A true epoch, not now_local(): that is naive MYT wall-clock, and
+        # converting it as if it were UTC puts every record hours in the
+        # future — the same mistake that once closed a trip on every cron tick.
+        import time as _time
+
+        base_ts = _time.time() - 7200
+
+        def at(offset):
+            return datetime.fromtimestamp(base_ts + offset, _tz.utc).isoformat(
+                ).replace("+00:00", "Z")
+
+        with TestClient(app) as client:
+            def post(offset, **kv):
+                keys = {"mph": "VehicleSpeed", "odo": "Odometer", "gear": "Gear"}
+                data = [{"key": keys[k],
+                         "value": ({"stringValue": v} if keys[k] == "Gear"
+                                   else {"doubleValue": v})}
+                        for k, v in kv.items()]
+                r = client.post("/api/telemetry", json={
+                    "records": [{"vin": vin, "createdAt": at(offset), "data": data}]})
+                assert r.status_code == 200, r.text
+
+            post(0, odo=19000.0, mph=0.0, gear="ShiftStateP")
+            post(10, mph=30.0, gear="ShiftStateD")
+            post(60, odo=19000.5, mph=30.0)
+            # Ten minutes underground. Whatever happened here was never sent.
+            post(660, odo=19002.0, mph=30.0)
+            post(700, odo=19002.2, mph=0.0, gear="ShiftStateP")
+
+            body = client.get("/api/telemetry/gaps").json()
+            assert body["gaps"] == 1, body
+            assert body["recent"][0]["seconds"] == 600
+
+        # And the journey it fell inside says so.
+        state.put(SessionLocal(), state.TELEMETRY_SEEN_KEY, "{}")
+        with TestClient(app) as client:
+            trips = _json.loads(
+                state.get(SessionLocal(), state.TELEMETRY_TRIPS_KEY) or "[]")
+            if not trips:                       # not yet settled; force it
+                from app.api import routes as routes_mod
+                routes_mod._settle_shadows(SessionLocal())
+            body = client.get("/api/telemetry/compare").json()
+        ours = [t for t in body["trips"]
+                if t["telemetry"].get("blackout_sec")]
+        assert ours, "a journey driven through ten minutes of silence said nothing about it"
+        assert ours[0]["telemetry"]["blackout_sec"] == pytest.approx(600, abs=5)
+    finally:
+        for key, was in prev.items():
+            state.put(sess, key, was or "")
+        sess.commit()
+        sess.close()
+        settings.app_passcode = old_pc

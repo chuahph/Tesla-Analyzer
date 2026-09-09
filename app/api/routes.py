@@ -9198,6 +9198,12 @@ TELEMETRY_MODE_FIELDS = ("BMSState", "CenterDisplay", "Gear",
                          # known what this reads normally.
                          "PairedPhoneKeyAndKeyFobQty")
 TELEMETRY_MODES_MAX = 400
+# Silence longer than this is a gap worth recording. Records arrive every few
+# seconds while the car is awake, so two minutes is unambiguous — and a parked
+# car that has gone to sleep produces gaps of hours, which are expected and
+# harmless because no journey spans them.
+TELEMETRY_GAP_MIN_SEC = 120.0
+TELEMETRY_GAPS_MAX = 200
 
 
 # A Sentry state can flicker — someone walks past twice. One message per
@@ -9399,6 +9405,15 @@ def telemetry_ingest(
         modes = _json.loads(state.get(session, state.TELEMETRY_MODES_KEY) or "[]") or []
     except ValueError:
         modes = []
+    try:
+        gaps = _json.loads(state.get(session, state.TELEMETRY_GAPS_KEY) or "[]") or []
+    except ValueError:
+        gaps = []
+    try:
+        seen_so_far = _json.loads(state.get(session, state.TELEMETRY_SEEN_KEY) or "{}") or {}
+    except ValueError:
+        seen_so_far = {}
+    prev_record_ts = float(seen_so_far.get("last_record_ts") or 0.0)
 
     # States that mean the car noticed something. Off/Idle/Armed/Quiet are
     # the car minding its own business; these two are not.
@@ -9421,6 +9436,19 @@ def telemetry_ingest(
         fields = {k: v for k, v in (record.get("fields") or {}).items()
                   if v is not None}
         ts = _telemetry_ts(record.get("created_at"))
+        # Silence, noted before anything is folded in. What the car did while
+        # it was quiet is unrecoverable — a gear change made underground is
+        # never transmitted at all, so it does not arrive late, it simply does
+        # not arrive — and the gap is the only evidence that a boundary inside
+        # it cannot be trusted.
+        if ts and prev_record_ts and ts - prev_record_ts > TELEMETRY_GAP_MIN_SEC:
+            gaps.append({
+                "from": sync_mod._dt(prev_record_ts).isoformat(timespec="seconds"),
+                "to": sync_mod._dt(ts).isoformat(timespec="seconds"),
+                "seconds": round(ts - prev_record_ts),
+            })
+        if ts:
+            prev_record_ts = max(prev_record_ts, ts)
         composite_ts = _telemetry_ts(car.get("_ts"))
         if ts and composite_ts and ts < composite_ts:
             # Older than what the composite already describes. Its values are
@@ -9496,6 +9524,8 @@ def telemetry_ingest(
                         newest_trip, snap):
                     amended += 1
 
+    state.put(session, state.TELEMETRY_GAPS_KEY,
+              _json.dumps(gaps[-TELEMETRY_GAPS_MAX:]))
     state.put(session, state.TELEMETRY_MODES_KEY,
               _json.dumps(modes[-TELEMETRY_MODES_MAX:]))
     state.put(session, state.TELEMETRY_LATEST_KEY, _json.dumps(latest))
@@ -9509,6 +9539,7 @@ def telemetry_ingest(
         seen = {}
     seen["first"] = seen.get("first") or now.isoformat(timespec="seconds")
     seen["last"] = now.isoformat(timespec="seconds")
+    seen["last_record_ts"] = prev_record_ts
     seen["batches"] = int(seen.get("batches") or 0) + 1
     seen["records"] = int(seen.get("records") or 0) + len(kept)
     state.put(session, state.TELEMETRY_SEEN_KEY, _json.dumps(seen))
@@ -9797,6 +9828,34 @@ def telemetry_modes(
             "recent": modes[-limit:]}
 
 
+@router.get("/telemetry/gaps")
+def telemetry_gaps(
+    limit: int = Query(40, ge=1, le=TELEMETRY_GAPS_MAX),
+    session: Session = Depends(get_session),
+):
+    """Stretches the car said nothing.
+
+    Most of these are a parked car asleep, and mean nothing. The ones that
+    matter fall inside a journey: a gear change made out of coverage is never
+    transmitted, so a car that parks underground and drives off again ten
+    minutes later leaves no trace of either event, and the journey reads as
+    one unbroken drive. Measured: a park at 17:39 and the departure that
+    followed it are both simply absent from the record.
+
+    The silence cannot recover what was lost. It can say that something was
+    lost, which is the difference between an answer that is wrong and one that
+    admits it does not know.
+    """
+    import json as _json
+
+    try:
+        gaps = _json.loads(state.get(session, state.TELEMETRY_GAPS_KEY) or "[]") or []
+    except ValueError:
+        gaps = []
+    return {"gaps": len(gaps), "over_seconds": TELEMETRY_GAP_MIN_SEC,
+            "recent": gaps[-limit:]}
+
+
 @router.get("/telemetry/compare")
 def telemetry_compare(
     days: int = Query(14, ge=1, le=90),
@@ -9851,6 +9910,18 @@ def telemetry_compare(
     # car kept streaming, so the store can hold rows from more than one shape
     # of this code — and the answer to "how did that drive go" should not be a
     # 500 because a record from three deploys ago is missing a key.
+    try:
+        gaps = _json.loads(state.get(session, state.TELEMETRY_GAPS_KEY) or "[]") or []
+    except ValueError:
+        gaps = []
+    gap_spans = []
+    for g in gaps:
+        try:
+            gap_spans.append((datetime.fromisoformat(g["from"]),
+                              datetime.fromisoformat(g["to"])))
+        except (KeyError, TypeError, ValueError):
+            continue
+
     rows, matched_ids, skipped = [], set(), []
     prev_end_odo, unaccounted = None, 0.0
     for t in shadow_trips:
@@ -9894,6 +9965,13 @@ def telemetry_compare(
         row["telemetry"]["odo_gap_before_km"] = gap
         if gap:
             unaccounted += gap
+        # Seconds of silence inside this journey. Not an error in itself — but
+        # a boundary that falls in one is a boundary nobody saw, and the trip's
+        # duration is then a lower bound rather than a measurement.
+        blackout = sum(
+            (min(b, t_end) - max(a, t_start)).total_seconds()
+            for a, b in gap_spans if a < t_end and t_start < b)
+        row["telemetry"]["blackout_sec"] = round(blackout) or None
         if t.get("end_odo_km") is not None:
             prev_end_odo = float(t["end_odo_km"])
         rows.append(row)
