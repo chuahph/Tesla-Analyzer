@@ -3300,6 +3300,52 @@ def test_the_car_s_own_bms_ends_a_trip_while_the_driver_is_still_seated():
     assert trip["end_odo_km"] == pytest.approx(106.02 * MILES_TO_KM, abs=0.01)
 
 
+def test_plugging_in_ends_the_trip_without_anyone_getting_out():
+    """A car drawing power has arrived, whoever is still sitting in it.
+
+    Parking at a charger and staying in the car is ordinary, and it is the
+    case where every other test says nothing: no exit to see, and the BMS may
+    hold Drive for another ten minutes. Charging cannot be wrong about it.
+    """
+    shadow: dict = {}
+    advance_shadow(shadow, _bms_tel(0, 100.0, 30.0, "BMSStateDrive"))
+    advance_shadow(shadow, _bms_tel(600, 106.0, 28.5, "BMSStateDrive"))
+    # Parked at the charger, driver still aboard, drivetrain still live.
+    assert advance_shadow(shadow, _bms_tel(660, 106.0, 28.5, "BMSStateDrive",
+                                           gear="ShiftStateP", speed_mph=0.0)) is None
+
+    plugged = snapshot_from_telemetry({
+        "Odometer": 106.02, "EnergyRemaining": 28.4, "Gear": "ShiftStateP",
+        "VehicleSpeed": 0.0, "Soc": 50.0, "BMSState": "BMSStateDrive",
+        "DriverSeatOccupied": True,
+        "DetailedChargeState": "DetailedChargeStateACCharging",
+    }, ts=700)
+    trip = advance_shadow(shadow, plugged)
+    assert trip is not None
+    assert trip["ended_on"] == "charging"
+    # Still ends where the car stopped, not where it was plugged in.
+    assert trip["end_ts"] == 660
+
+
+def test_the_charge_counters_are_carried_without_being_believed():
+    """ACChargingEnergyIn read 16.70 on a car with 31,000 km behind it.
+
+    Nobody knows whether that is a session or a lifetime, and a wrong guess
+    would misprice every charge. Carried raw so one charging session settles
+    it; energy_added_kwh stays at zero until it does.
+    """
+    snap = snapshot_from_telemetry({
+        "DetailedChargeState": "DetailedChargeStateACCharging",
+        "ACChargingEnergyIn": 16.70, "DCChargingEnergyIn": 16.00,
+        "ACChargingPower": 6.9,
+    }, ts=100)
+    assert snap["charging"] is True
+    assert snap["charge_energy_in_raw"] == 16.70
+    assert snap["dc_energy_in_raw"] == 16.00
+    assert snap["charge_state_raw"] == "DetailedChargeStateACCharging"
+    assert snap["energy_added_kwh"] == 0.0, "not until one charge has shown what it means"
+
+
 def test_a_bms_never_seen_in_drive_cannot_end_a_trip():
     """The composite holds the last value sent, and BMSState is sent on change.
 

@@ -2750,6 +2750,15 @@ def snapshot_from_telemetry(fields: dict[str, Any], ts: float) -> dict[str, Any]
         # per-session or rolling, a wrong guess here would silently misprice
         # every charge.
         "energy_added_kwh": 0.0,
+        # Carried raw, the way energy_used_raw is, so the question above can
+        # be settled by watching one charge rather than by guessing. If these
+        # start near zero and climb to what the session added, they are
+        # per-session and energy_added_kwh can finally be filled in; if they
+        # climb from 16.70 by that amount, they are rolling and a subtraction
+        # across the session says the same thing. Nothing reads them yet.
+        "charge_energy_in_raw": num("ACChargingEnergyIn"),
+        "dc_energy_in_raw": num("DCChargingEnergyIn"),
+        "charge_state_raw": charge_state or None,
         "fast": charge_state.startswith("DetailedChargeStateDC"),
         "out_temp": num("OutsideTemp") if num("OutsideTemp") is not None else 20.0,
         "shift": _TELEMETRY_SHIFT.get(str(fields.get("Gear") or ""), "P"),
@@ -3069,6 +3078,21 @@ def advance_shadow(shadow: dict[str, Any], snap: dict[str, Any]) -> dict[str, An
                                  readings=snap) or done
             open_at = None
 
+    # A car drawing power is a car that has arrived. No timer, no inference,
+    # and no need for anyone to have got out — plugging in and sitting in the
+    # car while it charges is an ordinary thing to do, and it is exactly the
+    # case where the driver-left test says nothing and the BMS may hold Drive
+    # for another ten minutes.
+    #
+    # A backstop rather than a discovery: when the car can say it is charging
+    # it can usually say the rest too. It costs three lines and it is the only
+    # signal here that cannot be wrong.
+    if open_at and snap.get("charging"):
+        shadow["ended_by_charge"] = True
+        done = _shadow_close(shadow, shadow.get("still_snap") or last or snap,
+                             readings=snap) or done
+        open_at = None
+
     if is_driving(snap):
         # Not without an odometer to start from. A telemetry message carries
         # only what changed, so a composite that has not yet seen an Odometer
@@ -3307,6 +3331,7 @@ def _shadow_close(shadow: dict[str, Any], end: dict[str, Any],
     # first would make every trip claim it ended on a timeout.
     exit_seen = bool(shadow.get("exit_seen"))
     ended_by_bms = bool(shadow.pop("ended_by_bms", False))
+    ended_by_charge = bool(shadow.pop("ended_by_charge", False))
     shadow["still_since"] = None
     shadow.pop("still_snap", None)
     shadow.pop("exit_seen", None)
@@ -3394,6 +3419,8 @@ def _shadow_close(shadow: dict[str, Any], end: dict[str, Any],
         "used_delta": used_delta,
         # How the journey's end was decided, because that is what says how
         # much to trust its final odometer:
+        #   charging    the car was drawing power, so it had arrived. The
+        #               only ending here that cannot be wrong
         #   bms         the car's battery management system left Drive. Its
         #               own answer, within seconds of the truth, and it does
         #               not care whether the driver stayed in the seat
@@ -3407,6 +3434,7 @@ def _shadow_close(shadow: dict[str, Any], end: dict[str, Any],
         #               systematic rather than random, because it is the same
         #               carpark every time.
         "ended_on": ("stream_lost" if shadow.pop("stream_lost", False)
+                     else "charging" if ended_by_charge
                      else "bms" if ended_by_bms
                      else "exit" if exit_seen else "timeout"),
         "pack_temp_c": end.get("pack_temp_c"),

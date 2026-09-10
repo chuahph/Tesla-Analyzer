@@ -9221,7 +9221,18 @@ TELEMETRY_MODE_FIELDS = ("BMSState", "CenterDisplay", "Gear",
                          # so its transitions can be lined up against buckling
                          # and against Park, which is the only way to find out
                          # what it actually reports.
-                         "DriverSeatBelt")
+                         "DriverSeatBelt",
+                         # Charge boundaries, timestamped. The polled history
+                         # owns charges, and this is not trying to take that
+                         # over — it is here because ACChargingEnergyIn read
+                         # 16.70 on a car with 31,000 km behind it, so nobody
+                         # knows yet whether that counter is per-session or
+                         # rolling, and the answer is the difference between
+                         # being able to price a charge from the stream and
+                         # not. Knowing exactly when a session started and
+                         # stopped is what lets the counter either side of it
+                         # be read.
+                         "DetailedChargeState")
 TELEMETRY_MODES_MAX = 400
 # Silence longer than this is a gap worth recording. Records arrive every few
 # seconds while the car is awake, so two minutes is unambiguous — and a parked
