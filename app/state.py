@@ -54,6 +54,14 @@ TELEMETRY_LATEST_KEY = "telemetry_latest"  # JSON {vin: {field: value}} — the
 # the running composite is what a snapshot can be built from.
 TELEMETRY_SHADOW_KEY = "telemetry_shadow"  # JSON {vin: machine state}: the
 # open shadow trip and what has been seen since it started.
+PURGED_DRIVES_KEY = "purged_drives"  # JSON {at, cutover, rows: [...]}: every
+# drive row deleted by /api/data/purge-pre-telemetry, serialised whole. The
+# purge is the one destructive operation in this app that cannot be recomputed
+# from anything else — polled trips came from an API that no longer holds the
+# history — so it writes the rows here before removing them and
+# /api/data/restore-purged-drives puts them back. Lives in Postgres rather
+# than a file because the app's disk is ephemeral.
+
 TELEMETRY_GAPS_KEY = "telemetry_gaps"  # JSON list of {from, to, seconds}:
 # stretches the car said nothing. A gear change made while the car is out of
 # coverage is never sent — it does not arrive late, it does not arrive at all

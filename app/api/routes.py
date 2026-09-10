@@ -1,6 +1,7 @@
 """REST API endpoints."""
 from __future__ import annotations
 
+import json as _json_mod
 import math
 import re
 import time
@@ -10,7 +11,8 @@ from typing import Any
 import httpx
 from fastapi import APIRouter, Body, Depends, File, HTTPException, Query, Request, UploadFile
 from fastapi.responses import RedirectResponse
-from sqlalchemy import func, select
+from sqlalchemy import DateTime, func, select
+from sqlalchemy import inspect as sa_inspect
 from sqlalchemy import text as sa_text
 from sqlalchemy.orm import Session
 
@@ -1468,6 +1470,196 @@ def delete_drives(payload: dict = Body(...), session: Session = Depends(get_sess
     ids = [int(i) for i in (payload.get("ids") or []) if str(i).lstrip("-").isdigit()]
     deleted = services.delete_drives(session, ids)
     return {"deleted_drives": deleted}
+
+
+def _drive_row_dict(d: Drive) -> dict:
+    """A Drive serialised whole, for a backup that must survive the model
+    changing under it.
+
+    Read off the mapper rather than a hand-written field list: this file has
+    added four columns to Drive in the last month alone, and a backup that
+    silently stops carrying the newest one is worse than no backup — it
+    restores rows that look right and are not.
+    """
+    out: dict = {}
+    for attr in sa_inspect(Drive).mapper.column_attrs:
+        value = getattr(d, attr.key)
+        out[attr.key] = value.isoformat() if isinstance(value, datetime) else value
+    return out
+
+
+def _drive_from_row_dict(row: dict) -> Drive:
+    """The inverse of _drive_row_dict, ignoring any column the model has since
+    dropped (a restore should not fail because the schema moved on)."""
+    cols = {attr.key: attr for attr in sa_inspect(Drive).mapper.column_attrs}
+    kwargs: dict = {}
+    for key, value in row.items():
+        attr = cols.get(key)
+        if attr is None:
+            continue
+        if isinstance(value, str) and isinstance(attr.columns[0].type, DateTime):
+            value = datetime.fromisoformat(value)
+        kwargs[key] = value
+    return Drive(**kwargs)
+
+
+def _standby_picture(drives: list, charges: list, capacity_kwh: float,
+                     readings: list) -> dict:
+    """What the parked-drain fits resolve to for a given set of trips.
+
+    The whole reason not to delete old trips is that these fits are measured
+    from the gaps BETWEEN trips, so deleting trips deletes the evidence. Rather
+    than assert that, the purge preview runs the fits twice — once over
+    everything, once over only the survivors — and shows both. A rate that
+    reads null in the "after" column is one the dashboard will stop correcting
+    for once the rows are gone.
+    """
+    places = sorted({(d.end_location or "") for d in drives if d.end_location})
+    return {
+        "gaps_over_6h": sum(
+            1 for a, b in zip(sorted(drives, key=lambda x: x.start_time),
+                              sorted(drives, key=lambda x: x.start_time)[1:])
+            if (b.start_time - a.end_time).total_seconds() >= 6 * 3600.0),
+        "whole_history_kw": driving_analysis.parked_rate_kw(
+            drives, charges, capacity_kwh),
+        "deep_sleep_kw": driving_analysis.standby_kw(drives, charges, capacity_kwh),
+        "sentry_armed_kw": driving_analysis.sentry_standby_kw(
+            drives, charges, capacity_kwh, readings, True) if readings else None,
+        "by_place_kw": {
+            place: driving_analysis.place_standby_kw(
+                drives, charges, capacity_kwh, place)
+            for place in places},
+    }
+
+
+@router.api_route("/data/purge-pre-telemetry", methods=["GET", "POST"])
+def purge_pre_telemetry(
+    apply: bool = Query(False),
+    session: Session = Depends(get_session),
+):
+    """Delete every trip that predates telemetry, keeping charges and readings.
+
+    The cutover is the earliest trip whose ``source`` is "telemetry" — not a
+    date typed in by hand, because the boundary that matters is where the
+    streamed history actually begins and only the rows know that.
+
+    Plans by default; pass ``apply=true`` to carry it out. The plan runs the
+    parked-drain fits over both the full history and the survivors alone, so
+    the cost is stated in the numbers that will actually change rather than
+    in the abstract: any rate that reads null under ``after`` is one the
+    dashboard stops being able to measure.
+
+    Reversible. Every deleted row is serialised into state.PURGED_DRIVES_KEY
+    first, and /api/data/restore-purged-drives puts them back — the polled
+    history cannot be re-fetched from Tesla, so deleting it without a copy
+    would be the one irreversible act in this app.
+    """
+    vehicle = _first_vehicle(session)
+    if vehicle is None:
+        return {"error": "no vehicle"}
+    cutover = session.scalar(
+        select(func.min(Drive.start_time)).where(
+            Drive.vehicle_id == vehicle.id, Drive.source == "telemetry")
+    )
+    if cutover is None:
+        # Refused rather than defaulted: with no telemetry-sourced row there is
+        # no boundary, and the obvious fallback ("everything older than today")
+        # would delete the entire history.
+        return {"error": "no telemetry-sourced trips yet — nothing defines the cutover",
+                "deleted": 0}
+
+    doomed = session.scalars(
+        select(Drive).where(Drive.vehicle_id == vehicle.id, Drive.start_time < cutover)
+        .order_by(Drive.start_time)
+    ).all()
+    kept = session.scalars(
+        select(Drive).where(Drive.vehicle_id == vehicle.id, Drive.start_time >= cutover)
+        .order_by(Drive.start_time)
+    ).all()
+    all_drives = list(doomed) + list(kept)
+    charges = list(session.scalars(select(Charge).where(Charge.vehicle_id == vehicle.id)))
+    readings = _parked_readings(session, vehicle.id)
+    settings = get_settings()
+    capacity_kwh, _ = _usable_capacity(session, vehicle, settings)
+
+    plan = {
+        "cutover": cutover.isoformat(timespec="minutes"),
+        "would_delete": len(doomed),
+        "would_keep": len(kept),
+        "oldest": doomed[0].start_time.isoformat(timespec="minutes") if doomed else None,
+        "newest": doomed[-1].start_time.isoformat(timespec="minutes") if doomed else None,
+        "distance_km": round(sum(d.distance_km for d in doomed), 1),
+        "energy_kwh": round(sum(d.energy_used_kwh for d in doomed), 1),
+        # Untouched by this operation, and named so because "delete my old
+        # trips" reads like it might take them too. Battery health is fitted
+        # from readings and usable capacity from charges; neither moves.
+        "charges_kept": len(charges),
+        "readings_kept": len(readings),
+        "standby_fits": {
+            "before": _standby_picture(all_drives, charges, capacity_kwh, readings),
+            "after": _standby_picture(list(kept), charges, capacity_kwh, readings),
+        },
+    }
+    if not apply:
+        plan["applied"] = False
+        return plan
+
+    backup = {
+        "at": sync_mod.now_local().isoformat(timespec="seconds"),
+        "cutover": cutover.isoformat(),
+        "rows": [_drive_row_dict(d) for d in doomed],
+    }
+    state.put(session, state.PURGED_DRIVES_KEY, _json_mod.dumps(backup))
+    session.commit()
+    # Committed before the delete, deliberately. If the write of the backup and
+    # the delete shared one transaction, a failure between them would roll back
+    # both and cost nothing — but a failure that commits the delete and loses
+    # the backup costs the history. Ordering them makes the harmless outcome
+    # (a backup of rows that still exist) the only one available.
+    deleted = services.delete_drives(session, [d.id for d in doomed])
+    plan["applied"] = True
+    plan["deleted"] = deleted
+    plan["backup_rows"] = len(backup["rows"])
+    plan["restore_with"] = "/api/data/restore-purged-drives?apply=true"
+    return plan
+
+
+@router.api_route("/data/restore-purged-drives", methods=["GET", "POST"])
+def restore_purged_drives(
+    apply: bool = Query(False),
+    session: Session = Depends(get_session),
+):
+    """Put back the trips /api/data/purge-pre-telemetry deleted.
+
+    Restores each row under its original id, so trip numbers, the car-readings
+    log (which references drive ids) and every stored cost override line up
+    again. Rows whose id is already present are skipped rather than
+    overwritten — a restore must never clobber a trip recorded since the
+    purge. Plans by default, like the purge.
+    """
+    raw = state.get(session, state.PURGED_DRIVES_KEY)
+    if not raw:
+        return {"error": "no purge backup stored", "restored": 0}
+    backup = _json_mod.loads(raw)
+    rows = backup.get("rows") or []
+    present = set(session.scalars(select(Drive.id)).all())
+    missing = [r for r in rows if r.get("id") not in present]
+    plan = {
+        "purged_at": backup.get("at"),
+        "cutover": backup.get("cutover"),
+        "in_backup": len(rows),
+        "would_restore": len(missing),
+        "already_present": len(rows) - len(missing),
+    }
+    if not apply:
+        plan["applied"] = False
+        return plan
+    for row in missing:
+        session.add(_drive_from_row_dict(row))
+    session.commit()
+    plan["applied"] = True
+    plan["restored"] = len(missing)
+    return plan
 
 
 @router.post("/data/reset-tags")

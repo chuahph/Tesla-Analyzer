@@ -5,6 +5,7 @@ from types import SimpleNamespace
 from unittest import mock
 
 from fastapi.testclient import TestClient
+from sqlalchemy import select
 
 from app.config import get_settings
 from app.main import app
@@ -6342,3 +6343,126 @@ def test_a_trip_is_only_compared_against_its_own_car():
         sess.commit()
         sess.close()
         settings.app_passcode = old_pc
+
+
+def test_purge_pre_telemetry_plans_then_deletes_and_restores():
+    """The purge deletes only trips older than the first telemetry-sourced
+    one, states what the parked-drain fits lose, and can be undone.
+
+    The backup is the whole point: polled trips came from an API that no
+    longer holds the history, so a purge without a restore path is the one
+    irreversible act in this app. This asserts the round trip returns every
+    row under its ORIGINAL id — trip numbers, cost overrides and the
+    car-readings log all reference drive ids, and a restore that renumbered
+    them would look successful and quietly break all three.
+    """
+    settings = get_settings()
+    old = settings.app_passcode
+    settings.app_passcode = ""
+    try:
+        with TestClient(app) as client:
+            from app.database import SessionLocal
+            from app.models import Drive, Vehicle
+
+            with SessionLocal() as s:
+                v = Vehicle(vin="TESTVIN-PURGE", name="Test", model="Model 3")
+                s.add(v)
+                s.commit()
+                # Three polled trips, then two the telemetry path wrote.
+                for day, src in ((1, ""), (2, ""), (3, ""), (10, "telemetry"),
+                                 (11, "telemetry")):
+                    s.add(Drive(
+                        vehicle_id=v.id,
+                        start_time=datetime(2025, 6, day, 8, 0),
+                        end_time=datetime(2025, 6, day, 8, 30),
+                        distance_km=10, duration_min=30, start_soc=80, end_soc=76,
+                        energy_used_kwh=4.0, avg_speed_kmh=20, max_speed_kmh=40,
+                        outside_temp_c=28, source=src, end_location="Home",
+                        tag="work" if day == 2 else "",
+                    ))
+                s.commit()
+                doomed_ids = sorted(
+                    d.id for d in s.scalars(
+                        select(Drive).where(Drive.vehicle_id == v.id,
+                                            Drive.source == "")).all())
+
+            client.post("/api/active-vehicle", json={"vin": "TESTVIN-PURGE"})
+
+            plan = client.get("/api/data/purge-pre-telemetry").json()
+            assert plan["applied"] is False
+            assert plan["would_delete"] == 3
+            assert plan["would_keep"] == 2
+            assert plan["cutover"].startswith("2025-06-10")
+            # Planning must not have touched anything.
+            with SessionLocal() as s:
+                assert s.query(Drive).filter(Drive.vehicle_id == v.id).count() == 5
+            # The cost is stated, not asserted in prose: both columns present.
+            assert set(plan["standby_fits"]) == {"before", "after"}
+
+            done = client.post("/api/data/purge-pre-telemetry?apply=true").json()
+            assert done["applied"] is True
+            assert done["deleted"] == 3
+            assert done["backup_rows"] == 3
+            with SessionLocal() as s:
+                left = s.scalars(select(Drive).where(Drive.vehicle_id == v.id)).all()
+                assert len(left) == 2
+                assert all(d.source == "telemetry" for d in left)
+
+            back = client.post("/api/data/restore-purged-drives?apply=true").json()
+            assert back["restored"] == 3
+            with SessionLocal() as s:
+                rows = s.scalars(
+                    select(Drive).where(Drive.vehicle_id == v.id,
+                                        Drive.source == "")).all()
+                assert sorted(d.id for d in rows) == doomed_ids
+                # Every column, not just the id — a backup built off the mapper
+                # is only worth having if it carries the columns nobody thought
+                # to check.
+                by_day = {d.start_time.day: d for d in rows}
+                assert by_day[2].tag == "work"
+                assert by_day[1].distance_km == 10
+                assert by_day[3].end_location == "Home"
+
+            # Restoring twice is a no-op, not a duplicate set.
+            again = client.post("/api/data/restore-purged-drives?apply=true").json()
+            assert again["restored"] == 0
+            assert again["already_present"] == 3
+            with SessionLocal() as s:
+                assert s.query(Drive).filter(Drive.vehicle_id == v.id).count() == 5
+    finally:
+        settings.app_passcode = old
+
+
+def test_purge_pre_telemetry_refuses_without_a_telemetry_trip():
+    """With nothing streamed yet there is no cutover, and the obvious
+    fallback ("anything older than today") would delete the whole history."""
+    settings = get_settings()
+    old = settings.app_passcode
+    settings.app_passcode = ""
+    try:
+        with TestClient(app) as client:
+            from app.database import SessionLocal
+            from app.models import Drive, Vehicle
+
+            with SessionLocal() as s:
+                v = Vehicle(vin="TESTVIN-NOCUT", name="Test", model="Model 3")
+                s.add(v)
+                s.commit()
+                s.add(Drive(
+                    vehicle_id=v.id,
+                    start_time=datetime(2025, 6, 1, 8, 0),
+                    end_time=datetime(2025, 6, 1, 8, 30),
+                    distance_km=10, duration_min=30, start_soc=80, end_soc=76,
+                    energy_used_kwh=4.0, avg_speed_kmh=20, max_speed_kmh=40,
+                    outside_temp_c=28,
+                ))
+                s.commit()
+
+            client.post("/api/active-vehicle", json={"vin": "TESTVIN-NOCUT"})
+            out = client.post("/api/data/purge-pre-telemetry?apply=true").json()
+            assert out["deleted"] == 0
+            assert "cutover" in out["error"]
+            with SessionLocal() as s:
+                assert s.query(Drive).filter(Drive.vehicle_id == v.id).count() == 1
+    finally:
+        settings.app_passcode = old
