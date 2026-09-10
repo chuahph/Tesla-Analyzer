@@ -4911,6 +4911,164 @@ def test_telemetry_is_carried_into_the_drive_history_without_losing_polling():
         settings.app_passcode = old_pc
 
 
+def test_a_trip_never_takes_a_drive_that_belongs_to_a_later_one():
+    """The fault the first real preview showed, in miniature.
+
+    Fourteen trips polling had certainly logged came back as "add". In a
+    drive history that is not a wrong number, it is a duplicate journey — so
+    the matching now uses the comparison's rules, which have been pairing
+    these two sources correctly for days: the drive that overlaps MOST, and
+    only if no earlier trip has taken it.
+
+    Here trip A overlaps both drives and would take the wrong one on a
+    first-overlap rule, leaving trip B to ask for a duplicate.
+    """
+    import json as _json
+
+    from app.database import SessionLocal
+    from app import state, sync as sync_mod
+    from app.models import Drive, Vehicle
+    from app.api import routes as routes_mod
+
+    sess = SessionLocal()
+    prev = state.get(sess, state.TELEMETRY_TRIPS_KEY)
+    vehicle = None
+    try:
+        now = sync_mod.now_local()
+
+        def _epoch(local):
+            return local.replace(tzinfo=sync_mod.MYT).timestamp()
+
+        vehicle = Vehicle(vin="OVERLAP000000001", name="Test", model="Model 3")
+        sess.add(vehicle)
+        sess.commit()
+
+        def drive(from_min, to_min, km):
+            d = Drive(vehicle_id=vehicle.id,
+                      start_time=now - timedelta(minutes=from_min),
+                      end_time=now - timedelta(minutes=to_min),
+                      distance_km=km, duration_min=from_min - to_min,
+                      start_soc=60, end_soc=57, energy_used_kwh=km * 0.17,
+                      avg_speed_kmh=30, max_speed_kmh=60, outside_temp_c=29)
+            sess.add(d)
+            sess.commit()
+            return d.id
+
+        def trip(from_min, to_min, km):
+            a = now - timedelta(minutes=from_min)
+            b = now - timedelta(minutes=to_min)
+            return {"vin": "OVERLAP000000001", "start_ts": _epoch(a),
+                    "end_ts": _epoch(b),
+                    "start_time": a.isoformat(timespec="seconds"),
+                    "end_time": b.isoformat(timespec="seconds"),
+                    "distance_km": km, "duration_min": from_min - to_min,
+                    "energy_kwh": km * 0.17}
+
+        # A brushes the end of the first drive by a minute and covers the
+        # second almost exactly. First-overlap grabs the first; most-overlap
+        # takes the one it belongs to.
+        first, second = drive(90, 61, 8.0), drive(60, 40, 6.0)
+        state.put(sess, state.TELEMETRY_TRIPS_KEY, _json.dumps(
+            [trip(62, 41, 6.1), trip(89, 62, 8.1)]))
+        sess.commit()
+
+        out = routes_mod._promote_shadow_trips(SessionLocal(), apply=False)
+        by_start = {e["start"]: e for e in out}
+        assert all(e["action"] == "correct" for e in out), out
+        assert {e["was"]["id"] for e in out} == {first, second}, out
+    finally:
+        with SessionLocal() as cleanup:
+            if vehicle is not None:
+                for d in cleanup.query(Drive).filter(
+                        Drive.vehicle_id == vehicle.id).all():
+                    cleanup.delete(d)
+                v = cleanup.get(Vehicle, vehicle.id)
+                if v is not None:
+                    cleanup.delete(v)
+            cleanup.commit()
+        state.put(sess, state.TELEMETRY_TRIPS_KEY, prev or "[]")
+        sess.commit()
+        sess.close()
+
+
+def test_a_corrected_row_can_be_put_back_the_way_polling_had_it():
+    """polled_km was called "the way back" before there was one."""
+    import json as _json
+
+    from app.database import SessionLocal
+    from app import state, sync as sync_mod
+    from app.models import Drive, Vehicle
+
+    settings = get_settings()
+    old_pc = settings.app_passcode
+    settings.app_passcode = ""
+    sess = SessionLocal()
+    prev = state.get(sess, state.TELEMETRY_TRIPS_KEY)
+    vehicle = None
+    try:
+        now = sync_mod.now_local()
+
+        def _epoch(local):
+            return local.replace(tzinfo=sync_mod.MYT).timestamp()
+
+        with TestClient(app) as client:
+            vehicle = Vehicle(vin="UNDO00000000001", name="Test", model="Model 3")
+            sess.add(vehicle)
+            sess.commit()
+            at = now - timedelta(minutes=80)
+            polled = Drive(vehicle_id=vehicle.id, start_time=at + timedelta(minutes=2),
+                           end_time=at + timedelta(minutes=20), distance_km=11.4,
+                           duration_min=18, start_soc=60, end_soc=57,
+                           energy_used_kwh=1.73, avg_speed_kmh=38,
+                           max_speed_kmh=70, outside_temp_c=29)
+            sess.add(polled)
+            sess.commit()
+            # And one telemetry alone saw, which has nothing to go back to.
+            solo = now - timedelta(minutes=40)
+            state.put(sess, state.TELEMETRY_TRIPS_KEY, _json.dumps([
+                {"vin": "UNDO00000000001", "start_ts": _epoch(at),
+                 "end_ts": _epoch(at + timedelta(minutes=20)),
+                 "start_time": at.isoformat(timespec="seconds"),
+                 "end_time": (at + timedelta(minutes=20)).isoformat(timespec="seconds"),
+                 "distance_km": 11.25, "duration_min": 20.0, "energy_kwh": 1.9},
+                {"vin": "UNDO00000000001", "start_ts": _epoch(solo),
+                 "end_ts": _epoch(solo + timedelta(minutes=8)),
+                 "start_time": solo.isoformat(timespec="seconds"),
+                 "end_time": (solo + timedelta(minutes=8)).isoformat(timespec="seconds"),
+                 "distance_km": 2.79, "duration_min": 8.0, "energy_kwh": 0.74}]))
+            sess.commit()
+            client.get("/api/telemetry/promote?apply=true")
+
+            undo = client.get("/api/telemetry/unpromote?apply=true").json()
+
+        assert undo["restored"] == 1, undo
+        assert len(undo["kept_because_polling_never_saw_them"]) == 1
+        with SessionLocal() as chk:
+            row = chk.get(Drive, polled.id)
+            assert row.distance_km == pytest.approx(11.4, abs=0.001)
+            assert row.energy_used_kwh == pytest.approx(1.73, abs=0.001)
+            assert row.source == "" and row.shadow_start_ts is None
+            assert row.polled_km is None
+            # The added journey stays: deleting one the car really drove is a
+            # worse answer than keeping one whose figures are argued about.
+            assert chk.query(Drive).filter(
+                Drive.vehicle_id == vehicle.id).count() == 2
+    finally:
+        with SessionLocal() as cleanup:
+            if vehicle is not None:
+                for d in cleanup.query(Drive).filter(
+                        Drive.vehicle_id == vehicle.id).all():
+                    cleanup.delete(d)
+                v = cleanup.get(Vehicle, vehicle.id)
+                if v is not None:
+                    cleanup.delete(v)
+            cleanup.commit()
+        state.put(sess, state.TELEMETRY_TRIPS_KEY, prev or "[]")
+        sess.commit()
+        sess.close()
+        settings.app_passcode = old_pc
+
+
 def test_a_trip_telemetry_alone_saw_is_added_rather_than_lost():
     """Polling misses whole journeys — one evening it merged two into one.
 

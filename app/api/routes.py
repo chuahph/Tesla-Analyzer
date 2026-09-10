@@ -2880,7 +2880,13 @@ def _promote_shadow_trips(session: Session, apply: bool = False,
     ).all()
     by_shadow = {d.shadow_start_ts: d for d in drives
                  if d.shadow_start_ts is not None}
+    claimed: set[int] = set()
     changed: list[dict] = []
+
+    # Oldest first. Trips arrive in that order already, but the matching
+    # below depends on it — an out-of-order trip would claim a drive from
+    # under one that had a better right to it.
+    trips = sorted(trips, key=lambda x: float(x.get("start_ts") or 0.0))
 
     for t in trips:
         try:
@@ -2901,12 +2907,28 @@ def _promote_shadow_trips(session: Session, apply: bool = False,
 
         row = by_shadow.get(start_ts)
         if row is None:
-            # The polled trip covering the same ground, if there is one.
-            row = next((d for d in drives
-                        if d.vehicle_id == vehicle_id
-                        and d.shadow_start_ts is None
-                        and d.start_time <= t_end and t_start <= d.end_time),
-                       None)
+            # The polled trip covering the same ground, if there is one —
+            # the one that overlaps MOST, and only if nothing else has taken
+            # it. Both rules are copied from the comparison, which has been
+            # matching these two sources correctly for days, and neither was
+            # here first: taking the first overlap lets an early trip claim a
+            # drive that belongs to a later one, and not tracking claims lets
+            # two trips take the same drive. Either way the trips that follow
+            # find nothing and ask to be ADDED, which in a drive history is
+            # not a wrong number but a duplicate journey.
+            best = None
+            for d in drives:
+                if (d.vehicle_id != vehicle_id or d.id in claimed
+                        or d.shadow_start_ts is not None
+                        or not d.start_time or not d.end_time):
+                    continue
+                if d.start_time <= t_end and t_start <= d.end_time:
+                    overlap = min(d.end_time, t_end) - max(d.start_time, t_start)
+                    if best is None or overlap > best[1]:
+                        best = (d, overlap)
+            row = best[0] if best else None
+        if row is not None and row.id is not None:
+            claimed.add(row.id)
         was = {"id": getattr(row, "id", None),
                "km": None if row is None else round(row.distance_km or 0.0, 3),
                "kwh": None if row is None else round(row.energy_used_kwh or 0.0, 3),
@@ -3071,21 +3093,18 @@ def sync_now(wake: bool = Query(False), session: Session = Depends(get_session))
     # Before anything else, since it needs no network and a failure to reach
     # Tesla must not also cost the trip the car already streamed.
     _settle_shadows(session)
-    # And carry what the car streamed into the history the dashboard reads.
-    # Also before the poll, and for the same reason: this depends on nothing
-    # outside the database, so a Tesla API that is down, rate-limited or
-    # simply asleep cannot stop a journey the car already told us about from
-    # appearing. Idempotent by shadow_start_ts, so running it every tick
-    # corrects rows rather than multiplying them.
-    try:
-        _promote_shadow_trips(session, apply=True)
-    except Exception:  # noqa: BLE001 — never let this break the sync
-        # A correction that cannot be made is a stale figure on the
-        # dashboard. A sync that dies here is no figures at all, plus no
-        # charges, no alerts and no history — so this is caught and the
-        # tick carries on. The next one tries again, because promotion is
-        # idempotent and nothing is lost by having missed a turn.
-        session.rollback()
+    # Promotion is deliberately NOT run here yet.
+    #
+    # It was, for one deploy. Its first preview against the real history then
+    # proposed adding fourteen trips that polling had certainly logged, while
+    # reporting two rows it had already corrected — a shape the code does not
+    # explain and a reproduction in isolation does not show. Writing to a
+    # drive history that cannot be predicted is how a wrong row gets into the
+    # record, and a wrong row there is a repair job rather than a delete.
+    #
+    # So it runs only when asked, through /api/telemetry/promote, which
+    # previews by default. It goes back on the tick when a preview matches
+    # what the comparison says should happen.
     try:
         return _sync_now_impl(wake, session)
     except HTTPException as exc:
@@ -10304,6 +10323,62 @@ def telemetry_promote(
                 "note": "Nothing written. Add &apply=true to carry these across.",
                 "how": "Add &apply=true to this URL to apply them."}
     return {"changed": len(changed), "trips": changed}
+
+
+@router.api_route("/telemetry/unpromote", methods=["GET", "POST"])
+def telemetry_unpromote(
+    apply: bool = Query(False),
+    days: int = Query(PROMOTE_MAX_DAYS, ge=1, le=90),
+    session: Session = Depends(get_session),
+):
+    """Put back what polling said, on rows telemetry corrected.
+
+    The promise made when polled_km and polled_kwh were added was that they
+    were "also the way back". They were not, until this existed — and the
+    first preview against the real history was wrong in a way the code did
+    not explain, which is exactly when a way back stops being a nicety.
+
+    Restores distance and energy, clears source and shadow_start_ts so the
+    row is a polled row again, and leaves rows telemetry ADDED alone: those
+    have nothing to go back to, and deleting a journey the car really drove
+    is a worse answer than keeping one whose figures are argued about.
+    Previews unless asked to apply.
+    """
+    since = sync_mod.now_local() - timedelta(days=days)
+    rows = session.scalars(
+        select(Drive).where(Drive.start_time >= since,
+                            Drive.source == "telemetry").order_by(Drive.start_time)
+    ).all()
+
+    restored, added = [], []
+    for row in rows:
+        if row.polled_km is None:
+            added.append({"id": row.id, "km": round(row.distance_km or 0.0, 3),
+                          "start": row.start_time.isoformat(timespec="seconds")})
+            continue
+        restored.append({"id": row.id,
+                         "start": row.start_time.isoformat(timespec="seconds"),
+                         "km": [round(row.distance_km or 0.0, 3),
+                                round(row.polled_km, 3)],
+                         "kwh": [round(row.energy_used_kwh or 0.0, 3),
+                                 round(row.polled_kwh or 0.0, 3)]})
+        if apply:
+            row.distance_km = row.polled_km
+            row.energy_used_kwh = row.polled_kwh or 0.0
+            row.polled_km = row.polled_kwh = None
+            row.shadow_start_ts = None
+            row.source = ""
+    if apply and restored:
+        session.commit()
+
+    body = {"restored": len(restored), "trips": restored,
+            # Named rather than silently skipped: after this runs they are
+            # the only telemetry rows left, and someone reading the history
+            # should know why.
+            "kept_because_polling_never_saw_them": added}
+    if not apply:
+        body["note"] = "Nothing written. Add &apply=true to restore these."
+    return body
 
 
 @router.get("/telemetry/charges")
