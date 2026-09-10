@@ -5814,6 +5814,12 @@ def test_only_changed_state_is_written_on_a_telemetry_batch():
         # Nothing closed and no mode moved, so these must NOT be rewritten.
         assert "telemetry_trips" not in written, "unchanged trips were rewritten"
         assert "telemetry_modes" not in written, "unchanged mode log was rewritten"
+        # And a car that is not charging has no session to remember. This
+        # store held a full forty-field snapshot of a parked car and was
+        # committed on every batch, all day, to record that nothing had
+        # happened.
+        assert "telemetry_charge_shadow" not in written, \
+            "an idle charge shadow was rewritten"
     finally:
         for key, was in prev.items():
             state.put(sess, key, was or "")

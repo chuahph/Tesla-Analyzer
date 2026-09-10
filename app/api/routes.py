@@ -9543,7 +9543,11 @@ def summary(
 # UPDATE when a value is unchanged, and trips, mode changes and gaps are
 # unchanged on almost every batch — and they are now skipped outright rather
 # than re-read and re-committed to discover that.
-TELEMETRY_RAW_MAX = 120
+# Back to 40 from 120. It was raised to read a charging session field by
+# field, that question is answered, and this blob is rewritten in full on
+# every batch the receiver posts — so its size is paid about 1,700 times a
+# day to hold a few minutes of records nobody is reading between diagnoses.
+TELEMETRY_RAW_MAX = 40
 # Shadow trips kept for comparison. Weeks of driving, which is the window in
 # which telemetry either earns the switch or does not.
 TELEMETRY_TRIPS_MAX = 400
@@ -9818,9 +9822,10 @@ def telemetry_ingest(
         charges = _json.loads(stored_charges or "[]") or []
     except ValueError:
         charges = []
+    stored_charge_shadows = state.get(session, state.TELEMETRY_CHARGE_SHADOW_KEY)
     try:
         charge_shadows = _json.loads(
-            state.get(session, state.TELEMETRY_CHARGE_SHADOW_KEY) or "{}") or {}
+            stored_charge_shadows or "{}") or {}
     except ValueError:
         charge_shadows = {}
     stored_modes = state.get(session, state.TELEMETRY_MODES_KEY)
@@ -10028,7 +10033,8 @@ def telemetry_ingest(
                    _json.dumps(trips[-TELEMETRY_TRIPS_MAX:]), stored_trips)
     put_if_changed(state.TELEMETRY_CHARGES_KEY,
                    _json.dumps(charges[-TELEMETRY_TRIPS_MAX:]), stored_charges)
-    state.put(session, state.TELEMETRY_CHARGE_SHADOW_KEY, _json.dumps(charge_shadows))
+    put_if_changed(state.TELEMETRY_CHARGE_SHADOW_KEY,
+                   _json.dumps(charge_shadows), stored_charge_shadows)
 
     try:
         seen = _json.loads(state.get(session, state.TELEMETRY_SEEN_KEY) or "{}") or {}

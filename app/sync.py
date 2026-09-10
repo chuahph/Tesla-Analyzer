@@ -3420,6 +3420,16 @@ def advance_charge(shadow: dict[str, Any], snap: dict[str, Any]) -> dict[str, An
         shadow["last"] = dict(snap)
         return None
 
+    # A parked car that is not charging has no session to remember, and this
+    # store is written on every batch the receiver posts. Keeping a full
+    # forty-field snapshot in it for a car doing nothing meant serialising
+    # and committing one every time, all day, to record that nothing had
+    # happened. Cleared instead, so the blob settles to {} and the
+    # write-only-what-changed rule in the ingest can skip it entirely.
+    if not charging and not open_at:
+        shadow.pop("last", None)
+        return None
+
     if charging and open_at:
         # ACChargingEnergyIn is per-session: it read 16.70 days before this
         # session and 4.72 during it, so it resets rather than accumulating.
