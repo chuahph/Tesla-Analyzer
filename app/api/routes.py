@@ -10683,6 +10683,18 @@ def telemetry_compare(
     drives = session.scalars(
         select(Drive).where(Drive.start_time >= since).order_by(Drive.start_time)
     ).all()
+    # Rows telemetry ADDED are not polling's answer to anything, and must not
+    # stand in for one. Polling never logged the 17:30 journey — it merged it
+    # into the trip before — so once promotion writes that row, matching a
+    # telemetry trip against it would pair telemetry with itself, report a
+    # delta of zero, and quietly add a perfect agreement to every median in
+    # this report. That is the same trap polled_km was added to close, one
+    # step further along: a row polling never saw has no polled figures to
+    # preserve, so the only honest thing is to leave it out of the comparison
+    # entirely. A row telemetry CORRECTED still belongs here, because what
+    # polling said about it survives on it.
+    drives = [d for d in drives
+              if not ((d.source or "") == "telemetry" and d.polled_km is None)]
 
     def pct(new: float | None, old: float | None) -> float | None:
         if new is None or not old:

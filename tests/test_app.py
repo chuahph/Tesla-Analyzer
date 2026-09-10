@@ -4991,6 +4991,76 @@ def test_a_trip_never_takes_a_drive_that_belongs_to_a_later_one():
         sess.close()
 
 
+def test_a_row_telemetry_added_is_not_offered_as_pollings_answer():
+    """A journey polling never saw cannot be polling's side of a comparison.
+
+    Polling merged the 17:30 trip into the one before it, so promotion added
+    that row. Matched against the telemetry trip it came from, it would pair
+    telemetry with itself, report a delta of zero and add a perfect agreement
+    to every median — the same trap polled_km was added to close, one step
+    further on. A corrected row still belongs, because what polling said
+    about it survives on it.
+    """
+    import json as _json
+
+    from app.database import SessionLocal
+    from app import state, sync as sync_mod
+    from app.models import Drive, Vehicle
+
+    settings = get_settings()
+    old_pc = settings.app_passcode
+    settings.app_passcode = ""
+    sess = SessionLocal()
+    prev = state.get(sess, state.TELEMETRY_TRIPS_KEY)
+    vehicle = None
+    try:
+        now = sync_mod.now_local()
+        at = now - timedelta(minutes=50)
+        vehicle = Vehicle(vin="SELFPAIR00000001", name="Test", model="Model 3")
+        sess.add(vehicle)
+        sess.commit()
+        # The row promotion would have created: telemetry's, nothing preserved.
+        added = Drive(vehicle_id=vehicle.id, start_time=at,
+                      end_time=at + timedelta(minutes=8), distance_km=2.791,
+                      duration_min=8.3, start_soc=60, end_soc=59,
+                      energy_used_kwh=0.74, avg_speed_kmh=20, max_speed_kmh=50,
+                      outside_temp_c=29, source="telemetry",
+                      shadow_start_ts=at.replace(tzinfo=sync_mod.MYT).timestamp())
+        sess.add(added)
+        sess.commit()
+        state.put(sess, state.TELEMETRY_TRIPS_KEY, _json.dumps([{
+            "vin": "SELFPAIR00000001",
+            "start_ts": at.replace(tzinfo=sync_mod.MYT).timestamp(),
+            "end_ts": (at + timedelta(minutes=8)).replace(
+                tzinfo=sync_mod.MYT).timestamp(),
+            "start_time": at.isoformat(timespec="seconds"),
+            "end_time": (at + timedelta(minutes=8)).isoformat(timespec="seconds"),
+            "distance_km": 2.791, "duration_min": 8.3, "energy_kwh": 0.74,
+            "wh_per_km": 265.1}]))
+        sess.commit()
+
+        with TestClient(app) as client:
+            body = client.get("/api/telemetry/compare?days=1").json()
+        row = next(r for r in body["trips"]
+                   if r["telemetry"]["start"] == at.isoformat(timespec="seconds"))
+        assert row["polled"] is None, "telemetry was offered as polling's answer"
+        assert row["delta"] is None
+    finally:
+        with SessionLocal() as cleanup:
+            if vehicle is not None:
+                for d in cleanup.query(Drive).filter(
+                        Drive.vehicle_id == vehicle.id).all():
+                    cleanup.delete(d)
+                v = cleanup.get(Vehicle, vehicle.id)
+                if v is not None:
+                    cleanup.delete(v)
+            cleanup.commit()
+        state.put(sess, state.TELEMETRY_TRIPS_KEY, prev or "[]")
+        sess.commit()
+        sess.close()
+        settings.app_passcode = old_pc
+
+
 def test_an_unattended_run_refuses_to_add_a_wall_of_rows():
     """The guard that would have stopped 183 duplicates at one.
 
