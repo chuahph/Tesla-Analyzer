@@ -29,7 +29,7 @@ from ..analysis import efficiency as efficiency_analysis
 from ..analysis import recommendations as recommendations_engine
 from ..analysis import service as service_analysis
 from ..config import get_settings
-from ..database import get_session
+from ..database import engine, get_session
 from ..importer import ImportError_, parse_upload
 from ..models import (ArrivalTailSample, BatteryReading, Charge, Drive, Place,
                       SecurityEvent, ServiceRecord, Vehicle)
@@ -10467,6 +10467,64 @@ def telemetry_promote(
                 "note": "Nothing written. Add &apply=true to carry these across.",
                 "how": "Add &apply=true to this URL to apply them."}
     return {"changed": len(changed), "trips": changed}
+
+
+@router.api_route("/db-maintenance", methods=["GET", "POST"])
+def db_maintenance(
+    apply: bool = Query(False),
+    session: Session = Depends(get_session),
+):
+    """Report table bloat, and vacuum it away when asked.
+
+    Measured on the deployed app: a bare SELECT 1 costs 8 ms, while the first
+    read of the drives table costs two seconds and returns four rows. The
+    curve fit over twenty-five charges takes 0.2 ms. So nothing here is
+    slow at arithmetic and nothing is far from its database — the cost is in
+    reaching the rows, and the times fall as the request goes on, which is
+    what pages being fetched once and then cached looks like.
+
+    Dead tuples are the reason to suspect this app in particular. Postgres
+    keeps the old version of every updated row until vacuum removes it, and
+    this app updates its state table several times for every batch the
+    receiver posts — around 1,700 batches a day, each rewriting JSON blobs.
+    The drives table took 183 inserts and 183 deletes in one evening on top
+    of that.
+
+    GET reports what the database thinks; POST with apply=true vacuums.
+    VACUUM only reclaims space and refreshes statistics — it cannot change a
+    row, and it is the one maintenance operation that is safe to run without
+    a preview.
+    """
+    if engine.dialect.name != "postgresql":
+        return {"available": False,
+                "why": f"nothing to vacuum on {engine.dialect.name}"}
+
+    stats_sql = sa_text("""
+        SELECT relname, n_live_tup, n_dead_tup,
+               pg_size_pretty(pg_total_relation_size(relid)) AS size,
+               last_autovacuum, last_vacuum
+        FROM pg_stat_user_tables
+        ORDER BY n_dead_tup DESC
+    """)
+    def _snapshot(conn):
+        return [{"table": r[0], "live": r[1], "dead": r[2], "size": r[3],
+                 "last_autovacuum": str(r[4]) if r[4] else None,
+                 "last_vacuum": str(r[5]) if r[5] else None}
+                for r in conn.execute(stats_sql)]
+
+    before = _snapshot(session.connection())
+    if not apply:
+        return {"tables": before, "vacuumed": False,
+                "note": "Add &apply=true to VACUUM ANALYZE these.",
+                "how": "POST /api/db-maintenance?apply=true"}
+
+    # Its own connection in autocommit: VACUUM cannot run inside a
+    # transaction block, and the request's session is in one.
+    with engine.connect().execution_options(isolation_level="AUTOCOMMIT") as conn:
+        for row in before:
+            conn.execute(sa_text(f'VACUUM (ANALYZE) "{row["table"]}"'))
+        after = _snapshot(conn)
+    return {"vacuumed": True, "before": before, "after": after}
 
 
 @router.api_route("/telemetry/drop-promoted", methods=["GET", "POST"])
