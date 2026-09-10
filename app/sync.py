@@ -3674,23 +3674,14 @@ def _shadow_close(shadow: dict[str, Any], end: dict[str, Any],
         "energy_kwh": energy,
         "wh_per_km": round(energy * 1000.0 / distance, 1)
         if energy and distance > 0 else None,
-        # What this trip's energy figure is actually worth. The larger of the
-        # 0.02 kWh step and one 60-second sampling interval at the trip's own
-        # average power — and on every real trip so far it is the second,
-        # by about three to one.
-        #
-        # Reported rather than used to hide anything: 698 Wh/km over 487
-        # metres is the honest answer to "energy per kilometre" and only
-        # misleads when read as efficiency. Carried so a reader — and the
-        # accuracy report — can tell a measurement from noise instead of
-        # guessing from the trip's length.
-        "energy_unc_kwh": None if energy is None else round(max(
-            ENERGY_QUANTUM_KWH,
-            abs(energy) * ENERGY_SAMPLE_SEC / max(minutes * 60.0, 1.0)), 3),
-        "energy_unc_pct": None if not energy else round(max(
-            ENERGY_QUANTUM_KWH,
-            abs(energy) * ENERGY_SAMPLE_SEC / max(minutes * 60.0, 1.0))
-            * 100.0 / abs(energy), 1),
+        # No energy_unc here on purpose. It is derived from this trip's own
+        # energy and duration, both of which are recorded, so storing it
+        # would freeze a formula rather than a measurement — and that formula
+        # has already moved once, from EnergyRemaining's 0.02 kWh step to the
+        # 60-second sampling interval that turned out to be three times
+        # larger. Trips closed either side of that carried different answers
+        # to the same question and the accuracy report added them together.
+        # See _energy_unc_kwh in the API layer, which works it out on read.
         "soc_start": start.get("soc"),
         "soc_end": end.get("soc"),
         "max_speed_kmh": round(max_speed, 1),

@@ -2843,8 +2843,9 @@ def _settle_shadows(session: Session) -> int:
     """
     import json as _json
 
+    stored_shadows = state.get(session, state.TELEMETRY_SHADOW_KEY)
     try:
-        shadows = _json.loads(state.get(session, state.TELEMETRY_SHADOW_KEY) or "{}") or {}
+        shadows = _json.loads(stored_shadows or "{}") or {}
     except ValueError:
         return 0
     if not shadows:
@@ -2894,6 +2895,21 @@ def _settle_shadows(session: Session) -> int:
         session.commit()
 
     if not finished:
+        # settle_shadow mutates whether or not it hands back a trip: it pops
+        # the open trip, clears still_since, records how the ending was
+        # decided. When _shadow_close then refuses the result — under
+        # TRIP_MIN_KM, no duration, no odometer to start from — this used to
+        # return without writing, discarding the mutation and doing the whole
+        # thing again on the next tick, for ever.
+        #
+        # Not corruption: the next real drive closes the stale trip on the
+        # gap rule and opens its own. Just a trip that can never close being
+        # closed once a minute, and a shadow store that disagrees with the
+        # process that just edited it.
+        changed = _json.dumps(shadows)
+        if changed != (stored_shadows or ""):
+            state.put(session, state.TELEMETRY_SHADOW_KEY, changed)
+            session.commit()
         return 0
     try:
         trips = _json.loads(state.get(session, state.TELEMETRY_TRIPS_KEY) or "[]") or []

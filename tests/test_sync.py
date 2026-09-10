@@ -4,7 +4,7 @@ import pytest
 from app.sync import (_energy_kwh, close_trip_on_sleep, is_driving,
                       snapshot_from_telemetry, advance_shadow,
                       process_snapshot, snapshot_from_vehicle_data,
-                      recover_sleep_gap, ENERGY_QUANTUM_KWH, MILES_TO_KM,
+                      recover_sleep_gap, ENERGY_QUANTUM_KWH, ENERGY_SAMPLE_SEC, MILES_TO_KM,
                       advance_charge, settle_charge, CHARGE_GAP_SEC)
 
 T0 = 1_760_000_000.0  # seconds epoch
@@ -3574,7 +3574,7 @@ def test_a_trip_is_not_charged_for_standing_still_after_it_ended():
     assert trip["end_energy_kwh"] == pytest.approx(28.5, abs=0.001)
 
 
-def test_a_trip_carries_what_its_energy_figure_is_actually_worth():
+def test_a_trip_records_what_its_uncertainty_is_derived_from_not_the_answer():
     """The 0.02 step is not the big term. The sampling interval is.
 
     EnergyRemaining is streamed once a minute, so each end of the bracket is
@@ -3582,6 +3582,11 @@ def test_a_trip_carries_what_its_energy_figure_is_actually_worth():
     seconds of several kilowatts. Across nine trips judged against the car,
     the spread of the disagreement was 0.075 kWh and one sampling interval
     at each trip's own average power was 0.062. The same number.
+
+    Not stored on the trip, though. It is derived from the energy and the
+    duration, both of which are, and the formula has already moved once —
+    trips closed either side of that move carried different answers to the
+    same question and the accuracy report summed them as if they agreed.
     """
     shadow: dict = {}
     advance_shadow(shadow, _tel(0, 100.0, 30.0))
@@ -3590,22 +3595,14 @@ def test_a_trip_carries_what_its_energy_figure_is_actually_worth():
                                 speed_mph=0.0, door=True))
     trip = advance_shadow(shadow, _tel(900, 106.0, 28.5, gear="ShiftStateP",
                                        speed_mph=0.0))
-    # 1.5 kWh over 11 minutes: one minute of that is 0.136 kWh, which dwarfs
-    # the 0.02 step and is what the figure is really worth.
-    assert trip["energy_unc_kwh"] == pytest.approx(0.136, abs=0.002)
-    assert trip["energy_unc_pct"] == pytest.approx(9.1, abs=0.2)
-
-    # A trip drawing little enough that a minute of it is under the step
-    # falls back to the step, which is then the floor rather than the figure.
-    gentle: dict = {}
-    advance_shadow(gentle, _tel(0, 100.0, 30.0))
-    advance_shadow(gentle, _tel(600, 106.0, 29.79))
-    advance_shadow(gentle, _tel(660, 106.0, 29.79, gear="ShiftStateP",
-                                speed_mph=0.0, door=True))
-    coasted = advance_shadow(gentle, _tel(900, 106.0, 29.79,
-                                          gear="ShiftStateP", speed_mph=0.0))
-    assert coasted["energy_kwh"] == pytest.approx(0.21, abs=0.001)
-    assert coasted["energy_unc_kwh"] == ENERGY_QUANTUM_KWH
+    assert "energy_unc_kwh" not in trip and "energy_unc_pct" not in trip
+    # What it is worked out FROM is on the trip, and enough to work it out:
+    # 1.5 kWh over 11 minutes, so one minute is 0.136 kWh — which dwarfs the
+    # 0.02 step and is what that figure is really worth.
+    assert trip["energy_kwh"] == pytest.approx(1.5, abs=0.001)
+    assert trip["duration_min"] == pytest.approx(11.0, abs=0.1)
+    assert (trip["energy_kwh"] * ENERGY_SAMPLE_SEC
+            / (trip["duration_min"] * 60.0)) == pytest.approx(0.136, abs=0.002)
 
 
 def test_the_odometer_gives_back_what_a_sleeping_car_never_sent():
