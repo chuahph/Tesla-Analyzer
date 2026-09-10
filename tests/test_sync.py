@@ -3542,6 +3542,38 @@ def test_a_bms_never_seen_in_drive_cannot_end_a_trip():
     assert shadow.get("open") is not None
 
 
+def test_a_trip_is_not_charged_for_standing_still_after_it_ended():
+    """Time and energy came from different snapshots, and it showed.
+
+    A trip closed on a settle window takes its odometer from a later reading,
+    because a car that has stopped may still roll a few metres and the
+    30-second Odometer interval leaves the closing reading stale. Energy was
+    being taken from that same later reading — and a car that has stopped is
+    still drawing: screen, climate, staying awake. Three minutes of it charged
+    to a journey that had already ended.
+
+    Which made every trip internally contradictory, its duration ending when
+    the car stopped while its energy went on accruing. Seven trips judged
+    against the car's own figures, all seven over.
+    """
+    shadow: dict = {}
+    advance_shadow(shadow, _tel(0, 100.0, 30.0))
+    advance_shadow(shadow, _tel(600, 106.0, 28.5))
+    # Stops here, driver gets out. 28.5 kWh remaining at that moment.
+    advance_shadow(shadow, _tel(660, 106.0, 28.5, gear="ShiftStateP",
+                                speed_mph=0.0, door=True))
+    # Three minutes later the car is still awake and has spent 0.1 kWh doing
+    # nothing, while its odometer reading has caught up by 20 metres.
+    trip = advance_shadow(shadow, _tel(900, 106.0125, 28.4, gear="ShiftStateP",
+                                       speed_mph=0.0))
+    assert trip is not None
+    # The later odometer is used: it measures the arrival better.
+    assert trip["end_odo_km"] == pytest.approx(106.0125 * MILES_TO_KM, abs=0.01)
+    # The energy is not: 1.5 kWh used driving, not 1.6.
+    assert trip["energy_kwh"] == pytest.approx(1.5, abs=0.001)
+    assert trip["end_energy_kwh"] == pytest.approx(28.5, abs=0.001)
+
+
 def test_a_trip_carries_what_the_energy_step_is_worth_on_it():
     """0.02 kWh is a rounding error on a long trip and the figure on a short one."""
     shadow: dict = {}

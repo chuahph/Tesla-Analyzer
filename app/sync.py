@@ -3286,10 +3286,18 @@ def amend_closed_trip(trip: dict[str, Any], snap: dict[str, Any]) -> bool:
     trip["tail_amended_km"] = round(
         float(trip.get("tail_amended_km") or 0.0) + gain, 3)
 
-    e0, e1 = trip.get("start_energy_kwh"), snap.get("energy_kwh")
-    if e0 is not None and e1 is not None:
-        trip["end_energy_kwh"] = e1
-        trip["energy_kwh"] = round(e0 - e1, 3)
+    # The recovered metres were driven, so they cost something — but the
+    # reading that measures them was also taken while the car sat there
+    # drawing power, and subtracting it raw charges the journey for up to
+    # fifteen minutes of standby it did not spend driving. So the energy is
+    # added the same way recover_sleep_gap adds it, at the trip's own Wh/km,
+    # and the two recovery paths agree with each other instead of one
+    # measuring standby and the other inferring propulsion.
+    whkm = trip.get("wh_per_km")
+    if whkm and trip.get("energy_kwh") is not None:
+        gained_kwh = round(gain * float(whkm) / 1000.0, 3)
+        trip["energy_kwh"] = round(float(trip["energy_kwh"]) + gained_kwh, 3)
+        trip["end_energy_kwh"] = snap.get("energy_kwh")
     energy = trip.get("energy_kwh")
     trip["wh_per_km"] = (round(energy * 1000.0 / distance, 1)
                          if energy and distance > 0 else None)
@@ -3612,7 +3620,22 @@ def _shadow_close(shadow: dict[str, Any], end: dict[str, Any],
 
     # Both ends measured, so this is a subtraction rather than a percentage
     # multiplied by a capacity nobody has pinned down.
-    e0, e1 = start.get("energy_kwh"), final.get("energy_kwh")
+    #
+    # From `end`, not from `final`. The two are the same moment for a trip
+    # that closed on its last record, and minutes apart for one that closed
+    # on a settle window — and the odometer and the energy want opposite
+    # things from that gap. A car that has stopped may still roll a few
+    # metres, so a later odometer measures the arrival better. A car that has
+    # stopped is still drawing: screen, climate, the car staying awake. Three
+    # minutes of that is 0.05 kWh or so, spent after the journey ended, and
+    # this was charging it to the journey.
+    #
+    # Which made the trip internally contradictory: its duration ended when
+    # the car stopped and its energy went on accruing for another three
+    # minutes. Every trip's energy was overstated, always in the same
+    # direction, and the accuracy report showed exactly that — seven trips
+    # judged against the car and all seven positive.
+    e0, e1 = start.get("energy_kwh"), end.get("energy_kwh")
     energy = round(e0 - e1, 3) if e0 is not None and e1 is not None else None
 
     # The drive counter is the better measure of the two: monotonic, so a

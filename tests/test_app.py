@@ -3992,19 +3992,29 @@ def test_late_arrival_reading_extends_the_closed_trip():
     assert trip["distance_km"] == pytest.approx(11.0, abs=0.001)
     assert trip["end_odo_km"] == pytest.approx(111.0, abs=0.001)
     assert trip["tail_amended_km"] == pytest.approx(0.3, abs=0.001)
-    assert trip["energy_kwh"] == pytest.approx(2.2, abs=0.001)
-    assert trip["wh_per_km"] == pytest.approx(200.0, abs=0.1)
+    # The recovered 0.3 km costs something, but not the raw EnergyRemaining
+    # delta: that reading was taken while the car sat there drawing power,
+    # and subtracting it charges the journey for standby it did not spend
+    # driving. Added at the trip's own Wh/km, the same way recover_sleep_gap
+    # adds it, so the two recovery paths agree rather than one measuring
+    # standby and the other inferring propulsion.
+    assert trip["energy_kwh"] == pytest.approx(2.1 + 0.3 * 0.19626, abs=0.002)
+    assert trip["wh_per_km"] == pytest.approx(196.3, abs=0.5)
     assert trip["soc_end"] == 76.0
     # Time is untouched: the car stopped when it stopped.
     assert trip["end_ts"] == t + 660
     assert trip["duration_min"] == pytest.approx(11.0, abs=0.1)
 
     # Applying it again from an even later reading refines the same trip
-    # rather than compounding — every figure is recomputed from the bracket.
+    # rather than compounding: distance is recomputed from the bracket, and
+    # the energy added is only for the ground gained SINCE — 0.1 km here,
+    # not the 0.4 km the trip has now recovered in total. The same reading
+    # twice gains nothing and is refused outright.
     assert sync_mod.amend_closed_trip(trip, _snap(t + 720, odo_km=111.1,
                                                   energy_kwh=52.8)) is True
     assert trip["distance_km"] == pytest.approx(11.1, abs=0.001)
-    assert trip["energy_kwh"] == pytest.approx(2.2, abs=0.001)
+    assert trip["energy_kwh"] == pytest.approx(2.179, abs=0.002)
+    assert trip["wh_per_km"] == pytest.approx(196.3, abs=0.5)
 
 
 def test_late_arrival_reading_is_refused_when_it_cannot_be_the_arrival():
