@@ -9054,6 +9054,7 @@ def summary(
     # Usable pack capacity (override > measured EMA > variant spec > default),
     # used everywhere below that turns kWh into % or range delta into kWh.
     capacity_kwh, capacity_source = _usable_capacity(session, vehicle, settings)
+    _mark("capacity")
     # The cron's own last determination of what the car was doing (including
     # "found it asleep") — written every /api/sync tick, read here purely
     # from the database. This is what lets the dashboard show a near-live
@@ -9453,7 +9454,10 @@ def summary(
     all_charges = session.scalars(
         select(Charge).where(Charge.vehicle_id == vehicle.id).order_by(Charge.start_time)
     ).all()
+    _mark("all_charges")
+    _marks.append(("rows_all_charges", len(all_charges)))
     vehicle_out["capacity_check"] = battery_analysis.implied_capacity(list(all_charges))
+    _mark("capacity_check")
     # Ground the odometer says was covered that no trip claims. The one check
     # in the app that doesn't depend on any of its own derived figures — it
     # compares each trip's recorded stop against the readings taken while the
@@ -9471,8 +9475,11 @@ def summary(
             BatteryReading.ts >= readings_since,
         ).order_by(BatteryReading.ts)
     ).all()
+    _mark("readings")
+    _marks.append(("rows_readings", len(window_readings)))
     vehicle_out["continuity"] = driving_analysis.odometer_continuity(
         list(drives), list(window_readings))
+    _mark("continuity")
     # Whether time-of-use pricing is active, so it's clear why cost figures
     # vary by time of day instead of using the flat rate.
     vehicle_out["tou_enabled"] = bool(
