@@ -4862,6 +4862,11 @@ def test_a_trip_that_is_mostly_rounding_does_not_referee_the_others():
         assert body["telemetry_trips"] == 3, "all three still reported"
         assert body["matched"] == 3, [r["polled"] for r in body["trips"]]
         assert body["judged"] == 1, body["not_judged"]
+        # Summed as well as judged, over the same set. A boundary drawn in
+        # the wrong place moves energy between two trips without losing any,
+        # so a median calls that an error twice while a sum cancels it.
+        assert body["totals"]["km"] == [10.8, 10.8, 10.8], body["totals"]
+        assert body["totals"]["km_err_pct"] == [0.0, 0.0]
         whys = " ".join(e["why"] for e in body["not_judged"])
         assert "quantisation" in whys and "no odometer bracket" in whys, whys
     finally:

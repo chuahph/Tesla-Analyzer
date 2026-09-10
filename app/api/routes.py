@@ -10382,6 +10382,36 @@ def telemetry_compare(
             "telemetry_whkm_err_pct": round(percentile(
                 [r["vs_car"]["telemetry_whkm_pct"] for r in judged], 0.5), 2),
         },
+        # Summed, not just averaged. A median compares each trip against the
+        # car and treats a boundary drawn in the wrong place as an error —
+        # but energy that lands on the wrong side of a boundary is not lost,
+        # it is on the next trip, and a sum puts it back.
+        #
+        # Measured, on the two trips of 10 September afternoon: individually
+        # +7.8% and -9.1% against the car, which reads as a source that
+        # cannot measure energy. Added together they are within 2%, and the
+        # car's own Since Charge panel agreed to the decimal on distance —
+        # 18.0 km against 18.004. The disagreement was never about how much
+        # energy was used, only about which trip used it.
+        "totals": None if not judged else {
+            "km": [round(sum(r["telemetry"]["km"] for r in judged), 2),
+                   round(sum(r["polled"]["km"] for r in judged), 2),
+                   round(sum(r["car"]["km"] for r in judged), 2)],
+            "kwh": [round(sum(r["telemetry"]["kwh"] or 0.0 for r in judged), 2),
+                    round(sum(r["polled"]["kwh"] for r in judged), 2),
+                    round(sum(r["car"]["kwh"] for r in judged), 2)],
+            "km_err_pct": [
+                pct(sum(r["telemetry"]["km"] for r in judged),
+                    sum(r["car"]["km"] for r in judged)),
+                pct(sum(r["polled"]["km"] for r in judged),
+                    sum(r["car"]["km"] for r in judged))],
+            "kwh_err_pct": [
+                pct(sum(r["telemetry"]["kwh"] or 0.0 for r in judged),
+                    sum(r["car"]["kwh"] for r in judged)),
+                pct(sum(r["polled"]["kwh"] for r in judged),
+                    sum(r["car"]["kwh"] for r in judged))],
+            "order": "telemetry, polled, car",
+        },
         "summary": {
             # Kilometres the odometer recorded between trips rather than
             # inside one. Zero is the healthy answer.
