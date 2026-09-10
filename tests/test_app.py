@@ -4442,7 +4442,8 @@ def test_a_charging_session_reaches_the_charges_endpoint_through_the_ingest():
         assert row["kwh_wall"] == pytest.approx(0.503, abs=0.001)
         assert row["kwh_pack_meter"] == pytest.approx(0.480, abs=0.001)
         assert row["kwh_pack_level"] == pytest.approx(0.440, abs=0.001)
-        assert row["converter_pct"] == pytest.approx(95.4, abs=0.5)
+        assert row["meters_agree_pct"] == pytest.approx(95.4, abs=0.5)
+        assert row["pack_vs_wall_pct"] == pytest.approx(87.5, abs=0.5)
         assert row["peak_kw"] == pytest.approx(7.6)
         assert row["vin"] == vin
     finally:

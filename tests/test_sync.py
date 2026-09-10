@@ -3426,8 +3426,11 @@ def test_a_charge_records_all_three_meters_and_prefers_none_of_them():
     assert charge["kwh_wall"] == pytest.approx(0.503, abs=0.001)
     assert charge["kwh_pack_meter"] == pytest.approx(0.480, abs=0.001)
     assert charge["kwh_pack_level"] == pytest.approx(0.440, abs=0.001)
-    # The converter's cut, reported and applied to nothing.
-    assert charge["converter_pct"] == pytest.approx(95.4, abs=0.5)
+    # Both ratios, reported and applied to nothing. The counters against
+    # each other, and either of them against the pack's own level — which is
+    # where the loss actually turned out to be.
+    assert charge["meters_agree_pct"] == pytest.approx(95.4, abs=0.5)
+    assert charge["pack_vs_wall_pct"] == pytest.approx(87.5, abs=0.5)
     assert charge["peak_kw"] == pytest.approx(7.6)
     # And where the counters finished, so a session seen only in part can
     # still be matched against what a charging network billed for.

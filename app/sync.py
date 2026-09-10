@@ -3304,17 +3304,22 @@ def advance_charge(shadow: dict[str, Any], snap: dict[str, Any]) -> dict[str, An
 
     Exists to settle one question and to be honest about not having settled
     it. The car reports two energy counters during a charge and the app has
-    never known which one the polled history stores. Measured on 10 September:
-    ACChargingEnergyIn climbed 7.55 kW while DCChargingEnergyIn climbed 7.2 kW
-    over the same minutes, so one is the wall meter and the other is what
-    reached the pack, about 95% of it. EnergyRemaining rose too, and is the
-    pack's own level rather than a meter of anything.
+    never known which one the polled history stores.
 
-    Three numbers, one session, no opinion about which is right. When the car
-    itself reports what it added, whichever column matches is the one the
-    polled path has been storing, and energy_added_kwh can be filled in from
-    evidence. Guessing instead would misprice every charge in the history, and
-    a wrong price is not visibly wrong.
+    What eighteen recorded minutes of the 10 September session showed: the
+    two counters agree to within a percent of each other, and both sit about
+    11% above the pack's own level. So they are not a wall meter and a pack
+    meter — an earlier reading that said 95% was three minutes of the 0.02
+    kWh step on DCChargingEnergyIn, not a converter. The loss is between
+    either counter and EnergyRemaining.
+
+    Which lines up with the two figures from outside the car: the charging
+    network billed 19.799 kWh and the car itself called it 18 kWh added,
+    90.9% — against 89% measured here. That points at the pack level being
+    what the car reports as "added", and it is still one partial session
+    against one rounded display, so nothing is written from it yet. Guessing
+    would misprice every charge in the history, and a wrong price is not
+    visibly wrong.
 
     Mutates ``shadow`` and returns a finished charge, or None.
     """
@@ -3449,11 +3454,27 @@ def _charge_close(shadow: dict[str, Any], end: dict[str, Any]) -> dict[str, Any]
         # final reading proves whether this is the same meter.
         "wall_meter_end": end.get("charge_energy_in_raw"),
         "pack_meter_end": end.get("dc_energy_in_raw"),
-        # What the converter kept. Reported rather than applied anywhere: it
-        # is the same subtraction as the columns above and exists so a reader
-        # can see at a glance whether the two meters are telling one story.
-        "converter_pct": round(kwh_pack_meter / kwh_wall * 100.0, 1)
+        # Two ratios, because the first session measured properly showed they
+        # are not the same question.
+        #
+        # meters_agree_pct is the two counters against each other. Read over
+        # three minutes they looked 5% apart and that was called the onboard
+        # charger's efficiency; read over eighteen it is 99.2%, and the
+        # earlier figure was the 0.02 kWh step on DCChargingEnergyIn being
+        # mistaken for a signal. Two counters that agree to within a percent
+        # are not a converter and its output — they are two views of the same
+        # side of it.
+        #
+        # pack_vs_wall_pct is where the loss actually shows: the meters said
+        # 2.237 kWh while the pack's own level rose 2.0, about 89%. The
+        # charging network billed 19.799 kWh for the session those minutes
+        # belong to and the car called it 18 kWh added — 90.9%. Those are the
+        # same number, which is what says the pack level is the figure the
+        # car reports as "added".
+        "meters_agree_pct": round(kwh_pack_meter / kwh_wall * 100.0, 1)
         if kwh_wall and kwh_pack_meter is not None and kwh_wall > 0 else None,
+        "pack_vs_wall_pct": round(kwh_pack_level / kwh_wall * 100.0, 1)
+        if kwh_wall and kwh_pack_level is not None and kwh_wall > 0 else None,
         "soc_start": start.get("soc"),
         "soc_end": end.get("soc"),
         "peak_kw": round(peak, 1),
