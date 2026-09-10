@@ -118,6 +118,17 @@ def init_db() -> None:
     _ensure_column("arrival_tail_samples", "place", "VARCHAR(120)", "''")
     _ensure_column("drives", "start_odo_km", "FLOAT", "NULL")
     _ensure_column("drives", "end_odo_km", "FLOAT", "NULL")
+    # Telemetry taking over the drive history. source names which path put
+    # these figures here; shadow_start_ts links the row to the streamed trip
+    # it came from, so promoting twice corrects the same row instead of
+    # writing a second one. polled_km/polled_kwh keep what polling had said
+    # before telemetry overwrote it — without them the comparison that
+    # decides which source to believe would be reading telemetry against
+    # itself and agreeing perfectly for ever.
+    _ensure_column("drives", "source", "VARCHAR(12)", "''")
+    _ensure_column("drives", "shadow_start_ts", "FLOAT", "NULL")
+    _ensure_column("drives", "polled_km", "FLOAT", "NULL")
+    _ensure_column("drives", "polled_kwh", "FLOAT", "NULL")
     _ensure_column("charges", "is_free", "BOOLEAN", "FALSE")
     _ensure_column("charges", "billed_kwh", "FLOAT", "0.0")
     _ensure_column("charges", "implied_capacity_kwh", "FLOAT", "NULL")

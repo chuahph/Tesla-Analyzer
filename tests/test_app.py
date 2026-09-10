@@ -4798,6 +4798,184 @@ def test_carpark_blackout_and_replay_end_to_end():
         settings.app_passcode = old_pc
 
 
+def test_telemetry_is_carried_into_the_drive_history_without_losing_polling():
+    """The switch: streamed trips become the figures the dashboard reads.
+
+    Telemetry earned it over ten judged trips — distance total -0.4% against
+    the car with a worst trip of 0.9%, where polling ran +0.4% with a worst
+    of 3.7%. But the dashboard, the analysis and the alerts all read the
+    Drive table, so being more accurate in a JSON blob beside it was worth
+    nothing to anybody.
+
+    Three things this must get right, and all three are here: it corrects a
+    polled row rather than adding a second one; it keeps what polling said so
+    the two sources stay independent; and running it again changes nothing.
+    """
+    import json as _json
+
+    from app.database import SessionLocal
+    from app import state, sync as sync_mod
+    from app.models import Drive, Vehicle
+    from app.api import routes as routes_mod
+
+    settings = get_settings()
+    old_pc = settings.app_passcode
+    settings.app_passcode = ""
+    sess = SessionLocal()
+    prev = state.get(sess, state.TELEMETRY_TRIPS_KEY)
+    made, vehicle = [], None
+    try:
+        now = sync_mod.now_local()
+
+        def _epoch(local):
+            return local.replace(tzinfo=sync_mod.MYT).timestamp()
+
+        with TestClient(app) as client:
+            vehicle = Vehicle(vin="PROMOTE00000001", name="Test", model="Model 3")
+            sess.add(vehicle)
+            sess.commit()
+
+            # What polling logged: 11.4 km, and 16 minutes late off the line.
+            at = now - timedelta(minutes=90)
+            polled = Drive(vehicle_id=vehicle.id,
+                           start_time=at + timedelta(minutes=16),
+                           end_time=at + timedelta(minutes=35),
+                           distance_km=11.4, duration_min=19.0,
+                           start_soc=60, end_soc=57, energy_used_kwh=1.73,
+                           avg_speed_kmh=36, max_speed_kmh=70, outside_temp_c=29)
+            sess.add(polled)
+            sess.commit()
+            made.append(polled.id)
+
+            # What the car streamed: the same journey, seen from the start.
+            trip = {"vin": "PROMOTE00000001",
+                    "start_ts": _epoch(at), "end_ts": _epoch(at + timedelta(minutes=35)),
+                    "start_time": at.isoformat(timespec="seconds"),
+                    "end_time": (at + timedelta(minutes=35)).isoformat(timespec="seconds"),
+                    "distance_km": 11.25, "duration_min": 35.1, "energy_kwh": 1.9,
+                    "wh_per_km": 168.9, "soc_start": 60.5, "soc_end": 57.9,
+                    "max_speed_kmh": 71.2, "avg_speed_kmh": 19.2,
+                    "start_odo_km": 31162.199, "end_odo_km": 31173.449,
+                    "ended_on": "exit"}
+            state.put(sess, state.TELEMETRY_TRIPS_KEY, _json.dumps([trip]))
+            sess.commit()
+
+            preview = client.get("/api/telemetry/promote").json()
+            assert preview["would_change"] == 1, preview
+            assert preview["trips"][0]["action"] == "correct"
+            with SessionLocal() as chk:
+                assert chk.get(Drive, polled.id).distance_km == 11.4, "preview wrote"
+
+            done = client.get("/api/telemetry/promote?apply=true").json()
+            assert done["changed"] == 1
+
+        with SessionLocal() as chk:
+            row = chk.get(Drive, polled.id)
+            assert row.source == "telemetry"
+            assert row.distance_km == pytest.approx(11.25, abs=0.001)
+            assert row.energy_used_kwh == pytest.approx(1.9, abs=0.001)
+            # The 16-minute blind head is gone: the row now starts when the
+            # car actually moved, which is the whole point of the switch.
+            assert row.duration_min == pytest.approx(35.1, abs=0.1)
+            # And polling's own figures survive, or the comparison would be
+            # scoring telemetry against itself from here on.
+            assert row.polled_km == pytest.approx(11.4, abs=0.001)
+            assert row.polled_kwh == pytest.approx(1.73, abs=0.001)
+            assert chk.query(Drive).filter(Drive.vehicle_id == vehicle.id).count() == 1
+
+        # Again: corrects the same row, keeps polling's original, adds nothing.
+        with TestClient(app) as client:
+            client.get("/api/telemetry/promote?apply=true")
+        with SessionLocal() as chk:
+            row = chk.get(Drive, polled.id)
+            assert row.polled_km == pytest.approx(11.4, abs=0.001), \
+                "a second run overwrote polling with telemetry's own answer"
+            assert chk.query(Drive).filter(Drive.vehicle_id == vehicle.id).count() == 1
+    finally:
+        with SessionLocal() as cleanup:
+            for drive_id in made:
+                d = cleanup.get(Drive, drive_id)
+                if d is not None:
+                    cleanup.delete(d)
+            if vehicle is not None:
+                for d in cleanup.query(Drive).filter(
+                        Drive.vehicle_id == vehicle.id).all():
+                    cleanup.delete(d)
+                v = cleanup.get(Vehicle, vehicle.id)
+                if v is not None:
+                    cleanup.delete(v)
+            cleanup.commit()
+        state.put(sess, state.TELEMETRY_TRIPS_KEY, prev or "[]")
+        sess.commit()
+        sess.close()
+        settings.app_passcode = old_pc
+
+
+def test_a_trip_telemetry_alone_saw_is_added_rather_than_lost():
+    """Polling misses whole journeys — one evening it merged two into one.
+
+    Where telemetry has a trip and polling has nothing covering it, the row
+    is added. That is the half of the switch that grows the history rather
+    than correcting it.
+    """
+    import json as _json
+
+    from app.database import SessionLocal
+    from app import state, sync as sync_mod
+    from app.models import Drive, Vehicle
+
+    settings = get_settings()
+    old_pc = settings.app_passcode
+    settings.app_passcode = ""
+    sess = SessionLocal()
+    prev = state.get(sess, state.TELEMETRY_TRIPS_KEY)
+    vehicle = None
+    try:
+        now = sync_mod.now_local()
+
+        def _epoch(local):
+            return local.replace(tzinfo=sync_mod.MYT).timestamp()
+
+        with TestClient(app) as client:
+            vehicle = Vehicle(vin="ADDONLY000000001", name="Test", model="Model 3")
+            sess.add(vehicle)
+            sess.commit()
+            at = now - timedelta(minutes=45)
+            state.put(sess, state.TELEMETRY_TRIPS_KEY, _json.dumps([{
+                "vin": "ADDONLY000000001",
+                "start_ts": _epoch(at), "end_ts": _epoch(at + timedelta(minutes=8)),
+                "start_time": at.isoformat(timespec="seconds"),
+                "end_time": (at + timedelta(minutes=8)).isoformat(timespec="seconds"),
+                "distance_km": 2.791, "duration_min": 8.3, "energy_kwh": 0.74,
+                "wh_per_km": 265.1, "ended_on": "stream_lost"}]))
+            sess.commit()
+
+            assert client.get("/api/telemetry/promote").json()["trips"][0]["action"] == "add"
+            client.get("/api/telemetry/promote?apply=true")
+
+        with SessionLocal() as chk:
+            rows = chk.query(Drive).filter(Drive.vehicle_id == vehicle.id).all()
+            assert len(rows) == 1
+            assert rows[0].source == "telemetry"
+            assert rows[0].distance_km == pytest.approx(2.791, abs=0.001)
+            # Nothing to preserve: polling never saw this one.
+            assert rows[0].polled_km is None
+    finally:
+        with SessionLocal() as cleanup:
+            if vehicle is not None:
+                for d in cleanup.query(Drive).filter(
+                        Drive.vehicle_id == vehicle.id).all():
+                    cleanup.delete(d)
+                v = cleanup.get(Vehicle, vehicle.id)
+                if v is not None:
+                    cleanup.delete(v)
+            cleanup.commit()
+        state.put(sess, state.TELEMETRY_TRIPS_KEY, prev or "[]")
+        sess.commit()
+        sess.close()
+        settings.app_passcode = old_pc
+
+
 def test_a_trip_that_is_mostly_rounding_does_not_referee_the_others():
     """Two kinds of trip cannot judge, and averaging them in makes it worse.
 

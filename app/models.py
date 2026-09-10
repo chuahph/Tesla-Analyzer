@@ -128,6 +128,23 @@ class Drive(Base):
     # change behaviour, and the trim itself is unchanged.
     tail_trim_sec: Mapped[float | None] = mapped_column(Float, nullable=True)
 
+    # Which path produced the figures in this row. "" is the polled history —
+    # everything logged before telemetry took over, and anything telemetry
+    # still cannot see. "telemetry" means the streamed trip machine wrote or
+    # corrected it.
+    source: Mapped[str] = mapped_column(String(12), default="")
+    # The shadow trip this row came from, by its start timestamp. Promotion
+    # is idempotent because of this: a trip already carried here corrects the
+    # row it made rather than adding a second one.
+    shadow_start_ts: Mapped[float | None] = mapped_column(Float, nullable=True)
+    # What polling had recorded before telemetry overwrote it, kept only on
+    # rows telemetry corrected. The two sources have to stay independent or
+    # the report that decides which to believe reads telemetry against itself
+    # and agrees perfectly for ever. Also the way back: these are what a row
+    # would be restored to.
+    polled_km: Mapped[float | None] = mapped_column(Float, nullable=True)
+    polled_kwh: Mapped[float | None] = mapped_column(Float, nullable=True)
+
     # Odometer distance driven before this trip's start anchor, and therefore
     # missing from its distance_km. The counterpart to tail_trim_sec at the
     # other end, and the harder of the two to see: the odometer is continuous,

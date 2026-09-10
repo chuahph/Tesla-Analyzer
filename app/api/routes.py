@@ -2832,6 +2832,142 @@ def _append_trip(trips: list, finished: dict) -> bool:
     return bool(paid)
 
 
+# How far back promotion will reach. A shadow trip older than this was
+# either already carried across or belongs to the period before telemetry
+# could see anything, and reaching further only risks disturbing history
+# nobody asked to be disturbed.
+PROMOTE_MAX_DAYS = 7
+
+
+def _promote_shadow_trips(session: Session, apply: bool = False,
+                          days: int = PROMOTE_MAX_DAYS) -> list[dict]:
+    """Write streamed trips into the drive history, correcting polling's.
+
+    Telemetry earned this over ten judged trips: distance total -0.4% against
+    the car with a worst trip of 0.9%, where polling ran +0.4% with a worst
+    of 3.7%, and Wh/km RMS half of polling's. The dashboard, the analysis and
+    the alerts all read the Drive table, so being more accurate in a JSON
+    blob beside it was worth nothing to anybody.
+
+    Polling is not switched off and its figures are not thrown away. Where a
+    streamed trip covers a polled one, the polled distance and energy move to
+    polled_km/polled_kwh and telemetry's replace them; where telemetry has
+    nothing, polling's row stands untouched. That keeps two independent paths
+    to the same car — which is the only thing that would ever notice
+    telemetry had stopped, since a dead receiver looks exactly like a car
+    nobody is driving.
+
+    Idempotent by shadow_start_ts. A trip already carried across corrects the
+    row it made rather than adding a second one, so this can run on every
+    tick and after every deploy without multiplying the history.
+    """
+    import json as _json
+
+    try:
+        trips = _json.loads(state.get(session, state.TELEMETRY_TRIPS_KEY) or "[]") or []
+    except ValueError:
+        return []
+    if not trips:
+        return []
+
+    since = sync_mod.now_local() - timedelta(days=days)
+    vin_to_vehicle = {
+        v.vin: v.id for v in session.scalars(select(Vehicle)).all() if v.vin}
+    if not vin_to_vehicle:
+        return []
+    drives = session.scalars(
+        select(Drive).where(Drive.start_time >= since).order_by(Drive.start_time)
+    ).all()
+    by_shadow = {d.shadow_start_ts: d for d in drives
+                 if d.shadow_start_ts is not None}
+    changed: list[dict] = []
+
+    for t in trips:
+        try:
+            start_ts = float(t["start_ts"])
+            t_start, t_end = sync_mod._dt(start_ts), sync_mod._dt(t["end_ts"])
+        except (KeyError, TypeError, ValueError, OSError):
+            continue
+        if t_end < since:
+            continue
+        vehicle_id = vin_to_vehicle.get(t.get("vin"))
+        if vehicle_id is None:
+            # One car, or a VIN this account has not linked. Guessing which
+            # vehicle a trip belongs to is how one car's journey ends up in
+            # another car's history.
+            if len(vin_to_vehicle) != 1:
+                continue
+            vehicle_id = next(iter(vin_to_vehicle.values()))
+
+        row = by_shadow.get(start_ts)
+        if row is None:
+            # The polled trip covering the same ground, if there is one.
+            row = next((d for d in drives
+                        if d.vehicle_id == vehicle_id
+                        and d.shadow_start_ts is None
+                        and d.start_time <= t_end and t_start <= d.end_time),
+                       None)
+        was = {"id": getattr(row, "id", None),
+               "km": None if row is None else round(row.distance_km or 0.0, 3),
+               "kwh": None if row is None else round(row.energy_used_kwh or 0.0, 3),
+               "source": None if row is None else (row.source or "polled")}
+        entry = {"start": t.get("start_time"), "was": was,
+                 "now": {"km": t.get("distance_km"), "kwh": t.get("energy_kwh")},
+                 "action": "correct" if row is not None else "add"}
+
+        if apply:
+            if row is None:
+                row = Drive(vehicle_id=vehicle_id, start_time=t_start,
+                            end_time=t_end, start_soc=0.0, end_soc=0.0,
+                            outside_temp_c=t.get("out_temp") or 20.0)
+                session.add(row)
+                drives = list(drives) + [row]
+            elif row.polled_km is None and row.shadow_start_ts is None:
+                # Only on the first correction. Running again must not
+                # overwrite what polling said with what telemetry said last
+                # time, which would quietly turn the accuracy report into
+                # telemetry agreeing with itself.
+                row.polled_km = row.distance_km
+                row.polled_kwh = row.energy_used_kwh
+            _apply_shadow_to_drive(row, t)
+            entry["id"] = row.id
+        changed.append(entry)
+
+    if apply and changed:
+        session.commit()
+        for entry in changed:
+            if entry.get("id") is None:
+                entry["id"] = entry["was"]["id"]
+    return changed
+
+
+def _apply_shadow_to_drive(row, t: dict) -> None:
+    """Copy a streamed trip's figures onto a drive row.
+
+    Only what telemetry actually measured. Locations, tags, costs and every
+    other field polling filled in are left alone — this is a correction to
+    two numbers and the boundaries around them, not a replacement of the row.
+    """
+    row.source = "telemetry"
+    row.shadow_start_ts = float(t["start_ts"])
+    row.start_time = sync_mod._dt(t["start_ts"])
+    row.end_time = sync_mod._dt(t["end_ts"])
+    row.distance_km = float(t.get("distance_km") or 0.0)
+    row.duration_min = float(t.get("duration_min") or 0.0)
+    if t.get("energy_kwh") is not None:
+        row.energy_used_kwh = float(t["energy_kwh"])
+        row.energy_estimated = False
+    for field, key in (("start_soc", "soc_start"), ("end_soc", "soc_end"),
+                       ("max_speed_kmh", "max_speed_kmh"),
+                       ("avg_speed_kmh", "avg_speed_kmh"),
+                       ("start_odo_km", "start_odo_km"),
+                       ("end_odo_km", "end_odo_km"),
+                       ("outside_temp_c", "out_temp")):
+        value = t.get(key)
+        if value is not None:
+            setattr(row, field, float(value))
+
+
 def _settle_shadows(session: Session) -> int:
     """Close any shadow trip whose stream went quiet. Returns how many.
 
@@ -2935,6 +3071,21 @@ def sync_now(wake: bool = Query(False), session: Session = Depends(get_session))
     # Before anything else, since it needs no network and a failure to reach
     # Tesla must not also cost the trip the car already streamed.
     _settle_shadows(session)
+    # And carry what the car streamed into the history the dashboard reads.
+    # Also before the poll, and for the same reason: this depends on nothing
+    # outside the database, so a Tesla API that is down, rate-limited or
+    # simply asleep cannot stop a journey the car already told us about from
+    # appearing. Idempotent by shadow_start_ts, so running it every tick
+    # corrects rows rather than multiplying them.
+    try:
+        _promote_shadow_trips(session, apply=True)
+    except Exception:  # noqa: BLE001 — never let this break the sync
+        # A correction that cannot be made is a stale figure on the
+        # dashboard. A sync that dies here is no figures at all, plus no
+        # charges, no alerts and no history — so this is caught and the
+        # tick carries on. The next one tries again, because promotion is
+        # idempotent and nothing is lost by having missed a turn.
+        session.rollback()
     try:
         return _sync_now_impl(wake, session)
     except HTTPException as exc:
@@ -9882,6 +10033,18 @@ def fleet_token(session: Session = Depends(get_session)):
     }
 
 
+def _polled_km(d) -> float:
+    """What polling said this drive was, even after telemetry corrected it."""
+    was = getattr(d, "polled_km", None)
+    return float(was if was is not None else (d.distance_km or 0.0))
+
+
+def _polled_kwh(d) -> float:
+    """What polling said this drive spent, even after telemetry corrected it."""
+    was = getattr(d, "polled_kwh", None)
+    return float(was if was is not None else (d.energy_used_kwh or 0.0))
+
+
 def _energy_unc_kwh(t: dict) -> float | None:
     """What a shadow trip's energy figure is worth, computed from the trip.
 
@@ -9953,14 +10116,20 @@ def _compare_row(t: dict, d, t_start, car_by_drive: dict, pct) -> dict:
             # _shadow_close.
             "ended_on": t.get("ended_on"),
         },
+        # polled_km/polled_kwh where telemetry has corrected the row, the
+        # live values where it has not. Reading the row's current figures
+        # after promotion would score telemetry against its own output and
+        # report perfect agreement for ever — the comparison would stop
+        # being able to detect the thing it exists to detect on the same day
+        # telemetry took over.
         "polled": None if not d else {
             "id": d.id,
             "start": d.start_time.isoformat(timespec="seconds"),
             "end": d.end_time.isoformat(timespec="seconds"),
-            "km": round(d.distance_km or 0.0, 3),
-            "kwh": round(d.energy_used_kwh or 0.0, 3),
-            "wh_per_km": round((d.energy_used_kwh or 0.0) * 1000.0
-                               / (d.distance_km or 1e-9), 1),
+            "km": round(_polled_km(d), 3),
+            "kwh": round(_polled_kwh(d), 3),
+            "wh_per_km": round(_polled_kwh(d) * 1000.0
+                               / (_polled_km(d) or 1e-9), 1),
             "min": d.duration_min,
             "estimated_energy": bool(getattr(d, "energy_estimated", False)),
         },
@@ -9975,17 +10144,17 @@ def _compare_row(t: dict, d, t_start, car_by_drive: dict, pct) -> dict:
         # departure or arrival looks like, and it inflates Wh/km by the
         # same proportion.
         "vs_car": None if not d or d.id not in car_by_drive else {
-            "polled_km_pct": pct(d.distance_km, car_by_drive[d.id]["km"]),
+            "polled_km_pct": pct(_polled_km(d), car_by_drive[d.id]["km"]),
             "telemetry_km_pct": pct(t["distance_km"], car_by_drive[d.id]["km"]),
             "polled_whkm_pct": pct(
-                (d.energy_used_kwh or 0.0) * 1000.0 / (d.distance_km or 1e-9),
+                _polled_kwh(d) * 1000.0 / (_polled_km(d) or 1e-9),
                 car_by_drive[d.id]["wh_per_km"]),
             "telemetry_whkm_pct": pct(t["wh_per_km"],
                                       car_by_drive[d.id]["wh_per_km"]),
         },
         "delta": None if not d else {
-            "km_pct": pct(t["distance_km"], d.distance_km),
-            "kwh_pct": pct(t["energy_kwh"], d.energy_used_kwh),
+            "km_pct": pct(t["distance_km"], _polled_km(d)),
+            "kwh_pct": pct(t["energy_kwh"], _polled_kwh(d)),
             # Positive means polling started the trip LATE — the blind
             # head, in minutes.
             "start_delta_min": round(
@@ -10112,6 +10281,29 @@ def telemetry_recover_gaps(
     state.put(session, state.TELEMETRY_TRIPS_KEY, _json.dumps(trips))
     session.commit()
     return {"recovered": len(changed), "trips": changed}
+
+
+@router.api_route("/telemetry/promote", methods=["GET", "POST"])
+def telemetry_promote(
+    apply: bool = Query(False),
+    days: int = Query(PROMOTE_MAX_DAYS, ge=1, le=90),
+    session: Session = Depends(get_session),
+):
+    """Carry streamed trips into the drive history the dashboard reads.
+
+    Previews unless asked to apply, and says for each trip whether it would
+    correct a polled row or add one telemetry alone saw. What polling had
+    recorded is kept on the row rather than discarded, so the comparison that
+    decides which source to believe still has two independent answers to
+    compare — and so a row can be put back.
+    """
+    _settle_shadows(session)
+    changed = _promote_shadow_trips(session, apply=apply, days=days)
+    if not apply:
+        return {"would_change": len(changed), "trips": changed,
+                "note": "Nothing written. Add &apply=true to carry these across.",
+                "how": "Add &apply=true to this URL to apply them."}
+    return {"changed": len(changed), "trips": changed}
 
 
 @router.get("/telemetry/charges")
