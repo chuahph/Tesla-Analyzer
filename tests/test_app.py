@@ -6538,3 +6538,46 @@ def test_refreezing_keeps_rates_the_current_history_can_no_longer_fit():
                 assert not state_mod.get(s, state_mod.FROZEN_RATES_KEY)
     finally:
         settings.app_passcode = old
+
+
+def test_supplied_frozen_rates_are_bounded_before_they_are_trusted():
+    """Rates handed in by hand reprice real parks — vampire_drain substitutes
+    a rate for the measurement on any gap too short to measure — so a typo
+    must be refused, not stored."""
+    settings = get_settings()
+    old = settings.app_passcode
+    settings.app_passcode = ""
+    try:
+        with TestClient(app) as client:
+            from app.database import SessionLocal
+            from app.models import Vehicle
+            from app import state as state_mod
+
+            with SessionLocal() as s:
+                s.add(Vehicle(vin="TESTVIN-SUPPLIED", name="Test", model="Model 3"))
+                s.commit()
+            client.post("/api/active-vehicle", json={"vin": "TESTVIN-SUPPLIED"})
+
+            good = json.dumps({"places": {"Home": 0.032, "Office": 0.03},
+                               "sentry_armed_kw": 0.233, "whole_history_kw": 0.059})
+            out = client.post(
+                "/api/data/freeze-parked-rates?apply=true", params={"rates": good}).json()
+            assert out["places"]["Home"] == 0.032
+            assert out["sentry_armed_kw"] == 0.233
+            assert out["source"] == "supplied"
+
+            # A misplaced decimal point is outside the plausible band.
+            bad = json.dumps({"places": {"Home": 32.0}})
+            err = client.post(
+                "/api/data/freeze-parked-rates?apply=true", params={"rates": bad}).json()
+            assert "outside the plausible band" in err["error"]
+            with SessionLocal() as s:
+                stored = json.loads(state_mod.get(s, state_mod.FROZEN_RATES_KEY))
+                assert stored["places"]["Home"] == 0.032   # unchanged
+
+            # Malformed input is refused rather than half-applied.
+            assert "error" in client.post(
+                "/api/data/freeze-parked-rates?apply=true",
+                params={"rates": "not json"}).json()
+    finally:
+        settings.app_passcode = old

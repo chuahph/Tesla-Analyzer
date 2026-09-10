@@ -1539,6 +1539,56 @@ def _frozen_rates(session: Session) -> dict:
     return _json_mod.loads(raw) if raw else {}
 
 
+def _parse_frozen_rates(raw: str, previous: dict) -> dict:
+    """Frozen rates supplied by hand, validated before they are trusted.
+
+    These numbers reshape real trip energy — vampire_drain substitutes a rate
+    for the measurement on any gap too short to measure (see its comments) —
+    so every one is bounded by the same STANDBY_PLAUSIBLE_KW the fit itself is
+    bounded by. A typo that puts a decimal point in the wrong place must be
+    refused here rather than quietly repricing a month of parks.
+    """
+    try:
+        given = _json_mod.loads(raw)
+    except ValueError:
+        return {"error": "rates is not valid JSON"}
+    if not isinstance(given, dict):
+        return {"error": "rates must be a JSON object"}
+    lo, hi = driving_analysis.STANDBY_PLAUSIBLE_KW
+
+    def _kw(value, label):
+        if value is None:
+            return None, None
+        try:
+            kw = float(value)
+        except (TypeError, ValueError):
+            return None, f"{label} is not a number"
+        if not (lo <= kw <= hi):
+            return None, f"{label} = {kw} kW is outside the plausible band {lo}-{hi} kW"
+        return kw, None
+
+    places = {}
+    for name, value in (given.get("places") or {}).items():
+        kw, err = _kw(value, f"places[{name}]")
+        if err:
+            return {"error": err}
+        if kw is not None:
+            places[str(name)] = kw
+    out = {
+        "at": sync_mod.now_local().isoformat(timespec="seconds"),
+        "places": {**(previous.get("places") or {}), **places},
+        "source": "supplied",
+    }
+    for key in ("sentry_armed_kw", "whole_history_kw"):
+        kw, err = _kw(given.get(key), key)
+        if err:
+            return {"error": err}
+        out[key] = kw if kw is not None else previous.get(key)
+    if previous:
+        out["kept_from"] = previous.get("at")
+    return out
+
+
 def _freeze_parked_rates(session: Session, vehicle, capacity_kwh: float) -> dict:
     """Record what the parked-drain fits currently resolve to, so they survive
     the trips they were measured from being deleted.
@@ -1604,6 +1654,7 @@ def _freeze_parked_rates(session: Session, vehicle, capacity_kwh: float) -> dict
 @router.api_route("/data/freeze-parked-rates", methods=["GET", "POST"])
 def freeze_parked_rates(
     apply: bool = Query(False),
+    rates: str | None = Query(None),
     session: Session = Depends(get_session),
 ):
     """Pin the parked-drain fits at their current values.
@@ -1625,7 +1676,16 @@ def freeze_parked_rates(
         return {"error": "no vehicle"}
     settings = get_settings()
     capacity_kwh, _ = _usable_capacity(session, vehicle, settings)
-    frozen = _freeze_parked_rates(session, vehicle, capacity_kwh)
+    if rates is not None:
+        # Set the figures directly instead of fitting them. The one case this
+        # is for: the history a rate was measured from is already gone, so
+        # there is nothing left to fit and the number survives only in a
+        # /api/data/purge-pre-telemetry plan someone still has a copy of.
+        frozen = _parse_frozen_rates(rates, _frozen_rates(session))
+        if "error" in frozen:
+            return frozen
+    else:
+        frozen = _freeze_parked_rates(session, vehicle, capacity_kwh)
     out = dict(frozen)
     out["would_freeze_places"] = len(frozen["places"])
     out["previous"] = _frozen_rates(session) or None
