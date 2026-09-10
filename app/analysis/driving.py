@@ -588,6 +588,7 @@ def vampire_drain(
     rate_history: tuple[list[Any], list[Any]] | None = None,
     place_rates: dict[str, float] | None = None,
     readings: list[Any] | None = None,
+    frozen: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """kWh lost while parked between two consecutive drives, with no charge in
     between — standby/vampire drain (sentry mode, cabin overheat protection,
@@ -658,6 +659,15 @@ def vampire_drain(
     # drain up, and the short-gap substitution only when a gap is too brief to
     # measure. Windows with neither shouldn't pay for the fit.
     _rate: dict[Any, float | None] = {}
+    # A fit that no longer has evidence behind it falls back to what the same
+    # fit said while it did. Consulted only where the live fit returns None —
+    # never as an override — because a live fit that resolves has cleared the
+    # same 24-hour threshold and is current, and the frozen figure is by
+    # definition older. This exists for one situation: the history the fit was
+    # measured from has been deleted (see /api/data/purge-pre-telemetry), and
+    # the alternative is not a fresher number but no number at all.
+    frozen_rates = frozen or {}
+    frozen_places = frozen_rates.get("places") or {}
 
     def park_rate(place: str | None = None, armed: bool | None = None) -> float | None:
         """What this car draws parked HERE, in the state it was actually in.
@@ -674,18 +684,27 @@ def vampire_drain(
         own fit. Then the whole-history blend, which fits no regime exactly but
         sits between them, and beats declining to correct a gap at all.
         """
-        if armed and readings:
+        if armed:
             key = ("sentry", True)
             if key not in _rate:
-                _rate[key] = sentry_standby_kw(
+                _rate[key] = (sentry_standby_kw(
                     fit_drives, fit_charges, capacity_kwh, readings, True)
+                    if readings else None)
+                if _rate[key] is None:
+                    _rate[key] = frozen_rates.get("sentry_armed_kw")
             if _rate[key]:
                 return _rate[key]
         if place not in _rate:
             given = (place_rates or {}).get(place) if place else None
-            _rate[place] = (given if given else
-                            place_standby_kw(fit_drives, fit_charges, capacity_kwh, place)
-                            if place else parked_rate_kw(fit_drives, fit_charges, capacity_kwh))
+            if given:
+                _rate[place] = given
+            elif place:
+                _rate[place] = (
+                    place_standby_kw(fit_drives, fit_charges, capacity_kwh, place)
+                    or frozen_places.get(place))
+            else:
+                _rate[place] = (parked_rate_kw(fit_drives, fit_charges, capacity_kwh)
+                                or frozen_rates.get("whole_history_kw"))
         if _rate[place] is None and place is not None:
             return park_rate(None)
         return _rate[place]
@@ -1105,6 +1124,7 @@ def analyze(drives: list[Drive], rated_wh_per_km: float = 150.0,
             vampire_rate_history: tuple[list[Any], list[Any]] | None = None,
             vampire_place_rates: dict[str, float] | None = None,
             vampire_readings: list[Any] | None = None,
+            vampire_frozen: dict[str, Any] | None = None,
             ) -> dict[str, Any]:
     """``energy_price`` is either a flat RM/kWh float, or a
     ``datetime -> RM/kWh`` callable (time-of-use pricing — see app.tariff) for
@@ -1154,7 +1174,8 @@ def analyze(drives: list[Drive], rated_wh_per_km: float = 150.0,
     vampire = vampire_drain(ordered, charges, capacity_kwh, anchor=vampire_anchor,
                             rate_history=vampire_rate_history,
                             place_rates=vampire_place_rates,
-                            readings=vampire_readings)
+                            readings=vampire_readings,
+                            frozen=vampire_frozen)
     vampire_kwh = vampire["kwh"]
     # Trip drain, measured PER DRIVE at its best-available precision: each
     # drive's own fractional energy_used_kwh (from its range delta — sub-1%

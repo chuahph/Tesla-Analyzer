@@ -1532,9 +1532,104 @@ def _standby_picture(drives: list, charges: list, capacity_kwh: float,
     }
 
 
+def _frozen_rates(session: Session) -> dict:
+    """The parked-drain fits as they stood when the history still supported
+    them. Empty when nothing has been frozen — which is the normal state."""
+    raw = state.get(session, state.FROZEN_RATES_KEY)
+    return _json_mod.loads(raw) if raw else {}
+
+
+def _freeze_parked_rates(session: Session, vehicle, capacity_kwh: float) -> dict:
+    """Record what the parked-drain fits currently resolve to, so they survive
+    the trips they were measured from being deleted.
+
+    Only rates that actually resolve are stored. A None is not frozen as a
+    None — that would pin "unmeasurable" in place and stop a later, better
+    history from ever producing a figure.
+
+    Deliberately NOT written into Place.parked_draw_w, even though that field
+    already outranks the fit. That column means one specific thing (see
+    Place.parked_draw_w): a draw read off the car's own Park screen, which
+    measures to 0.1% where the fit measures to a whole SoC point and carries a
+    cooling bias on top. Seven Home nights fitted 32 W where the screen implies
+    14. Storing a fit there would make a worse number indistinguishable from a
+    better one for ever, so the frozen fits get their own layer, ranked below
+    the screen reading and above nothing at all.
+    """
+    drives = list(session.scalars(
+        select(Drive).where(Drive.vehicle_id == vehicle.id).order_by(Drive.start_time)))
+    charges = list(session.scalars(select(Charge).where(Charge.vehicle_id == vehicle.id)))
+    readings = _parked_readings(session, vehicle.id)
+    places = sorted({(d.end_location or "") for d in drives if d.end_location})
+
+    fitted = {}
+    for place in places:
+        kw = driving_analysis.place_standby_kw(drives, charges, capacity_kwh, place)
+        if kw:
+            fitted[place] = kw
+    ordered = sorted(drives, key=lambda d: d.start_time)
+    frozen = {
+        "at": sync_mod.now_local().isoformat(timespec="seconds"),
+        "places": fitted,
+        "sentry_armed_kw": driving_analysis.sentry_standby_kw(
+            drives, charges, capacity_kwh, readings, True) if readings else None,
+        "whole_history_kw": driving_analysis.parked_rate_kw(drives, charges, capacity_kwh),
+        "from_drives": len(drives),
+        "from_gaps": sum(1 for a, b in zip(ordered, ordered[1:])
+                         if (b.start_time - a.end_time).total_seconds() >= 6 * 3600.0),
+    }
+    return frozen
+
+
+@router.api_route("/data/freeze-parked-rates", methods=["GET", "POST"])
+def freeze_parked_rates(
+    apply: bool = Query(False),
+    session: Session = Depends(get_session),
+):
+    """Pin the parked-drain fits at their current values.
+
+    Worth doing before anything that shrinks the drive history, and harmless
+    otherwise: a frozen rate is consulted only where the live fit no longer
+    resolves, so while the history is intact this changes nothing at all.
+
+    Plans by default. Re-running replaces the stored set outright rather than
+    merging — a half-updated blend of two different histories describes
+    neither.
+    """
+    vehicle = _first_vehicle(session)
+    if vehicle is None:
+        return {"error": "no vehicle"}
+    settings = get_settings()
+    capacity_kwh, _ = _usable_capacity(session, vehicle, settings)
+    frozen = _freeze_parked_rates(session, vehicle, capacity_kwh)
+    out = dict(frozen)
+    out["would_freeze_places"] = len(frozen["places"])
+    out["previous"] = _frozen_rates(session) or None
+    if not apply:
+        out["applied"] = False
+        return out
+    state.put(session, state.FROZEN_RATES_KEY, _json_mod.dumps(frozen))
+    session.commit()
+    out["applied"] = True
+    return out
+
+
+@router.api_route("/data/thaw-parked-rates", methods=["GET", "POST"])
+def thaw_parked_rates(session: Session = Depends(get_session)):
+    """Discard the frozen fits and go back to measuring from the history
+    alone. The counterpart to freeze, and what to call after restoring a
+    purge — with the trips back, the live fit is the better number again and
+    a stale floor under it is just noise."""
+    had = _frozen_rates(session)
+    state.delete(session, state.FROZEN_RATES_KEY)
+    session.commit()
+    return {"thawed": bool(had), "was": had or None}
+
+
 @router.api_route("/data/purge-pre-telemetry", methods=["GET", "POST"])
 def purge_pre_telemetry(
     apply: bool = Query(False),
+    freeze: bool = Query(True),
     session: Session = Depends(get_session),
 ):
     """Delete every trip that predates telemetry, keeping charges and readings.
@@ -1553,6 +1648,15 @@ def purge_pre_telemetry(
     first, and /api/data/restore-purged-drives puts them back — the polled
     history cannot be re-fetched from Tesla, so deleting it without a copy
     would be the one irreversible act in this app.
+
+    Applying also freezes the parked-drain fits first (``freeze=false`` to
+    skip). Measured on the real history: deleting 268 trips takes the gaps the
+    fits stand on from 74 to 3, which drops Home (0.032 kW), Office (0.030 kW)
+    and the Sentry-armed rate (0.233 kW) to null and leaves one blended 0.083
+    kW describing nowhere the car actually parks. That blend is precisely what
+    place_standby_kw was written to replace, so a purge without the freeze
+    would recreate the bug by deletion. The frozen figures are consulted only
+    where the live fit returns None, so restoring the trips makes them inert.
     """
     vehicle = _first_vehicle(session)
     if vehicle is None:
@@ -1599,10 +1703,24 @@ def purge_pre_telemetry(
             "before": _standby_picture(all_drives, charges, capacity_kwh, readings),
             "after": _standby_picture(list(kept), charges, capacity_kwh, readings),
         },
+        # What applying would carry across the deletion. Read this against the
+        # "after" column: every rate listed here is one that goes null under
+        # "after" and keeps working anyway.
+        "would_freeze": _freeze_parked_rates(session, vehicle, capacity_kwh) if freeze else None,
     }
     if not apply:
         plan["applied"] = False
         return plan
+
+    if freeze:
+        frozen = _freeze_parked_rates(session, vehicle, capacity_kwh)
+        state.put(session, state.FROZEN_RATES_KEY, _json_mod.dumps(frozen))
+        plan["froze"] = {
+            "places": len(frozen["places"]),
+            "sentry_armed_kw": frozen["sentry_armed_kw"],
+            "whole_history_kw": frozen["whole_history_kw"],
+            "from_gaps": frozen["from_gaps"],
+        }
 
     backup = {
         "at": sync_mod.now_local().isoformat(timespec="seconds"),
@@ -4044,7 +4162,8 @@ def compare_vehicles(days: int = Query(30, ge=1, le=730), session: Session = Dep
             trip_costs=_trip_cost_map(session, vehicle.id),
             vampire_rate_history=_full_history(session, vehicle.id),
         vampire_place_rates=_place_parked_rates(session),
-        vampire_readings=_parked_readings(session, vehicle.id))
+        vampire_readings=_parked_readings(session, vehicle.id),
+        vampire_frozen=_frozen_rates(session))
         charging = charging_analysis.analyze(charges, drives)
         readings = _newest_readings(
             session, vehicle.id,
@@ -4923,7 +5042,8 @@ def _monthly_report_payload(session: Session, vehicle: Vehicle, settings, days: 
         trip_costs=trip_costs,
         vampire_rate_history=_full_history(session, vehicle.id),
         vampire_place_rates=_place_parked_rates(session),
-        vampire_readings=_parked_readings(session, vehicle.id))
+        vampire_readings=_parked_readings(session, vehicle.id),
+        vampire_frozen=_frozen_rates(session))
     charging = charging_analysis.analyze(charges, drives)
     efficiency = efficiency_analysis.analyze(drives, settings.rated_wh_per_km)
     cur = settings.currency
@@ -4964,7 +5084,8 @@ def _monthly_report_payload(session: Session, vehicle: Vehicle, settings, days: 
         trip_costs=trip_costs,
         vampire_rate_history=_full_history(session, vehicle.id),
         vampire_place_rates=_place_parked_rates(session),
-        vampire_readings=_parked_readings(session, vehicle.id))
+        vampire_readings=_parked_readings(session, vehicle.id),
+        vampire_frozen=_frozen_rates(session))
     prev_charging = charging_analysis.analyze(prev_charges, prev_drives)
     prev_efficiency = efficiency_analysis.analyze(prev_drives, settings.rated_wh_per_km)
     narrative_lines = narrative_engine.build(
@@ -5019,7 +5140,8 @@ def _standby_longest(session: Session, vehicle: Vehicle, drives, charges,
         drives, charges, capacity_kwh,
         rate_history=_full_history(session, vehicle.id),
         place_rates=_place_parked_rates(session),
-        readings=_parked_readings(session, vehicle.id))
+        readings=_parked_readings(session, vehicle.id),
+        frozen=_frozen_rates(session))
     gaps = vd.get("gap_list") or []
     if not gaps:
         return None
@@ -7251,7 +7373,8 @@ def energy_reconcile(session: Session = Depends(get_session)):
         anchor=(last_charge.end_time, last_charge.end_soc),
         rate_history=_full_history(session, vehicle.id),
         place_rates=_place_parked_rates(session),
-        readings=_parked_readings(session, vehicle.id))
+        readings=_parked_readings(session, vehicle.id),
+        frozen=_frozen_rates(session))
     trips_kwh = round(sum(d.energy_used_kwh or 0.0 for d in drives_since), 3)
     parked_kwh = round(vampire["kwh"], 3)
     attributed_kwh = round(trips_kwh + parked_kwh, 3)
@@ -9337,7 +9460,8 @@ def summary(
             drives_since, [], capacity_kwh, anchor=(last_charge.end_time, last_charge.end_soc),
             rate_history=_hist("full_history", _full_history, session, vehicle.id),
             place_rates=_hist("place_rates", _place_parked_rates, session),
-            readings=_hist("parked_readings", _parked_readings, session, vehicle.id))
+            readings=_hist("parked_readings", _parked_readings, session, vehicle.id),
+            frozen=_hist("frozen_rates", _frozen_rates, session))
         _mark("since_vampire")
         used_since_last_charge_kwh = (
             sum(d.energy_used_kwh for d in drives_since) + vampire_since["kwh"]
@@ -9407,7 +9531,8 @@ def summary(
         recent_trips_limit=trips_limit or 5,
         vampire_rate_history=_hist("full_history", _full_history, session, vehicle.id),
         vampire_place_rates=_hist("place_rates", _place_parked_rates, session),
-        vampire_readings=_hist("parked_readings", _parked_readings, session, vehicle.id))
+        vampire_readings=_hist("parked_readings", _parked_readings, session, vehicle.id),
+        vampire_frozen=_hist("frozen_rates", _frozen_rates, session))
     _mark("driving")
     # A since-charge window's own `charges` list is always empty by
     # definition (it starts right where last_charge ends, so no charge can
@@ -9461,7 +9586,8 @@ def summary(
             charges=prev_charges, trip_costs=trip_costs,
             vampire_rate_history=_hist("full_history", _full_history, session, vehicle.id),
             vampire_place_rates=_hist("place_rates", _place_parked_rates, session),
-            vampire_readings=_hist("parked_readings", _parked_readings, session, vehicle.id))
+            vampire_readings=_hist("parked_readings", _parked_readings, session, vehicle.id),
+            vampire_frozen=_hist("frozen_rates", _frozen_rates, session))
         prev_charging = charging_analysis.analyze(prev_charges, prev_drives)
         prev_efficiency = efficiency_analysis.analyze(prev_drives, settings.rated_wh_per_km)
         narrative_lines = narrative_engine.build(

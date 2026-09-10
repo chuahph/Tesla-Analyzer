@@ -6399,10 +6399,18 @@ def test_purge_pre_telemetry_plans_then_deletes_and_restores():
             # The cost is stated, not asserted in prose: both columns present.
             assert set(plan["standby_fits"]) == {"before", "after"}
 
+            # Applying freezes the parked-drain fits before deleting the trips
+            # they were measured from — without it the purge takes the fits
+            # with it, which is the whole objection to running one.
+            assert "would_freeze" in plan
             done = client.post("/api/data/purge-pre-telemetry?apply=true").json()
             assert done["applied"] is True
             assert done["deleted"] == 3
             assert done["backup_rows"] == 3
+            assert done["froze"]["from_gaps"] >= 0
+            with SessionLocal() as s:
+                from app import state as state_mod
+                assert state_mod.get(s, state_mod.FROZEN_RATES_KEY)
             with SessionLocal() as s:
                 left = s.scalars(select(Drive).where(Drive.vehicle_id == v.id)).all()
                 assert len(left) == 2

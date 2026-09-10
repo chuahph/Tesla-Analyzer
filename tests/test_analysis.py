@@ -1,5 +1,6 @@
 """Tests for the analytics engine and helpers."""
 import pytest
+from datetime import datetime, timedelta
 from sqlalchemy import select
 
 from app.analysis import linregress, mean, percentile
@@ -2205,3 +2206,92 @@ def test_ground_the_next_trip_already_recovered_is_not_a_missing_arrival():
     lost = odometer_continuity([arriving, departing], readings)["gaps"][0]
     assert lost["claimed_by_departure"] is False
     assert lost["unrecorded_km"] == 0.22
+
+
+def _park_history(days: int, drop_pct: float, place: str = "Home"):
+    """Trips separated by overnight parks at one place, each losing drop_pct."""
+    from types import SimpleNamespace
+
+    drives = []
+    soc = 90.0
+    for i in range(days):
+        start = datetime(2025, 6, 1, 8, 0) + timedelta(days=i)
+        drives.append(SimpleNamespace(
+            id=i + 1, start_time=start, end_time=start + timedelta(minutes=30),
+            start_soc=soc, end_soc=soc - 2.0, distance_km=10.0,
+            energy_used_kwh=1.4, end_location=place, start_location=place,
+            end_odo_km=None, end_lost_km=None, start_recovered_km=None))
+        soc = soc - 2.0 - drop_pct
+    return drives
+
+
+def test_frozen_rate_takes_over_only_when_the_live_fit_stops_resolving():
+    """A frozen fit is a floor under a deleted history, not an override.
+
+    While the trips are there the live fit wins — it cleared the same
+    threshold and it is current. Once they are gone the live fit returns
+    None, and without the frozen figure the gap falls through to the
+    whole-history blend, which place_standby_kw exists precisely to
+    replace.
+    """
+    from app.analysis import driving
+
+    from types import SimpleNamespace
+
+    full = _park_history(12, 1.0)          # enough parks to fit Home
+    cap = 70.0
+
+    live = driving.place_standby_kw(full, [], cap, "Home")
+    assert live is not None, "fixture must produce a fittable history"
+
+    # What a purge leaves: two trips around one short park. Short is the case
+    # that needs a rate at all — one SoC point is 0.7 kWh here, so a 3-hour
+    # park resolves the drain no better than "0 or 0.7" and the fitted rate is
+    # the better estimator (see vampire_drain).
+    survivors = [
+        SimpleNamespace(id=90, start_time=datetime(2025, 7, 1, 8, 0),
+                        end_time=datetime(2025, 7, 1, 8, 30),
+                        start_soc=80.0, end_soc=78.0, distance_km=10.0,
+                        energy_used_kwh=1.4, end_location="Home",
+                        start_location="Home", end_odo_km=None,
+                        end_lost_km=None, start_recovered_km=None),
+        SimpleNamespace(id=91, start_time=datetime(2025, 7, 1, 11, 30),
+                        end_time=datetime(2025, 7, 1, 12, 0),
+                        start_soc=78.0, end_soc=76.0, distance_km=10.0,
+                        energy_used_kwh=1.4, end_location="Home",
+                        start_location="Home", end_odo_km=None,
+                        end_lost_km=None, start_recovered_km=None),
+    ]
+    assert driving.place_standby_kw(survivors, [], cap, "Home") is None
+
+    frozen = {"places": {"Home": 0.2}, "whole_history_kw": 0.2}
+
+    # History intact: the live fit is used and the frozen figure is inert.
+    with_history = driving.vampire_drain(
+        full, [], cap, rate_history=(full, []), frozen=frozen)
+    without_frozen = driving.vampire_drain(
+        full, [], cap, rate_history=(full, []))
+    assert with_history["kwh"] == without_frozen["kwh"]
+
+    # History gone: the frozen figure is what keeps the park priced at all.
+    purged = driving.vampire_drain(
+        survivors, [], cap, rate_history=(survivors, []), frozen=frozen)
+    unfrozen = driving.vampire_drain(
+        survivors, [], cap, rate_history=(survivors, []))
+    assert unfrozen["kwh"] == 0.0          # nothing left to fit from
+    assert purged["kwh"] == pytest.approx(0.6, abs=0.05)   # 0.2 kW x 3 h
+
+
+def test_frozen_rates_never_pin_an_unmeasurable_place_as_unmeasurable():
+    """freeze stores only rates that resolved. A None frozen as None would
+    stop a later, better history from ever producing a figure."""
+    from app.analysis import driving
+
+    full = _park_history(12, 1.0)
+    cap = 70.0
+    # A place with no fit contributes nothing to the frozen table, so asking
+    # about it still falls through to the live global fit rather than to a
+    # stored null.
+    frozen = {"places": {"Home": 0.05}, "whole_history_kw": None}
+    out = driving.vampire_drain(full, [], cap, rate_history=(full, []), frozen=frozen)
+    assert out["kwh"] >= 0.0

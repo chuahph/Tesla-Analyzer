@@ -54,6 +54,14 @@ TELEMETRY_LATEST_KEY = "telemetry_latest"  # JSON {vin: {field: value}} — the
 # the running composite is what a snapshot can be built from.
 TELEMETRY_SHADOW_KEY = "telemetry_shadow"  # JSON {vin: machine state}: the
 # open shadow trip and what has been seen since it started.
+FROZEN_RATES_KEY = "frozen_parked_rates"  # JSON {at, places: {name: kW},
+# sentry_armed_kw, whole_history_kw, from_drives, from_gaps}: what the
+# parked-drain fits resolved to while the history they were measured from
+# still existed. driving.vampire_drain consults these ONLY where the live fit
+# returns None, so they are a floor under a deleted history and never an
+# override on a working one. Written by /api/data/freeze-parked-rates, which
+# the purge runs first.
+
 PURGED_DRIVES_KEY = "purged_drives"  # JSON {at, cutover, rows: [...]}: every
 # drive row deleted by /api/data/purge-pre-telemetry, serialised whole. The
 # purge is the one destructive operation in this app that cannot be recomputed
