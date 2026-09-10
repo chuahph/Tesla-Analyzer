@@ -2839,8 +2839,20 @@ def _append_trip(trips: list, finished: dict) -> bool:
 PROMOTE_MAX_DAYS = 7
 
 
+# The most rows an UNATTENDED promotion may add before it refuses to do
+# anything at all. A tick that runs every minute should have at most one
+# completed journey to carry across, and a wall of additions means the
+# matching has stopped recognising the history — which is precisely what
+# happened, 183 times, one duplicate per tick.
+#
+# It only binds the automatic path. A person reading a preview can add as
+# many as the preview shows, because they have seen what it shows.
+PROMOTE_AUTO_MAX_ADD = 3
+
+
 def _promote_shadow_trips(session: Session, apply: bool = False,
-                          days: int = PROMOTE_MAX_DAYS) -> list[dict]:
+                          days: int = PROMOTE_MAX_DAYS,
+                          max_add: int | None = None) -> list[dict]:
     """Write streamed trips into the drive history, correcting polling's.
 
     Telemetry earned this over ten judged trips: distance total -0.4% against
@@ -2901,6 +2913,7 @@ def _promote_shadow_trips(session: Session, apply: bool = False,
                  if (d.source or "") == "telemetry" and d.start_time}
     claimed: set[int] = set()
     changed: list[dict] = []
+    plan: list[tuple] = []
 
     # Oldest first. Trips arrive in that order already, but the matching
     # below depends on it — an out-of-order trip would claim a drive from
@@ -2983,29 +2996,39 @@ def _promote_shadow_trips(session: Session, apply: bool = False,
                      for d in drives if d.start_time), default=None),
             }
 
-        if apply:
-            if row is None:
-                row = Drive(vehicle_id=vehicle_id, start_time=t_start,
-                            end_time=t_end, start_soc=0.0, end_soc=0.0,
-                            outside_temp_c=t.get("out_temp") or 20.0)
-                session.add(row)
-                drives = list(drives) + [row]
-            elif row.polled_km is None and row.shadow_start_ts is None:
-                # Only on the first correction. Running again must not
-                # overwrite what polling said with what telemetry said last
-                # time, which would quietly turn the accuracy report into
-                # telemetry agreeing with itself.
-                row.polled_km = row.distance_km
-                row.polled_kwh = row.energy_used_kwh
-            _apply_shadow_to_drive(row, t)
-            entry["id"] = row.id
+        plan.append((row, t, vehicle_id, t_start, t_end))
         changed.append(entry)
 
-    if apply and changed:
-        session.commit()
-        for entry in changed:
-            if entry.get("id") is None:
-                entry["id"] = entry["was"]["id"]
+    if not apply:
+        return changed
+
+    # Refuse the whole run rather than write a wall of duplicates. Checked
+    # after planning and before touching anything, because a cap that fires
+    # halfway through has already done the damage it exists to prevent.
+    adds = sum(1 for c in changed if c["action"] == "add")
+    if max_add is not None and adds > max_add:
+        return [{"action": "refused", "would_add": adds, "limit": max_add,
+                 "why": "an unattended run does not add this many at once; "
+                        "read /api/telemetry/promote and apply it by hand"}]
+
+    for row, t, vehicle_id, t_start, t_end in plan:
+        if row is None:
+            row = Drive(vehicle_id=vehicle_id, start_time=t_start,
+                        end_time=t_end, start_soc=0.0, end_soc=0.0,
+                        outside_temp_c=t.get("out_temp") or 20.0)
+            session.add(row)
+        elif row.polled_km is None and (row.source or "") != "telemetry":
+            # Only on the first correction. Running again must not overwrite
+            # what polling said with what telemetry said last time, which
+            # would quietly turn the accuracy report into telemetry agreeing
+            # with itself.
+            row.polled_km = row.distance_km
+            row.polled_kwh = row.energy_used_kwh
+        _apply_shadow_to_drive(row, t)
+    session.commit()
+    for entry, (row, *_rest) in zip(changed, plan):
+        if entry.get("was", {}).get("id") is None and row is not None:
+            entry["id"] = row.id
     return changed
 
 
@@ -3145,18 +3168,26 @@ def sync_now(wake: bool = Query(False), session: Session = Depends(get_session))
     # Before anything else, since it needs no network and a failure to reach
     # Tesla must not also cost the trip the car already streamed.
     _settle_shadows(session)
-    # Promotion is deliberately NOT run here yet.
+    # Carry what the car streamed into the history the dashboard reads. Also
+    # before the poll, and for the same reason: this depends on nothing
+    # outside the database, so a Tesla API that is down, rate-limited or
+    # asleep cannot stop a journey the car already told us about from
+    # appearing.
     #
-    # It was, for one deploy. Its first preview against the real history then
-    # proposed adding fourteen trips that polling had certainly logged, while
-    # reporting two rows it had already corrected — a shape the code does not
-    # explain and a reproduction in isolation does not show. Writing to a
-    # drive history that cannot be predicted is how a wrong row gets into the
-    # record, and a wrong row there is a repair job rather than a delete.
-    #
-    # So it runs only when asked, through /api/telemetry/promote, which
-    # previews by default. It goes back on the tick when a preview matches
-    # what the comparison says should happen.
+    # Capped, because the first version of this was not. It ran here for one
+    # deploy while it could not recognise the rows it had written the tick
+    # before, and added the same fourteen journeys every minute — 183 drives
+    # that never happened. The cap turns that failure from a corrupted
+    # history into a run that does nothing and says so, which is the only
+    # acceptable shape for an unattended write to real records.
+    try:
+        _promote_shadow_trips(session, apply=True, max_add=PROMOTE_AUTO_MAX_ADD)
+    except Exception:  # noqa: BLE001 — never let this break the sync
+        # A correction that cannot be made is a stale figure on the
+        # dashboard. A sync that dies here is no figures at all, plus no
+        # charges, no alerts and no history — so this is caught and the tick
+        # carries on. The next one tries again.
+        session.rollback()
     try:
         return _sync_now_impl(wake, session)
     except HTTPException as exc:

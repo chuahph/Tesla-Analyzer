@@ -4991,6 +4991,76 @@ def test_a_trip_never_takes_a_drive_that_belongs_to_a_later_one():
         sess.close()
 
 
+def test_an_unattended_run_refuses_to_add_a_wall_of_rows():
+    """The guard that would have stopped 183 duplicates at one.
+
+    A tick running every minute has at most one finished journey to carry
+    across. Many at once means the matching has stopped recognising the
+    history, which is exactly what happened — and an unattended write to real
+    records must fail by doing nothing, not by doing all of it.
+
+    The cap binds only the automatic path. A person who has read the preview
+    can apply what the preview showed them.
+    """
+    import json as _json
+
+    from app.database import SessionLocal
+    from app import state, sync as sync_mod
+    from app.models import Drive, Vehicle
+    from app.api import routes as routes_mod
+
+    sess = SessionLocal()
+    prev = state.get(sess, state.TELEMETRY_TRIPS_KEY)
+    vehicle = None
+    try:
+        now = sync_mod.now_local()
+        vehicle = Vehicle(vin="FLOOD00000000001", name="Test", model="Model 3")
+        sess.add(vehicle)
+        sess.commit()
+
+        trips = []
+        for i in range(6):
+            at = now - timedelta(hours=8 - i)
+            trips.append({
+                "vin": "FLOOD00000000001",
+                "start_ts": at.replace(tzinfo=sync_mod.MYT).timestamp(),
+                "end_ts": (at + timedelta(minutes=15)).replace(
+                    tzinfo=sync_mod.MYT).timestamp(),
+                "start_time": at.isoformat(timespec="seconds"),
+                "end_time": (at + timedelta(minutes=15)).isoformat(timespec="seconds"),
+                "distance_km": 9.0 + i, "duration_min": 15.0, "energy_kwh": 1.6})
+        state.put(sess, state.TELEMETRY_TRIPS_KEY, _json.dumps(trips))
+        sess.commit()
+
+        refused = routes_mod._promote_shadow_trips(
+            SessionLocal(), apply=True, max_add=routes_mod.PROMOTE_AUTO_MAX_ADD)
+        assert refused[0]["action"] == "refused", refused
+        assert refused[0]["would_add"] == 6
+        with SessionLocal() as chk:
+            assert chk.query(Drive).filter(
+                Drive.vehicle_id == vehicle.id).count() == 0, \
+                "a refused run wrote something"
+
+        # Uncapped — a person applying what they have read — goes through.
+        routes_mod._promote_shadow_trips(SessionLocal(), apply=True)
+        with SessionLocal() as chk:
+            assert chk.query(Drive).filter(
+                Drive.vehicle_id == vehicle.id).count() == 6
+    finally:
+        with SessionLocal() as cleanup:
+            if vehicle is not None:
+                for d in cleanup.query(Drive).filter(
+                        Drive.vehicle_id == vehicle.id).all():
+                    cleanup.delete(d)
+                v = cleanup.get(Vehicle, vehicle.id)
+                if v is not None:
+                    cleanup.delete(v)
+            cleanup.commit()
+        state.put(sess, state.TELEMETRY_TRIPS_KEY, prev or "[]")
+        sess.commit()
+        sess.close()
+
+
 def test_promotion_recognises_its_own_rows_across_a_storage_round_trip():
     """The fault that put 198 drives that never happened into the history.
 
