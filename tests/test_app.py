@@ -1,4 +1,5 @@
 """App-level tests: passcode gate boundaries and the Tesla partner key path."""
+import json
 import pytest
 from datetime import datetime, timedelta
 from types import SimpleNamespace
@@ -6416,6 +6417,22 @@ def test_purge_pre_telemetry_plans_then_deletes_and_restores():
                 assert len(left) == 2
                 assert all(d.source == "telemetry" for d in left)
 
+            # A SECOND apply against the already-purged database must change
+            # nothing. Reported live: it re-froze from the emptied history and
+            # wrote a zero-row backup over the one holding every deleted trip,
+            # so a run with nothing to do destroyed both things this endpoint
+            # exists to protect.
+            with SessionLocal() as s:
+                from app import state as state_mod
+                frozen_before = state_mod.get(s, state_mod.FROZEN_RATES_KEY)
+                backup_before = state_mod.get(s, state_mod.PURGED_DRIVES_KEY)
+            noop = client.post("/api/data/purge-pre-telemetry?apply=true").json()
+            assert noop["deleted"] == 0
+            with SessionLocal() as s:
+                from app import state as state_mod
+                assert state_mod.get(s, state_mod.PURGED_DRIVES_KEY) == backup_before
+                assert state_mod.get(s, state_mod.FROZEN_RATES_KEY) == frozen_before
+
             back = client.post("/api/data/restore-purged-drives?apply=true").json()
             assert back["restored"] == 3
             with SessionLocal() as s:
@@ -6472,5 +6489,52 @@ def test_purge_pre_telemetry_refuses_without_a_telemetry_trip():
             assert "cutover" in out["error"]
             with SessionLocal() as s:
                 assert s.query(Drive).filter(Drive.vehicle_id == v.id).count() == 1
+    finally:
+        settings.app_passcode = old
+
+
+def test_refreezing_keeps_rates_the_current_history_can_no_longer_fit():
+    """A freeze records what the fits said while they had evidence, so a
+    re-freeze against a history that can no longer produce a figure must keep
+    the one already stored rather than blank it.
+
+    This is the bug that ate four real rates in production: the freeze
+    replaced outright, so running it a second time after the purge wrote an
+    empty set over Home, Office and the armed-Sentry rate.
+    """
+    settings = get_settings()
+    old = settings.app_passcode
+    settings.app_passcode = ""
+    try:
+        with TestClient(app) as client:
+            from app.database import SessionLocal
+            from app.models import Vehicle
+            from app import state as state_mod
+
+            with SessionLocal() as s:
+                v = Vehicle(vin="TESTVIN-REFREEZE", name="Test", model="Model 3")
+                s.add(v)
+                s.commit()
+                state_mod.put(s, state_mod.FROZEN_RATES_KEY, json.dumps({
+                    "at": "2026-09-11T07:15:11",
+                    "places": {"Home": 0.032, "Office": 0.03},
+                    "sentry_armed_kw": 0.233,
+                    "whole_history_kw": 0.059,
+                }))
+                s.commit()
+
+            client.post("/api/active-vehicle", json={"vin": "TESTVIN-REFREEZE"})
+            # No drives at all, so nothing can be fitted from scratch.
+            out = client.post("/api/data/freeze-parked-rates?apply=true").json()
+            assert out["places"]["Home"] == 0.032
+            assert out["places"]["Office"] == 0.03
+            assert out["sentry_armed_kw"] == 0.233
+            assert out["whole_history_kw"] == 0.059
+            assert out["kept_from"] == "2026-09-11T07:15:11"
+
+            # And thaw is still the deliberate way to clear it.
+            client.post("/api/data/thaw-parked-rates")
+            with SessionLocal() as s:
+                assert not state_mod.get(s, state_mod.FROZEN_RATES_KEY)
     finally:
         settings.app_passcode = old

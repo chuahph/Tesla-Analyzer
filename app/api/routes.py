@@ -1578,6 +1578,26 @@ def _freeze_parked_rates(session: Session, vehicle, capacity_kwh: float) -> dict
         "from_gaps": sum(1 for a, b in zip(ordered, ordered[1:])
                          if (b.start_time - a.end_time).total_seconds() >= 6 * 3600.0),
     }
+
+    # Merged over whatever is already frozen, never replacing a rate with a
+    # blank. This layer records what the fits said WHILE THEY HAD EVIDENCE, so
+    # a re-freeze against a history that can no longer produce a figure has
+    # nothing better to offer than the figure already stored.
+    #
+    # Reported live, and the reason this is not a "replace outright" as first
+    # written: a second purge run against an already-purged database re-froze
+    # from the 19 surviving trips and wiped Home (0.032), Office (0.030) and
+    # the armed-Sentry rate (0.233) — the exact four numbers the freeze had
+    # been added to save one commit earlier.
+    previous = _frozen_rates(session)
+    if previous:
+        merged_places = dict(previous.get("places") or {})
+        merged_places.update(frozen["places"])
+        frozen["places"] = merged_places
+        for key in ("sentry_armed_kw", "whole_history_kw"):
+            if frozen.get(key) is None:
+                frozen[key] = previous.get(key)
+        frozen["kept_from"] = previous.get("at")
     return frozen
 
 
@@ -1592,9 +1612,13 @@ def freeze_parked_rates(
     otherwise: a frozen rate is consulted only where the live fit no longer
     resolves, so while the history is intact this changes nothing at all.
 
-    Plans by default. Re-running replaces the stored set outright rather than
-    merging — a half-updated blend of two different histories describes
-    neither.
+    Plans by default. Re-running MERGES over what is already stored: a rate
+    the current history can still fit replaces the frozen one, and a rate it
+    can no longer fit keeps whatever was frozen before. See
+    _freeze_parked_rates for the incident that settled this — replacing
+    outright meant a second run against an already-purged database wiped the
+    four rates the first run had saved. /api/data/thaw-parked-rates is the way
+    to clear the set deliberately.
     """
     vehicle = _first_vehicle(session)
     if vehicle is None:
@@ -1712,6 +1736,20 @@ def purge_pre_telemetry(
         plan["applied"] = False
         return plan
 
+    if not doomed:
+        # Nothing to delete, so nothing may be written. Reported live: a second
+        # apply=true against an already-purged database re-froze the rates from
+        # the emptied history (overwriting Home 0.032, Office 0.030 and the
+        # 0.233 armed rate with an empty set) and wrote a zero-row backup over
+        # the one holding all 268 deleted trips. Both destinations are
+        # single-slot, so a no-op run was able to destroy the two things this
+        # endpoint exists to protect.
+        plan["applied"] = True
+        plan["deleted"] = 0
+        plan["note"] = ("nothing older than the cutover — no rows deleted, "
+                        "and the stored backup and frozen rates were left alone")
+        return plan
+
     if freeze:
         frozen = _freeze_parked_rates(session, vehicle, capacity_kwh)
         state.put(session, state.FROZEN_RATES_KEY, _json_mod.dumps(frozen))
@@ -1727,7 +1765,14 @@ def purge_pre_telemetry(
         "cutover": cutover.isoformat(),
         "rows": [_drive_row_dict(d) for d in doomed],
     }
-    state.put(session, state.PURGED_DRIVES_KEY, _json_mod.dumps(backup))
+    existing_raw = state.get(session, state.PURGED_DRIVES_KEY)
+    existing = _json_mod.loads(existing_raw) if existing_raw else {}
+    if existing.get("rows") and not backup["rows"]:
+        # Belt and braces behind the early return above: whatever else is
+        # true, a backup holding rows is never replaced by one holding none.
+        plan["backup_kept"] = len(existing["rows"])
+    else:
+        state.put(session, state.PURGED_DRIVES_KEY, _json_mod.dumps(backup))
     session.commit()
     # Committed before the delete, deliberately. If the write of the backup and
     # the delete shared one transaction, a failure between them would roll back
