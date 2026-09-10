@@ -3429,6 +3429,10 @@ def test_a_charge_records_all_three_meters_and_prefers_none_of_them():
     # The converter's cut, reported and applied to nothing.
     assert charge["converter_pct"] == pytest.approx(95.4, abs=0.5)
     assert charge["peak_kw"] == pytest.approx(7.6)
+    # And where the counters finished, so a session seen only in part can
+    # still be matched against what a charging network billed for.
+    assert charge["wall_meter_end"] == pytest.approx(5.218, abs=0.001)
+    assert charge["pack_meter_end"] == pytest.approx(4.960, abs=0.001)
     assert charge["fast"] is False
     # Ends on the last snapshot that was still charging, not on the unplug.
     assert charge["end_ts"] == 240

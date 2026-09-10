@@ -3440,6 +3440,15 @@ def _charge_close(shadow: dict[str, Any], end: dict[str, Any]) -> dict[str, Any]
         "kwh_wall": kwh_wall,
         "kwh_pack_meter": kwh_pack_meter,
         "kwh_pack_level": kwh_pack_level,
+        # The counters as they finished, not only how far they moved. A
+        # session recorded from partway through — the machine was deployed
+        # mid-charge the first time it ever ran — has a delta that measures
+        # the part it saw, while the counter itself has been climbing since
+        # the plug went in. Comparing what the charging network billed for
+        # against a partial delta proves nothing; comparing it against the
+        # final reading proves whether this is the same meter.
+        "wall_meter_end": end.get("charge_energy_in_raw"),
+        "pack_meter_end": end.get("dc_energy_in_raw"),
         # What the converter kept. Reported rather than applied anywhere: it
         # is the same subtraction as the columns above and exists so a reader
         # can see at a glance whether the two meters are telling one story.
