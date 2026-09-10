@@ -9049,6 +9049,23 @@ def summary(
     def _mark(name: str) -> None:
         _marks.append((name, round((time.monotonic() - _t0) * 1000.0, 1)))
 
+    # vampire_drain needs three things that describe the CAR rather than the
+    # window on screen: every drive and charge, every battery reading, and the
+    # per-place parked draws. This endpoint calls it up to three times — for
+    # the since-charge figure, for the displayed window, and for the window
+    # before it — and each call was re-running all three queries. That is
+    # ~3,000 rows fetched and hydrated two or three times over to produce
+    # byte-identical answers, and it was most of the dashboard's load time.
+    # Load each once; the mark fires only on the load, so a second reader
+    # costs nothing and shows up as nothing.
+    _hist_cache: dict[str, object] = {}
+
+    def _hist(key: str, fn, *args):
+        if key not in _hist_cache:
+            _hist_cache[key] = fn(*args)
+            _mark(key)
+        return _hist_cache[key]
+
     # One trivial round trip, timed on its own. Every phase above measured
     # hundreds of milliseconds while returning a handful of rows, and the
     # curve fit over twenty charges took 0.2 ms — so the cost is not in this
@@ -9126,9 +9143,9 @@ def summary(
         ).all()
         vampire_since = driving_analysis.vampire_drain(
             drives_since, [], capacity_kwh, anchor=(last_charge.end_time, last_charge.end_soc),
-            rate_history=_full_history(session, vehicle.id),
-        place_rates=_place_parked_rates(session),
-        readings=_parked_readings(session, vehicle.id))
+            rate_history=_hist("full_history", _full_history, session, vehicle.id),
+            place_rates=_hist("place_rates", _place_parked_rates, session),
+            readings=_hist("parked_readings", _parked_readings, session, vehicle.id))
         used_since_last_charge_kwh = (
             sum(d.energy_used_kwh for d in drives_since) + vampire_since["kwh"]
         )
@@ -9194,9 +9211,9 @@ def summary(
         # rest, same as any other window, rather than an uncapped window
         # dumping the whole cycle into one long list.
         recent_trips_limit=trips_limit or 5,
-        vampire_rate_history=_full_history(session, vehicle.id),
-        vampire_place_rates=_place_parked_rates(session),
-        vampire_readings=_parked_readings(session, vehicle.id))
+        vampire_rate_history=_hist("full_history", _full_history, session, vehicle.id),
+        vampire_place_rates=_hist("place_rates", _place_parked_rates, session),
+        vampire_readings=_hist("parked_readings", _parked_readings, session, vehicle.id))
     # A since-charge window's own `charges` list is always empty by
     # definition (it starts right where last_charge ends, so no charge can
     # have happened "since" yet) — without this, Energy Charged/AC-DC
@@ -9247,9 +9264,9 @@ def summary(
         prev_driving = driving_analysis.analyze(
             prev_drives, settings.rated_wh_per_km, capacity_kwh, price_fn,
             charges=prev_charges, trip_costs=trip_costs,
-            vampire_rate_history=_full_history(session, vehicle.id),
-        vampire_place_rates=_place_parked_rates(session),
-        vampire_readings=_parked_readings(session, vehicle.id))
+            vampire_rate_history=_hist("full_history", _full_history, session, vehicle.id),
+            vampire_place_rates=_hist("place_rates", _place_parked_rates, session),
+            vampire_readings=_hist("parked_readings", _parked_readings, session, vehicle.id))
         prev_charging = charging_analysis.analyze(prev_charges, prev_drives)
         prev_efficiency = efficiency_analysis.analyze(prev_drives, settings.rated_wh_per_km)
         narrative_lines = narrative_engine.build(
