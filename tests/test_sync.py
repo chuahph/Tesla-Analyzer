@@ -3318,7 +3318,7 @@ def test_plugging_in_ends_the_trip_without_anyone_getting_out():
         "Odometer": 106.02, "EnergyRemaining": 28.4, "Gear": "ShiftStateP",
         "VehicleSpeed": 0.0, "Soc": 50.0, "BMSState": "BMSStateDrive",
         "DriverSeatOccupied": True,
-        "DetailedChargeState": "DetailedChargeStateACCharging",
+        "DetailedChargeState": "DetailedChargeStateCharging",
     }, ts=700)
     trip = advance_shadow(shadow, plugged)
     assert trip is not None
@@ -3334,16 +3334,44 @@ def test_the_charge_counters_are_carried_without_being_believed():
     would misprice every charge. Carried raw so one charging session settles
     it; energy_added_kwh stays at zero until it does.
     """
+    # The real values off the AC session of 10 September, including the enum
+    # the car actually sends — which is plain ...Charging, not the ...AC
+    # variant this test first assumed.
     snap = snapshot_from_telemetry({
-        "DetailedChargeState": "DetailedChargeStateACCharging",
-        "ACChargingEnergyIn": 16.70, "DCChargingEnergyIn": 16.00,
-        "ACChargingPower": 6.9,
+        "DetailedChargeState": "DetailedChargeStateCharging",
+        "ACChargingEnergyIn": 5.218388966648919,
+        "DCChargingEnergyIn": 4.83999989181757,
+        "ACChargingPower": 7.500000111758709,
     }, ts=100)
     assert snap["charging"] is True
-    assert snap["charge_energy_in_raw"] == 16.70
-    assert snap["dc_energy_in_raw"] == 16.00
-    assert snap["charge_state_raw"] == "DetailedChargeStateACCharging"
+    assert snap["fast"] is False
+    assert snap["charge_energy_in_raw"] == pytest.approx(5.218, abs=0.001)
+    assert snap["dc_energy_in_raw"] == pytest.approx(4.840, abs=0.001)
+    assert snap["charge_state_raw"] == "DetailedChargeStateCharging"
     assert snap["energy_added_kwh"] == 0.0, "not until one charge has shown what it means"
+
+
+def test_a_supercharge_is_not_recorded_as_zero_kilowatts():
+    """DC sessions report DCChargingPower and leave the AC field empty.
+
+    Reading only the AC one puts a 250 kW session in the history at 0 kW, and
+    a charge with no power is a charge whose duration and cost cannot be
+    checked against anything.
+    """
+    dc = snapshot_from_telemetry({
+        "DetailedChargeState": "DetailedChargeStateDCCharging",
+        "DCChargingPower": 122.0,
+    }, ts=100)
+    assert dc["charging"] is True
+    assert dc["fast"] is True
+    assert dc["charger_kw"] == pytest.approx(122.0)
+
+    ac = snapshot_from_telemetry({
+        "DetailedChargeState": "DetailedChargeStateCharging",
+        "ACChargingPower": 7.5,
+    }, ts=100)
+    assert ac["charger_kw"] == pytest.approx(7.5), "AC unchanged by the max"
+    assert ac["fast"] is False
 
 
 def test_a_bms_never_seen_in_drive_cannot_end_a_trip():

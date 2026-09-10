@@ -2738,24 +2738,44 @@ def snapshot_from_telemetry(fields: dict[str, Any], ts: float) -> dict[str, Any]
         "soc": num("Soc") or 0.0,
         "range_km": (rated * MILES_TO_KM) if rated is not None else 0.0,
         "charging": charge_state.endswith("Charging"),
-        "charger_kw": num("ACChargingPower") or 0.0,
+        # Whichever side is delivering. A Supercharge reports DCChargingPower
+        # and leaves the AC field at nothing, so reading only the AC one puts
+        # a 250 kW session in the history at 0 kW — and a charge with no power
+        # is one whose duration and cost cannot be checked against anything.
+        # Measured on AC: ACChargingPower 7.5 kW with no DC figure at all, so
+        # the max is the AC value and nothing changes for the charging this
+        # car actually does.
+        "charger_kw": max(num("ACChargingPower") or 0.0,
+                          num("DCChargingPower") or 0.0),
         # Energy straight from the pack, which polling has never had: it is
         # measured rather than SoC multiplied by an estimated capacity, so a
         # trip's energy is a subtraction and the capacity constant leaves the
         # path entirely. Nothing downstream reads this yet.
         "energy_kwh": num("EnergyRemaining"),
-        # Left at 0 deliberately. ACChargingEnergyIn read 16.70 and
-        # DCChargingEnergyIn 16.00 on a car with 31,000 km, so neither is a
-        # lifetime total, and until a charge shows whether they are
-        # per-session or rolling, a wrong guess here would silently misprice
-        # every charge.
+        # Still 0, but no longer for want of knowing what the counters mean —
+        # see below. What is missing now is only which of the two matches the
+        # "Added" figure the car displays, and so what the polled history has
+        # always stored.
         "energy_added_kwh": 0.0,
-        # Carried raw, the way energy_used_raw is, so the question above can
-        # be settled by watching one charge rather than by guessing. If these
-        # start near zero and climb to what the session added, they are
-        # per-session and energy_added_kwh can finally be filled in; if they
-        # climb from 16.70 by that amount, they are rolling and a subtraction
-        # across the session says the same thing. Nothing reads them yet.
+        # Measured, on the AC charge of 10 September.
+        #
+        # ACChargingEnergyIn is PER-SESSION: it read 16.70 days earlier and
+        # 4.72 partway through this one, so it resets. It is in kWh and it
+        # agrees with the power being reported — 4.715 to 5.218 over four
+        # minutes is 7.55 kW against ACChargingPower's 7.5.
+        #
+        # DCChargingEnergyIn runs during an AC charge too, which the name does
+        # not suggest. It is not "energy from a DC charger", it is the energy
+        # that reached the pack: 4.48 to 4.84 over three minutes is 7.2 kW
+        # against 7.55 going in at the wall. That ratio, about 95%, is the
+        # onboard charger's efficiency, and it is the difference between the
+        # kWh a session is billed for and the kWh the battery got.
+        #
+        # Still not written into energy_added_kwh. Which of the two matches
+        # the "Added" figure the car itself displays — and so what the polled
+        # history has always stored — has not been checked against a finished
+        # session, and pricing every charge in the record on an unverified
+        # guess is the one mistake here that would be expensive.
         "charge_energy_in_raw": num("ACChargingEnergyIn"),
         "dc_energy_in_raw": num("DCChargingEnergyIn"),
         "charge_state_raw": charge_state or None,

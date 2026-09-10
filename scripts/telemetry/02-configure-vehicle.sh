@@ -259,6 +259,7 @@ $DEFAULT_DRIVE_COUNTER
       "DetailedChargeState":       {"interval_seconds": 30},
       "ChargePortLatch":           {"interval_seconds": 60},
       "ACChargingPower":           {"interval_seconds": 60},
+      "DCChargingPower":           {"interval_seconds": 60},
       "ACChargingEnergyIn":        {"interval_seconds": 60},
       "DCChargingEnergyIn":        {"interval_seconds": 60},
       "ChargerVoltage":            {"interval_seconds": 60},
