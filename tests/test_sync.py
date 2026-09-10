@@ -3577,6 +3577,11 @@ def test_the_odometer_gives_back_what_a_sleeping_car_never_sent():
     assert prev["wh_per_km"] == pytest.approx(231.9, abs=0.2)
     # Duration is untouched: the odometer counts up, the clock does not.
     assert prev["duration_min"] == 17.2
+    # And so is the average speed, which is why. 4.133 km over the 17.2
+    # minutes that only covered 3.795 of them reads 14.4 km/h, and the car
+    # was slower than the 13.2 it was measured at, not faster — the figure
+    # from before the correction is short in both halves and so unbiased.
+    assert prev.get("avg_speed_kmh") is None, "not recomputed against a short clock"
 
     # Recomputed from the bracket, so running it again finds nothing left.
     assert recover_sleep_gap(prev, {"start_odo_km": 31162.199}) is False
@@ -3599,6 +3604,17 @@ def test_a_whole_journey_driven_offline_is_not_glued_onto_the_last_arrival():
     over = trip()
     assert recover_sleep_gap(over, {"start_odo_km": 31173.2}) is False
     assert over["distance_km"] == 3.795
+
+    # The cap sits just above what entering a carpark without signal actually
+    # costs — 200 to 400 metres, on the driver's account and on every gap
+    # recorded here. A roll inside that is paid back; one well beyond it is
+    # left in unaccounted_km, where it is visible rather than silently
+    # attributed to a trip that did not drive it.
+    normal = trip()
+    assert recover_sleep_gap(normal, {"start_odo_km": 31161.861 + 0.4}) is True
+    assert normal["recovered_km"] == pytest.approx(0.4, abs=0.002)
+    beyond = trip()
+    assert recover_sleep_gap(beyond, {"start_odo_km": 31161.861 + 0.7}) is False
 
     # And only for an ending nobody confirmed. A trip the car said goodbye to
     # was measured; a gap after it belongs to whatever happened next.

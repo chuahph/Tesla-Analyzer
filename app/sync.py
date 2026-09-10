@@ -3218,7 +3218,19 @@ def advance_shadow(shadow: dict[str, Any], snap: dict[str, Any]) -> dict[str, An
 # coverage and replays on reconnect, so the reading that measures where a trip
 # truly ended can arrive minutes — or a night — after the trip was closed.
 SHADOW_TAIL_SEC = 900.0
-SHADOW_TAIL_MAX_KM = 1.0
+# Tightened from 1.0 km on the driver's own account of the thing being
+# measured: entering a carpark without signal costs 200 to 400 metres. Every
+# gap this app has recorded agrees — 0.004, 0.061, 0.082, 0.161, 0.338, and
+# about 0.31 on the trip of 10 September.
+#
+# Tighter because of which way this bound fails. Too tight and a real arrival
+# is refused, the distance stays in unaccounted_km, and it is visible there to
+# be argued about. Too loose and a movement that was never an arrival is
+# quietly added to a trip that did not drive it, and nothing ever says so. A
+# bound with a silent failure on one side belongs near the evidence, not three
+# times past it — and if a genuine arrival ever exceeds this, it will appear
+# as unaccounted_km and can raise the number with a measurement behind it.
+SHADOW_TAIL_MAX_KM = 0.6
 
 
 def amend_closed_trip(trip: dict[str, Any], snap: dict[str, Any]) -> bool:
@@ -3546,12 +3558,18 @@ def recover_sleep_gap(prev: dict[str, Any], nxt: dict[str, Any]) -> bool:
             float(prev.get("recovered_kwh") or 0.0) + gained_kwh, 3)
         prev["wh_per_km"] = round(
             float(prev["energy_kwh"]) * 1000.0 / distance, 1) if distance > 0 else None
-    minutes = float(prev.get("duration_min") or 0.0)
     # Time is not touched, and cannot be. The odometer is cumulative so the
     # distance comes back; nothing was listening while the clock ran, so the
-    # duration stays a lower bound and the average speed with it.
-    if minutes > 0:
-        prev["avg_speed_kmh"] = round(distance / (minutes / 60.0), 1)
+    # duration stays a lower bound.
+    #
+    # Which is why the average speed is not recomputed either, though it was
+    # at first. Dividing the recovered distance by the unrecovered duration
+    # is the one combination that is wrong on both counts: 3.795 km over 17.2
+    # minutes is 13.2 km/h and both halves were measured over the same
+    # window, while 4.133 km over the same 17.2 minutes reads 14.4 and the
+    # car was slower than that, not faster. The figure measured before the
+    # correction is the better estimate of the real average, because its
+    # numerator and denominator are short by the same missing minutes.
     return True
 
 
