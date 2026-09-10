@@ -11,6 +11,7 @@ import httpx
 from fastapi import APIRouter, Body, Depends, File, HTTPException, Query, Request, UploadFile
 from fastapi.responses import RedirectResponse
 from sqlalchemy import func, select
+from sqlalchemy import text as sa_text
 from sqlalchemy.orm import Session
 
 from .. import alerts, auth, notifications, pricing_prefs, services, state, tariff, vin as vin_mod
@@ -9047,6 +9048,16 @@ def summary(
 
     def _mark(name: str) -> None:
         _marks.append((name, round((time.monotonic() - _t0) * 1000.0, 1)))
+
+    # One trivial round trip, timed on its own. Every phase above measured
+    # hundreds of milliseconds while returning a handful of rows, and the
+    # curve fit over twenty charges took 0.2 ms — so the cost is not in this
+    # app's arithmetic, it is in talking to the database. This says what a
+    # single exchange with it costs, which is the difference between "the
+    # queries are badly written" and "each one is a slow trip over a wire".
+    _ping0 = time.monotonic()
+    session.execute(sa_text("SELECT 1")).scalar()
+    _marks.append(("ping_ms", round((time.monotonic() - _ping0) * 1000.0, 1)))
 
     settings = get_settings()
     vehicle = _first_vehicle(session)
