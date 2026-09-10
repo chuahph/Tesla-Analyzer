@@ -4381,6 +4381,71 @@ def _tele_record(vin, ts, resend=False, **kv):
     return {"vin": vin, "createdAt": stamp, "data": data, "isResend": resend}
 
 
+def test_recovering_gaps_on_stored_trips_previews_before_it_writes():
+    """Trips closed before the correction existed can still be paid back.
+
+    And must not be paid twice. The preview runs the same function on the
+    same objects, so the guard that matters is that a preview writes nothing
+    and an apply run over an already-corrected store finds no gap left.
+    """
+    import json as _json
+
+    from app.database import SessionLocal
+    from app import state, sync as sync_mod
+
+    settings = get_settings()
+    old_pc = settings.app_passcode
+    settings.app_passcode = ""
+    sess = SessionLocal()
+    prev = state.get(sess, state.TELEMETRY_TRIPS_KEY)
+    try:
+        now = sync_mod.now_local()
+
+        def trip(mins_ago, start_odo, end_odo, ended_on):
+            at = now - timedelta(minutes=mins_ago)
+            end = at + timedelta(minutes=10)
+            return {"vin": "BACKFILL00000001",
+                    "start_ts": at.replace(tzinfo=sync_mod.MYT).timestamp(),
+                    "end_ts": end.replace(tzinfo=sync_mod.MYT).timestamp(),
+                    "start_time": at.isoformat(timespec="seconds"),
+                    "end_time": end.isoformat(timespec="seconds"),
+                    "distance_km": round(end_odo - start_odo, 3),
+                    "duration_min": 10.0, "energy_kwh": 0.88,
+                    "wh_per_km": round(0.88 * 1000.0 / (end_odo - start_odo), 1),
+                    "start_odo_km": start_odo, "end_odo_km": end_odo,
+                    "ended_on": ended_on}
+
+        state.put(sess, state.TELEMETRY_TRIPS_KEY, _json.dumps([
+            trip(120, 31158.066, 31161.861, "stream_lost"),
+            trip(60, 31162.199, 31166.0, "exit"),
+        ]))
+        sess.commit()
+
+        with TestClient(app) as client:
+            preview = client.get("/api/telemetry/recover-gaps").json()
+            assert preview["would_recover"] == 1, preview
+            assert preview["trips"][0]["recovered_km"] == pytest.approx(0.338, abs=0.002)
+            # Preview means preview.
+            stored = _json.loads(state.get(SessionLocal(), state.TELEMETRY_TRIPS_KEY))
+            assert stored[0]["distance_km"] == 3.795
+
+            done = client.get("/api/telemetry/recover-gaps?apply=true").json()
+            assert done["recovered"] == 1
+            stored = _json.loads(state.get(SessionLocal(), state.TELEMETRY_TRIPS_KEY))
+            assert stored[0]["distance_km"] == pytest.approx(4.133, abs=0.002)
+
+            # Run it again: the trips now meet, so there is nothing to take.
+            again = client.get("/api/telemetry/recover-gaps?apply=true").json()
+            assert again["recovered"] == 0
+            stored = _json.loads(state.get(SessionLocal(), state.TELEMETRY_TRIPS_KEY))
+            assert stored[0]["distance_km"] == pytest.approx(4.133, abs=0.002)
+    finally:
+        state.put(sess, state.TELEMETRY_TRIPS_KEY, prev or "[]")
+        sess.commit()
+        sess.close()
+        settings.app_passcode = old_pc
+
+
 def test_the_next_morning_s_departure_pays_back_last_night_s_arrival():
     """Two journeys through the real ingest path, and the metres between them.
 

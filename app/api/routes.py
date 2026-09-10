@@ -9868,6 +9868,63 @@ def telemetry_drop_trips(
     return {"dropped": len(doomed), "kept": len(kept), "trips": listing}
 
 
+@router.api_route("/telemetry/recover-gaps", methods=["GET", "POST"])
+def telemetry_recover_gaps(
+    apply: bool = Query(False),
+    session: Session = Depends(get_session),
+):
+    """Apply sleep-gap recovery to trips already in the store.
+
+    The correction runs when a trip closes, so it can only ever help journeys
+    driven after it was deployed. The one that proved it was needed — 338
+    metres rolled into a carpark on the evening of the 9th — was closed
+    before the code existed and would stay short for ever, which is the wrong
+    answer for the only measurement that demonstrated the fault.
+
+    Same bounds as the live path, because it is the same function: the
+    earlier trip must have ended ``stream_lost``, the gap must be under a
+    kilometre, and a pair already reconciled finds nothing left to take.
+    Previews unless asked to apply.
+    """
+    import json as _json
+
+    try:
+        trips = _json.loads(state.get(session, state.TELEMETRY_TRIPS_KEY) or "[]") or []
+    except ValueError:
+        raise HTTPException(500, "The stored trips are not readable JSON.")
+
+    # Per vehicle, and in order, so "the trip before this one" means the one
+    # this car drove before it rather than whichever car spoke last.
+    by_vin: dict = {}
+    for trip in trips:
+        by_vin.setdefault(trip.get("vin"), []).append(trip)
+
+    changed = []
+    for run in by_vin.values():
+        for previous, nxt in zip(run, run[1:]):
+            before = previous.get("distance_km")
+            if sync_mod.recover_sleep_gap(previous, nxt):
+                changed.append({
+                    "start": previous.get("start_time"),
+                    "km": [before, previous.get("distance_km")],
+                    "recovered_km": previous.get("recovered_km"),
+                    "recovered_kwh": previous.get("recovered_kwh"),
+                })
+
+    if not apply:
+        # recover_sleep_gap mutated the objects to work out what it would do,
+        # and those objects are this request's own parse of the stored JSON.
+        # Nothing is written, so the store is untouched either way — but the
+        # preview has to say so plainly rather than leave it to be assumed.
+        return {"would_recover": len(changed), "trips": changed,
+                "note": "Nothing written. Add &apply=true to keep these.",
+                "how": "Add &apply=true to this URL to apply them."}
+
+    state.put(session, state.TELEMETRY_TRIPS_KEY, _json.dumps(trips))
+    session.commit()
+    return {"recovered": len(changed), "trips": changed}
+
+
 @router.get("/telemetry/modes")
 def telemetry_modes(
     limit: int = Query(60, ge=1, le=TELEMETRY_MODES_MAX),
