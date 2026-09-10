@@ -9866,6 +9866,22 @@ def fleet_token(session: Session = Depends(get_session)):
     }
 
 
+def _energy_unc_kwh(t: dict) -> float | None:
+    """What a shadow trip's energy figure is worth, computed from the trip.
+
+    The larger of EnergyRemaining's 0.02 kWh step and one 60-second sampling
+    interval at the trip's own average power — see sync.ENERGY_SAMPLE_SEC for
+    what the measurement behind that is.
+    """
+    energy = t.get("energy_kwh")
+    minutes = float(t.get("duration_min") or 0.0)
+    if energy is None or minutes <= 0:
+        return None
+    return round(max(sync_mod.ENERGY_QUANTUM_KWH,
+                     abs(float(energy)) * sync_mod.ENERGY_SAMPLE_SEC
+                     / (minutes * 60.0)), 3)
+
+
 def _compare_row(t: dict, d, t_start, car_by_drive: dict, pct) -> dict:
     """One telemetry trip beside the polled trip it overlaps, and beside
     the car's own figures where those were recorded.
@@ -9894,8 +9910,22 @@ def _compare_row(t: dict, d, t_start, car_by_drive: dict, pct) -> dict:
             # What EnergyRemaining's 0.02 kWh step is worth here. A trip
             # whose energy figure is mostly rounding cannot judge anything,
             # and is kept out of the medians below rather than dropped.
-            "energy_unc_pct": t.get("energy_unc_pct"),
-            "energy_unc_kwh": t.get("energy_unc_kwh"),
+            # Derived here, not read off the trip. The stored field is a
+            # snapshot of a formula that has already changed once — it was
+            # the 0.02 kWh step until the sampling interval turned out to be
+            # three times larger — so trips closed before that read 0.02 and
+            # trips closed before it existed read nothing at all. Five of
+            # eight judged trips had no value and three had the old one,
+            # which made the totals' uncertainty band five times too narrow
+            # and would have made a coin toss look like a finding.
+            #
+            # Recomputed from the trip's own energy and duration, every trip
+            # is comparable regardless of which version of this app closed
+            # it, and the next change to the formula reaches the history for
+            # free.
+            "energy_unc_kwh": _energy_unc_kwh(t),
+            "energy_unc_pct": None if not t.get("energy_kwh") else round(
+                _energy_unc_kwh(t) * 100.0 / abs(t["energy_kwh"]), 1),
             # The same trip's energy read a second way: the difference of a
             # monotonic lifetime counter, which has no 0.02 kWh step of its
             # own. Beside kwh above rather than instead of it — the counter's
@@ -10427,7 +10457,7 @@ def telemetry_compare(
             # not been shown to exist.
             "kwh_unc_pct": round(
                 math.sqrt(sum((r["telemetry"]["energy_unc_kwh"] or 0.0) ** 2
-                              for r in judged))
+                              for r in judged))  # recomputed, see _energy_unc_kwh
                 / sum(r["car"]["kwh"] for r in judged) * 100.0, 2)
             if sum(r["car"]["kwh"] for r in judged) else None,
             "order": "telemetry, polled, car",

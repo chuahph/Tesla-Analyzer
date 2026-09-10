@@ -4834,11 +4834,11 @@ def test_a_trip_that_is_mostly_rounding_does_not_referee_the_others():
         sess.add(vehicle)
         sess.commit()
 
-        def pair(mins_ago, km, kwh, odo, unc_energy):
+        def pair(mins_ago, km, kwh, odo, mins):
             at = now - timedelta(minutes=mins_ago)
-            end = at + timedelta(minutes=10)
+            end = at + timedelta(minutes=mins)
             d = Drive(vehicle_id=vehicle.id, start_time=at, end_time=end,
-                      distance_km=km, duration_min=10, start_soc=60, end_soc=59,
+                      distance_km=km, duration_min=mins, start_soc=60, end_soc=59,
                       energy_used_kwh=kwh, avg_speed_kmh=km * 6,
                       max_speed_kmh=60, outside_temp_c=29)
             sess.add(d)
@@ -4850,10 +4850,9 @@ def test_a_trip_that_is_mostly_rounding_does_not_referee_the_others():
             t = {"start_ts": _epoch(at), "end_ts": _epoch(end),
                  "start_time": at.isoformat(timespec="seconds"),
                  "end_time": end.isoformat(timespec="seconds"),
-                 "distance_km": km, "duration_min": 10.0, "energy_kwh": kwh,
-                 "wh_per_km": round(kwh * 1000.0 / km, 1),
-                 "energy_unc_kwh": round(kwh * unc_energy / 100.0, 3),
-                 "energy_unc_pct": unc_energy}
+                 "distance_km": km, "duration_min": float(mins),
+                 "energy_kwh": kwh,
+                 "wh_per_km": round(kwh * 1000.0 / km, 1)}
             if odo:
                 t["start_odo_km"], t["end_odo_km"] = odo, round(odo + km, 3)
             return t, {"drive_id": d.id, "km": km,
@@ -4861,11 +4860,14 @@ def test_a_trip_that_is_mostly_rounding_does_not_referee_the_others():
                        "pct": round(kwh / 68.0 * 100.0, 2)}
 
         with TestClient(app) as client:      # startup may reseed, so build after
-            good, r1 = pair(180, 10.8, 1.9, 31138.7, 2.8)
-            # 0.34 kWh over ten minutes: one 60-second sampling interval is
-            # a sixth of the whole figure, so it referees nothing.
-            tiny, r2 = pair(120, 0.49, 0.34, 31150.0, 17.6)
-            old, r3 = pair(60, 3.0, 0.51, None, 3.9)         # no odo bracket
+            # Ten-minute trips throughout, so one 60-second sampling
+            # interval is a tenth of each trip's energy. 1.9 kWh carries
+            # 0.19 and referees fine at 10%; 0.34 kWh carries 0.034, which
+            # is also a tenth — so the tiny trip has to be made short as
+            # well as small to be excluded, which is what a real one is.
+            good, r1 = pair(180, 10.8, 1.9, 31138.7, 10.0)
+            tiny, r2 = pair(120, 0.49, 0.34, 31150.0, 1.5)
+            old, r3 = pair(60, 3.0, 0.51, None, 10.0)        # no odo bracket
             state.put(sess, state.TELEMETRY_TRIPS_KEY, _json.dumps([good, tiny, old]))
             state.put(sess, state.CAR_READINGS_KEY, _json.dumps([r1, r2, r3]))
             sess.commit()
