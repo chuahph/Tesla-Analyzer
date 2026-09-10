@@ -9211,16 +9211,28 @@ TELEMETRY_TRIPS_MAX = 400
 # Fields that say what the car thinks it is doing, and how many of their
 # changes to keep. They stream only on change, so this is a log of moments
 # rather than a sample of values — a few hundred covers weeks.
+# CenterDisplay stays in this list as a record, not as a candidate. Measured
+# across three arrivals, DisplayStateDriving ends in the same second Gear
+# reaches P — and it flickers back on a mid-journey pause exactly as Gear
+# does (19:29:09 to Driving-off, 19:30:50 back again, one trip). It is Gear
+# with extra steps, so nothing reads it for a boundary.
 TELEMETRY_MODE_FIELDS = ("BMSState", "CenterDisplay", "Gear",
                          "DriverSeatOccupied", "SentryMode", "HvacPower",
                          # A key added to the car is how a stolen Tesla is
                          # prepared. Logged rather than alerted on until it is
                          # known what this reads normally.
                          "PairedPhoneKeyAndKeyFobQty",
-                         # Read false while a belted driver was driving. Logged
-                         # so its transitions can be lined up against buckling
-                         # and against Park, which is the only way to find out
-                         # what it actually reports.
+                         # Whatever this names, it is not "the driver is
+                         # belted". Two arrivals, both identical: false all
+                         # the way through a journey the driver spent belted,
+                         # true at the exact second Gear reached P, false
+                         # again half a minute later — within three seconds
+                         # of the seat emptying, both times. So the true
+                         # state is the short window between unbuckling and
+                         # getting out, which makes the name read backwards.
+                         # Kept for the record; useless as a boundary, since
+                         # its transition is simultaneous with Gear's and
+                         # therefore says nothing Gear did not.
                          "DriverSeatBelt",
                          # Charge boundaries, timestamped. The polled history
                          # owns charges, and this is not trying to take that

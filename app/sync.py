@@ -3113,7 +3113,20 @@ def advance_shadow(shadow: dict[str, Any], snap: dict[str, Any]) -> dict[str, An
                              readings=snap) or done
         open_at = None
 
-    if is_driving(snap):
+    # Gear and VehicleSpeed arrive as separate records — gear on change,
+    # speed every ten seconds — so a car that selects Park is described by a
+    # composite still carrying the speed it had a moment earlier, and
+    # is_driving reads that as motion until the next speed record lands.
+    # Measured on trip 537: Park at 12:33:04, trip closed at 12:33:14. You
+    # cannot select Park while moving, so the gear settles it on its own.
+    #
+    # For ENDING a trip only. A composite that has not yet heard a Gear
+    # record reads P, and Gear is sent on change — so requiring a non-P gear
+    # to START would mean a trip that never opens until the next time the
+    # lever moves, which may be at its destination. Opening still asks for
+    # real motion, which is what keeps a stale gear from inventing a journey.
+    parked_gear = (snap.get("shift") or "P") == "P"
+    if is_driving(snap) and not (open_at and parked_gear):
         # Not without an odometer to start from. A telemetry message carries
         # only what changed, so a composite that has not yet seen an Odometer
         # record reports 0.0 — and Odometer is streamed every 30 seconds while

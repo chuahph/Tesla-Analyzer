@@ -3300,6 +3300,44 @@ def test_the_car_s_own_bms_ends_a_trip_while_the_driver_is_still_seated():
     assert trip["end_odo_km"] == pytest.approx(106.02 * MILES_TO_KM, abs=0.01)
 
 
+def test_park_ends_the_trip_without_waiting_for_the_speed_record():
+    """Gear arrives on change, speed every ten seconds. Park wins.
+
+    Trip 537 selected Park at 12:33:04 and this closed it at 12:33:14,
+    because the composite still carried the speed from four seconds before
+    the lever moved. Ten seconds on every arrival, in the same direction
+    every time.
+    """
+    shadow: dict = {}
+    advance_shadow(shadow, _tel(0, 100.0, 30.0, speed_mph=20.0))
+    advance_shadow(shadow, _tel(600, 106.0, 28.5, speed_mph=20.0))
+    # Park selected. The speed record for this instant has not arrived, so
+    # the composite still reports 20 mph.
+    advance_shadow(shadow, _tel(610, 106.0, 28.5, gear="ShiftStateP",
+                                speed_mph=20.0, door=True))
+    assert shadow["still_since"] == 610, "the stop is when Park was selected"
+
+    trip = advance_shadow(shadow, _tel(900, 106.0, 28.4, gear="ShiftStateP",
+                                       speed_mph=0.0))
+    assert trip is not None
+    assert trip["end_ts"] == 610
+
+
+def test_a_stale_park_gear_still_cannot_stop_a_trip_from_opening():
+    """The mirror of the rule above, and the reason it is ending-only.
+
+    BMSState and Gear are sent on change, so a composite that has not yet
+    heard a Gear record reads P. If a P gear could block a trip from
+    opening, a car whose stream restarted mid-journey would never open one
+    until the next time the lever moved — possibly at its destination.
+    """
+    shadow: dict = {}
+    # No Gear record has ever arrived: the composite defaults to Park.
+    advance_shadow(shadow, _tel(0, 100.0, 30.0, gear="ShiftStateP",
+                                speed_mph=20.0))
+    assert shadow.get("open") is not None, "real motion opens it regardless"
+
+
 def test_plugging_in_ends_the_trip_without_anyone_getting_out():
     """A car drawing power has arrived, whoever is still sitting in it.
 
