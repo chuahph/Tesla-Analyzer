@@ -9196,15 +9196,24 @@ def summary(
 # established from it.
 #
 # What remained was its cost. Every batch appends a few records and rewrites
-# the whole blob, so the buffer's size is paid ~2000 times a day rather than
+# the whole blob, so the buffer's size is paid ~1700 times a day rather than
 # once. At 300 records that was about 100 KB per batch, some 200 MB of writes
-# a day to carry under 1 MB of new data. Forty records still answers "what is
-# the car sending right now", which is all anyone asks of it now.
+# a day to carry under 1 MB of new data.
 #
-# The other telemetry blobs do not have this problem: SQLAlchemy emits no
-# UPDATE when a value is unchanged, and trips and mode changes are unchanged
-# on almost every batch.
-TELEMETRY_RAW_MAX = 40
+# It was also storing everything twice — each record flattened, and the
+# original beside it to prove the flattening lost nothing. It has now proved
+# that across six thousand records and every field this car sends, so only
+# the flat form is kept, plus the one flag the original carried that the flat
+# form does not. That halved the blob, which is what pays for a window three
+# times longer: forty records covered nine minutes of a parked car and about
+# three of a moving one, which is not enough to look at a journey after the
+# fact.
+#
+# The other telemetry blobs do not have this problem. SQLAlchemy emits no
+# UPDATE when a value is unchanged, and trips, mode changes and gaps are
+# unchanged on almost every batch — and they are now skipped outright rather
+# than re-read and re-committed to discover that.
+TELEMETRY_RAW_MAX = 120
 # Shadow trips kept for comparison. Weeks of driving, which is the window in
 # which telemetry either earns the switch or does not.
 TELEMETRY_TRIPS_MAX = 400
@@ -9421,13 +9430,20 @@ def telemetry_ingest(
             "received_at": now.isoformat(timespec="seconds"),
             "vin": record.get("vin"),
             "created_at": record.get("createdAt") or record.get("created_at"),
-            # Flattened alongside the original: the flat form is what a human
-            # reads to settle the units question, the original is what proves
-            # the flattening did not lose anything.
+            # The flat form only. The original was kept beside it to prove the
+            # flattening lost nothing, which it has now done for six thousand
+            # records across every field this car sends — and it doubled the
+            # size of the one blob written on every single batch. What the
+            # original carried that the flat form does not is one flag, so
+            # that is what is carried.
             "fields": {e.get("key"): _telemetry_value(e)
                        for e in data if isinstance(e, dict) and e.get("key")}
             if isinstance(data, list) else None,
-            "raw": record,
+            # Whether the car buffered this while out of coverage. Measured to
+            # matter: an entire 35-minute drive arrived 36 minutes late this
+            # way, and without the flag a replay is indistinguishable from a
+            # clock problem.
+            "resend": bool(record.get("isResend")),
         })
 
     try:
@@ -9609,13 +9625,14 @@ def telemetry_ingest(
                         newest_trip, snap):
                     amended += 1
 
-    # Only what actually moved. state.put commits, so each of these is its
-    # own round trip to the database, and three of the five change only when
-    # something happens: a trip closes, the car changes its mind about
-    # something, or the stream goes quiet. A parked car posts a batch every
-    # twenty seconds and none of those are true for hours at a time, while
-    # the trips blob — the largest of the five — was being rewritten
-    # byte-for-byte on every one of them.
+    # Only what actually moved. Not to avoid the UPDATE — SQLAlchemy already
+    # emits none when the value is unchanged, verified against the engine log
+    # — but to avoid the SELECT and the COMMIT that go with it. state.put
+    # reads the row and commits, so each call is a round trip whether or not
+    # anything changed, and three of these five change only when something
+    # happens: a trip closes, the car changes its mind, the stream goes
+    # quiet. A parked car posts a batch every twenty seconds, around 1,700 a
+    # day, and none of those are true for hours at a time.
     #
     # Comparing the serialised form rather than keeping a dirty flag: the
     # flag is what goes wrong later, when a new code path mutates one of

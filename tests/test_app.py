@@ -3522,8 +3522,12 @@ def test_telemetry_ingest_records_what_arrived():
             assert seen["fields"]["Gear"]["sample"] == "ShiftStateD"
             assert seen["fields"]["Location"]["sample"] == {
                 "latitude": 5.3, "longitude": 100.3}
-            # And the original is kept beside the flattened form.
-            assert seen["records"][-1]["raw"] == batch["records"][0]
+            # The original is no longer stored beside the flat form — it
+            # doubled the one blob written on every batch, and the only thing
+            # it carried that the flat form does not is the replay flag,
+            # which is carried on its own.
+            assert seen["records"][-1]["resend"] is False
+            assert "raw" not in seen["records"][-1]
 
             # "invalid" is the car saying it has no reading, not a reading of
             # true — and it must not erase what the car last did tell us.
@@ -5091,7 +5095,8 @@ def test_only_changed_state_is_written_on_a_telemetry_batch():
     300-record buffer cost ~100 KB per batch — some 200 MB of writes a day to
     carry under 1 MB of new data. The other blobs are fine: no UPDATE is
     emitted when a value has not changed, and trips and mode changes are
-    unchanged on almost every batch. This pins both halves of that.
+    unchanged on almost every batch — and they are now skipped outright
+    rather than read and committed to discover that. This pins both halves.
     """
     import json as _json
 
@@ -5101,7 +5106,19 @@ def test_only_changed_state_is_written_on_a_telemetry_batch():
     from app import state
     from app.api import routes as routes_mod
 
-    assert routes_mod.TELEMETRY_RAW_MAX <= 60, "the raw buffer is a diagnostic, not an archive"
+    # The budget is bytes, not records. This first guarded a record count,
+    # which was the right instinct measured on the wrong axis: dropping the
+    # duplicate copy of each record halved what one costs, so the same budget
+    # now buys three times the window. Pinning the count would have made a
+    # strictly cheaper buffer fail.
+    sample = _json.dumps({
+        "received_at": "2026-09-10T13:15:48", "vin": "LRW3F7EK3RC309372",
+        "created_at": "2026-09-10T05:15:47.708992906Z",
+        "fields": {"EnergyRemaining": 44.87999899685383}, "resend": False})
+    budget_kb = len(sample) * routes_mod.TELEMETRY_RAW_MAX / 1024.0
+    assert budget_kb <= 30, (
+        f"the raw buffer is a diagnostic, not an archive: {budget_kb:.0f} KB "
+        f"rewritten on every batch")
 
     settings = get_settings()
     old_pc = settings.app_passcode

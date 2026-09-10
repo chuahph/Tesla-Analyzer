@@ -12,10 +12,27 @@ doesn't recognise. All of that lives in the app, where it is tested and version
 controlled — this process runs on a box nobody looks at, so the less judgement
 it exercises the fewer places a wrong judgement can hide.
 
-Failure policy is "keep the car's data, lose the batch": a POST that fails is
-retried a few times and then dropped with a log line. Blocking here would back
-up the ZMQ queue and eventually make the server refuse the vehicle's
-connection, which is a far worse outcome than a gap the app can see.
+Failure policy is "never block the car, never lose the batch". Blocking here
+would back up the ZMQ queue and eventually make the server refuse the
+vehicle's connection, which is worse than any gap — so a POST that fails is
+retried briefly and then written to a small disk spool, and drained on a
+later flush.
+
+The spool is the one thing on this box that keeps data, and it is worth being
+clear about why that does not contradict "the VM stores nothing". The car
+buffers what it cannot send and replays it in order — measured, a 35-minute
+drive arrived 36 minutes late and rebuilt to within 0.4%. That covers the
+car-to-here link completely. Nothing covered here-to-the-app: the car has
+already handed the records over and will never send them again, so a batch
+dropped at this point is gone in a way no other failure here is. The spool is
+a transient buffer for that one hop, not storage.
+
+Drained BEFORE the current batch, always. Spooled records are older than
+live ones, and the app builds a trip from a stream it reads in order — send
+the new batch first and the recovered one arrives looking like the odometer
+running backwards, which is exactly the state it refuses. If the drain
+cannot complete, the live batch joins the spool behind it rather than
+overtaking it.
 """
 from __future__ import annotations
 
@@ -48,11 +65,109 @@ BATCH_SECONDS = float(os.environ.get("BATCH_SECONDS", "5"))
 POST_TIMEOUT = float(os.environ.get("POST_TIMEOUT", "30"))
 POST_RETRIES = int(os.environ.get("POST_RETRIES", "3"))
 
+# Where batches wait when the app cannot be reached. /var/tmp because it
+# survives a reboot and needs no setup step on a box nobody logs into.
+SPOOL_PATH = os.environ.get("SPOOL_PATH", "/var/tmp/tesla-bridge-spool.jsonl")
+# An hour of a parked car is about 180 batches, a day about 4,000. The cap is
+# generous enough that any outage worth recovering from fits, and finite so a
+# permanently misconfigured APP_URL cannot fill the disk.
+SPOOL_MAX_BATCHES = int(os.environ.get("SPOOL_MAX_BATCHES", "20000"))
+# How many spooled batches one flush may send. The loop must stay responsive
+# to ZMQ, and POST_TIMEOUT is 30 seconds, so a long backlog drains steadily
+# over many cycles rather than stalling the process on one.
+SPOOL_DRAIN_MAX = int(os.environ.get("SPOOL_DRAIN_MAX", "5"))
+# Drain even when the car is silent: a backlog written during an outage would
+# otherwise sit there until the next record arrives, which for a sleeping car
+# is the next morning.
+DRAIN_SECONDS = float(os.environ.get("DRAIN_SECONDS", "30"))
 
-def post(records: list) -> None:
-    """POST one batch, retrying briefly, then giving up loudly."""
-    if not records or not APP_URL:
+
+def spool(records: list) -> None:
+    """Keep a batch the app would not take, oldest first."""
+    if not records:
         return
+    try:
+        lines = []
+        if os.path.exists(SPOOL_PATH):
+            with open(SPOOL_PATH, encoding="utf-8") as fh:
+                lines = fh.read().splitlines()
+        lines.append(json.dumps(records))
+        if len(lines) > SPOOL_MAX_BATCHES:
+            # Keep the newest, drop the oldest. A trip is rebuilt from the
+            # records around it, so the most recent hours are the ones still
+            # worth recovering; the far end of a multi-day outage is not.
+            dropped = len(lines) - SPOOL_MAX_BATCHES
+            lines = lines[-SPOOL_MAX_BATCHES:]
+            LOG.error("spool full: dropped %d oldest batch(es)", dropped)
+        with open(SPOOL_PATH, "w", encoding="utf-8") as fh:
+            fh.write("\n".join(lines) + "\n")
+        LOG.warning("spooled %d record(s); %d batch(es) waiting",
+                    len(records), len(lines))
+    except OSError as exc:
+        LOG.error("could not spool %d record(s): %s", len(records), exc)
+
+
+def drain() -> bool:
+    """Send what the spool is holding, oldest first. True when it is empty.
+
+    Stops at the first batch the app will not take and keeps the rest, so a
+    partial drain never reorders what is left.
+    """
+    try:
+        if not os.path.exists(SPOOL_PATH):
+            return True
+        with open(SPOOL_PATH, encoding="utf-8") as fh:
+            lines = [ln for ln in fh.read().splitlines() if ln.strip()]
+    except OSError as exc:
+        LOG.error("could not read spool: %s", exc)
+        return False
+    if not lines:
+        return True
+
+    sent = 0
+    for line in lines[:SPOOL_DRAIN_MAX]:
+        try:
+            records = json.loads(line)
+        except json.JSONDecodeError:
+            LOG.error("discarding unreadable spool line (%d bytes)", len(line))
+            sent += 1                     # unreadable is not retryable
+            continue
+        if not post(records):
+            break
+        sent += 1
+
+    remaining = lines[sent:]
+    try:
+        if remaining:
+            with open(SPOOL_PATH, "w", encoding="utf-8") as fh:
+                fh.write("\n".join(remaining) + "\n")
+        else:
+            os.remove(SPOOL_PATH)
+    except OSError as exc:
+        LOG.error("could not rewrite spool: %s", exc)
+        return False
+    if sent:
+        LOG.info("drained %d batch(es); %d left", sent, len(remaining))
+    return not remaining
+
+
+def send(records: list) -> None:
+    """Deliver one live batch, in order, spooling rather than dropping."""
+    if not records:
+        return
+    if not drain():
+        # Something older is still stuck. This batch goes behind it, because
+        # arriving first would put the app's stream out of order.
+        spool(records)
+        return
+    if not post(records):
+        spool(records)
+
+
+def post(records: list) -> bool:
+    """POST one batch, retrying briefly. False means it did not get through."""
+    if not records or not APP_URL:
+        return True
     url = f"{APP_URL}/api/telemetry"
     params = {"key": SYNC_KEY} if SYNC_KEY else {}
     for attempt in range(1, POST_RETRIES + 1):
@@ -62,18 +177,21 @@ def post(records: list) -> None:
             )
             if resp.status_code < 300:
                 LOG.info("posted %d record(s)", len(records))
-                return
+                return True
             # 4xx will not fix itself on retry — a wrong key or a missing
-            # endpoint is a deployment problem, not a transient one.
+            # endpoint is a deployment problem, not a transient one, and
+            # spooling it would build a backlog that can never drain.
             if 400 <= resp.status_code < 500:
                 LOG.error("app rejected batch: HTTP %d %s",
                           resp.status_code, resp.text[:200])
-                return
+                return True
             LOG.warning("attempt %d: HTTP %d", attempt, resp.status_code)
         except requests.RequestException as exc:
             LOG.warning("attempt %d: %s", attempt, exc)
         time.sleep(2 ** attempt)
-    LOG.error("dropping %d record(s) after %d attempts", len(records), POST_RETRIES)
+    LOG.warning("app unreachable after %d attempts; spooling %d record(s)",
+                POST_RETRIES, len(records))
+    return False
 
 
 def parse(frames: list) -> dict | None:
@@ -112,18 +230,23 @@ def main() -> int:
     poller.register(sock, zmq.POLLIN)
 
     batch: list = []
-    last_flush = time.monotonic()
+    last_flush = last_drain = time.monotonic()
     while True:
         events = dict(poller.poll(timeout=1000))
         if sock in events:
             record = parse(sock.recv_multipart())
             if record is not None:
                 batch.append(record)
-        due = time.monotonic() - last_flush >= BATCH_SECONDS
-        if batch and (len(batch) >= BATCH_MAX or due):
-            post(batch)
+        now = time.monotonic()
+        if batch and (len(batch) >= BATCH_MAX or now - last_flush >= BATCH_SECONDS):
+            send(batch)
             batch = []
-            last_flush = time.monotonic()
+            last_flush = last_drain = time.monotonic()
+        elif now - last_drain >= DRAIN_SECONDS:
+            # A backlog written while the app was down would otherwise wait
+            # for the next record, which for a sleeping car is tomorrow.
+            drain()
+            last_drain = time.monotonic()
 
 
 if __name__ == "__main__":
