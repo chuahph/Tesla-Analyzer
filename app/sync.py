@@ -2957,6 +2957,19 @@ BMS_DRIVE = "BMSStateDrive"
 # percent before anything else goes wrong, which is why a 487-metre trip can
 # report 698 Wh/km and be neither a bug nor a measurement.
 ENERGY_QUANTUM_KWH = 0.02
+# And the step is not the big term. EnergyRemaining is streamed once a
+# minute, so each end of a trip's bracket is a reading taken up to sixty
+# seconds from the boundary it is supposed to mark — sixty seconds during
+# which the car was drawing several kilowatts. That is worth about 0.06 kWh
+# on this car's trips, three times the 0.02 step.
+#
+# Measured against nine trips judged by the car's own figures: the spread of
+# the disagreement is 0.075 kWh and one sampling interval at each trip's own
+# average power is 0.062. The same number. What looked like a systematic
+# error was the sampling interval, and taking it as a percentage of a small
+# trip made it look like a large one — a 1.0 kWh journey carries the same
+# 0.06 kWh as a 2.5 kWh journey and reports three times the percentage.
+ENERGY_SAMPLE_SEC = 60.0
 
 
 # How long the stream must have been silent before a trip is closed without
@@ -3661,15 +3674,23 @@ def _shadow_close(shadow: dict[str, Any], end: dict[str, Any],
         "energy_kwh": energy,
         "wh_per_km": round(energy * 1000.0 / distance, 1)
         if energy and distance > 0 else None,
-        # What the 0.02 kWh step is worth on THIS trip. Reported rather than
-        # used to hide the figure: 698 Wh/km over 487 metres is the honest
-        # answer to "energy per kilometre" and only misleads when read as
-        # efficiency. Carried so a reader — and the accuracy report — can
-        # tell a measurement from a rounding artefact instead of guessing
-        # from the trip's length.
-        "energy_unc_kwh": ENERGY_QUANTUM_KWH if energy is not None else None,
-        "energy_unc_pct": round(ENERGY_QUANTUM_KWH * 100.0 / abs(energy), 1)
-        if energy else None,
+        # What this trip's energy figure is actually worth. The larger of the
+        # 0.02 kWh step and one 60-second sampling interval at the trip's own
+        # average power — and on every real trip so far it is the second,
+        # by about three to one.
+        #
+        # Reported rather than used to hide anything: 698 Wh/km over 487
+        # metres is the honest answer to "energy per kilometre" and only
+        # misleads when read as efficiency. Carried so a reader — and the
+        # accuracy report — can tell a measurement from noise instead of
+        # guessing from the trip's length.
+        "energy_unc_kwh": None if energy is None else round(max(
+            ENERGY_QUANTUM_KWH,
+            abs(energy) * ENERGY_SAMPLE_SEC / max(minutes * 60.0, 1.0)), 3),
+        "energy_unc_pct": None if not energy else round(max(
+            ENERGY_QUANTUM_KWH,
+            abs(energy) * ENERGY_SAMPLE_SEC / max(minutes * 60.0, 1.0))
+            * 100.0 / abs(energy), 1),
         "soc_start": start.get("soc"),
         "soc_end": end.get("soc"),
         "max_speed_kmh": round(max_speed, 1),

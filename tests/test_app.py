@@ -4852,7 +4852,7 @@ def test_a_trip_that_is_mostly_rounding_does_not_referee_the_others():
                  "end_time": end.isoformat(timespec="seconds"),
                  "distance_km": km, "duration_min": 10.0, "energy_kwh": kwh,
                  "wh_per_km": round(kwh * 1000.0 / km, 1),
-                 "energy_unc_kwh": sync_mod.ENERGY_QUANTUM_KWH,
+                 "energy_unc_kwh": round(kwh * unc_energy / 100.0, 3),
                  "energy_unc_pct": unc_energy}
             if odo:
                 t["start_odo_km"], t["end_odo_km"] = odo, round(odo + km, 3)
@@ -4861,9 +4861,11 @@ def test_a_trip_that_is_mostly_rounding_does_not_referee_the_others():
                        "pct": round(kwh / 68.0 * 100.0, 2)}
 
         with TestClient(app) as client:      # startup may reseed, so build after
-            good, r1 = pair(180, 10.8, 1.9, 31138.7, 1.1)
-            tiny, r2 = pair(120, 0.49, 0.34, 31150.0, 5.9)   # mostly the step
-            old, r3 = pair(60, 3.0, 0.51, None, 3.9)         # no odometer bracket
+            good, r1 = pair(180, 10.8, 1.9, 31138.7, 2.8)
+            # 0.34 kWh over ten minutes: one 60-second sampling interval is
+            # a sixth of the whole figure, so it referees nothing.
+            tiny, r2 = pair(120, 0.49, 0.34, 31150.0, 17.6)
+            old, r3 = pair(60, 3.0, 0.51, None, 3.9)         # no odo bracket
             state.put(sess, state.TELEMETRY_TRIPS_KEY, _json.dumps([good, tiny, old]))
             state.put(sess, state.CAR_READINGS_KEY, _json.dumps([r1, r2, r3]))
             sess.commit()
@@ -4879,6 +4881,9 @@ def test_a_trip_that_is_mostly_rounding_does_not_referee_the_others():
         assert body["totals"]["km_err_pct"] == [0.0, 0.0]
         whys = " ".join(e["why"] for e in body["not_judged"])
         assert "quantisation" in whys and "no odometer bracket" in whys, whys
+        # And the total carries what it is worth, which is the only thing
+        # that says whether its error is a finding or a coin toss.
+        assert body["totals"]["kwh_unc_pct"] is not None
     finally:
         for drive_id in made:
             d = sess.get(Drive, drive_id)

@@ -1,6 +1,7 @@
 """REST API endpoints."""
 from __future__ import annotations
 
+import math
 import re
 import time
 from datetime import datetime, timedelta
@@ -9291,13 +9292,19 @@ TELEMETRY_GAP_MIN_SEC = 120.0
 # Above this, a trip's energy figure carries more of EnergyRemaining's 0.02
 # kWh step than the effect being measured, and it is kept out of the accuracy
 # medians. Not a judgement on the trip — a 0.34 kWh journey is a real journey
-# — only on its ability to referee. The question these medians answer is
-# whether one source is a few percent better than the other; a trip whose own
-# energy is uncertain by six percent cannot vote on that. Measured: the five
-# judged trips run 1.0, 1.0, 1.1 and 2.3 percent, with the 0.42 kWh one at
-# 4.8 — so this line falls in a real gap rather than through the middle of
-# the evidence.
-TELEMETRY_UNC_MAX_PCT = 3.0
+# — only on its ability to referee.
+#
+# Raised from 3% when the uncertainty stopped being the 0.02 kWh step and
+# became the 60-second sampling interval, which is three times larger. The
+# threshold moved with it, not to keep more trips but to keep the same ones:
+# on the honest measure a normal 10 km journey is 3-7% uncertain, and a 3%
+# line would have thrown away all but three of nine.
+#
+# Which is the real lesson in this number. On the honest measure almost no
+# single trip can settle a three-percent question about energy — the totals
+# block is what does that, because independent errors shrink relative to a
+# growing sum and a median does not.
+TELEMETRY_UNC_MAX_PCT = 10.0
 TELEMETRY_GAPS_MAX = 200
 
 
@@ -9888,6 +9895,7 @@ def _compare_row(t: dict, d, t_start, car_by_drive: dict, pct) -> dict:
             # whose energy figure is mostly rounding cannot judge anything,
             # and is kept out of the medians below rather than dropped.
             "energy_unc_pct": t.get("energy_unc_pct"),
+            "energy_unc_kwh": t.get("energy_unc_kwh"),
             # The same trip's energy read a second way: the difference of a
             # monotonic lifetime counter, which has no 0.02 kWh step of its
             # own. Beside kwh above rather than instead of it — the counter's
@@ -10410,6 +10418,18 @@ def telemetry_compare(
                     sum(r["car"]["kwh"] for r in judged)),
                 pct(sum(r["polled"]["kwh"] for r in judged),
                     sum(r["car"]["kwh"] for r in judged))],
+            # What the telemetry energy total is worth, which is the only
+            # thing that says whether its error is a finding or a coin toss.
+            # Each trip's uncertainty is dominated by EnergyRemaining's
+            # 60-second sampling interval, and those are independent between
+            # trips, so they add in quadrature and the total gets relatively
+            # tighter as trips accumulate. A total error inside this band has
+            # not been shown to exist.
+            "kwh_unc_pct": round(
+                math.sqrt(sum((r["telemetry"]["energy_unc_kwh"] or 0.0) ** 2
+                              for r in judged))
+                / sum(r["car"]["kwh"] for r in judged) * 100.0, 2)
+            if sum(r["car"]["kwh"] for r in judged) else None,
             "order": "telemetry, polled, car",
         },
         "summary": {

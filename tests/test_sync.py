@@ -3574,8 +3574,15 @@ def test_a_trip_is_not_charged_for_standing_still_after_it_ended():
     assert trip["end_energy_kwh"] == pytest.approx(28.5, abs=0.001)
 
 
-def test_a_trip_carries_what_the_energy_step_is_worth_on_it():
-    """0.02 kWh is a rounding error on a long trip and the figure on a short one."""
+def test_a_trip_carries_what_its_energy_figure_is_actually_worth():
+    """The 0.02 step is not the big term. The sampling interval is.
+
+    EnergyRemaining is streamed once a minute, so each end of the bracket is
+    a reading taken up to sixty seconds from the boundary it marks — sixty
+    seconds of several kilowatts. Across nine trips judged against the car,
+    the spread of the disagreement was 0.075 kWh and one sampling interval
+    at each trip's own average power was 0.062. The same number.
+    """
     shadow: dict = {}
     advance_shadow(shadow, _tel(0, 100.0, 30.0))
     advance_shadow(shadow, _tel(600, 106.0, 28.5))
@@ -3583,9 +3590,22 @@ def test_a_trip_carries_what_the_energy_step_is_worth_on_it():
                                 speed_mph=0.0, door=True))
     trip = advance_shadow(shadow, _tel(900, 106.0, 28.5, gear="ShiftStateP",
                                        speed_mph=0.0))
-    assert trip["energy_unc_kwh"] == ENERGY_QUANTUM_KWH
-    assert trip["energy_unc_pct"] == pytest.approx(
-        ENERGY_QUANTUM_KWH * 100.0 / trip["energy_kwh"], abs=0.1)
+    # 1.5 kWh over 11 minutes: one minute of that is 0.136 kWh, which dwarfs
+    # the 0.02 step and is what the figure is really worth.
+    assert trip["energy_unc_kwh"] == pytest.approx(0.136, abs=0.002)
+    assert trip["energy_unc_pct"] == pytest.approx(9.1, abs=0.2)
+
+    # A trip drawing little enough that a minute of it is under the step
+    # falls back to the step, which is then the floor rather than the figure.
+    gentle: dict = {}
+    advance_shadow(gentle, _tel(0, 100.0, 30.0))
+    advance_shadow(gentle, _tel(600, 106.0, 29.79))
+    advance_shadow(gentle, _tel(660, 106.0, 29.79, gear="ShiftStateP",
+                                speed_mph=0.0, door=True))
+    coasted = advance_shadow(gentle, _tel(900, 106.0, 29.79,
+                                          gear="ShiftStateP", speed_mph=0.0))
+    assert coasted["energy_kwh"] == pytest.approx(0.21, abs=0.001)
+    assert coasted["energy_unc_kwh"] == ENERGY_QUANTUM_KWH
 
 
 def test_the_odometer_gives_back_what_a_sleeping_car_never_sent():
