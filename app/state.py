@@ -69,6 +69,15 @@ TELEMETRY_MODES_KEY = "telemetry_modes"  # JSON list of {ts, vin, field, from,
 TELEMETRY_TRIPS_KEY = "telemetry_trips"  # JSON list of finished shadow trips.
 # Kept out of the Drive table on purpose — these are unverified, and a wrong
 # row in the real history is a repair job while a wrong row here is a delete.
+TELEMETRY_CHARGE_SHADOW_KEY = "telemetry_charge_shadow"  # JSON {vin: state}
+# of the charge in progress, the counterpart to TELEMETRY_SHADOW_KEY.
+TELEMETRY_CHARGES_KEY = "telemetry_charges"  # JSON list of finished shadow
+# charges. Out of the Charge table for the same reason, and for one more: the
+# question they exist to answer is which of the car's two energy counters the
+# polled history has been storing all along. A session records the wall meter,
+# the pack meter and the pack level side by side and asserts nothing about
+# them, so that one completed charge decides it by arithmetic rather than by
+# anybody being confident.
 SYNC_LOG_KEY = "sync_log"  # JSON: run-length record of what each /api/sync tick did —
 # the only place a blackout can be told from a quiet car after the fact, since
 # LAST_STATUS_KEY is overwritten every tick and keeps no history

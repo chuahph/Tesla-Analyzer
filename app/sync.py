@@ -3289,6 +3289,173 @@ def amend_closed_trip(trip: dict[str, Any], snap: dict[str, Any]) -> bool:
     return True
 
 
+# A plug-in that moved less than this was somebody testing the cable, not a
+# charge. Well above the 0.02 kWh step EnergyRemaining moves in.
+CHARGE_MIN_KWH = 0.05
+# Silence longer than this ends a charge at the last thing the car said. A
+# charging car is awake and talking every thirty seconds; ten minutes of
+# nothing means the session is over and the car went to sleep, not that it is
+# still drawing.
+CHARGE_GAP_SEC = 600.0
+
+
+def advance_charge(shadow: dict[str, Any], snap: dict[str, Any]) -> dict[str, Any] | None:
+    """Step the shadow CHARGE machine with one telemetry snapshot.
+
+    Exists to settle one question and to be honest about not having settled
+    it. The car reports two energy counters during a charge and the app has
+    never known which one the polled history stores. Measured on 10 September:
+    ACChargingEnergyIn climbed 7.55 kW while DCChargingEnergyIn climbed 7.2 kW
+    over the same minutes, so one is the wall meter and the other is what
+    reached the pack, about 95% of it. EnergyRemaining rose too, and is the
+    pack's own level rather than a meter of anything.
+
+    Three numbers, one session, no opinion about which is right. When the car
+    itself reports what it added, whichever column matches is the one the
+    polled path has been storing, and energy_added_kwh can be filled in from
+    evidence. Guessing instead would misprice every charge in the history, and
+    a wrong price is not visibly wrong.
+
+    Mutates ``shadow`` and returns a finished charge, or None.
+    """
+    # `is None`, not falsiness. A timestamp of zero is a real epoch — the
+    # first second of 1970 — and while no car will ever send one, a guard
+    # that quietly discards a valid value is the kind that is found later by
+    # something else going wrong. It was found here by a test at ts=0, which
+    # opened no session at all.
+    if snap.get("ts") is None:
+        return None
+    ts = float(snap["ts"])
+    open_at = shadow.get("open")
+    last = shadow.get("last")
+    charging = bool(snap.get("charging"))
+
+    # A charging car talks constantly, so a long silence is the session
+    # ending rather than a pause in it.
+    if open_at and last and ts - float(last["ts"]) > CHARGE_GAP_SEC:
+        done = _charge_close(shadow, last)
+        open_at, last = None, None
+        if not charging:
+            shadow["last"] = dict(snap)
+            return done
+        # Straight into a new session, which the reset check below also
+        # catches — but only if a counter is being reported, and it may not
+        # be on the record that reopens this.
+        shadow["open"] = dict(snap)
+        shadow["peak_kw"] = float(snap.get("charger_kw") or 0.0)
+        shadow["last"] = dict(snap)
+        return done
+
+    if charging and not open_at:
+        shadow["open"] = dict(snap)
+        shadow["peak_kw"] = float(snap.get("charger_kw") or 0.0)
+        shadow["last"] = dict(snap)
+        return None
+
+    if charging and open_at:
+        # ACChargingEnergyIn is per-session: it read 16.70 days before this
+        # session and 4.72 during it, so it resets rather than accumulating.
+        # A counter that goes backwards is therefore a new session starting,
+        # not a bad reading — and carrying on would report one charge with a
+        # negative meter.
+        started = _charge_counter(open_at)
+        now_counter = _charge_counter(snap)
+        if (started is not None and now_counter is not None
+                and now_counter < started - 1e-9):
+            done = _charge_close(shadow, last or snap)
+            shadow["open"] = dict(snap)
+            shadow["peak_kw"] = float(snap.get("charger_kw") or 0.0)
+            shadow["last"] = dict(snap)
+            return done
+        shadow["peak_kw"] = max(float(shadow.get("peak_kw") or 0.0),
+                                float(snap.get("charger_kw") or 0.0))
+        shadow["last"] = dict(snap)
+        return None
+
+    if open_at and not charging:
+        # Closed on the last snapshot that was still charging, not on this
+        # one: unplugging is what makes charging false, and the counters have
+        # no reason to still be right afterwards.
+        done = _charge_close(shadow, last or snap)
+        shadow["last"] = dict(snap)
+        return done
+
+    shadow["last"] = dict(snap)
+    return None
+
+
+def _charge_counter(snap: dict[str, Any]) -> float | None:
+    """Whichever wall meter this session is being measured by."""
+    ac = snap.get("charge_energy_in_raw")
+    return ac if ac is not None else snap.get("dc_energy_in_raw")
+
+
+def settle_charge(shadow: dict[str, Any], now_ts: float) -> dict[str, Any] | None:
+    """Close a charge the car stopped reporting on, without a new snapshot.
+
+    The same hole settle_shadow fills for trips: a car that finishes charging
+    and goes to sleep sends nothing more, so the session would stay open until
+    the next plug-in and read as one enormous charge.
+    """
+    open_at, last = shadow.get("open"), shadow.get("last")
+    if not open_at or not last:
+        return None
+    if now_ts - float(last.get("ts") or 0.0) <= CHARGE_GAP_SEC:
+        return None
+    return _charge_close(shadow, last)
+
+
+def _charge_close(shadow: dict[str, Any], end: dict[str, Any]) -> dict[str, Any] | None:
+    """Emit the open charge, ending at ``end``, and clear the machine."""
+    start = shadow.pop("open", None)
+    peak = float(shadow.pop("peak_kw", 0.0) or 0.0)
+    if not start:
+        return None
+
+    def delta(key: str) -> float | None:
+        a, b = start.get(key), end.get(key)
+        if a is None or b is None:
+            return None
+        return round(float(b) - float(a), 3)
+
+    # The wall meter, the pack meter, and the pack's own level. Named for
+    # where each is measured rather than for what the field is called: the
+    # field names say AC and DC, but both counters ran on an AC charge, so
+    # the names describe the side of the converter and not the socket.
+    kwh_wall = delta("charge_energy_in_raw")
+    kwh_pack_meter = delta("dc_energy_in_raw")
+    kwh_pack_level = delta("energy_kwh")
+    minutes = max((float(end["ts"]) - float(start["ts"])) / 60.0, 0.0)
+    biggest = max((v for v in (kwh_wall, kwh_pack_meter, kwh_pack_level)
+                   if v is not None), default=0.0)
+    if biggest < CHARGE_MIN_KWH or minutes <= 0:
+        return None
+
+    return {
+        "start_ts": float(start["ts"]),
+        "end_ts": float(end["ts"]),
+        "start_time": _dt(start["ts"]).isoformat(timespec="seconds"),
+        "end_time": _dt(end["ts"]).isoformat(timespec="seconds"),
+        "duration_min": round(minutes, 1),
+        "kwh_wall": kwh_wall,
+        "kwh_pack_meter": kwh_pack_meter,
+        "kwh_pack_level": kwh_pack_level,
+        # What the converter kept. Reported rather than applied anywhere: it
+        # is the same subtraction as the columns above and exists so a reader
+        # can see at a glance whether the two meters are telling one story.
+        "converter_pct": round(kwh_pack_meter / kwh_wall * 100.0, 1)
+        if kwh_wall and kwh_pack_meter is not None and kwh_wall > 0 else None,
+        "soc_start": start.get("soc"),
+        "soc_end": end.get("soc"),
+        "peak_kw": round(peak, 1),
+        "fast": bool(start.get("fast") or end.get("fast")),
+        "lat": start.get("lat"), "lon": start.get("lon"),
+        "pack_temp_c": end.get("pack_temp_c"),
+        # Nothing writes a Charge row from this. It is evidence.
+        "state_raw": end.get("charge_state_raw"),
+    }
+
+
 def recover_sleep_gap(prev: dict[str, Any], nxt: dict[str, Any]) -> bool:
     """Give a trip back the metres it drove after its last transmission.
 

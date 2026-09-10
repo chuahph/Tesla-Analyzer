@@ -4,7 +4,8 @@ import pytest
 from app.sync import (_energy_kwh, close_trip_on_sleep, is_driving,
                       snapshot_from_telemetry, advance_shadow,
                       process_snapshot, snapshot_from_vehicle_data,
-                      recover_sleep_gap, ENERGY_QUANTUM_KWH, MILES_TO_KM)
+                      recover_sleep_gap, ENERGY_QUANTUM_KWH, MILES_TO_KM,
+                      advance_charge, settle_charge, CHARGE_GAP_SEC)
 
 T0 = 1_760_000_000.0  # seconds epoch
 
@@ -3393,6 +3394,82 @@ def test_a_charge_state_left_over_from_the_last_session_cannot_end_a_trip():
     advance_shadow(real, moving(600, 106.0, False))
     trip = advance_shadow(real, moving(660, 106.0, True))
     assert trip is not None and trip["ended_on"] == "charging"
+
+
+def _charge_tel(ts, ac, dc, kwh, soc=60.0, charging=True, kw=7.5):
+    fields = {"EnergyRemaining": kwh, "Soc": soc, "Gear": "ShiftStateP",
+              "VehicleSpeed": 0.0}
+    if charging:
+        fields.update({"DetailedChargeState": "DetailedChargeStateCharging",
+                       "ACChargingEnergyIn": ac, "DCChargingEnergyIn": dc,
+                       "ACChargingPower": kw})
+    else:
+        fields["DetailedChargeState"] = "DetailedChargeStateDisconnected"
+    return snapshot_from_telemetry(fields, ts=ts)
+
+
+def test_a_charge_records_all_three_meters_and_prefers_none_of_them():
+    """The real rates off the AC session of 10 September.
+
+    Wall 7.55 kW, pack 7.2 kW, and the pack's own level rising more slowly
+    still. Three figures, one session, and no opinion about which the polled
+    history has been storing — that is decided by the car's own Added figure,
+    not here.
+    """
+    shadow: dict = {}
+    assert advance_charge(shadow, _charge_tel(0, 4.715, 4.480, 44.44)) is None
+    advance_charge(shadow, _charge_tel(120, 5.092, 4.840, 44.74, soc=61.06))
+    advance_charge(shadow, _charge_tel(240, 5.218, 4.960, 44.88, soc=61.20, kw=7.6))
+
+    charge = advance_charge(shadow, _charge_tel(300, 0, 0, 44.88, charging=False))
+    assert charge is not None
+    assert charge["kwh_wall"] == pytest.approx(0.503, abs=0.001)
+    assert charge["kwh_pack_meter"] == pytest.approx(0.480, abs=0.001)
+    assert charge["kwh_pack_level"] == pytest.approx(0.440, abs=0.001)
+    # The converter's cut, reported and applied to nothing.
+    assert charge["converter_pct"] == pytest.approx(95.4, abs=0.5)
+    assert charge["peak_kw"] == pytest.approx(7.6)
+    assert charge["fast"] is False
+    # Ends on the last snapshot that was still charging, not on the unplug.
+    assert charge["end_ts"] == 240
+
+
+def test_a_counter_that_goes_backwards_is_the_next_session_starting():
+    """ACChargingEnergyIn is per-session: 16.70 days before this one, 4.72
+    during it. So a counter that falls has not misread — a new session has
+    begun, and carrying on would report one charge with a negative meter."""
+    shadow: dict = {}
+    advance_charge(shadow, _charge_tel(0, 4.0, 3.8, 40.0))
+    advance_charge(shadow, _charge_tel(60, 5.0, 4.8, 41.0))
+    first = advance_charge(shadow, _charge_tel(120, 0.4, 0.38, 41.0))
+    assert first is not None
+    assert first["kwh_wall"] == pytest.approx(1.0, abs=0.001)
+    assert shadow.get("open") is not None, "the new session is already running"
+
+    second = advance_charge(shadow, _charge_tel(240, 1.4, 1.33, 42.0))
+    assert second is None
+    done = advance_charge(shadow, _charge_tel(300, 0, 0, 42.0, charging=False))
+    assert done["kwh_wall"] == pytest.approx(1.0, abs=0.001)
+
+
+def test_a_car_that_sleeps_mid_charge_does_not_leave_the_session_open():
+    """Otherwise it stays open until the next plug-in and reads as one
+    enormous charge spanning both."""
+    shadow: dict = {}
+    advance_charge(shadow, _charge_tel(0, 4.0, 3.8, 40.0))
+    advance_charge(shadow, _charge_tel(600, 9.0, 8.6, 44.5))
+    assert settle_charge(shadow, 600 + 300) is None, "still talking recently"
+    done = settle_charge(shadow, 600 + CHARGE_GAP_SEC + 1)
+    assert done is not None
+    assert done["end_ts"] == 600, "ends at the last thing the car said"
+    assert done["kwh_wall"] == pytest.approx(5.0, abs=0.001)
+
+
+def test_plugging_in_and_unplugging_again_is_not_a_charge():
+    shadow: dict = {}
+    advance_charge(shadow, _charge_tel(0, 4.0, 3.8, 40.0))
+    advance_charge(shadow, _charge_tel(30, 4.01, 3.81, 40.0))
+    assert advance_charge(shadow, _charge_tel(60, 0, 0, 40.0, charging=False)) is None
 
 
 def test_the_charge_counters_are_carried_without_being_believed():

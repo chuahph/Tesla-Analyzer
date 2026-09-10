@@ -2864,6 +2864,34 @@ def _settle_shadows(session: Session) -> int:
         if done:
             done["vin"] = vin
             finished.append(done)
+
+    # The same hole, for charges. A car that finishes charging and goes to
+    # sleep sends nothing more, so the session would stay open until the next
+    # plug-in and read as one enormous charge spanning both.
+    try:
+        charge_shadows = _json.loads(
+            state.get(session, state.TELEMETRY_CHARGE_SHADOW_KEY) or "{}") or {}
+    except ValueError:
+        charge_shadows = {}
+    settled_charges = []
+    for vin, shadow in charge_shadows.items():
+        done = sync_mod.settle_charge(shadow, now_ts)
+        if done:
+            done["vin"] = vin
+            settled_charges.append(done)
+    if settled_charges:
+        try:
+            charges = _json.loads(
+                state.get(session, state.TELEMETRY_CHARGES_KEY) or "[]") or []
+        except ValueError:
+            charges = []
+        charges.extend(settled_charges)
+        state.put(session, state.TELEMETRY_CHARGES_KEY,
+                  _json.dumps(charges[-TELEMETRY_TRIPS_MAX:]))
+        state.put(session, state.TELEMETRY_CHARGE_SHADOW_KEY,
+                  _json.dumps(charge_shadows))
+        session.commit()
+
     if not finished:
         return 0
     try:
@@ -9477,6 +9505,16 @@ def telemetry_ingest(
         trips = _json.loads(stored_trips or "[]") or []
     except ValueError:
         trips = []
+    stored_charges = state.get(session, state.TELEMETRY_CHARGES_KEY)
+    try:
+        charges = _json.loads(stored_charges or "[]") or []
+    except ValueError:
+        charges = []
+    try:
+        charge_shadows = _json.loads(
+            state.get(session, state.TELEMETRY_CHARGE_SHADOW_KEY) or "{}") or {}
+    except ValueError:
+        charge_shadows = {}
     stored_modes = state.get(session, state.TELEMETRY_MODES_KEY)
     try:
         modes = _json.loads(stored_modes or "[]") or []
@@ -9597,6 +9635,15 @@ def telemetry_ingest(
         if ts:
             snap = sync_mod.snapshot_from_telemetry(car, ts)
             shadow = shadows.setdefault(vin, {})
+            # Charges run on their own machine. A charge is not a trip with
+            # the sign flipped: it opens on a state the car reports directly,
+            # has no distance, and its whole purpose is to hold three energy
+            # figures side by side — so sharing the trip machine would mean
+            # one set of thresholds serving two jobs badly.
+            charged = sync_mod.advance_charge(charge_shadows.setdefault(vin, {}), snap)
+            if charged:
+                charged["vin"] = vin
+                charges.append(charged)
             finished = sync_mod.advance_shadow(shadow, snap)
             if finished:
                 finished["vin"] = vin
@@ -9650,6 +9697,9 @@ def telemetry_ingest(
     state.put(session, state.TELEMETRY_SHADOW_KEY, _json.dumps(shadows))
     put_if_changed(state.TELEMETRY_TRIPS_KEY,
                    _json.dumps(trips[-TELEMETRY_TRIPS_MAX:]), stored_trips)
+    put_if_changed(state.TELEMETRY_CHARGES_KEY,
+                   _json.dumps(charges[-TELEMETRY_TRIPS_MAX:]), stored_charges)
+    state.put(session, state.TELEMETRY_CHARGE_SHADOW_KEY, _json.dumps(charge_shadows))
 
     try:
         seen = _json.loads(state.get(session, state.TELEMETRY_SEEN_KEY) or "{}") or {}
@@ -9987,6 +10037,43 @@ def telemetry_recover_gaps(
     state.put(session, state.TELEMETRY_TRIPS_KEY, _json.dumps(trips))
     session.commit()
     return {"recovered": len(changed), "trips": changed}
+
+
+@router.get("/telemetry/charges")
+def telemetry_charges(
+    limit: int = Query(40, ge=1, le=TELEMETRY_TRIPS_MAX),
+    session: Session = Depends(get_session),
+):
+    """Charging sessions as the stream saw them, with all three meters.
+
+    Not a replacement for the polled charge history and not wired into it.
+    This exists to answer one question that has kept energy_added_kwh at zero
+    since telemetry was turned on: the car reports a wall meter and a pack
+    meter, they disagree by about five percent because that is what the
+    onboard charger loses, and nobody knows which of them the polled history
+    has been storing all along.
+
+    kwh_wall     ACChargingEnergyIn — what the meter on the wall charged for
+    kwh_pack_meter DCChargingEnergyIn — what got past the converter. Despite
+                 the name it runs on an AC charge too; the names describe the
+                 side of the converter, not the socket
+    kwh_pack_level the rise in EnergyRemaining, which is the pack's own level
+                 rather than a meter of anything, and the coarsest of the
+                 three at a 0.02 kWh step
+
+    Read the car's own "Added" figure after a session and whichever column
+    matches is the answer. Until then this asserts nothing: pricing every
+    charge in the history on a guess would be wrong in a way nobody would
+    ever see.
+    """
+    import json as _json
+
+    _settle_shadows(session)
+    try:
+        charges = _json.loads(state.get(session, state.TELEMETRY_CHARGES_KEY) or "[]") or []
+    except ValueError:
+        charges = []
+    return {"charges": len(charges), "recent": charges[-limit:]}
 
 
 @router.get("/telemetry/modes")

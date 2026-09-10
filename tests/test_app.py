@@ -4385,6 +4385,74 @@ def _tele_record(vin, ts, resend=False, **kv):
     return {"vin": vin, "createdAt": stamp, "data": data, "isResend": resend}
 
 
+def test_a_charging_session_reaches_the_charges_endpoint_through_the_ingest():
+    """The three meters, posted the way the receiver posts them.
+
+    The unit tests drive the charge machine directly. This drives it through
+    the HTTP path, because that is where the wiring can be wrong — the sleep
+    gap recovery was correct in isolation and never fired once in production,
+    for exactly that reason.
+    """
+    import time as _time
+    from datetime import timezone
+
+    from app.database import SessionLocal
+    from app import state
+
+    settings = get_settings()
+    old_pc = settings.app_passcode
+    settings.app_passcode = ""
+    sess = SessionLocal()
+    prev = {k: state.get(sess, k) for k in
+            (state.TELEMETRY_CHARGES_KEY, state.TELEMETRY_CHARGE_SHADOW_KEY,
+             state.TELEMETRY_LATEST_KEY)}
+    vin = "CHARGER000000001"
+    try:
+        for key in prev:
+            state.put(sess, key, "")
+        sess.commit()
+
+        t = _time.time() - 3000
+        with TestClient(app) as client:
+            def post(ts, **fields):
+                keys = {"ac": "ACChargingEnergyIn", "dc": "DCChargingEnergyIn",
+                        "kwh": "EnergyRemaining", "soc": "Soc",
+                        "kw": "ACChargingPower", "st": "DetailedChargeState"}
+                data = [{"key": keys[k],
+                         "value": ({"stringValue": v} if k == "st"
+                                   else {"doubleValue": v})}
+                        for k, v in fields.items()]
+                stamp = datetime.fromtimestamp(ts, timezone.utc).isoformat(
+                    ).replace("+00:00", "Z")
+                r = client.post("/api/telemetry", json={"records": [
+                    {"vin": vin, "createdAt": stamp, "data": data}]})
+                assert r.status_code == 200, r.text
+
+            # The real figures off the AC session of 10 September.
+            post(t, st="DetailedChargeStateCharging", ac=4.715, dc=4.480,
+                 kwh=44.44, soc=60.53, kw=7.5)
+            post(t + 120, ac=5.092, dc=4.840, kwh=44.74, soc=61.06)
+            post(t + 240, ac=5.218, dc=4.960, kwh=44.88, soc=61.20, kw=7.6)
+            post(t + 300, st="DetailedChargeStateDisconnected")
+
+            body = client.get("/api/telemetry/charges").json()
+
+        assert body["charges"] == 1, body
+        row = body["recent"][0]
+        assert row["kwh_wall"] == pytest.approx(0.503, abs=0.001)
+        assert row["kwh_pack_meter"] == pytest.approx(0.480, abs=0.001)
+        assert row["kwh_pack_level"] == pytest.approx(0.440, abs=0.001)
+        assert row["converter_pct"] == pytest.approx(95.4, abs=0.5)
+        assert row["peak_kw"] == pytest.approx(7.6)
+        assert row["vin"] == vin
+    finally:
+        for key, was in prev.items():
+            state.put(sess, key, was or "")
+        sess.commit()
+        sess.close()
+        settings.app_passcode = old_pc
+
+
 def test_recovering_gaps_on_stored_trips_previews_before_it_writes():
     """Trips closed before the correction existed can still be paid back.
 
