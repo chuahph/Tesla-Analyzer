@@ -4583,7 +4583,18 @@ def test_the_next_morning_s_departure_pays_back_last_night_s_arrival():
             assert first["ended_on"] == "stream_lost"
             assert first["end_odo_km"] == pytest.approx(31161.861, abs=0.002)
 
-            # This morning, 0.338 km further on than it was last seen.
+            # This morning, 0.338 km further on than it was last seen. The
+            # correction must land as the new trip OPENS — waiting for it to
+            # finish would leave last night recorded short for the whole
+            # drive, with the number to fix it already in hand.
+            t0 = t + 43000
+            post(_tele_record(vin, t0, odo=(31161.861 + lost_km) / mi, mph=0.0,
+                              gear="ShiftStateP", kwh=56.0, soc=80.0))
+            post(_tele_record(vin, t0 + 10, mph=25.0, gear="ShiftStateD"))
+            opened = _json.loads(state.get(SessionLocal(), state.TELEMETRY_TRIPS_KEY))
+            assert opened[0]["recovered_km"] == pytest.approx(lost_km, abs=0.002), \
+                "paid back at the departure, not at the next arrival"
+
             t = drive(31161.861 + lost_km, 31166.0, t + 43000)
             post(_tele_record(vin, t + 5, mph=0.0, gear="ShiftStateP", seat=False))
             assert routes_mod._settle_shadows(SessionLocal()) == 1

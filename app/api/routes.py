@@ -9644,6 +9644,7 @@ def telemetry_ingest(
             if charged:
                 charged["vin"] = vin
                 charges.append(charged)
+            was_open = bool(shadow.get("open"))
             finished = sync_mod.advance_shadow(shadow, snap)
             if finished:
                 finished["vin"] = vin
@@ -9652,6 +9653,26 @@ def telemetry_ingest(
                 # trip's opening odometer is the first reading taken since,
                 # so it measures that ground.
                 if _append_trip(trips, finished):
+                    recovered += 1
+            # And again the moment a trip OPENS, not only when it closes.
+            # The opening odometer is the whole input to the correction, so
+            # waiting for the journey to finish leaves the previous trip
+            # recorded short for its entire duration — knowably short, with
+            # the number needed to fix it already in hand. Someone reading
+            # the dashboard in that window gets an answer this app could
+            # already have corrected.
+            #
+            # Safe to do before the trip is real. The gap is ground the car
+            # demonstrably covered, whether or not the movement now starting
+            # turns into a trip of its own — and if this same pair reaches
+            # _append_trip later, it finds the odometers already meeting and
+            # takes nothing.
+            opening = shadow.get("open")
+            if opening and not was_open and opening.get("odo_km"):
+                previous = next((t for t in reversed(trips)
+                                 if t.get("vin") == vin), None)
+                if previous is not None and sync_mod.recover_sleep_gap(
+                        previous, {"start_odo_km": opening["odo_km"]}):
                     recovered += 1
             elif not shadow.get("open"):
                 # No trip is running, so this record may be the arrival of the
