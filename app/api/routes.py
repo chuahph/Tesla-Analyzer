@@ -9146,6 +9146,7 @@ def summary(
             rate_history=_hist("full_history", _full_history, session, vehicle.id),
             place_rates=_hist("place_rates", _place_parked_rates, session),
             readings=_hist("parked_readings", _parked_readings, session, vehicle.id))
+        _mark("since_vampire")
         used_since_last_charge_kwh = (
             sum(d.energy_used_kwh for d in drives_since) + vampire_since["kwh"]
         )
@@ -9201,6 +9202,7 @@ def summary(
     # stack can't reach.
     price_fn = tariff.price_fn_from_settings(settings)
     trip_costs = _trip_cost_map(session, vehicle.id)
+    _mark("trip_costs")
     driving = driving_analysis.analyze(
         drives, settings.rated_wh_per_km, capacity_kwh, price_fn,
         charges=charges, vampire_anchor=vampire_anchor,
@@ -9214,6 +9216,7 @@ def summary(
         vampire_rate_history=_hist("full_history", _full_history, session, vehicle.id),
         vampire_place_rates=_hist("place_rates", _place_parked_rates, session),
         vampire_readings=_hist("parked_readings", _parked_readings, session, vehicle.id))
+    _mark("driving")
     # A since-charge window's own `charges` list is always empty by
     # definition (it starts right where last_charge ends, so no charge can
     # have happened "since" yet) — without this, Energy Charged/AC-DC

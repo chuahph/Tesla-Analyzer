@@ -1,6 +1,7 @@
 """Driving pattern analysis."""
 from __future__ import annotations
 
+from bisect import bisect_left, bisect_right
 from collections import Counter, defaultdict
 from datetime import datetime
 from types import SimpleNamespace
@@ -243,11 +244,16 @@ def _gap_rate_kw(drives: list[Any], charges: list[Any] | None, capacity_kwh: flo
     for a, b in zip(ordered, ordered[1:]):
         if place is not None and getattr(a, "end_location", None) != place:
             continue
-        if keep is not None and not keep(a, b):
-            continue
         gap_start, gap_end = a.end_time, b.start_time
         gap_hours = (gap_end - gap_start).total_seconds() / 3600.0
         if gap_hours < min_gap_h or (max_gap_h is not None and gap_hours >= max_gap_h):
+            continue
+        # Asked after the duration band, not before it: ``keep`` is the one
+        # predicate here that costs anything to evaluate (it goes looking
+        # through the readings), and most gaps in a full history are short
+        # errand stops the band throws out anyway. Both are pure tests of the
+        # same gap, so the order changes only what gets asked, never the answer.
+        if keep is not None and not keep(a, b):
             continue
         # A charge anywhere inside the gap moved SoC upward, so its endpoints
         # say nothing about drain. Scanned per gap rather than with a marching
@@ -295,6 +301,46 @@ def standby_kw(drives: list[Any], charges: list[Any] | None,
                         STANDBY_MIN_GAP_HOURS, None, STANDBY_MIN_TOTAL_HOURS)
 
 
+class SentryIndex:
+    """Sentry states sorted by timestamp, for asking about one gap at a time.
+
+    gap_sentry_state below used to walk every reading to answer one gap, and
+    sentry_standby_kw asks it once per gap in the car's whole history. At 287
+    drives and 2,795 readings that is 800,000 comparisons to fit one rate, and
+    the dashboard fits it twice per load — which is where the seconds were
+    going. Sorted once, each question costs a pair of bisects plus the readings
+    that actually fall inside the gap.
+    """
+
+    __slots__ = ("_ts", "_state")
+
+    def __init__(self, readings: list[Any]):
+        rows = sorted(
+            ((r.ts, r.sentry_mode) for r in readings
+             if getattr(r, "ts", None) is not None),
+            key=lambda pair: pair[0])
+        self._ts = [ts for ts, _ in rows]
+        self._state = [st for _, st in rows]
+
+    def __len__(self) -> int:
+        return len(self._ts)
+
+    def state(self, start, end) -> bool | None:
+        lo = bisect_left(self._ts, start)
+        hi = bisect_right(self._ts, end)
+        seen = [st for st in self._state[lo:hi] if st is not None]
+        return any(seen) if seen else None
+
+
+def _sentry_index(readings: Any) -> SentryIndex:
+    """A SentryIndex over ``readings``, or ``readings`` itself if already one.
+
+    Callers that ask about many gaps build the index once and hand it down;
+    ones that ask about a single gap can keep passing a plain list.
+    """
+    return readings if isinstance(readings, SentryIndex) else SentryIndex(readings)
+
+
 def gap_sentry_state(readings: list[Any], start, end) -> bool | None:
     """Was Sentry armed during this parked gap? None when nothing said.
 
@@ -302,10 +348,10 @@ def gap_sentry_state(readings: list[Any], start, end) -> bool | None:
     armed or disarmed leaves one even where SoC never moves a whole point.
     Absent readings mean the car was unreachable throughout — usually a
     signal-dead car park — and the answer is unknown, not "off".
+
+    Accepts either a plain list of readings or a SentryIndex over them.
     """
-    seen = [r.sentry_mode for r in readings
-            if start <= r.ts <= end and r.sentry_mode is not None]
-    return any(seen) if seen else None
+    return _sentry_index(readings).state(start, end)
 
 
 def sentry_standby_kw(drives: list[Any], charges: list[Any] | None,
@@ -329,10 +375,11 @@ def sentry_standby_kw(drives: list[Any], charges: list[Any] | None,
     """
     if not readings:
         return None
+    index = _sentry_index(readings)
     return _gap_rate_kw(
         drives, charges, capacity_kwh,
         STANDBY_MIN_GAP_HOURS, None, STANDBY_MIN_TOTAL_HOURS,
-        keep=lambda a, b: gap_sentry_state(readings, a.end_time, b.start_time) is armed)
+        keep=lambda a, b: index.state(a.end_time, b.start_time) is armed)
 
 
 def place_standby_kw(drives: list[Any], charges: list[Any] | None,
@@ -597,6 +644,10 @@ def vampire_drain(
     # it at all. The same gap in a 30-day window would have been corrected.
     # A figure that changes with the dropdown is not measuring the car.
     fit_drives, fit_charges = rate_history or (drives, charges)
+    # Indexed once for the whole call. Three things below ask what Sentry was
+    # doing during a gap — the armed-parks fit, and the per-gap annotations
+    # twice — and each of them would otherwise re-sort the readings.
+    readings = _sentry_index(readings) if readings else None
     ordered = sorted(drives, key=lambda d: d.start_time)
     boundary = SimpleNamespace(end_time=anchor[0], end_soc=anchor[1]) if anchor else None
     chain = ([boundary] if boundary else []) + ordered
