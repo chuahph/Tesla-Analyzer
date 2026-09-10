@@ -9036,8 +9036,21 @@ def summary(
 
     from .. import sync as sync_mod
 
+    # Where the time goes, reported with the answer. The dashboard got slower
+    # on the day telemetry took over the drive history, and nothing added
+    # that day runs on this request's path — promotion and settle are only
+    # reached from /api/sync and the telemetry endpoints. Rather than reason
+    # about it from the code a third time, this says which phase is slow and
+    # how much there is to be slow about.
+    _t0 = time.monotonic()
+    _marks: list[tuple[str, float]] = []
+
+    def _mark(name: str) -> None:
+        _marks.append((name, round((time.monotonic() - _t0) * 1000.0, 1)))
+
     settings = get_settings()
     vehicle = _first_vehicle(session)
+    _mark("vehicle")
     # Usable pack capacity (override > measured EMA > variant spec > default),
     # used everywhere below that turns kWh into % or range delta into kWh.
     capacity_kwh, capacity_source = _usable_capacity(session, vehicle, settings)
@@ -9140,6 +9153,9 @@ def summary(
             since = last_charge.end_time
             window_label = "since last charge"
     drives, charges = _window(session, vehicle.id, days, since=since)
+    _mark("window")
+    _marks.append(("rows_drives", len(drives)))
+    _marks.append(("rows_charges", len(charges)))
 
     # Anchor the vampire-drain gap search at this charge's own end when the
     # window starts there — otherwise the parked stretch before the window's
@@ -9187,6 +9203,7 @@ def summary(
     # This week vs last week (rolling 7-day windows anchored at now), regardless
     # of the display window — a steady, comparable pulse of usage.
     now = sync_mod.now_local()   # MYT wall-clock, to match stored start_time
+    _mark("analysis_start")
     wk_drives = [d for d in drives if d.start_time >= now - timedelta(days=7)] \
         if since is None and days >= 14 else None
     week_compare = None
@@ -9469,7 +9486,13 @@ def summary(
             for v in session.scalars(select(Vehicle).order_by(Vehicle.id)).all()
             if not v.vin.startswith(("DEMO", "IMPORT"))
         ]
+    _mark("done")
     return {
+        # Milliseconds from the start of the request to each phase, plus how
+        # much data the phase had to work with. Reported on every response
+        # because a page that is only slow sometimes cannot be profiled by
+        # asking it to be slow on demand.
+        "timing_ms": dict(_marks),
         "vehicle": vehicle_out,
         "active_vin": vehicle.vin,
         "garage": garage,
