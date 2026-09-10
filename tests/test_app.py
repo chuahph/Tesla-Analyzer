@@ -4991,6 +4991,77 @@ def test_a_trip_never_takes_a_drive_that_belongs_to_a_later_one():
         sess.close()
 
 
+def test_promotion_recognises_its_own_rows_across_a_storage_round_trip():
+    """The fault that put 198 drives that never happened into the history.
+
+    Identity was decided by float equality on a true epoch near 1.79e9 with a
+    fractional part. It does not come back from Postgres bit-identical, so
+    every automatic run failed to recognise what the previous run had written
+    and added the same journeys again — fourteen a tick, for fourteen ticks.
+
+    SQLite round-trips the value exactly, which is why every test passed. So
+    this one perturbs the stored value the way a database would and insists
+    the trip is still recognised.
+    """
+    import json as _json
+
+    from app.database import SessionLocal
+    from app import state, sync as sync_mod
+    from app.models import Drive, Vehicle
+    from app.api import routes as routes_mod
+
+    sess = SessionLocal()
+    prev = state.get(sess, state.TELEMETRY_TRIPS_KEY)
+    vehicle = None
+    try:
+        now = sync_mod.now_local()
+        at = now - timedelta(minutes=70)
+        start_ts = at.replace(tzinfo=sync_mod.MYT).timestamp() + 0.708992
+
+        vehicle = Vehicle(vin="ROUNDTRIP0000001", name="Test", model="Model 3")
+        sess.add(vehicle)
+        sess.commit()
+        state.put(sess, state.TELEMETRY_TRIPS_KEY, _json.dumps([{
+            "vin": "ROUNDTRIP0000001", "start_ts": start_ts,
+            "end_ts": start_ts + 1200,
+            "start_time": at.isoformat(timespec="seconds"),
+            "end_time": (at + timedelta(minutes=20)).isoformat(timespec="seconds"),
+            "distance_km": 11.25, "duration_min": 20.0, "energy_kwh": 1.9}]))
+        sess.commit()
+
+        assert routes_mod._promote_shadow_trips(
+            SessionLocal(), apply=True)[0]["action"] == "add"
+        with SessionLocal() as chk:
+            row = chk.query(Drive).filter(Drive.vehicle_id == vehicle.id).one()
+            # What a float column that is not quite double precision does to
+            # a number this size: at 1.79e9 a single-precision float resolves
+            # about every 128 seconds, so not even whole seconds survive.
+            row.shadow_start_ts = float(f"{row.shadow_start_ts:.7g}")
+            chk.commit()
+            assert int(row.shadow_start_ts) != int(start_ts), \
+                "the perturbation has to actually break the float"
+
+        again = routes_mod._promote_shadow_trips(SessionLocal(), apply=True)
+        assert again[0]["action"] == "correct", again
+        with SessionLocal() as chk:
+            assert chk.query(Drive).filter(
+                Drive.vehicle_id == vehicle.id).count() == 1, \
+                "the same journey was written twice"
+    finally:
+        with SessionLocal() as cleanup:
+            if vehicle is not None:
+                for d in cleanup.query(Drive).filter(
+                        Drive.vehicle_id == vehicle.id).all():
+                    cleanup.delete(d)
+                v = cleanup.get(Vehicle, vehicle.id)
+                if v is not None:
+                    cleanup.delete(v)
+            cleanup.commit()
+        state.put(sess, state.TELEMETRY_TRIPS_KEY, prev or "[]")
+        sess.commit()
+        sess.close()
+
+
 def test_a_corrected_row_can_be_put_back_the_way_polling_had_it():
     """polled_km was called "the way back" before there was one."""
     import json as _json

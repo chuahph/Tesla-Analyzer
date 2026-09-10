@@ -2878,8 +2878,27 @@ def _promote_shadow_trips(session: Session, apply: bool = False,
     drives = session.scalars(
         select(Drive).where(Drive.start_time >= since).order_by(Drive.start_time)
     ).all()
-    by_shadow = {d.shadow_start_ts: d for d in drives
-                 if d.shadow_start_ts is not None}
+    # Identity is the row's own start_time, in a DateTime column, and not a
+    # timestamp in a float one.
+    #
+    # It was the float. shadow_start_ts holds a true epoch near 1.79e9, and
+    # whether a row had already been written was decided by float equality on
+    # what the database gave back. It does not come back bit-identical, so
+    # every automatic run failed to recognise what the previous run had
+    # written and added the same journeys again — 198 drives that never
+    # happened, in fourteen ticks, in a history where a wrong row is a repair
+    # job rather than a delete.
+    #
+    # Rounding to whole seconds was the first fix and was not enough: a
+    # single-precision float at that magnitude cannot resolve seconds either,
+    # only about every 128 of them. Nothing about a number that large belongs
+    # in a float column when it has to be compared for equality. The start
+    # time is already stored properly, is exact, and is never altered after a
+    # trip closes — the recoveries change distance and energy, never the
+    # boundary — so it is the identity.
+    by_shadow = {(d.vehicle_id, d.start_time.replace(microsecond=0)): d
+                 for d in drives
+                 if (d.source or "") == "telemetry" and d.start_time}
     claimed: set[int] = set()
     changed: list[dict] = []
 
@@ -2897,7 +2916,7 @@ def _promote_shadow_trips(session: Session, apply: bool = False,
         if t_end < since:
             continue
         vehicle_id = vin_to_vehicle.get(t.get("vin"))
-        if vehicle_id is None:
+        if vehicle_id is None:  # noqa: SIM102 — read with the block below
             # One car, or a VIN this account has not linked. Guessing which
             # vehicle a trip belongs to is how one car's journey ends up in
             # another car's history.
@@ -2905,7 +2924,7 @@ def _promote_shadow_trips(session: Session, apply: bool = False,
                 continue
             vehicle_id = next(iter(vin_to_vehicle.values()))
 
-        row = by_shadow.get(start_ts)
+        row = by_shadow.get((vehicle_id, t_start.replace(microsecond=0)))
         if row is None:
             # The polled trip covering the same ground, if there is one —
             # the one that overlaps MOST, and only if nothing else has taken
@@ -2998,9 +3017,15 @@ def _apply_shadow_to_drive(row, t: dict) -> None:
     two numbers and the boundaries around them, not a replacement of the row.
     """
     row.source = "telemetry"
-    row.shadow_start_ts = float(t["start_ts"])
-    row.start_time = sync_mod._dt(t["start_ts"])
-    row.end_time = sync_mod._dt(t["end_ts"])
+    # Recorded, but nothing decides identity from it — see the comment in
+    # _promote_shadow_trips for what that cost. Whole seconds so it at least
+    # reads sensibly to a human.
+    row.shadow_start_ts = float(int(t["start_ts"]))
+    # To the second, both ends, because this IS the identity now and a
+    # microsecond that survives one storage engine and not another would put
+    # the whole fault straight back.
+    row.start_time = sync_mod._dt(t["start_ts"]).replace(microsecond=0)
+    row.end_time = sync_mod._dt(t["end_ts"]).replace(microsecond=0)
     row.distance_km = float(t.get("distance_km") or 0.0)
     row.duration_min = float(t.get("duration_min") or 0.0)
     if t.get("energy_kwh") is not None:
@@ -10355,6 +10380,57 @@ def telemetry_promote(
                 "note": "Nothing written. Add &apply=true to carry these across.",
                 "how": "Add &apply=true to this URL to apply them."}
     return {"changed": len(changed), "trips": changed}
+
+
+@router.api_route("/telemetry/drop-promoted", methods=["GET", "POST"])
+def telemetry_drop_promoted(
+    apply: bool = Query(False),
+    days: int = Query(PROMOTE_MAX_DAYS, ge=1, le=90),
+    session: Session = Depends(get_session),
+):
+    """Delete drive rows that promotion ADDED, keeping ones it corrected.
+
+    Written to clear up after itself. Promotion ran automatically for about
+    fourteen sync ticks while it could not recognise the rows it had written
+    the tick before — identity was decided by float equality on a timestamp
+    that does not survive a round trip to Postgres — so it added the same
+    fourteen journeys again on every tick. Around 198 drives that never
+    happened.
+
+    Only rows promotion created: source is telemetry AND polled_km is null,
+    which means no polled row was corrected to make it. A corrected row is
+    left alone here and belongs to /api/telemetry/unpromote, which puts
+    polling's figures back rather than deleting anything.
+
+    Deleting real driving history is exactly the operation that should not be
+    easy, so this previews unless asked, counts what it would remove, and
+    names the days it touches.
+    """
+    since = sync_mod.now_local() - timedelta(days=days)
+    rows = session.scalars(
+        select(Drive).where(Drive.start_time >= since,
+                            Drive.source == "telemetry",
+                            Drive.polled_km.is_(None),
+                            Drive.shadow_start_ts.is_not(None))
+        .order_by(Drive.start_time)
+    ).all()
+
+    by_day: dict[str, int] = {}
+    for row in rows:
+        day = row.start_time.date().isoformat()
+        by_day[day] = by_day.get(day, 0) + 1
+    listing = [{"id": r.id, "start": r.start_time.isoformat(timespec="seconds"),
+                "km": round(r.distance_km or 0.0, 3)} for r in rows[:40]]
+
+    if not apply:
+        return {"would_drop": len(rows), "by_day": by_day,
+                "first_40": listing,
+                "note": "Nothing deleted. Add &apply=true to remove these.",
+                "how": "Add &apply=true to this URL to delete them."}
+    for row in rows:
+        session.delete(row)
+    session.commit()
+    return {"dropped": len(rows), "by_day": by_day}
 
 
 @router.api_route("/telemetry/unpromote", methods=["GET", "POST"])
