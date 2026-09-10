@@ -2936,6 +2936,33 @@ def _promote_shadow_trips(session: Session, apply: bool = False,
         entry = {"start": t.get("start_time"), "was": was,
                  "now": {"km": t.get("distance_km"), "kwh": t.get("energy_kwh")},
                  "action": "correct" if row is not None else "add"}
+        if row is None:
+            # Why nothing matched, rather than leaving it to be guessed at.
+            # Two rounds of reasoning about this from the code produced two
+            # wrong answers while the real history sat there able to say. An
+            # "add" that should have been a "correct" is a duplicate journey,
+            # so the preview has to be able to show its working.
+            mine = [d for d in drives if d.vehicle_id == vehicle_id]
+            entry["why_no_match"] = {
+                "vin": t.get("vin"),
+                "vehicle_id": vehicle_id,
+                "drives_in_window": len(drives),
+                "drives_for_this_vehicle": len(mine),
+                "already_claimed": sum(1 for d in mine if d.id in claimed),
+                "already_promoted": sum(1 for d in mine
+                                        if d.shadow_start_ts is not None),
+                "overlapping": sum(1 for d in mine
+                                   if d.start_time and d.end_time
+                                   and d.start_time <= t_end
+                                   and t_start <= d.end_time),
+                "window": [t_start.isoformat(timespec="seconds"),
+                           t_end.isoformat(timespec="seconds")],
+                "nearest_drive": min(
+                    ((abs((d.start_time - t_start).total_seconds()), d.id,
+                      d.start_time.isoformat(timespec="seconds"),
+                      d.vehicle_id)
+                     for d in drives if d.start_time), default=None),
+            }
 
         if apply:
             if row is None:
@@ -10319,7 +10346,12 @@ def telemetry_promote(
     _settle_shadows(session)
     changed = _promote_shadow_trips(session, apply=apply, days=days)
     if not apply:
-        return {"would_change": len(changed), "trips": changed,
+        adds = sum(1 for c in changed if c["action"] == "add")
+        return {"would_change": len(changed),
+                "would_add": adds, "would_correct": len(changed) - adds,
+                "vehicles": {v.vin: v.id for v in
+                             session.scalars(select(Vehicle)).all() if v.vin},
+                "trips": changed,
                 "note": "Nothing written. Add &apply=true to carry these across.",
                 "how": "Add &apply=true to this URL to apply them."}
     return {"changed": len(changed), "trips": changed}
