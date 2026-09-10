@@ -3365,6 +3365,36 @@ def test_plugging_in_ends_the_trip_without_anyone_getting_out():
     assert trip["end_ts"] == 660
 
 
+def test_a_charge_state_left_over_from_the_last_session_cannot_end_a_trip():
+    """The same stale-composite trap the gear and the BMS both set.
+
+    DetailedChargeState is sent on change, so a composite still carrying
+    Charging from the session the driver has just unplugged from would close
+    the new trip the instant it opened. Being seen unplugged first makes this
+    a transition rather than a reading.
+    """
+    def moving(ts, odo_mi, charging):
+        fields = {"Odometer": odo_mi, "EnergyRemaining": 30.0,
+                  "Gear": "ShiftStateD", "VehicleSpeed": 20.0, "Soc": 50.0}
+        if charging:
+            fields["DetailedChargeState"] = "DetailedChargeStateCharging"
+        return snapshot_from_telemetry(fields, ts=ts)
+
+    # Never seen unplugged: the composite has read Charging since before the
+    # trip opened, and it must not be taken as an arrival.
+    stale: dict = {}
+    advance_shadow(stale, moving(0, 100.0, True))
+    assert advance_shadow(stale, moving(60, 100.5, True)) is None
+    assert stale.get("open") is not None
+
+    # Seen unplugged, then charging: a real plug-in, and the trip ends.
+    real: dict = {}
+    advance_shadow(real, moving(0, 100.0, False))
+    advance_shadow(real, moving(600, 106.0, False))
+    trip = advance_shadow(real, moving(660, 106.0, True))
+    assert trip is not None and trip["ended_on"] == "charging"
+
+
 def test_the_charge_counters_are_carried_without_being_believed():
     """ACChargingEnergyIn read 16.70 on a car with 31,000 km behind it.
 

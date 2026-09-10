@@ -3105,9 +3105,17 @@ def advance_shadow(shadow: dict[str, Any], snap: dict[str, Any]) -> dict[str, An
     # for another ten minutes.
     #
     # A backstop rather than a discovery: when the car can say it is charging
-    # it can usually say the rest too. It costs three lines and it is the only
-    # signal here that cannot be wrong.
-    if open_at and snap.get("charging"):
+    # it can usually say the rest too. It is the only signal here that cannot
+    # be wrong about what it means.
+    #
+    # It can still be stale, which is a different thing, and the same trap the
+    # gear and the BMS both set. DetailedChargeState is sent on change, so a
+    # composite carrying Charging from the session the driver has just
+    # unplugged from would close the new trip the instant it opened. Requiring
+    # the car to have been seen NOT charging first makes this a transition
+    # rather than a reading — and unplugging necessarily happens before
+    # driving off, so the honest case always qualifies.
+    if open_at and snap.get("charging") and shadow.get("seen_unplugged"):
         shadow["ended_by_charge"] = True
         done = _shadow_close(shadow, shadow.get("still_snap") or last or snap,
                              readings=snap) or done
@@ -3167,6 +3175,8 @@ def advance_shadow(shadow: dict[str, Any], snap: dict[str, Any]) -> dict[str, An
         # answer: require the evidence to have arrived during the journey.
         if snap.get("bms_state") == BMS_DRIVE:
             shadow["bms_seen_drive"] = True
+        if not snap.get("charging"):
+            shadow["seen_unplugged"] = True
     elif open_at:
         still_since = shadow.get("still_since")
         # Did anyone actually leave? Occupancy answers it directly; a door
@@ -3369,6 +3379,7 @@ def _shadow_close(shadow: dict[str, Any], end: dict[str, Any],
     shadow.pop("still_snap", None)
     shadow.pop("exit_seen", None)
     shadow.pop("bms_seen_drive", None)
+    shadow.pop("seen_unplugged", None)
     if not start:
         return None
 

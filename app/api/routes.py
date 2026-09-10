@@ -9456,16 +9456,19 @@ def telemetry_ingest(
         shadows = _json.loads(state.get(session, state.TELEMETRY_SHADOW_KEY) or "{}") or {}
     except ValueError:
         shadows = {}
+    stored_trips = state.get(session, state.TELEMETRY_TRIPS_KEY)
     try:
-        trips = _json.loads(state.get(session, state.TELEMETRY_TRIPS_KEY) or "[]") or []
+        trips = _json.loads(stored_trips or "[]") or []
     except ValueError:
         trips = []
+    stored_modes = state.get(session, state.TELEMETRY_MODES_KEY)
     try:
-        modes = _json.loads(state.get(session, state.TELEMETRY_MODES_KEY) or "[]") or []
+        modes = _json.loads(stored_modes or "[]") or []
     except ValueError:
         modes = []
+    stored_gaps = state.get(session, state.TELEMETRY_GAPS_KEY)
     try:
-        gaps = _json.loads(state.get(session, state.TELEMETRY_GAPS_KEY) or "[]") or []
+        gaps = _json.loads(stored_gaps or "[]") or []
     except ValueError:
         gaps = []
     try:
@@ -9606,14 +9609,30 @@ def telemetry_ingest(
                         newest_trip, snap):
                     amended += 1
 
-    state.put(session, state.TELEMETRY_GAPS_KEY,
-              _json.dumps(gaps[-TELEMETRY_GAPS_MAX:]))
-    state.put(session, state.TELEMETRY_MODES_KEY,
-              _json.dumps(modes[-TELEMETRY_MODES_MAX:]))
+    # Only what actually moved. state.put commits, so each of these is its
+    # own round trip to the database, and three of the five change only when
+    # something happens: a trip closes, the car changes its mind about
+    # something, or the stream goes quiet. A parked car posts a batch every
+    # twenty seconds and none of those are true for hours at a time, while
+    # the trips blob — the largest of the five — was being rewritten
+    # byte-for-byte on every one of them.
+    #
+    # Comparing the serialised form rather than keeping a dirty flag: the
+    # flag is what goes wrong later, when a new code path mutates one of
+    # these and forgets to set it. A blob that did not change cannot be
+    # written by accident this way, and one that did cannot be skipped.
+    def put_if_changed(key: str, value: str, was: str | None) -> None:
+        if value != (was or ""):
+            state.put(session, key, value)
+
+    put_if_changed(state.TELEMETRY_GAPS_KEY,
+                   _json.dumps(gaps[-TELEMETRY_GAPS_MAX:]), stored_gaps)
+    put_if_changed(state.TELEMETRY_MODES_KEY,
+                   _json.dumps(modes[-TELEMETRY_MODES_MAX:]), stored_modes)
     state.put(session, state.TELEMETRY_LATEST_KEY, _json.dumps(latest))
     state.put(session, state.TELEMETRY_SHADOW_KEY, _json.dumps(shadows))
-    state.put(session, state.TELEMETRY_TRIPS_KEY,
-              _json.dumps(trips[-TELEMETRY_TRIPS_MAX:]))
+    put_if_changed(state.TELEMETRY_TRIPS_KEY,
+                   _json.dumps(trips[-TELEMETRY_TRIPS_MAX:]), stored_trips)
 
     try:
         seen = _json.loads(state.get(session, state.TELEMETRY_SEEN_KEY) or "{}") or {}
@@ -9622,6 +9641,11 @@ def telemetry_ingest(
     seen["first"] = seen.get("first") or now.isoformat(timespec="seconds")
     seen["last"] = now.isoformat(timespec="seconds")
     seen["last_record_ts_by_vin"] = last_seen_by_vin
+    # A single figure across all cars, from before this was per-VIN. Nothing
+    # has written it since, so it sat in every response reading thirteen
+    # hours stale beside the per-VIN value that was correct. An answer that
+    # is wrong is worse than no answer.
+    seen.pop("last_record_ts", None)
     seen["batches"] = int(seen.get("batches") or 0) + 1
     seen["records"] = int(seen.get("records") or 0) + len(kept)
     state.put(session, state.TELEMETRY_SEEN_KEY, _json.dumps(seen))
