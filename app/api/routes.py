@@ -9962,10 +9962,16 @@ def telemetry_modes(
         modes = _json.loads(state.get(session, state.TELEMETRY_MODES_KEY) or "[]") or []
     except ValueError:
         modes = []
-    if field:
-        modes = [m for m in modes if m.get("field") == field]
-    return {"changes": len(modes), "watching": list(TELEMETRY_MODE_FIELDS),
-            "recent": modes[-limit:]}
+    # changes is the whole log; matching is what the filter left. Reporting
+    # only the filtered count made an empty filter indistinguishable from an
+    # empty log — asked for DetailedChargeState mid-charge, this answered
+    # {"changes": 0, "recent": []}, which reads as the log having been wiped
+    # rather than as that one field not having moved yet.
+    matching = [m for m in modes if not field or m.get("field") == field]
+    return {"changes": len(modes), "field": field or None,
+            "matching": len(matching),
+            "watching": list(TELEMETRY_MODE_FIELDS),
+            "recent": matching[-limit:]}
 
 
 @router.get("/telemetry/gaps")

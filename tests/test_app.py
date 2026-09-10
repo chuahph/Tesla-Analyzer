@@ -5068,6 +5068,15 @@ def test_mode_changes_are_logged_with_the_moment_they_happened():
 
             one = client.get("/api/telemetry/modes?field=BMSState").json()
             assert {m["field"] for m in one["recent"]} == {"BMSState"}
+            # A filter narrows what comes back; it must not make the log look
+            # empty. Asked mid-charge for a field that had not moved yet, this
+            # answered {"changes": 0, "recent": []} and read as data loss.
+            assert one["changes"] == 3, "the whole log, not the filtered part"
+            assert one["matching"] == 2
+            assert one["field"] == "BMSState"
+
+            none = client.get("/api/telemetry/modes?field=HvacPower").json()
+            assert none["matching"] == 0 and none["changes"] == 3
     finally:
         state.put(sess, state.TELEMETRY_MODES_KEY, prev or "[]")
         sess.commit()
