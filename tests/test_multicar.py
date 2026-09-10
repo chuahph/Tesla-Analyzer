@@ -12,6 +12,20 @@ from app.models import ArrivalTailSample, Vehicle
 from app.sync import now_local as sync_now_local
 
 
+def _gap_base():
+    """A fixed hour of a recent morning, for the trip-gap tests.
+
+    Anchored to today rather than written as a literal. These tests were
+    pinned to 2026-08-11 and passed for a month, then failed at midnight on
+    2026-09-10 with no code change: /api/trip-gaps looks back thirty days,
+    and the first two drives had just aged out of the window. A test that
+    breaks by the calendar rather than by the code sends you hunting the
+    wrong change.
+    """
+    return (sync_now_local() - timedelta(days=7)).replace(
+        hour=8, minute=0, second=0, microsecond=0)
+
+
 @pytest.fixture(autouse=True)
 def _db_ready():
     """Ensure the schema exists for tests that use SessionLocal directly."""
@@ -5000,7 +5014,7 @@ def test_trip_gaps_finds_every_boundary_the_odometer_disagrees_about():
                     s.delete(d)
                 s.flush()
                 veh = s.query(Vehicle).first()
-                base = datetime.fromisoformat("2026-08-11T08:00")
+                base = _gap_base()
 
                 def add(i, s_odo, e_odo, start, mins, lost=0.0):
                     s.add(Drive(vehicle_id=veh.id, start_time=start,
@@ -5080,7 +5094,7 @@ def test_repair_all_reclaims_only_what_the_trips_measured_themselves():
                     s.delete(d)
                 s.flush()
                 veh = s.query(Vehicle).first()
-                base = datetime.fromisoformat("2026-08-11T08:00")
+                base = _gap_base()
 
                 def add(i, s_odo, e_odo, start, mins, lost=0.0):
                     s.add(Drive(vehicle_id=veh.id, start_time=start,
@@ -5194,7 +5208,7 @@ def test_trip_gaps_reconciles_spans_it_has_no_anchors_to_check():
                     s.delete(d)
                 s.flush()
                 veh = s.query(Vehicle).first()
-                base = datetime.fromisoformat("2026-08-11T08:00")
+                base = _gap_base()
 
                 def add(i, dist, mins, s_odo=None, e_odo=None):
                     s.add(Drive(vehicle_id=veh.id, start_time=base + timedelta(hours=i),
@@ -5269,7 +5283,7 @@ def test_trip_gaps_admits_the_boundaries_nothing_can_reach():
                     s.delete(d)
                 s.flush()
                 veh = s.query(Vehicle).first()
-                base = datetime.fromisoformat("2026-08-11T08:00")
+                base = _gap_base()
 
                 def add(i, dist, s_odo=None, e_odo=None):
                     s.add(Drive(vehicle_id=veh.id, start_time=base + timedelta(hours=i),
@@ -5332,14 +5346,15 @@ def test_trip_gaps_admits_the_boundaries_nothing_can_reach():
             # Trip A1 ran 10 km from base, so a reading of 992.0 taken just
             # before trip A1 leaves 8.0 km claimed against an 8.0 km span.
             mid = client.get(
-                "/api/trip-gaps?from_odo_km=992.0"
-                "&from_time=2026-08-11T08:30").json()
+                "/api/trip-gaps?from_odo_km=992.0&from_time="
+                + (base + timedelta(minutes=30)).isoformat(timespec="minutes")).json()
             assert mid["unanchored_blocks"] == 0
             assert mid["boundaries_unreachable"] == 1     # the pre-cutoff one
-            assert mid["oldest_trip_at"] == "2026-08-11T08:00"
+            assert mid["oldest_trip_at"] == base.isoformat(timespec="minutes")
             # The pair bounds the search: a usable reading is dated between
             # these two, and anything after the second proves nothing new.
-            assert mid["anchors_begin_at"] == "2026-08-11T10:00"
+            assert mid["anchors_begin_at"] == (
+                base + timedelta(hours=2)).isoformat(timespec="minutes")
 
             # A malformed timestamp is refused rather than silently ignored,
             # which would reconcile against the wrong set of trips.

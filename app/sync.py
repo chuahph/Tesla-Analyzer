@@ -3052,7 +3052,16 @@ def advance_shadow(shadow: dict[str, Any], snap: dict[str, Any]) -> dict[str, An
     # saying so — still_snap if it was seen to stop, otherwise the last thing
     # it sent. The closing odometer comes from this snapshot, which is newer
     # and measures the arrival better.
-    if open_at and shadow.get("bms_seen_drive"):
+    #
+    # Never while the car is moving. Only Drive, Support and Standby have
+    # been observed and the drivetrain must be live for the wheels to turn,
+    # so this should be unreachable — which is exactly why it is guarded. An
+    # unrecognised state arriving mid-journey would otherwise end a trip at
+    # speed, and this app has already been taught once what a single
+    # unexpected value does to a boundary. The trip simply stays open until
+    # the car is next seen stopped, which is where it ends anyway.
+    if (open_at and shadow.get("bms_seen_drive")
+            and float(snap.get("speed_kmh") or 0.0) <= ZERO_SPEED_KMH):
         bms_now = snap.get("bms_state")
         if bms_now is not None and bms_now != BMS_DRIVE:
             shadow["ended_by_bms"] = True
