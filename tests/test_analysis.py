@@ -2295,3 +2295,41 @@ def test_frozen_rates_never_pin_an_unmeasurable_place_as_unmeasurable():
     frozen = {"places": {"Home": 0.05}, "whole_history_kw": None}
     out = driving.vampire_drain(full, [], cap, rate_history=(full, []), frozen=frozen)
     assert out["kwh"] >= 0.0
+
+
+def test_cost_per_100km_ignores_charges_older_than_the_drive_history():
+    """The running-cost figure is a ratio, so both sides must cover the same
+    span. Purging trips while keeping charges (capacity is fitted from
+    charges) breaks that, and a wide window would divide a season of
+    charging by a weekend of driving.
+    """
+    from types import SimpleNamespace
+
+    from app.analysis import charging
+
+    def charge(day, kwh, cost):
+        return SimpleNamespace(
+            start_time=datetime(2025, 6, day, 12, 0),
+            end_time=datetime(2025, 6, day, 14, 0),
+            energy_added_kwh=kwh, cost=cost, charge_type="AC",
+            start_soc=50.0, end_soc=80.0, location="Home", is_free=False,
+            id=day, duration_min=120, max_power_kw=7.0)
+
+    def drive(day, km):
+        return SimpleNamespace(
+            id=day, start_time=datetime(2025, 6, day, 8, 0),
+            end_time=datetime(2025, 6, day, 8, 30),
+            distance_km=km, energy_used_kwh=km * 0.15,
+            start_location="Home", end_location="Office")
+
+    # Charges across the whole month; trips only in the last few days, as a
+    # purge would leave them.
+    charges = [charge(d, 20.0, 18.0) for d in (1, 5, 10, 15, 20, 28)]
+    drives = [drive(d, 50.0) for d in (28, 29)]
+
+    out = charging.analyze(charges, drives)
+    # 100 km driven, one charge inside that span: RM 18 per 100 km.
+    assert out["cost_per_100km"] == pytest.approx(18.0)
+    # The window's own totals are untouched — a charge that happened, happened.
+    assert out["total_sessions"] == 6
+    assert out["total_cost"] == pytest.approx(108.0)

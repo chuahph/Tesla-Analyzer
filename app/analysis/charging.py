@@ -96,7 +96,27 @@ def analyze(charges: list[Charge], drives: list[Drive] | None = None) -> dict[st
     # "Fuel cost" view: what the window's charging cost per 100 km actually
     # driven — the EV counterpart of a petrol car's RM/100km figure.
     drive_km = sum(d.distance_km for d in drives)
-    cost_per_100km = round(safe_div(total_cost, drive_km) * 100.0, 2) if drive_km else None
+    # Priced against only the charges that overlap the span the drives cover.
+    # This is a ratio between two measured quantities and it means nothing
+    # unless both describe the same period — and they stop describing the same
+    # period the moment the two histories have different starts.
+    #
+    # Not hypothetical: /api/data/purge-pre-telemetry deletes trips and keeps
+    # charges (capacity is fitted from charges, so taking them would cost far
+    # more than it saved). That leaves 25 charges spanning 53 days against 19
+    # trips spanning 3, and a 90-day window would divide ~500 kWh of charging
+    # by 36 km of driving and report it as the running cost.
+    #
+    # Only the ratio is narrowed. total_cost, the session list and every other
+    # figure still describe the window as asked for — a charge that happened
+    # in the window happened, whether or not this app kept the trips it paid
+    # for.
+    if drives and charges:
+        first_drive = min(d.start_time for d in drives)
+        ratio_cost = sum(c.cost for c in charges if c.end_time >= first_drive)
+    else:
+        ratio_cost = total_cost
+    cost_per_100km = round(safe_div(ratio_cost, drive_km) * 100.0, 2) if drive_km else None
 
     # Most recent first, so the session someone's most likely trying to fix
     # (the one they just noticed a wrong cost on) is right at the top.
