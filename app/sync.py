@@ -3146,6 +3146,36 @@ def advance_shadow(shadow: dict[str, Any], snap: dict[str, Any]) -> dict[str, An
     # to START would mean a trip that never opens until the next time the
     # lever moves, which may be at its destination. Opening still asks for
     # real motion, which is what keeps a stale gear from inventing a journey.
+    # Idle and climate, accumulated while the trip is open.
+    #
+    # Both were polling's guesses before this. idle_tracked was false on
+    # every streamed trip, so the dashboard marked the most accurate journeys
+    # it has recorded as estimates — correctly, since nothing had measured a
+    # stop. Telemetry is the better instrument for it: VehicleSpeed arrives
+    # every ten seconds where a poll sees the car once a minute at best.
+    #
+    # A stop counts only once it has lasted IDLE_STREAK_MIN, which is what
+    # separates a run of traffic lights from actually waiting somewhere.
+    # Climate counts by the second it was on, which is what decides how much
+    # of a trip's energy was not propulsion.
+    if open_at and last:
+        gap = ts - float(last["ts"])
+        # Nothing is inferred across a blackout. A car that went quiet for an
+        # hour was not idling for an hour, and counting it as such would put
+        # a fictional stop into the one figure this exists to measure.
+        if 0.0 < gap <= SHADOW_GAP_SEC:
+            if last.get("climate_on"):
+                shadow["climate_sec"] = float(shadow.get("climate_sec") or 0.0) + gap
+            stopped = float(snap.get("speed_kmh") or 0.0) <= ZERO_SPEED_KMH
+            run_since = shadow.get("idle_run_since")
+            if stopped and run_since is None:
+                shadow["idle_run_since"] = float(last["ts"])
+            elif not stopped and run_since is not None:
+                span = float(last["ts"]) - float(run_since)
+                if span >= IDLE_STREAK_MIN * 60.0:
+                    shadow["idle_sec"] = float(shadow.get("idle_sec") or 0.0) + span
+                shadow["idle_run_since"] = None
+
     parked_gear = (snap.get("shift") or "P") == "P"
     if is_driving(snap) and not (open_at and parked_gear):
         # Not without an odometer to start from. A telemetry message carries
@@ -3611,6 +3641,12 @@ def _shadow_close(shadow: dict[str, Any], end: dict[str, Any],
     exit_seen = bool(shadow.get("exit_seen"))
     ended_by_bms = bool(shadow.pop("ended_by_bms", False))
     ended_by_charge = bool(shadow.pop("ended_by_charge", False))
+    idle_sec = float(shadow.pop("idle_sec", 0.0) or 0.0)
+    climate_sec = float(shadow.pop("climate_sec", 0.0) or 0.0)
+    # An idle run still open at the close is the arrival itself — the trip
+    # ends at the moment the car stopped, so that stretch comes after it, not
+    # during it. Dropped rather than counted.
+    shadow.pop("idle_run_since", None)
     shadow["still_since"] = None
     shadow.pop("still_snap", None)
     shadow.pop("exit_seen", None)
@@ -3682,6 +3718,13 @@ def _shadow_close(shadow: dict[str, Any], end: dict[str, Any],
         # larger. Trips closed either side of that carried different answers
         # to the same question and the accuracy report added them together.
         # See _energy_unc_kwh in the API layer, which works it out on read.
+        # Measured, not estimated from average speed — which is what lets a
+        # streamed trip say its driving-only figure is real rather than
+        # wearing the dashboard's "estimated" badge for want of a stop
+        # nobody had recorded.
+        "idle_min": round(idle_sec / 60.0, 1),
+        "idle_tracked": True,
+        "climate_min": round(climate_sec / 60.0, 1),
         "soc_start": start.get("soc"),
         "soc_end": end.get("soc"),
         "max_speed_kmh": round(max_speed, 1),

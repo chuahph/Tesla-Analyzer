@@ -3054,6 +3054,15 @@ def _apply_shadow_to_drive(row, t: dict) -> None:
     if t.get("energy_kwh") is not None:
         row.energy_used_kwh = float(t["energy_kwh"])
         row.energy_estimated = False
+    # Measured on the stream, so the row can stop claiming its efficiency is
+    # a speed-based estimate. idle_tracked is what the dashboard's data
+    # quality badge reads, and until telemetry recorded a stop it was false
+    # on every streamed trip.
+    if t.get("idle_tracked"):
+        row.idle_min = float(t.get("idle_min") or 0.0)
+        row.idle_tracked = True
+    if t.get("climate_min") is not None:
+        row.climate_min = float(t["climate_min"])
     for field, key in (("start_soc", "soc_start"), ("end_soc", "soc_end"),
                        ("max_speed_kmh", "max_speed_kmh"),
                        ("avg_speed_kmh", "avg_speed_kmh"),

@@ -3542,6 +3542,92 @@ def test_a_bms_never_seen_in_drive_cannot_end_a_trip():
     assert shadow.get("open") is not None
 
 
+def _idle_tel(ts, odo_mi, kmh, climate=False):
+    return snapshot_from_telemetry({
+        "Odometer": odo_mi, "EnergyRemaining": 30.0, "Gear": "ShiftStateD",
+        "VehicleSpeed": kmh / MILES_TO_KM, "Soc": 50.0,
+        "HvacPower": "HvacPowerStateOn" if climate else "HvacPowerStateOff",
+    }, ts=ts)
+
+
+def test_a_streamed_trip_measures_its_own_idle_instead_of_guessing_it():
+    """idle_tracked was false on every streamed trip, so the dashboard marked
+    the most accurate journeys it has recorded as estimates — correctly, since
+    nothing had measured a stop.
+
+    Telemetry is the better instrument for it. VehicleSpeed arrives every ten
+    seconds; a poll sees the car once a minute at best. A stop counts only
+    once it has lasted IDLE_STREAK_MIN, which is what separates a run of
+    traffic lights from actually waiting somewhere.
+    """
+    shadow: dict = {}
+    t, odo = 0.0, 100.0
+    advance_shadow(shadow, _idle_tel(t, odo, 40.0, climate=True))
+    # Two minutes moving.
+    for _ in range(12):
+        t += 10; odo += 0.07
+        advance_shadow(shadow, _idle_tel(t, odo, 40.0, climate=True))
+    # Ninety seconds at a light: too short to be idling.
+    for _ in range(9):
+        t += 10
+        advance_shadow(shadow, _idle_tel(t, odo, 0.0, climate=True))
+    # Moving again.
+    for _ in range(6):
+        t += 10; odo += 0.07
+        advance_shadow(shadow, _idle_tel(t, odo, 40.0, climate=True))
+    # Eight minutes genuinely waiting, climate off for the last half.
+    for i in range(48):
+        t += 10
+        advance_shadow(shadow, _idle_tel(t, odo, 0.0, climate=i < 24))
+    # Off again, which is what banks the wait.
+    for _ in range(6):
+        t += 10; odo += 0.07
+        advance_shadow(shadow, _idle_tel(t, odo, 40.0))
+    t += 10
+    advance_shadow(shadow, snapshot_from_telemetry({
+        "Odometer": odo, "EnergyRemaining": 28.8, "Gear": "ShiftStateP",
+        "VehicleSpeed": 0.0, "Soc": 48.0,
+        "DoorState": {"DriverFront": True}}, ts=t))
+    trip = advance_shadow(shadow, snapshot_from_telemetry({
+        "Odometer": odo, "EnergyRemaining": 28.8, "Gear": "ShiftStateP",
+        "VehicleSpeed": 0.0, "Soc": 48.0}, ts=t + 240))
+
+    assert trip is not None
+    assert trip["idle_tracked"] is True
+    # The eight-minute wait, not the ninety-second light.
+    assert trip["idle_min"] == pytest.approx(8.0, abs=0.2)
+    # Climate ran from the start until halfway through that wait: two
+    # minutes moving, ninety seconds at the light, a minute moving again and
+    # four minutes of the wait, which is 8.7 and not the 8.0 the shape of the
+    # test suggests at a glance.
+    assert trip["climate_min"] == pytest.approx(8.7, abs=0.2)
+
+
+def test_a_blackout_is_not_counted_as_time_spent_idling():
+    """A car that went quiet for an hour was not waiting for an hour.
+
+    The gap is unmeasured, and putting it into the one figure this exists to
+    measure would be worse than the estimate it replaces.
+    """
+    shadow: dict = {}
+    advance_shadow(shadow, _idle_tel(0, 100.0, 40.0))
+    advance_shadow(shadow, _idle_tel(10, 100.1, 40.0))
+    # Stops, then says nothing for twenty minutes, then drives on.
+    advance_shadow(shadow, _idle_tel(20, 100.1, 0.0))
+    advance_shadow(shadow, _idle_tel(20 + 1200, 100.1, 40.0))
+    for i in range(1, 7):
+        advance_shadow(shadow, _idle_tel(20 + 1200 + i * 10, 100.1 + i * 0.07, 40.0))
+    trip = advance_shadow(shadow, snapshot_from_telemetry({
+        "Odometer": 100.6, "EnergyRemaining": 28.8, "Gear": "ShiftStateP",
+        "VehicleSpeed": 0.0, "Soc": 48.0,
+        "DoorState": {"DriverFront": True}}, ts=20 + 1200 + 300))
+    trip = trip or advance_shadow(shadow, snapshot_from_telemetry({
+        "Odometer": 100.6, "EnergyRemaining": 28.8, "Gear": "ShiftStateP",
+        "VehicleSpeed": 0.0, "Soc": 48.0}, ts=20 + 1200 + 600))
+    assert trip is not None
+    assert trip["idle_min"] == 0.0, "the silence was counted as waiting"
+
+
 def test_a_trip_is_not_charged_for_standing_still_after_it_ended():
     """Time and energy came from different snapshots, and it showed.
 

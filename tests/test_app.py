@@ -4855,6 +4855,7 @@ def test_telemetry_is_carried_into_the_drive_history_without_losing_polling():
                     "distance_km": 11.25, "duration_min": 35.1, "energy_kwh": 1.9,
                     "wh_per_km": 168.9, "soc_start": 60.5, "soc_end": 57.9,
                     "max_speed_kmh": 71.2, "avg_speed_kmh": 19.2,
+                    "idle_min": 4.0, "idle_tracked": True, "climate_min": 12.0,
                     "start_odo_km": 31162.199, "end_odo_km": 31173.449,
                     "ended_on": "exit"}
             state.put(sess, state.TELEMETRY_TRIPS_KEY, _json.dumps([trip]))
@@ -4877,6 +4878,12 @@ def test_telemetry_is_carried_into_the_drive_history_without_losing_polling():
             # The 16-minute blind head is gone: the row now starts when the
             # car actually moved, which is the whole point of the switch.
             assert row.duration_min == pytest.approx(35.1, abs=0.1)
+            # And the row stops claiming its efficiency is a speed-based
+            # estimate: the stream measured the stop, so idle_tracked is
+            # true and the dashboard's "estimated" badge clears.
+            assert row.idle_tracked is True
+            assert row.idle_min == pytest.approx(4.0, abs=0.01)
+            assert row.climate_min == pytest.approx(12.0, abs=0.01)
             # And polling's own figures survive, or the comparison would be
             # scoring telemetry against itself from here on.
             assert row.polled_km == pytest.approx(11.4, abs=0.001)
