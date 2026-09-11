@@ -6913,3 +6913,61 @@ def test_telemetry_raises_the_parked_alerts_and_does_not_double_send():
     finally:
         (settings.app_passcode, settings.low_soc_notify_pct,
          settings.intrusion_notify) = saved
+
+
+def test_status_staleness_is_judged_against_the_source_own_cadence():
+    """"Stale" has to mean "this source has gone quiet", not "ten minutes
+    passed".
+
+    The threshold was a fixed ten minutes, sized for a cron ticking every
+    minute. At a thirty-minute cron the card reads stale for twenty minutes in
+    every thirty with nothing wrong; at four-hourly it never reads anything
+    else. And the two sources now run three orders of magnitude apart — a
+    streaming car writes every twenty seconds, a watchdog cron every few
+    hours — so one constant cannot serve both.
+    """
+    import json as _json
+
+    from app import state
+    from app.api.routes import CRON_STALE_FACTOR, CRON_STALE_MIN, _save_last_status
+    from app.database import SessionLocal
+
+    vin = "TESTVIN-CADENCE"
+    with SessionLocal() as s:
+        key = state.scoped(state.LAST_STATUS_KEY, vin)
+        base = 1_789_000_000.0
+        # A cron ticking every 30 minutes, four times.
+        for i in range(4):
+            _save_last_status(s, vin, status="asleep", ts=base + i * 1800,
+                              soc=70.0, source="polled")
+        s.commit()
+        stored = _json.loads(state.get(s, key))
+        observed = stored["cadence"]["polled"]
+        assert 1500 <= observed <= 1800, observed   # converging on 1800 s
+
+        # Which makes the threshold ~90 min, not 10.
+        allow = max(CRON_STALE_MIN, observed / 60.0 * CRON_STALE_FACTOR)
+        assert allow > 60.0
+
+        # A streaming source writing every 20 s must not get a 60-second
+        # threshold — the floor is what stops a fast source making the card
+        # twitchy.
+        for i in range(4):
+            _save_last_status(s, vin, status="online", ts=base + 10_000 + i * 20,
+                              soc=70.0, source="telemetry")
+        s.commit()
+        stored = _json.loads(state.get(s, key))
+        fast = stored["cadence"]["telemetry"]
+        assert fast <= 25, fast
+        assert max(CRON_STALE_MIN, fast / 60.0 * CRON_STALE_FACTOR) == CRON_STALE_MIN
+
+        # Each source keeps its own cadence: the stream's 20 s must not
+        # redefine what "quiet" means for a half-hourly cron.
+        assert stored["cadence"]["polled"] == observed
+
+        # A long gap is the car having been asleep, not the cron having
+        # slowed, and must not be allowed to raise the threshold for hours.
+        _save_last_status(s, vin, status="asleep", ts=base + 200_000,
+                          soc=70.0, source="polled")
+        s.commit()
+        assert _json.loads(state.get(s, key))["cadence"]["polled"] == observed

@@ -78,6 +78,10 @@ def _trim_rate_kw(past_drives: list, past_charges: list,
 # every tick regardless of whether the car itself is reachable, so a gap
 # this large is a real signal, not normal jitter.
 CRON_STALE_MIN = 10.0
+# How many of a source's own intervals may pass before its word is stale.
+# Two would flag on one missed tick, which a cron service does routinely; at
+# three a genuinely stopped cron still shows within a couple of intervals.
+CRON_STALE_FACTOR = 3.0
 
 # How long "offline" (as opposed to a clean "asleep") must be sustained before
 # an open trip is closed on it. Some accounts/cars report a genuinely-sleeping
@@ -399,17 +403,48 @@ def _log_tick_isolated(detail: str, session: Session | None = None) -> None:
 
 
 def _save_last_status(session: Session, vin: str, **fields) -> None:
-    """Persist the cron's own last determination of what the car was doing.
+    """Persist whichever source last determined what the car was doing.
 
-    Written on every /api/sync tick (including "found it asleep") so the
-    dashboard can show a near-live status straight from the database on page
-    load — mirroring what a push-based telemetry feed would give you, but
-    built from polling: the cron is the thing pinging Tesla, writing the
-    result to Neon every time, and the dashboard only ever reads that back.
+    Written on every /api/sync tick (including "found it asleep") and on every
+    telemetry batch, so the dashboard shows a near-live status straight from
+    the database on page load without itself pinging anything.
+
+    Also records how far apart that source's own writes actually fall, which
+    is what makes "stale" mean something. The threshold used to be a fixed ten
+    minutes, sized for a cron ticking every minute — at a thirty-minute cron
+    the card would have read stale for twenty minutes in every thirty with
+    nothing whatever wrong, and at four-hourly it would never have read
+    anything else. Measured rather than configured, because the cron's rate is
+    set on a website this app cannot see, and because the two sources run at
+    rates three orders of magnitude apart: a streaming car writes every twenty
+    seconds, a watchdog cron every few hours.
     """
     import json as _json
 
-    state.put(session, state.scoped(state.LAST_STATUS_KEY, vin), _json.dumps(fields))
+    key = state.scoped(state.LAST_STATUS_KEY, vin)
+    try:
+        prev = _json.loads(state.get(session, key) or "{}") or {}
+    except ValueError:
+        prev = {}
+    source = fields.get("source") or "polled"
+    cadence = dict(prev.get("cadence") or {})
+    prev_ts = (prev.get("cadence_ts") or {}).get(source)
+    now_ts = float(fields.get("ts") or 0.0)
+    if prev_ts and now_ts > float(prev_ts):
+        gap = now_ts - float(prev_ts)
+        # Smoothed, and only over plausible gaps. A single long gap is the car
+        # having been asleep, not the cron having slowed down, and letting one
+        # of those set the threshold would mask a genuinely dead cron for
+        # hours afterwards.
+        if 1.0 <= gap <= 6 * 3600.0:
+            was = float(cadence.get(source) or gap)
+            cadence[source] = round(0.7 * was + 0.3 * gap, 1)
+    cadence_ts = dict(prev.get("cadence_ts") or {})
+    if now_ts:
+        cadence_ts[source] = now_ts
+    fields["cadence"] = cadence
+    fields["cadence_ts"] = cadence_ts
+    state.put(session, key, _json.dumps(fields))
 
 
 def _first_vehicle(session: Session) -> Vehicle:
@@ -9714,7 +9749,16 @@ def summary(
     # browser's), so a stale/wrong client clock can't mask or fake this.
     if last_status is not None:
         age_min = (datetime.now().timestamp() - (last_status.get("ts") or 0)) / 60.0
-        last_status["stale"] = age_min > CRON_STALE_MIN
+        # Judged against how often this source actually speaks, not a constant.
+        # CRON_STALE_MIN is the floor, so a fast source cannot make the card
+        # twitchy; the multiple is what lets a slow one be quiet in peace.
+        source = last_status.get("source") or "polled"
+        observed = (last_status.get("cadence") or {}).get(source)
+        allow_min = max(CRON_STALE_MIN,
+                        float(observed) / 60.0 * CRON_STALE_FACTOR) if observed \
+            else CRON_STALE_MIN
+        last_status["stale"] = age_min > allow_min
+        last_status["stale_after_min"] = round(allow_min, 1)
     since = None
     window_label = None
     live = None
