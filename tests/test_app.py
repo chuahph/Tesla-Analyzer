@@ -6581,3 +6581,95 @@ def test_supplied_frozen_rates_are_bounded_before_they_are_trusted():
                 params={"rates": "not json"}).json()
     finally:
         settings.app_passcode = old
+
+
+def test_telemetry_writes_battery_readings_on_pollings_own_rules():
+    """The stream writes the table polling was the only writer of.
+
+    Battery health, the current-SoC gauge, odometer continuity and
+    gap_sentry_state all read BatteryReading, and gap_sentry_state is the one
+    that reshapes real energy — it decides whether a parked gap is priced at
+    the armed rate or the place rate. Cutting the cron starves all four unless
+    the stream writes them.
+    """
+    import json as _json
+
+    from app import state
+    from app.config import get_settings
+    from app.database import SessionLocal
+    from app.models import BatteryReading, Vehicle
+
+    settings = get_settings()
+    old_pc = settings.app_passcode
+    settings.app_passcode = ""
+    vin = "TESTVIN-TELEBATT"
+
+    def batch(ts_iso, soc, sentry="SentryModeStateOff", odo_miles=19337.0):
+        return {"records": [{
+            "vin": vin, "createdAt": ts_iso,
+            "data": [{"key": "Soc", "value": {"doubleValue": soc}},
+                     {"key": "RatedRange", "value": {"doubleValue": 250.0}},
+                     {"key": "Odometer", "value": {"doubleValue": odo_miles}},
+                     {"key": "SentryMode", "value": {"stringValue": sentry}},
+                     {"key": "HvacPower", "value": {"stringValue": "HvacPowerStateOff"}},
+                     {"key": "Gear", "value": {"stringValue": "ShiftStateP"}},
+                     {"key": "VehicleSpeed", "value": {"doubleValue": 0}}],
+        }]}
+
+    try:
+        with TestClient(app) as client:
+            with SessionLocal() as s:
+                s.add(Vehicle(vin=vin, name="Test", model="Model 3"))
+                s.commit()
+                vid = s.scalars(select(Vehicle).where(Vehicle.vin == vin)).first().id
+                state.put(s, state.TELEMETRY_LATEST_KEY, _json.dumps({}))
+                state.put(s, state.TELEMETRY_SHADOW_KEY, _json.dumps({vin: {}}))
+                s.commit()
+
+            def rows():
+                with SessionLocal() as s:
+                    return s.scalars(
+                        select(BatteryReading)
+                        .where(BatteryReading.vehicle_id == vid)
+                        .order_by(BatteryReading.ts)).all()
+
+            # First reading: nothing stored yet, so it writes.
+            out = client.post("/api/telemetry", json=batch("2026-09-12T02:00:00Z", 80.0))
+            assert out.json()["battery_readings"] == 1
+            assert len(rows()) == 1
+
+            # A batch a moment later with SoC unmoved and no state change is
+            # not a reading. A parked car posts one of these every twenty
+            # seconds — writing each would be 1,700 rows a day.
+            out = client.post("/api/telemetry", json=batch("2026-09-12T02:00:40Z", 80.0))
+            assert out.json()["battery_readings"] == 0
+            assert len(rows()) == 1
+
+            # Sentry arming is a reading even with SoC unmoved — that is the
+            # whole point of the column, and SoC will not have moved a full
+            # point by the time the car parks and arms.
+            out = client.post("/api/telemetry", json=batch(
+                "2026-09-12T02:01:00Z", 80.0, sentry="SentryModeStateArmed"))
+            assert out.json()["battery_readings"] == 1
+            assert rows()[-1].sentry_mode is True
+
+            # A whole point of SoC is a reading.
+            out = client.post("/api/telemetry", json=batch(
+                "2026-09-12T03:00:00Z", 79.0, sentry="SentryModeStateArmed"))
+            assert out.json()["battery_readings"] == 1
+
+            # A replayed record older than what is stored must not be written:
+            # gap_sentry_state and odometer_continuity both read this table as
+            # a sequence.
+            out = client.post("/api/telemetry", json=batch(
+                "2026-09-12T01:00:00Z", 60.0, sentry="SentryModeStateOff"))
+            assert out.json()["battery_readings"] == 0
+            stored = rows()
+            assert stored == sorted(stored, key=lambda r: r.ts)
+
+            # Fields the configured set does not carry stay unknown, not False
+            # — the column exists to keep those distinct.
+            assert stored[-1].dashcam_state is None
+            assert stored[-1].cabin_overheat_protection is None
+    finally:
+        settings.app_passcode = old_pc

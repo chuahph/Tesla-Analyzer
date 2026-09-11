@@ -10201,6 +10201,70 @@ def _telemetry_value(entry: dict) -> Any:
     return value
 
 
+def _telemetry_battery_reading(session: Session, vin: str, snap: dict) -> bool:
+    """Write a BatteryReading from the stream, on polling's own rules.
+
+    Every dashboard figure that is not a trip reads this table: battery health
+    and the degradation trend, the current-SoC fuel gauge, odometer continuity,
+    and — the one that reshapes real energy — gap_sentry_state, which decides
+    whether a parked gap is priced at the armed rate or the place rate.
+
+    Polling is the only thing that has ever written these, so cutting the cron
+    to a few ticks a day starves all four. The stream already carries Soc,
+    RatedRange, Odometer, SentryMode at ten seconds and HvacPower, which is
+    every column this table fills from a poll bar three.
+
+    Same trigger as the polled path (see _process_vehicle): a whole point of
+    SoC, or a watched state changing, or no reading at all yet. A parked car
+    posts a batch every twenty seconds and none of those are true for hours on
+    end, so this writes about as often as polling did rather than 1,700 times
+    a day.
+    """
+    if not (snap.get("soc") or 0) > 0 or not (snap.get("range_km") or 0) > 0:
+        return False
+    vehicle = session.scalars(select(Vehicle).where(Vehicle.vin == vin)).first()
+    if vehicle is None:
+        return False
+    last = session.scalars(
+        select(BatteryReading).where(BatteryReading.vehicle_id == vehicle.id)
+        .order_by(BatteryReading.ts.desc())
+    ).first()
+    sentry_now = snap.get("sentry_mode")
+    climate_now = snap.get("climate_on")
+    # Only the two states the stream actually reports. The polled path also
+    # compares dashcam, centre display and cabin-overheat protection — none of
+    # which are in the configured field set, so they arrive as None here.
+    # Comparing them would read every telemetry reading as "changed" against
+    # every polled one and write a row per batch.
+    changed = last is not None and (
+        last.sentry_mode != sentry_now or last.climate_on != climate_now)
+    if not (last is None or abs(last.soc - snap["soc"]) >= 1.0 or changed):
+        return False
+    ts = datetime.fromtimestamp(snap["ts"], sync_mod.MYT).replace(tzinfo=None)
+    if last is not None and ts <= last.ts:
+        # A replayed batch is older than what is already stored. Writing it
+        # would put the table out of order, and gap_sentry_state and
+        # odometer_continuity both read it as a sequence.
+        return False
+    session.add(BatteryReading(
+        vehicle_id=vehicle.id,
+        ts=ts,
+        soc=snap["soc"],
+        range_km=round(snap["range_km"], 1),
+        odo_km=round(snap.get("odo_km") or 0.0, 1),
+        sentry_mode=sentry_now,
+        climate_on=climate_now,
+        # Not streamed. None is "unknown", which is what these genuinely are
+        # here — and the column was built to keep that distinct from a
+        # confirmed off (see database.py).
+        cabin_overheat_protection=None,
+        cabin_overheat_protection_actively_cooling=None,
+        dashcam_state=None,
+        center_display_state=None,
+    ))
+    return True
+
+
 @router.post("/telemetry")
 def telemetry_ingest(
     payload: dict = Body(...), session: Session = Depends(get_session)
@@ -10223,6 +10287,12 @@ def telemetry_ingest(
     kept = []
     amended = 0
     recovered = 0
+    # The newest composite this batch produced, per car. One battery reading is
+    # considered per batch from it rather than one per record: the records in a
+    # batch are seconds apart and describe one state of the car, so judging
+    # each would ask the same question fifty times and answer it once.
+    last_snaps: dict[str, dict] = {}
+    readings_written = 0
     for record in records:
         if not isinstance(record, dict):
             continue
@@ -10408,6 +10478,11 @@ def telemetry_ingest(
         ts = _telemetry_ts(record.get("created_at"))
         if ts:
             snap = sync_mod.snapshot_from_telemetry(car, ts)
+            # Newest wins, and a replay cannot displace it: a buffered record
+            # arriving late still describes an older state of the car.
+            seen = last_snaps.get(vin)
+            if seen is None or ts >= seen["ts"]:
+                last_snaps[vin] = snap
             shadow = shadows.setdefault(vin, {})
             # Charges run on their own machine. A charge is not a trip with
             # the sign flipped: it opens on a state the car reports directly,
@@ -10480,6 +10555,10 @@ def telemetry_ingest(
     # flag is what goes wrong later, when a new code path mutates one of
     # these and forgets to set it. A blob that did not change cannot be
     # written by accident this way, and one that did cannot be skipped.
+    for vin, snap in last_snaps.items():
+        if _telemetry_battery_reading(session, vin, snap):
+            readings_written += 1
+
     def put_if_changed(key: str, value: str, was: str | None) -> None:
         if value != (was or ""):
             state.put(session, key, value)
@@ -10517,6 +10596,9 @@ def telemetry_ingest(
             # Readings that arrived after their trip had been closed and were
             # folded into its ending rather than dropped.
             "amended_tails": amended, "recovered_gaps": recovered,
+            # BatteryReading rows the stream wrote. Polling was the only thing
+            # that ever wrote these, and four dashboard figures read them.
+            "battery_readings": readings_written,
             "seen": seen}
 
 
