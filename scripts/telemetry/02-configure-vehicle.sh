@@ -406,12 +406,30 @@ if [ "${HTTP:0:1}" = "2" ]; then
   curl -sS "$BASE/api/1/vehicles/$VIN/fleet_telemetry_config" \
     -H "Authorization: Bearer $(jq -r .access_token "$WORK/tok.json")" \
     -o "$WORK/state.json" 2>/dev/null || true
-  # .synced, not .response.synced. The GET is not wrapped the way the POST
-  # is, so this read "unknown" on every run since it was written — including
-  # the two runs on 11 September that did land on the car.
-  SYNCED=$(jq -r '.synced // .response.synced // "unknown"' "$WORK/state.json" 2>/dev/null)
+  # Read with has(), not with //. jq's alternative operator treats false the
+  # same as null, so `.synced // "unknown"` turns the single most interesting
+  # answer this endpoint can give — the car has NOT taken it yet — into
+  # "unknown", which is what every run of this script has printed, including
+  # the ones where Tesla was plainly answering false. Checked both wrapped
+  # and unwrapped because which one comes back is Tesla's business.
+  SYNCED=$(jq -r 'def pick: if type=="object" and has("synced")
+                            then (.synced|tostring) else empty end;
+                  [pick, (if type=="object" and (.response|type)=="object"
+                          then (.response|pick) else empty end)]
+                  | if length > 0 then .[0] else "unknown" end' \
+             "$WORK/state.json" 2>/dev/null) || SYNCED=""
+  [ -n "$SYNCED" ] || SYNCED="unknown"
   echo "  synced: $SYNCED"
-  [ "$SYNCED" = "true" ] || echo "  (not yet — the car applies it when it next wakes)"
+  case "$SYNCED" in
+    true)  ;;
+    false) echo "  (not yet — the car applies it when it next wakes)" ;;
+    # Neither true nor false means the answer was not readable, which is a
+    # different thing from a car that has not taken the configuration. Show
+    # what came back rather than leaving the reader to guess which it was.
+    *)     echo "  (Tesla did not answer that question — what came back was:)"
+           head -c 300 "$WORK/state.json" 2>/dev/null; echo
+           echo "  Ask the app instead: $APP_URL/api/telemetry/config" ;;
+  esac
 fi
 
 case "$HTTP" in
