@@ -7589,3 +7589,62 @@ def test_the_dashboard_settles_a_trip_that_ended_while_the_car_slept():
             state.put(s, state.TELEMETRY_SHADOW_KEY, "{}")
             state.put(s, state.TELEMETRY_TRIPS_KEY, "[]")
             s.commit()
+
+
+def test_the_live_readout_comes_from_the_stream_not_the_last_poll():
+    """A live readout is only live if it is live.
+
+    The current-drive panel read the polled open trip and the polled snapshot,
+    which are as fresh as the last tick — half an hour at the new cron, and at
+    the four-hourly watchdog no readout at all. The stream has the journey in
+    flight to the second and the shadow machine holds the same pair.
+    """
+    import json as _json
+
+    from app import state, sync as sync_mod
+    from app.config import get_settings
+    from app.database import SessionLocal
+    from app.models import Vehicle
+
+    settings = get_settings()
+    old_pc = settings.app_passcode
+    settings.app_passcode = ""
+    vin = "TESTVIN-LIVE"
+    try:
+        with TestClient(app) as client:
+            with SessionLocal() as s:
+                s.add(Vehicle(vin=vin, name="Test", model="Model 3"))
+                s.commit()
+                now_ts = sync_mod.to_epoch(sync_mod.now_local())
+                # The polled pair is stale: 8 km, half an hour old.
+                state.put(s, state.scoped(state.OPEN_TRIP_KEY, vin), _json.dumps(
+                    {"ts": now_ts - 1800, "odo_km": 31000.0, "soc": 70.0,
+                     "range_km": 300.0, "max_speed": 60.0}))
+                state.put(s, state.scoped(state.SNAPSHOT_KEY, vin), _json.dumps(
+                    {"ts": now_ts - 1740, "odo_km": 31008.0, "soc": 69.0,
+                     "range_km": 296.0, "speed_kmh": 50.0, "shift": "D"}))
+                # The stream has the same journey, 22 km in, seconds ago.
+                state.put(s, state.TELEMETRY_SHADOW_KEY, _json.dumps({vin: {
+                    "open": {"ts": now_ts - 1800, "odo_km": 31000.0, "soc": 70.0,
+                             "range_km": 300.0, "energy_kwh": 48.0,
+                             "max_speed": 60.0, "shift": "D", "speed_kmh": 0.0},
+                    "last": {"ts": now_ts - 20, "odo_km": 31022.0, "soc": 66.0,
+                             "range_km": 284.0, "energy_kwh": 44.6,
+                             "shift": "D", "speed_kmh": 63.0},
+                }}))
+                s.commit()
+
+            client.post("/api/active-vehicle", json={"vin": vin})
+            live = client.get("/api/summary?current_drive=true").json()["live_trip"]
+
+            assert live is not None
+            # The stream's 22 km, not the poll's 8.
+            assert round(live["distance_km"], 1) == 22.0
+    finally:
+        settings.app_passcode = old_pc
+        with SessionLocal() as s:
+            v = s.query(Vehicle).filter(Vehicle.vin == vin).first()
+            if v:
+                s.delete(v)
+            state.put(s, state.TELEMETRY_SHADOW_KEY, "{}")
+            s.commit()

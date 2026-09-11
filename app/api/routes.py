@@ -10024,10 +10024,17 @@ def summary(
     window_label = None
     live = None
     if current_drive:
-        open_trip = _json.loads(
-            state.get(session, state.scoped(state.OPEN_TRIP_KEY, vehicle.vin)) or "null")
-        snap_raw = state.get(session, state.scoped(state.SNAPSHOT_KEY, vehicle.vin))
-        snap = _json.loads(snap_raw) if snap_raw else None
+        # The stream first. It has the journey in flight to the second, where
+        # the polled pair below is only ever as fresh as the last tick — at
+        # thirty minutes that is a live readout half an hour old, and at the
+        # four-hourly watchdog it is no readout at all.
+        open_trip, snap = _live_from_stream(session, vehicle.vin)
+        if open_trip is None:
+            open_trip = _json.loads(
+                state.get(session, state.scoped(state.OPEN_TRIP_KEY, vehicle.vin))
+                or "null")
+            snap_raw = state.get(session, state.scoped(state.SNAPSHOT_KEY, vehicle.vin))
+            snap = _json.loads(snap_raw) if snap_raw else None
         if open_trip and snap:
             live = sync_mod.live_trip(open_trip, snap, capacity_kwh, settings.drive_min_km)
             live["eta"] = _live_eta(session, snap, live, capacity_kwh)
@@ -10704,6 +10711,42 @@ def _telemetry_value(entry: dict) -> Any:
             return None
         return inner
     return value
+
+
+def _live_from_stream(session: Session, vin: str):
+    """The trip in flight, as the stream has it. (open_trip, snapshot) or None.
+
+    live_trip() wants the snapshot a journey opened on and the latest one, and
+    the shadow machine holds exactly those: `open` is the record the trip
+    started from and `last` is the one it most recently stepped on. Both are
+    the same shape as the polled pair, because both come from a snapshot
+    builder — so nothing downstream has to know which source it got.
+
+    Preferred over the polled pair because it is current. A car streams every
+    twenty seconds while it is moving; the cron is half an hour behind at
+    best, and the whole point of a live readout is that it is live.
+    """
+    import json as _json
+
+    try:
+        shadows = _json.loads(state.get(session, state.TELEMETRY_SHADOW_KEY) or "{}") or {}
+        latest = _json.loads(state.get(session, state.TELEMETRY_LATEST_KEY) or "{}") or {}
+    except ValueError:
+        return None, None
+    shadow = (shadows.get(vin) or {}) if isinstance(shadows, dict) else {}
+    open_trip = shadow.get("open")
+    if not isinstance(open_trip, dict) or open_trip.get("ts") is None:
+        return None, None
+    snap = shadow.get("last")
+    if not isinstance(snap, dict) or snap.get("ts") is None:
+        # The machine has no last step yet — rebuild from the running
+        # composite, which is the car as of the newest record folded in.
+        car = latest.get(vin) if isinstance(latest, dict) else None
+        stamp = _telemetry_ts((car or {}).get("_ts")) if isinstance(car, dict) else None
+        if not isinstance(car, dict) or not stamp:
+            return None, None
+        snap = sync_mod.snapshot_from_telemetry(car, stamp)
+    return open_trip, snap
 
 
 def _telemetry_battery_reading(session: Session, vin: str, snap: dict) -> bool:
