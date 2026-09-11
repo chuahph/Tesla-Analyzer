@@ -1462,12 +1462,25 @@ def _build_info() -> dict:
 def health(session: Session = Depends(get_session)):
     source = state.data_source(session)
     mode = "live" if state.is_live(session) else ("imported" if source == "imported" else "demo")
+    settings = get_settings()
     return {
         "status": "ok",
         "mode": mode,
         "source": source,
         "oauth_available": auth.oauth_configured(),
         "build": _build_info(),
+        # What the polling tick is for on this deployment. Reported because it
+        # is set as an environment variable on the host, which means there is
+        # otherwise no way to tell from here whether it took — and the two
+        # states differ in what gets written to real history.
+        "polling": {
+            "writes_history": bool(getattr(settings, "polling_writes", True)),
+            "bridge_quiet_alert_min": float(
+                getattr(settings, "bridge_quiet_alert_min", 0.0) or 0.0),
+            "role": ("data source and watchdog"
+                     if getattr(settings, "polling_writes", True)
+                     else "watchdog only — wake, reachability, stream silence"),
+        },
     }
 
 
