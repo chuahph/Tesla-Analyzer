@@ -322,6 +322,24 @@ class SentryIndex:
         self._ts = [ts for ts, _ in rows]
         self._state = [st for _, st in rows]
 
+    @classmethod
+    def from_sorted(cls, pairs) -> "SentryIndex":
+        """Build from (ts, sentry_mode) pairs the DATABASE has already ordered.
+
+        The same index, skipping the two things that cost at this size: a
+        Python sort of the car's whole reading history, and an attribute
+        lookup per row to get at two values the query already returns in
+        order. Index access instead, because a row here is a plain pair.
+
+        The caller owns the ordering claim. Hand it unordered pairs and every
+        bisect below silently answers the wrong question, so this is only for
+        a query that says ORDER BY.
+        """
+        index = cls.__new__(cls)
+        index._ts = [pair[0] for pair in pairs]
+        index._state = [pair[1] for pair in pairs]
+        return index
+
     def __len__(self) -> int:
         return len(self._ts)
 

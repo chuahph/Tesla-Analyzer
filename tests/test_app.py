@@ -6021,6 +6021,65 @@ def test_a_trip_is_only_compared_against_its_own_car():
         settings.app_passcode = old_pc
 
 
+def test_the_sentry_index_answers_the_same_from_two_columns_as_from_whole_rows(session):
+    """The readings query stopped building ORM objects. It must not have
+    stopped answering the same question.
+
+    This is the car's entire reading history on every dashboard load, and it
+    only grows: at 40,000 readings, materialising whole rows cost 415 ms of an
+    809 ms page while every query on it put together cost 56 ms. The database
+    was never the problem. But the fix narrows what is loaded to two columns
+    and drops the readings with no sentry state at all, and either of those
+    could quietly change an answer — so the cheap index is checked against one
+    built the old way, over the whole rows, across every kind of window.
+    """
+    from datetime import timedelta as _td
+
+    from app.api.routes import _parked_readings
+    from app.analysis.driving import SentryIndex
+    from app.models import BatteryReading, Vehicle
+
+    car = Vehicle(name="Mine", vin="SENTRYVIN0000001")
+    session.add(car)
+    session.flush()
+
+    base = datetime(2026, 9, 1, 8, 0)
+    # Armed, then not, then unknown, then armed again — and deliberately
+    # inserted out of order, because the index promises sorted answers and the
+    # new one takes that ordering from the query rather than doing it itself.
+    pattern = [(0, True), (30, True), (60, False), (90, None),
+               (120, None), (150, False), (180, True), (210, None)]
+    for minutes, armed in reversed(pattern):
+        session.add(BatteryReading(
+            vehicle_id=car.id, ts=base + _td(minutes=minutes),
+            soc=70.0, range_km=300.0, odo_km=1000.0 + minutes,
+            sentry_mode=armed))
+    session.commit()
+
+    cheap = _parked_readings(session, car.id)
+    whole = SentryIndex(session.query(BatteryReading).all())
+
+    windows = [
+        (base, base + _td(minutes=210)),          # everything
+        (base, base + _td(minutes=45)),           # armed only
+        (base + _td(minutes=55), base + _td(minutes=65)),    # one false
+        (base + _td(minutes=85), base + _td(minutes=125)),   # only unknowns
+        (base + _td(minutes=95), base + _td(minutes=115)),   # inside a run
+        (base + _td(minutes=145), base + _td(minutes=185)),  # false then armed
+        (base - _td(minutes=60), base - _td(minutes=30)),    # before any
+        (base + _td(minutes=300), base + _td(minutes=360)),  # after all
+    ]
+    for start, end in windows:
+        assert cheap.state(start, end) == whole.state(start, end), (
+            f"disagreed about {start.time()}-{end.time()}: "
+            f"{cheap.state(start, end)} vs {whole.state(start, end)}")
+
+    # A window of only-unknown readings still reads as unknown, which is the
+    # case the None-dropping could have broken: absence has to keep meaning
+    # "the car was unreachable", not "the car was not armed".
+    assert cheap.state(base + _td(minutes=95), base + _td(minutes=115)) is None
+
+
 def test_energy_uncertainty_uses_the_interval_the_trip_was_driven_under():
     """A trip does not get more precise because the car was reconfigured.
 

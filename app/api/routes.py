@@ -1157,16 +1157,33 @@ def _place_parked_rates(session: Session) -> dict[str, float]:
             for p in session.scalars(select(Place)) if p.parked_draw_w}
 
 
-def _parked_readings(session: Session, vehicle_id: int) -> list:
+def _parked_readings(session: Session, vehicle_id: int):
     """Every battery reading, for telling which parks had Sentry armed.
 
-    /api/sync writes one on any sentry_mode change, so this is enough to state
+    A reading is written on any sentry_mode change, so this is enough to state
     each gap even where SoC never moved a whole point — see
     driving.gap_sentry_state.
+
+    Two columns, not whole rows, and indexed here rather than by each caller.
+    This is the car's ENTIRE reading history on every dashboard load and it
+    only ever grows: at 40,000 readings, building ORM objects for all of them
+    cost 415 ms of a 809 ms page, against 56 ms for every query on it put
+    together — so the database was never the problem, materialising was. Of
+    the twenty-odd columns on a reading this answers one question, needing ts
+    and sentry_mode, and SentryIndex keeps nothing else anyway.
+
+    Returning the index rather than a list also stops it being rebuilt: the
+    summary asks three separate analyses about the same readings, and each of
+    them sorted the whole history again to do it.
     """
-    return list(session.scalars(
-        select(BatteryReading).where(BatteryReading.vehicle_id == vehicle_id)
-        .order_by(BatteryReading.ts)))
+    return driving_analysis.SentryIndex.from_sorted(session.execute(
+        select(BatteryReading.ts, BatteryReading.sentry_mode)
+        .where(BatteryReading.vehicle_id == vehicle_id,
+               # A reading with no sentry state answers nothing: the index
+               # skips them when it reads a gap, so carrying them only makes
+               # the list longer. Leaving them out cannot change an answer.
+               BatteryReading.sentry_mode.is_not(None))
+        .order_by(BatteryReading.ts)).all())
 
 
 def _full_history(session: Session, vehicle_id: int) -> tuple[list, list]:
@@ -1886,7 +1903,11 @@ def purge_pre_telemetry(
         # trips" reads like it might take them too. Battery health is fitted
         # from readings and usable capacity from charges; neither moves.
         "charges_kept": len(charges),
-        "readings_kept": len(readings),
+        # Counted, not len(readings): the index deliberately holds only the
+        # readings that carry a sentry state, and this line is reporting how
+        # much of the car's record survives the purge.
+        "readings_kept": session.scalar(select(func.count()).select_from(
+            BatteryReading).where(BatteryReading.vehicle_id == vehicle.id)),
         "standby_fits": {
             "before": _standby_picture(all_drives, charges, capacity_kwh, readings),
             "after": _standby_picture(list(kept), charges, capacity_kwh, readings),
@@ -10212,8 +10233,10 @@ def summary(
     # so mirror it here rather than reaching for a value that isn't set yet.
     readings_since = since if since is not None else (
         sync_mod.now_local() - timedelta(days=days))
-    window_readings = session.scalars(
-        select(BatteryReading).where(
+    # ts and odo_km only: odometer_continuity reads nothing else, and whole
+    # rows here cost 139 ms of the same page for 10,800 of them.
+    window_readings = session.execute(
+        select(BatteryReading.ts, BatteryReading.odo_km).where(
             BatteryReading.vehicle_id == vehicle.id,
             BatteryReading.ts >= readings_since,
         ).order_by(BatteryReading.ts)
