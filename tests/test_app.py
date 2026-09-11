@@ -5608,9 +5608,8 @@ def test_the_other_third_set_fields_are_recorded_raw():
          "ChargePortDoorOpen": True, "DriverSeatBelt": False}, 1_788_900_000.0)
     assert s["paired_keys"] == 3.0
     assert s["charge_port_door_open"] is True
-    # NOT read as "belted": observed false while a belted driver drove at
-    # 17 km/h. Carried raw, claimed as nothing, until its transitions say
-    # what it reports.
+    # The raw flag is carried unchanged, and means nothing on its own: with
+    # no occupancy in the record there is nobody for it to describe.
     assert s["driver_belt_raw"] is False
     assert s["driver_belt"] is None
 
@@ -5618,6 +5617,42 @@ def test_the_other_third_set_fields_are_recorded_raw():
     assert bare["paired_keys"] is None
     assert bare["charge_port_door_open"] is None
     assert bare["driver_belt_raw"] is None and bare["driver_belt"] is None
+
+
+def test_the_belt_flag_is_read_inverted_and_only_while_someone_is_sitting_there():
+    """DriverSeatBelt true means "in that seat and NOT belted".
+
+    Six transitions in the mode log on 11 September say so, and one of them
+    settles it: at 13:58:16 the flag cleared in the same second the car went
+    from Park to Drive, while DriverSeatOccupied stayed true throughout. Every
+    other transition tracked occupancy and could have been occupancy under
+    another name; that one could not. A driver buckles as they set off, so
+    true is the warning condition rather than the buckle.
+
+    Which makes the empty seat the trap. Its flag reads false, and false under
+    this reading means belted — so an empty car would report a belted driver
+    for as long as it sat there. Unknown is the only honest answer without
+    somebody in the seat.
+    """
+    from app import sync as sync_mod
+
+    def snap(**fields):
+        return sync_mod.snapshot_from_telemetry(
+            {"Odometer": 19000.0, **fields}, 1_788_900_000.0)
+
+    # Seated and belted: the 11:48 journey, which read false throughout.
+    assert snap(DriverSeatOccupied=True, DriverSeatBelt=False)["driver_belt"] is True
+    # Seated, not belted: sat down at 13:55:53 and not yet buckled.
+    assert snap(DriverSeatOccupied=True, DriverSeatBelt=True)["driver_belt"] is False
+    # Empty seat, either way, says nothing at all.
+    assert snap(DriverSeatOccupied=False, DriverSeatBelt=False)["driver_belt"] is None
+    assert snap(DriverSeatOccupied=False, DriverSeatBelt=True)["driver_belt"] is None
+    # And a record that has not carried the belt yet cannot be read from
+    # occupancy alone.
+    assert snap(DriverSeatOccupied=True)["driver_belt"] is None
+    # The raw value is never reinterpreted — the thing that makes this
+    # reviewable if the meaning turns out to be something else again.
+    assert snap(DriverSeatOccupied=True, DriverSeatBelt=True)["driver_belt_raw"] is True
 
 
 def test_sentry_alert_reports_a_window(monkeypatch):

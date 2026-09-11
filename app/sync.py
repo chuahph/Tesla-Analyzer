@@ -2805,20 +2805,35 @@ def snapshot_from_telemetry(fields: dict[str, Any], ts: float) -> dict[str, Any]
         "paired_keys": num("PairedPhoneKeyAndKeyFobQty"),
         "charge_port_door_open": (bool(fields["ChargePortDoorOpen"])
                                   if "ChargePortDoorOpen" in fields else None),
-        # NOT read as "the driver is belted", because it is not. Observed
-        # reading false while the car was being driven at 17 km/h by a driver
-        # who was belted, and who unbuckles only after shifting to Park. So it
-        # is either inverted, or it reports something else — a warning state, a
-        # latch, a chime — and Tesla's proto declares the field with no
-        # semantics at all, only a number.
+        # Inverted, and only meaningful while someone is sitting there. Read
+        # off the mode log rather than assumed, six transitions on 11
+        # September, every one of them consistent:
         #
-        # Carried raw under a name that claims nothing, and driver_belt is left
-        # unknown so nothing can quietly start believing it. Its changes are in
-        # the mode log; when they line up with buckling or with Park, the
-        # meaning will be established rather than assumed. That was the lesson
-        # of the odometer, and of LifetimeEnergyUsed a day later.
+        #   12:21:03  false -> true   car stopping; driver unbuckles, still
+        #                             seated (Gear R->P one second later)
+        #   12:21:50  true  -> false  driver got out (occupancy fell 12:21:49)
+        #   13:55:53  false -> true   driver got in (occupancy rose 13:55:53)
+        #   13:57:15  true  -> false  got out again
+        #   13:57:45  false -> true   got back in
+        #   13:58:16  true  -> false  buckled and drove off (Gear P->D, same
+        #                             second; occupancy stayed true throughout)
+        #
+        # That last one settles it. Every other transition also moves with
+        # occupancy, so the field could have been occupancy under another
+        # name — but here the seat stayed occupied and the flag cleared at the
+        # exact moment the car was put in Drive, which is when a driver
+        # buckles. So true means "someone is in that seat and not belted": the
+        # warning condition, not the buckle. It read false throughout the
+        # 11:48 journey, which under this reading means belted, and matches
+        # the earlier puzzle of it reading false at 17 km/h.
+        #
+        # None while the seat is empty, because an empty seat's flag is false
+        # and false must never be read here as "belted".
         "driver_belt_raw": fields.get("DriverSeatBelt"),
-        "driver_belt": None,
+        "driver_belt": (
+            None if ("DriverSeatBelt" not in fields
+                     or not fields.get("DriverSeatOccupied"))
+            else not bool(fields["DriverSeatBelt"])),
         # The pack's own notion of driving (BMSStateDrive). Trip boundaries
         # are inferred from Gear and speed; this is the car's own answer, and
         # is recorded to be compared against that inference rather than to
