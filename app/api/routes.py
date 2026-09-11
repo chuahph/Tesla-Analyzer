@@ -10650,6 +10650,11 @@ def telemetry_fields(session: Session = Depends(get_session)):
     for car in latest.values():
         if isinstance(car, dict):
             names.update(car.keys())
+    # The composite carries bookkeeping of its own alongside the car's fields
+    # — _ts, the timestamp of the record each composite was last folded from.
+    # Those are not things the car streams, and listing them both misreports
+    # the set and inflates the count.
+    names = {n for n in names if not n.startswith("_")}
 
     level = 1
     for value, marker in TELEMETRY_LEVEL_MARKERS:

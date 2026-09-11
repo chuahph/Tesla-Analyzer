@@ -6705,7 +6705,8 @@ def test_telemetry_fields_reports_the_set_without_leaking_values():
                 # buffer alone would call a correctly configured car a
                 # downgrade and refuse a good configuration.
                 state.put(s, state.TELEMETRY_LATEST_KEY, _json.dumps(
-                    {"V1": {"BMSState": "BMSStateStandby", "Odometer": 19337.0}}))
+                    {"V1": {"BMSState": "BMSStateStandby", "Odometer": 19337.0,
+                            "_ts": "2026-09-11T01:42:33Z"}}))
                 s.commit()
 
             out = client.get("/api/telemetry/fields").json()
@@ -6716,6 +6717,10 @@ def test_telemetry_fields_reports_the_set_without_leaking_values():
             # location out of this.
             assert all(isinstance(f, str) for f in out["fields"])
             assert "70.0" not in _json.dumps(out)
+            # The composite keeps bookkeeping of its own beside the car's
+            # fields. Reported live: _ts appeared in the list and in the count.
+            assert not [f for f in out["fields"] if f.startswith("_")]
+            assert out["count"] == len(out["fields"])
 
             with SessionLocal() as s:
                 state.put(s, state.TELEMETRY_LATEST_KEY, _json.dumps(
