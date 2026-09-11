@@ -7134,3 +7134,55 @@ def test_bridge_quiet_alert_fires_only_when_the_car_is_awake_and_silent():
         s.commit()
         assert _check_bridge_quiet(
             s, vehicle, vin, {"ts": back + 9999}, settings) is False
+
+
+def test_telemetry_config_separates_a_quiet_field_from_a_missing_one():
+    """/api/telemetry/fields alone cannot tell these apart.
+
+    Fleet Telemetry transmits a field when it CHANGES, so a field that has not
+    arrived may be absent from the car's configuration, or may simply not have
+    moved since the configuration landed — a lifetime charge counter on a car
+    that has not charged, a DC power reading on a car that has not
+    supercharged. One reads as a broken deploy and the other is ordinary.
+    """
+    import json as _json
+    from unittest import mock
+
+    from app import state
+    from app.api import routes as routes_mod
+    from app.config import get_settings
+    from app.database import SessionLocal
+    from app.models import Vehicle
+
+    settings = get_settings()
+    old_pc = settings.app_passcode
+    settings.app_passcode = ""
+    vin = "TESTVIN-CONFIG"
+    try:
+        with TestClient(app) as client:
+            with SessionLocal() as s:
+                s.add(Vehicle(vin=vin, name="Test", model="Model 3"))
+                # Two of the three configured fields have actually arrived.
+                state.put(s, state.TELEMETRY_LATEST_KEY, _json.dumps(
+                    {vin: {"Soc": 70.0, "Gear": "ShiftStateP", "_ts": "x"}}))
+                state.put(s, state.TELEMETRY_RAW_KEY, "[]")
+                state.put(s, state.TOKEN_KEY, "tok")
+                s.commit()
+
+            fake = {"response": {"synced": True, "config": {
+                "hostname": "telemetry.example",
+                "fields": {"Soc": {}, "Gear": {},
+                           "LifetimeEnergyChargedKwh": {}}}}}
+            with mock.patch(
+                    "app.tesla_client.TeslaClient.telemetry_config",
+                    lambda self, v: fake):
+                out = client.get("/api/telemetry/config").json()
+
+            assert out["synced"] is True
+            assert out["count"] == 3
+            # The car holds it; it just has not moved. Not a failed deploy.
+            assert out["configured_but_quiet"] == ["LifetimeEnergyChargedKwh"]
+            # Nothing should arrive that was never asked for.
+            assert out["arriving_unconfigured"] == []
+    finally:
+        settings.app_passcode = old_pc

@@ -10952,6 +10952,61 @@ def telemetry_ingest(
 TELEMETRY_LEVEL_MARKERS = ((3, "FdWindow"), (2, "BMSState"))
 
 
+@router.get("/telemetry/config")
+def telemetry_config(session: Session = Depends(get_session)):
+    """What the CAR is holding, as against what has arrived from it.
+
+    /api/telemetry/fields reports fields that have actually been received, and
+    on its own that is ambiguous: Fleet Telemetry transmits a field when it
+    CHANGES, so one that has not arrived may be missing from the car's
+    configuration, or may simply not have moved since the configuration
+    landed. LifetimeEnergyChargedKwh does not move unless the car is charging;
+    DCChargingPower does not move unless a DC charger is delivering.
+
+    This asks Tesla instead. ``synced`` is the car's own acknowledgement, and
+    the field list is what it is holding. Read the two endpoints together:
+    configured-and-synced but not arriving means the field is quiet, which is
+    ordinary; not configured means the send did not take, which is not.
+    """
+    vehicle = _first_vehicle(session)
+    if vehicle is None:
+        return {"error": "no vehicle linked"}
+    from ..tesla_client import TeslaClient
+
+    token = state.active_token(session)
+    if not token:
+        return {"error": "no Tesla token — the app is not linked"}
+    client = TeslaClient(token, state.active_base_url(session))
+    try:
+        raw = client.telemetry_config(vehicle.vin)
+    except httpx.HTTPStatusError as exc:
+        return {"error": f"Tesla returned {exc.response.status_code}",
+                "detail": exc.response.text[:400]}
+    except httpx.RequestError as exc:
+        return {"error": f"could not reach Tesla: {exc}"}
+    body = raw.get("response") if isinstance(raw, dict) else None
+    config = (body or {}).get("config") or {}
+    fields = sorted((config.get("fields") or {}).keys())
+    # The comparison, done here rather than left to be done by eye. Two
+    # endpoints each holding half an answer is how a quiet field gets read as
+    # a failed configuration.
+    arrived = set(telemetry_fields(session)["fields"])
+    return {
+        "synced": (body or {}).get("synced"),
+        "count": len(fields),
+        "hostname": config.get("hostname"),
+        # Configured on the car and nothing has arrived from it. Ordinary for
+        # anything that has not changed since the configuration landed — a
+        # lifetime charge counter on a car that has not charged, a DC power
+        # reading on a car that has not supercharged.
+        "configured_but_quiet": sorted(f for f in fields if f not in arrived),
+        # Arriving without being configured. Should be empty; anything here
+        # means this endpoint and the stream disagree about what the car has.
+        "arriving_unconfigured": sorted(f for f in arrived if f not in fields),
+        "fields": fields,
+    }
+
+
 @router.get("/telemetry/fields")
 def telemetry_fields(session: Session = Depends(get_session)):
     """Field NAMES the car has actually been streaming, and the set they imply.

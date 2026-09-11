@@ -42,6 +42,17 @@ class TeslaClient:
             resp.raise_for_status()
             return resp.json().get("response", {})
 
+    def telemetry_config(self, vin: str) -> dict[str, Any]:
+        """What telemetry configuration the car is actually holding.
+
+        The only authoritative answer to "did the car take it". Tesla STORES a
+        configuration when it is sent and delivers it when the vehicle next
+        connects, so a successful send says nothing about the car — and a
+        field that has not arrived is ambiguous on its own, since a field is
+        only transmitted when it changes.
+        """
+        return self._get(f"/api/1/vehicles/{vin}/fleet_telemetry_config")
+
     def list_vehicles(self) -> list[dict[str, Any]]:
         with httpx.Client(timeout=30.0) as client:
             resp = client.get(
