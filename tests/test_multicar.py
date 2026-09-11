@@ -1007,6 +1007,62 @@ def test_compare_endpoint_covers_only_real_cars(monkeypatch):
         _reset_to_demo()
 
 
+def test_a_polled_trip_never_becomes_a_drive_when_the_car_falls_asleep(monkeypatch):
+    """The phantom trip of 11 September: 20:00 to 20:02, 0.5 km, 0% battery,
+    sitting inside a real 4 km journey the stream had already recorded whole.
+
+    Polling still runs its own trip state machine — the throttle, the alerts
+    and the live status all ask whether a trip is open — and it opens one on
+    any tick that catches the car in gear. It stopped WRITING history in the
+    morning, but the asleep/offline branch still closed whatever that machine
+    had open and wrote it to the drive table. Two polls two minutes apart in
+    the middle of a journey therefore became a second journey: half a
+    kilometre, no energy at all because the whole-percent SoC had not moved,
+    and double-counted in every total on the dashboard.
+
+    Polling may still track a trip. It may never write one.
+    """
+    from app import services, state
+    from app.models import Drive
+
+    settings = get_settings()
+    old = settings.app_passcode
+    settings.app_passcode = ""
+    _SleepsAfterDrivingClient.step = 0
+    try:
+        monkeypatch.setattr("app.tesla_client.TeslaClient", _FakeClient)
+        with SessionLocal() as s:
+            services.link_with_token(s, "tok")
+            before = s.query(Drive).count()
+
+        monkeypatch.setattr("app.tesla_client.TeslaClient", _SleepsAfterDrivingClient)
+        with TestClient(app) as client:
+            client.post("/api/sync")                       # driving
+            _SleepsAfterDrivingClient.step = 1
+            moving = client.post("/api/sync").json()       # driving, 12 km on
+            # The polled machine really is holding a trip — this is the state
+            # the old close turned into a row, not a hypothetical.
+            assert moving["trip_in_progress"] is True
+
+            _SleepsAfterDrivingClient.step = 2
+            asleep = client.post("/api/sync").json()       # and now asleep
+
+        assert asleep["status"] == "asleep"
+        assert asleep["logged"]["drives"] == 0, "polling wrote a drive"
+        with SessionLocal() as s:
+            assert s.query(Drive).count() == before, "a phantom trip reached history"
+            # And the state it was holding is cleared rather than left to be
+            # closed by some later tick: a stale open trip is what made this
+            # possible, and a stale open charge reports the car as charging
+            # for as long as it sits there.
+            vin = _SleepsAfterDrivingClient.VIN
+            assert state.get(s, state.scoped(state.OPEN_TRIP_KEY, vin)) == ""
+            assert state.get(s, state.scoped(state.OPEN_CHARGE_KEY, vin)) == ""
+    finally:
+        settings.app_passcode = old
+        _SleepsAfterDrivingClient.step = 0
+
+
 class _DrivesThenParksOnlineClient(_SleepsAfterDrivingClient):
     """Drives, then parks and STAYS online — the trip is still open (the
     parked close waits PARK_END_MIN), which is the arrival window."""
