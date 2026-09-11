@@ -10231,13 +10231,19 @@ def _telemetry_battery_reading(session: Session, vin: str, snap: dict) -> bool:
     ).first()
     sentry_now = snap.get("sentry_mode")
     climate_now = snap.get("climate_on")
-    # Only the two states the stream actually reports. The polled path also
-    # compares dashcam, centre display and cabin-overheat protection — none of
-    # which are in the configured field set, so they arrive as None here.
-    # Comparing them would read every telemetry reading as "changed" against
-    # every polled one and write a row per batch.
+    cop_now = snap.get("cabin_overheat_protection")
+    cop_cooling_now = snap.get("cabin_overheat_protection_actively_cooling")
+    # Everything the configured field set actually reports. Dashcam and the
+    # centre display are left out on purpose: dashcam has no field anywhere in
+    # Tesla's 494 (checked, not assumed), and CenterDisplay arrives as an enum
+    # whose correspondence to the integers polling stores is undocumented.
+    # Comparing a column the stream always leaves None against a polled row
+    # that has a value would read as "changed" every time and write a row per
+    # batch.
     changed = last is not None and (
-        last.sentry_mode != sentry_now or last.climate_on != climate_now)
+        last.sentry_mode != sentry_now or last.climate_on != climate_now
+        or last.cabin_overheat_protection != cop_now
+        or last.cabin_overheat_protection_actively_cooling != cop_cooling_now)
     if not (last is None or abs(last.soc - snap["soc"]) >= 1.0 or changed):
         return False
     ts = datetime.fromtimestamp(snap["ts"], sync_mod.MYT).replace(tzinfo=None)
@@ -10254,11 +10260,11 @@ def _telemetry_battery_reading(session: Session, vin: str, snap: dict) -> bool:
         odo_km=round(snap.get("odo_km") or 0.0, 1),
         sentry_mode=sentry_now,
         climate_on=climate_now,
-        # Not streamed. None is "unknown", which is what these genuinely are
-        # here — and the column was built to keep that distinct from a
-        # confirmed off (see database.py).
-        cabin_overheat_protection=None,
-        cabin_overheat_protection_actively_cooling=None,
+        cabin_overheat_protection=cop_now,
+        cabin_overheat_protection_actively_cooling=cop_cooling_now,
+        # Not streamed, and one of them never will be. None is "unknown",
+        # which is what these genuinely are here — the column was built to
+        # keep that distinct from a confirmed off (see database.py).
         dashcam_state=None,
         center_display_state=None,
     ))

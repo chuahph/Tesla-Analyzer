@@ -3867,3 +3867,44 @@ def test_arrival_readings_come_from_after_the_car_stopped():
     assert trip is not None
     assert trip["end_ts"] == 300                      # when it stopped
     assert round(trip["distance_km"], 1) == 8.4       # 5.2 miles, not 5.0
+
+
+def test_telemetry_snapshot_reads_cabin_overheat_and_climate_keeper():
+    """Both are real fields in Tesla's proto (180 and 186), both are large
+    parked draws, and neither was configured until now.
+
+    The enum tail is taken as the value rather than a mapping being invented
+    for it — CabinOverheatProtectionModeStateFanOnly is "FanOnly", which is
+    the word the polled column already holds. That is the difference between
+    this and CenterDisplay, whose enum has no documented correspondence to
+    the integers polling stores and so is still not mapped.
+    """
+    from app.sync import snapshot_from_telemetry
+
+    def snap(**fields):
+        base = {"Soc": 70.0, "RatedRange": 250.0, "Odometer": 19337.0}
+        return snapshot_from_telemetry({**base, **fields}, 1_789_000_000.0)
+
+    s = snap(CabinOverheatProtectionMode="CabinOverheatProtectionModeStateFanOnly",
+             HvacPower="HvacPowerStateOverheatProtect",
+             ClimateKeeperMode="ClimateKeeperModeStateDog")
+    assert s["cabin_overheat_protection"] == "FanOnly"
+    assert s["cabin_overheat_protection_actively_cooling"] is True
+    assert s["climate_keeper"] == "Dog"
+
+    # Enabled is not the same as cooling: the mode says it is allowed to run,
+    # HvacPower says whether it is running for that reason right now.
+    s = snap(CabinOverheatProtectionMode="CabinOverheatProtectionModeStateOn",
+             HvacPower="HvacPowerStateOff")
+    assert s["cabin_overheat_protection"] == "On"
+    assert s["cabin_overheat_protection_actively_cooling"] is False
+
+    # "Unknown" is the car declining to answer, which must stay None rather
+    # than becoming a confident value.
+    s = snap(CabinOverheatProtectionMode="CabinOverheatProtectionModeStateUnknown")
+    assert s["cabin_overheat_protection"] is None
+    assert s["climate_keeper"] is None
+
+    # Dashcam has no field anywhere in Tesla's proto, so it stays unknown on
+    # this path however the car is configured.
+    assert s["dashcam_state"] is None

@@ -146,6 +146,16 @@ kill -0 $PROXY_PID 2>/dev/null || die "the proxy exited on startup (see $LOG)"
 #                visible through vehicle_data, which reports a bare boolean.
 #                At ten seconds an escalation is caught; at the old three
 #                hundred, an entire incident could pass between readings.
+#   Parked draw  CabinOverheatProtectionMode and ClimateKeeperMode. Both are
+#                large draws that run while the car is parked and neither has
+#                ever been visible to this app on the telemetry path, so the
+#                standby attribution has had to say "climate (maybe)". Dog and
+#                Party are ClimateKeeperMode states, and a climate keeper left
+#                running through a long park is exactly the kind of drain
+#                worth naming rather than guessing at. Checked against Tesla's
+#                proto (fields 180 and 186) rather than assumed: dashcam has
+#                no field anywhere in the 494, which is why that column stays
+#                polling-only and these two do not have to.
 #   Explanation  ModuleTempMin is the pack's own temperature, which is what
 #                cold losses actually depend on rather than the outside air
 #                the efficiency chart plots today. Tyre pressure is worth a
@@ -271,6 +281,8 @@ $DEFAULT_DRIVE_COUNTER
       "InsideTemp":                {"interval_seconds": 300},
       "OutsideTemp":               {"interval_seconds": 300},
       "SentryMode":                {"interval_seconds": 10},
+      "CabinOverheatProtectionMode": {"interval_seconds": 60},
+      "ClimateKeeperMode":         {"interval_seconds": 60},
       "CenterDisplay":             {"interval_seconds": 30},
       "Locked":                    {"interval_seconds": 300},
       "TpmsPressureFl":            {"interval_seconds": 3600},

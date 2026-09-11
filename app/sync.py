@@ -2724,6 +2724,19 @@ def snapshot_from_telemetry(fields: dict[str, Any], ts: float) -> dict[str, Any]
             return None
         return any(raw.endswith(t) for t in true_when)
 
+    def enum_word(key: str, prefix: str) -> str | None:
+        """The tail of an enum string, once its type name is taken off.
+
+        CabinOverheatProtectionModeStateFanOnly is "FanOnly" — which is the
+        word the polled column already holds, so the two sources land in the
+        same vocabulary instead of needing a mapping table invented between
+        them. A value the car could not supply stays None.
+        """
+        raw = enum_str(key)
+        if raw is None or any(raw.endswith(u) for u in _UNREADABLE):
+            return None
+        return raw[len(prefix):] if raw.startswith(prefix) else raw
+
     odo = num("Odometer")
     rated = num("RatedRange")
     speed = num("VehicleSpeed")
@@ -2808,8 +2821,24 @@ def snapshot_from_telemetry(fields: dict[str, Any], ts: float) -> dict[str, Any]
         # comparison of the two sources — the odometer already taught that
         # lesson. The string is carried below instead, under its own name.
         "center_display_state": None,
-        "cabin_overheat_protection": None,
-        "cabin_overheat_protection_actively_cooling": None,
+        # Now configured, and checked against Tesla's proto rather than
+        # guessed: CabinOverheatProtectionMode is field 180, with states
+        # Off / On / FanOnly. The polled column holds the same three words, so
+        # the enum's tail maps onto it directly — no invented correspondence
+        # of the kind the CenterDisplay integer would have needed.
+        "cabin_overheat_protection": enum_word("CabinOverheatProtectionMode",
+                                               "CabinOverheatProtectionModeState"),
+        # Whether it is COOLING, which is not the same as being switched on.
+        # HvacPowerStateOverheatProtect (field value 4) is the car saying the
+        # system is running for that reason right now; the mode above only
+        # says it is allowed to.
+        "cabin_overheat_protection_actively_cooling": enum_flag(
+            "HvacPower", ("OverheatProtect",)),
+        # Off / On / Dog / Party. A climate keeper left running through a long
+        # park is a large draw that this app has never been able to see, which
+        # is why the standby attribution has had to say "climate (maybe)".
+        "climate_keeper": enum_word("ClimateKeeperMode",
+                                    "ClimateKeeperModeState"),
         "display_state_raw": enum_str("CenterDisplay"),
         # HvacPower is an enum, not a number: HvacPowerStateOn / ...Off /
         # ...Precondition / ...OverheatProtect. Anything that is not plainly
