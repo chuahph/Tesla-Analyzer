@@ -6056,6 +6056,79 @@ def test_a_trip_is_only_compared_against_its_own_car():
         settings.app_passcode = old_pc
 
 
+def test_a_refused_promotion_is_announced_instead_of_passing_for_silence():
+    """A run that wrote nothing looked exactly like a run with nothing to write.
+
+    The automatic promoter refuses when more journeys are waiting than an
+    unattended run may add at once — a guard worth having, after a bug added
+    fourteen journeys a minute. But every automatic caller ignores what it
+    returns, so the refusal went nowhere, and the trips do not wait for ever:
+    anything older than PROMOTE_MAX_DAYS leaves the window and is then never
+    written at all. Silent data loss on a clock nobody is watching.
+    """
+    import json as _json
+    import time as _time
+
+    from app import state, sync as sync_mod
+    from app.api.routes import (PROMOTE_AUTO_MAX_ADD, _promote_shadow_trips,
+                                _clear_promote_refused)
+    from app.database import SessionLocal
+    from app.models import Vehicle
+    from app import notifications
+
+    sent: list[tuple[str, str]] = []
+    real_notify = notifications.notify
+    notifications.notify = lambda session, title, body, tag=None: (
+        sent.append((title, tag)) or 0)
+    sess = SessionLocal()
+    prev = state.get(sess, state.TELEMETRY_TRIPS_KEY)
+    try:
+        car = sess.query(Vehicle).first()
+        if car is None:
+            car = Vehicle(name="Mine", vin="PROMOTEVIN000001")
+            sess.add(car)
+            sess.commit()
+
+        # One more than an unattended run will take.
+        now = _time.time() - 3600
+        trips = []
+        for i in range(PROMOTE_AUTO_MAX_ADD + 1):
+            start = now + i * 600
+            trips.append({
+                "vin": car.vin, "start_ts": start, "end_ts": start + 300,
+                "start_time": sync_mod._dt(start).isoformat(timespec="seconds"),
+                "end_time": sync_mod._dt(start + 300).isoformat(timespec="seconds"),
+                "distance_km": 5.0, "duration_min": 5.0, "energy_kwh": 1.0,
+                "wh_per_km": 200.0, "soc_start": 80.0, "soc_end": 79.0,
+                "start_odo_km": 1000.0 + i * 10, "end_odo_km": 1005.0 + i * 10,
+                "avg_speed_kmh": 60.0, "max_speed_kmh": 70.0})
+        state.put(sess, state.TELEMETRY_TRIPS_KEY, _json.dumps(trips))
+        _clear_promote_refused(sess)
+        sess.commit()
+
+        out = _promote_shadow_trips(sess, apply=True, max_add=PROMOTE_AUTO_MAX_ADD)
+        assert out and out[0]["action"] == "refused"
+        assert out[0]["would_add"] == PROMOTE_AUTO_MAX_ADD + 1
+        assert len(sent) == 1, f"the refusal said nothing: {sent}"
+        assert sent[0][1] == "promote-refused"
+        assert str(PROMOTE_AUTO_MAX_ADD + 1) in sent[0][0]
+
+        # Once per episode, not once per tick — this runs every batch.
+        _promote_shadow_trips(sess, apply=True, max_add=PROMOTE_AUTO_MAX_ADD)
+        assert len(sent) == 1, "the alert repeated on every run"
+
+        # And a run that gets through re-arms it, so the NEXT backlog is
+        # announced rather than swallowed by a flag nobody cleared.
+        _promote_shadow_trips(sess, apply=True, max_add=None)
+        assert state.get(sess, state.PROMOTE_REFUSED_KEY) != "1"
+    finally:
+        notifications.notify = real_notify
+        state.put(sess, state.TELEMETRY_TRIPS_KEY, prev or "[]")
+        _clear_promote_refused(sess)
+        sess.commit()
+        sess.close()
+
+
 def test_the_sentry_index_answers_the_same_from_two_columns_as_from_whole_rows(session):
     """The readings query stopped building ORM objects. It must not have
     stopped answering the same question.

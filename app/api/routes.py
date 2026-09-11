@@ -3086,6 +3086,39 @@ PROMOTE_MAX_DAYS = 7
 PROMOTE_AUTO_MAX_ADD = 3
 
 
+def _warn_promote_refused(session: Session, kind: str, waiting: int,
+                          limit: int, endpoint: str) -> None:
+    """Say that an automatic promotion refused, once per episode.
+
+    A refusal is the one outcome of a promotion that needs a person, and
+    every automatic caller ignores what the promoter returns — so a run that
+    wrote nothing looked exactly like a run with nothing to write. Worse, the
+    backlog is not held for ever: anything older than PROMOTE_MAX_DAYS leaves
+    the promoter's window and is then never written at all, which is silent
+    data loss on a clock nobody is watching.
+
+    Once per episode, not once per tick: the flag is cleared by the next run
+    that gets through, so a backlog that clears itself says nothing and one
+    that does not is reported exactly once.
+    """
+    if state.get(session, state.PROMOTE_REFUSED_KEY) == "1":
+        return
+    state.put(session, state.PROMOTE_REFUSED_KEY, "1")
+    session.commit()
+    notifications.notify(
+        session, f"{waiting} {kind} waiting to be recorded",
+        f"An unattended run will not add more than {limit} at once. Apply "
+        f"them with {endpoint}?apply=true — after {PROMOTE_MAX_DAYS} days "
+        f"they drop out of the window and are lost.",
+        tag="promote-refused")
+
+
+def _clear_promote_refused(session: Session) -> None:
+    """Re-arm the refusal alert after a run that got through."""
+    if state.get(session, state.PROMOTE_REFUSED_KEY) == "1":
+        state.put(session, state.PROMOTE_REFUSED_KEY, "")
+
+
 def _promote_shadow_trips(session: Session, apply: bool = False,
                           days: int = PROMOTE_MAX_DAYS,
                           max_add: int | None = None) -> list[dict]:
@@ -3243,9 +3276,12 @@ def _promote_shadow_trips(session: Session, apply: bool = False,
     # halfway through has already done the damage it exists to prevent.
     adds = sum(1 for c in changed if c["action"] == "add")
     if max_add is not None and adds > max_add:
+        _warn_promote_refused(session, "trips", adds, max_add,
+                              "/api/telemetry/promote")
         return [{"action": "refused", "would_add": adds, "limit": max_add,
                  "why": "an unattended run does not add this many at once; "
                         "read /api/telemetry/promote and apply it by hand"}]
+    _clear_promote_refused(session)
 
     for row, t, vehicle_id, t_start, t_end in plan:
         if row is None:
@@ -3525,10 +3561,13 @@ def _promote_shadow_charges(session: Session, apply: bool = False,
 
     adds = len(plan)
     if max_add is not None and adds > max_add:
+        _warn_promote_refused(session, "charging sessions", adds, max_add,
+                              "/api/telemetry/promote-charges")
         return [{"action": "refused", "would_add": adds, "limit": max_add,
                  "corrected": len(corrections),
                  "why": "an unattended run does not add this many at once; "
                         "read /api/telemetry/promote-charges and apply it by hand"}]
+    _clear_promote_refused(session)
 
     for c, vehicle_id, c_start, c_end, kwh, energy_source in plan:
         # The shadow carries lat/lon, not a formatted string — checked against
@@ -10651,8 +10690,13 @@ def telemetry_ingest(
             charges_promoted = 0
     if closed:
         try:
-            promoted = len(_promote_shadow_trips(
-                session, apply=True, max_add=PROMOTE_AUTO_MAX_ADD))
+            # Only the rows actually written. len() counted a refusal as a
+            # promotion, so the one number that says the journeys did NOT
+            # land reported that one had.
+            promoted = sum(
+                1 for c in _promote_shadow_trips(
+                    session, apply=True, max_add=PROMOTE_AUTO_MAX_ADD)
+                if c.get("action") in ("add", "correct"))
         except Exception:  # noqa: BLE001 — never let this reject the batch
             # The records are already stored. A promotion that fails costs a
             # late dashboard row, which the next sync tick will write; losing

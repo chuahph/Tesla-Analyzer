@@ -121,6 +121,12 @@ LAST_STATUS_KEY = "last_status"  # JSON: {status, ts, soc, odo_km, speed_kmh, no
 UNREACHABLE_SINCE_KEY = "unreachable_since_ts"  # epoch a car was first seen not
 # "online" (asleep or offline) this episode, per VIN — cleared once it's back
 # online. Used to close an open trip after sustained "offline", not just "asleep".
+# "1" while an automatic promotion is refusing to write, because more
+# journeys are waiting than an unattended run may add at once. Cleared the
+# moment one succeeds, so the alert fires per episode rather than per tick —
+# and it has to fire at all: the waiting trips are dropped from the promoter's
+# window after PROMOTE_MAX_DAYS, and silently.
+PROMOTE_REFUSED_KEY = "promote_refused"
 LOW_SOC_NOTIFIED_KEY = "low_soc_notified"  # "1" once the low-SoC push has fired
 # for the current low-battery episode, per VIN — cleared once SoC recovers
 # above the threshold, so plugging in and charging re-arms it instead of
