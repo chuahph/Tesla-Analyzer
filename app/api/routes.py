@@ -10770,6 +10770,7 @@ def telemetry_ingest(
     # each would ask the same question fifty times and answer it once.
     last_snaps: dict[str, dict] = {}
     readings_written = 0
+    closed = 0
     for record in records:
         if not isinstance(record, dict):
             continue
@@ -10980,6 +10981,7 @@ def telemetry_ingest(
                 # so it measures that ground.
                 if _append_trip(trips, finished):
                     recovered += 1
+                closed += 1
             # And again the moment a trip OPENS, not only when it closes.
             # The opening odometer is the whole input to the correction, so
             # waiting for the journey to finish leaves the previous trip
@@ -11079,6 +11081,35 @@ def telemetry_ingest(
     put_if_changed(state.TELEMETRY_CHARGE_SHADOW_KEY,
                    _json.dumps(charge_shadows), stored_charge_shadows)
 
+    # A closed trip belongs on the dashboard now, not at the next cron tick.
+    #
+    # Promotion has only ever run from /api/sync, which was invisible at a
+    # one-minute cron and is not at thirty minutes: a journey that ended
+    # fourteen minutes ago simply was not there. At the four-hourly watchdog
+    # this migration is heading for, it would be missing for most of the day.
+    # The stream knows the moment a trip closes, so that is where the row
+    # should be written.
+    #
+    # Only when one actually closed. A parked car posts a batch every twenty
+    # seconds and promoting on each would be ~1,700 runs a day to write
+    # nothing.
+    #
+    # Capped exactly as the sync path is. Automatic promotion is what put 183
+    # journeys that never happened into this database — a float identity that
+    # could not recognise its own rows — and while that cause is long fixed,
+    # an unattended write to real records earns a limit on how wrong it can
+    # go in one run.
+    promoted = 0
+    if closed:
+        try:
+            promoted = len(_promote_shadow_trips(
+                session, apply=True, max_add=PROMOTE_AUTO_MAX_ADD))
+        except Exception:  # noqa: BLE001 — never let this reject the batch
+            # The records are already stored. A promotion that fails costs a
+            # late dashboard row, which the next sync tick will write; losing
+            # the batch would cost the journey itself.
+            promoted = 0
+
     try:
         seen = _json.loads(state.get(session, state.TELEMETRY_SEEN_KEY) or "{}") or {}
     except ValueError:
@@ -11102,6 +11133,9 @@ def telemetry_ingest(
             # BatteryReading rows the stream wrote. Polling was the only thing
             # that ever wrote these, and four dashboard figures read them.
             "battery_readings": readings_written,
+            # Trips that closed in this batch, and drive rows written for
+            # them without waiting for the cron.
+            "closed_trips": closed, "promoted": promoted,
             "seen": seen}
 
 

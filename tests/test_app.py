@@ -3509,12 +3509,18 @@ def test_fleet_token_needs_the_key_and_withholds_the_refresh_token(monkeypatch):
             state_mod.delete(s, state_mod.TOKEN_KEY, state_mod.REFRESH_KEY)
 
 
-def test_telemetry_shadow_trip_appears_in_the_comparison():
-    """A stream of records becomes a shadow trip, without touching history.
+def test_telemetry_shadow_trip_appears_and_is_promoted_at_once():
+    """A stream of records becomes a shadow trip AND the drive row for it.
 
     The unit tests cover the machine; this covers the wiring — that records
-    arriving over the wire drive it, and that what comes out is visible
-    without a single Drive row being written.
+    arriving over the wire drive it, and that a journey which has ended is on
+    the dashboard immediately rather than at the next cron tick.
+
+    That used to be the opposite assertion, and rightly: promotion ran only
+    from /api/sync, which was invisible at a one-minute cron. At thirty
+    minutes it is not — a trip that ended fourteen minutes ago was simply
+    missing — and at the four-hourly watchdog this is heading for it would be
+    absent for most of the day.
     """
     from datetime import timezone
 
@@ -3565,11 +3571,24 @@ def test_telemetry_shadow_trip_appears_in_the_comparison():
         trip = body["trips"][-1]["telemetry"]
         assert round(trip["km"], 1) == 9.7        # 6 miles
         assert trip["kwh"] == 1.5                 # measured, not derived
-        # And nothing was written to the real history.
+        # And the history has it, written by the ingest rather than the cron.
         with SessionLocal() as s:
-            assert s.query(Drive).count() == before
+            assert s.query(Drive).count() == before + 1
+            row = s.scalars(select(Drive).order_by(Drive.id.desc())).first()
+            assert row.source == "telemetry"
+            assert round(row.distance_km, 1) == 9.7
     finally:
         settings.app_passcode, settings.sync_key = old_pc, old_sk
+        # Promotion now writes on ingest, so this test has a side effect on
+        # the shared database that it did not have before. Cleaned up, or
+        # every later test counting drives inherits it.
+        with SessionLocal() as s:
+            extra = s.scalars(
+                select(Drive).where(Drive.source == "telemetry",
+                                    Drive.polled_km.is_(None))).all()
+            for r in extra:
+                s.delete(r)
+            s.commit()
 
 
 def test_sentry_escalation_raises_an_alert_once(monkeypatch):
@@ -5160,6 +5179,15 @@ def test_a_corrected_row_can_be_put_back_the_way_polling_had_it():
             return local.replace(tzinfo=sync_mod.MYT).timestamp()
 
         with TestClient(app) as client:
+            # Promotion now runs on telemetry ingest as well as on the sync
+            # tick, so any earlier test that posted a batch has left rows of
+            # its own in this shared database. Cleared first, or this measures
+            # them instead of its own.
+            for stray in sess.scalars(
+                    select(Drive).where(Drive.source == "telemetry",
+                                        Drive.polled_km.is_(None))).all():
+                sess.delete(stray)
+            sess.commit()
             vehicle = Vehicle(vin="UNDO00000000001", name="Test", model="Model 3")
             sess.add(vehicle)
             sess.commit()
