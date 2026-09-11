@@ -12102,12 +12102,6 @@ def telemetry_compare(
     judged = [r for r in rows if r["vs_car"] and all(
         r["vs_car"][k] is not None for k in
         ("telemetry_km_pct", "telemetry_whkm_pct"))]
-    # The polled half, where it exists. Every one of these was logged at a
-    # one-minute cron; nothing logged at half-hourly belongs in an accuracy
-    # figure, and this is kept as the historical record that justified the
-    # migration rather than as a live measurement.
-    judged_polled = [r for r in judged if r["vs_car"].get("polled_km_pct") is not None
-                     and r["vs_car"].get("polled_whkm_pct") is not None]
     # Two kinds of trip cannot judge anything, and averaging them in makes
     # the verdict worse rather than more cautious.
     #
@@ -12129,9 +12123,31 @@ def telemetry_compare(
     judged = [r for r in judged
               if r["telemetry"]["odo"] is not None
               and (r["telemetry"]["energy_unc_pct"] or 0.0) <= TELEMETRY_UNC_MAX_PCT]
-    km_deltas = [r["delta"]["km_pct"] for r in paired
-                 if r["delta"]["km_pct"] is not None]
-    heads = [r["delta"]["start_delta_min"] for r in paired]
+    # The polled half, where it exists — derived AFTER the exclusions above so
+    # both sides clear the same quality bar. Every trip behind these was
+    # logged at a one-minute cron; nothing logged at half-hourly belongs in an
+    # accuracy figure, so this is the historical record that justified the
+    # migration rather than a live measurement.
+    judged_polled = [r for r in judged
+                     if r["vs_car"].get("polled_km_pct") is not None
+                     and r["vs_car"].get("polled_whkm_pct") is not None]
+    # Against the car, not against polling. These two medians used to be
+    # telemetry-versus-polled — how far the streamed trip sat from the polled
+    # one, and how much of its opening polling had missed. Both were questions
+    # about polling, answerable only while polling was still measuring
+    # properly, and neither says anything now: the polled row is either absent
+    # or was recorded by a cron that sees a fraction of each journey.
+    #
+    # The car is the referee that does not depend on either source.
+    km_deltas = [r["vs_car"]["telemetry_km_pct"] for r in judged
+                 if r["vs_car"] and r["vs_car"]["telemetry_km_pct"] is not None]
+    whkm_deltas = [r["vs_car"]["telemetry_whkm_pct"] for r in judged
+                   if r["vs_car"] and r["vs_car"]["telemetry_whkm_pct"] is not None]
+    # Kept, but scoped to the trips polling actually measured. A blind head is
+    # a fact about a polled row, so averaging it over trips that have none
+    # would report a number about nothing.
+    heads = [r["delta"]["start_delta_min"] for r in judged_polled
+             if r.get("delta") and r["delta"].get("start_delta_min") is not None]
     return {
         "days": days,
         # Records the store held but this could not read. Empty is the normal
@@ -12212,10 +12228,20 @@ def telemetry_compare(
         },
         "summary": {
             # Kilometres the odometer recorded between trips rather than
-            # inside one. Zero is the healthy answer.
+            # inside one. Zero is the healthy answer, and it is the one figure
+            # here that needs neither source to be trusted.
             "unaccounted_km": round(unaccounted, 3),
-            "median_km_delta_pct": round(percentile(km_deltas, 0.5), 2)
+            # Telemetry against the car, per trip, not against polling.
+            "median_km_err_pct": round(percentile(km_deltas, 0.5), 2)
             if km_deltas else None,
+            "worst_km_err_pct": round(max(km_deltas, key=abs), 2)
+            if km_deltas else None,
+            "median_whkm_err_pct": round(percentile(whkm_deltas, 0.5), 2)
+            if whkm_deltas else None,
+            "worst_whkm_err_pct": round(max(whkm_deltas, key=abs), 2)
+            if whkm_deltas else None,
+            # A fact about polled rows, so reported only over the trips that
+            # have one. Expect it to go quiet as polling stops writing.
             "median_blind_head_min": round(percentile(heads, 0.5), 2)
             if heads else None,
             "worst_blind_head_min": round(max(heads), 1) if heads else None,
