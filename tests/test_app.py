@@ -1426,11 +1426,14 @@ def test_sentry_drain_alert_fires_once_per_parked_episode(monkeypatch):
 
 
 def test_display_state_flicker_forces_a_battery_reading(monkeypatch):
-    """A center_display_state change must write its own BatteryReading row
-    even with SoC unmoved. The display wakes in brief flickers between two
-    identical SoC readings, so keying the write on SoC alone would drop the
-    sample entirely — and a screen awake on a parked car is a draw worth
-    attributing."""
+    """A watched state changing must write its own BatteryReading row even
+    with SoC unmoved.
+
+    Sentry arming is the case that matters: it happens as the car parks,
+    before it sleeps and polling stops seeing it, and SoC will not have moved
+    a whole point by then. Keying the write on SoC alone would drop the one
+    sample that decides how the whole parked gap is priced — see
+    driving.gap_sentry_state."""
     from types import SimpleNamespace
 
     from app.api.routes import _process_vehicle
@@ -1445,12 +1448,11 @@ def test_display_state_flicker_forces_a_battery_reading(monkeypatch):
         sentry_drain_notify_pct=0.0, intrusion_notify=False, drive_min_km=0.5,
     )
 
-    def vdata(ts, display):
+    def vdata(ts, sentry):
         return {
             "vin": "TESTVIN-DISPLAY", "display_name": "Test", "vehicle_config": {},
             "vehicle_state": {"odometer": 2000.0, "is_user_present": False,
-                              "locked": True, "sentry_mode": True,
-                              "center_display_state": display},
+                              "locked": True, "sentry_mode": sentry},
             "drive_state": {"timestamp": ts * 1000, "shift_state": "P", "speed": 0,
                             "latitude": None, "longitude": None},
             "charge_state": {"battery_level": 80, "battery_range": 200.0,
@@ -1467,8 +1469,8 @@ def test_display_state_flicker_forces_a_battery_reading(monkeypatch):
             s.commit()
             vid = v.id
 
-            def tick(dt, display):
-                _process_vehicle(s, vdata(t + dt, display),
+            def tick(dt, sentry):
+                _process_vehicle(s, vdata(t + dt, sentry),
                                  {"vin": "TESTVIN-DISPLAY"}, settings)
                 s.commit()
 
@@ -1476,13 +1478,13 @@ def test_display_state_flicker_forces_a_battery_reading(monkeypatch):
                 return s.query(BatteryReading).filter(
                     BatteryReading.vehicle_id == vid).order_by(BatteryReading.ts).all()
 
-            tick(0, 4)      # first reading
-            tick(60, 4)     # unchanged, SoC unmoved -> no new row
+            tick(0, True)      # first reading
+            tick(60, True)     # unchanged, SoC unmoved -> no new row
             before = len(rows())
-            tick(120, 2)    # display woke (SoC identical) -> must still log
+            tick(120, False)   # Sentry went off (SoC identical) -> must log
             after = rows()
             assert len(after) == before + 1
-            assert after[-1].center_display_state == 2
+            assert after[-1].sentry_mode is False
     finally:
         with SessionLocal() as s:
             from app.models import Drive as _Drive
@@ -3988,12 +3990,14 @@ def test_enum_fields_are_read_not_coerced():
     assert snap(HvacPower="HvacPowerStateOff")["climate_on"] is False
     assert snap()["climate_on"] is None
 
-    # CenterDisplay is streamed but deliberately unmapped: polling stores an
-    # integer code and telemetry sends an enum string on an undocumented
-    # scale, so the shared column stays empty and the string is kept as-is.
+    # CenterDisplay is streamed and kept as the car's own word for the state.
+    # The center_display_state column that used to sit beside it held Tesla's
+    # POLLED integer code on an undocumented scale, so no streamed value could
+    # be turned into one without inventing a mapping — the column is gone and
+    # the enum, which needs no mapping, is what remains.
     s = snap(CenterDisplay="DisplayStateDriving")
-    assert s["center_display_state"] is None
     assert s["display_state_raw"] == "DisplayStateDriving"
+    assert "center_display_state" not in s
 
 
 def test_late_reading_never_reaches_past_the_newest_trip():
@@ -6583,7 +6587,7 @@ def test_telemetry_writes_battery_readings_on_pollings_own_rules():
 
             # A field the configured set does not carry stays unknown, not
             # False — the column exists to keep those distinct.
-            assert stored[-1].center_display_state is None
+            assert stored[-1].cabin_overheat_protection is None
     finally:
         settings.app_passcode = old_pc
 

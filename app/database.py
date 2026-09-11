@@ -193,7 +193,17 @@ def init_db() -> None:
     # question they were recorded for has a better answer now.
     _drop_column("battery_readings", "dashcam_state")
     _drop_column("security_events", "dashcam_state")
-    _ensure_column("battery_readings", "center_display_state", "INTEGER", "NULL")
+    # center_display_state followed it, for the same reason and one more of
+    # its own. It was the other half of the same probe, so it lost its purpose
+    # when SentryMode's Aware and Panic states answered the question. And it
+    # had no telemetry path even in principle: CenterDisplay is streamed, but
+    # as an enum with no documented correspondence to the integers this column
+    # held, so the stream could only ever write None into it. A column one of
+    # the two sources cannot fill, holding a value neither of them reads, is
+    # not a column.
+    _drop_column("battery_readings", "center_display_state")
+    _drop_column("security_events", "center_display_state")
+
 
 
 def get_session() -> Iterator[Session]:

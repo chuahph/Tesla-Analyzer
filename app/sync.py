@@ -402,12 +402,6 @@ def snapshot_from_vehicle_data(data: dict[str, Any]) -> dict[str, Any]:
         # so a 1-2 min poll catches it reliably rather than by luck.
         "doors_open": _any_open(vs, _DOOR_FIELDS),
         "windows_open": _any_open(vs, _WINDOW_FIELDS),
-        # Logged only, nothing reads these yet — they exist to find out
-        # empirically whether a Sentry trigger is visible in the API at all
-        # (see BatteryReading's own note). Free to collect: same payload.
-        "center_display_state": (
-            vs.get("center_display_state") if "center_display_state" in vs else None
-        ),
         "climate_on": cl.get("is_climate_on") if "is_climate_on" in cl else None,
         # Tesla reports this as a tri-state string ("Off"/"On"/"FanOnly"), not
         # a bool — but it's the *setting* (whether COP is allowed to run at
@@ -2833,7 +2827,6 @@ def snapshot_from_telemetry(fields: dict[str, Any], ts: float) -> dict[str, Any]
         # mapping into the same column would put a silent error under every
         # comparison of the two sources — the odometer already taught that
         # lesson. The string is carried below instead, under its own name.
-        "center_display_state": None,
         # Now configured, and checked against Tesla's proto rather than
         # guessed: CabinOverheatProtectionMode is field 180, with states
         # Off / On / FanOnly. The polled column holds the same three words, so
@@ -2852,6 +2845,14 @@ def snapshot_from_telemetry(fields: dict[str, Any], ts: float) -> dict[str, Any]
         # is why the standby attribution has had to say "climate (maybe)".
         "climate_keeper": enum_word("ClimateKeeperMode",
                                     "ClimateKeeperModeState"),
+        # The enum as the car sends it — DisplayStateSentry, DisplayStateDog,
+        # DisplayStateDriving and so on. Kept after the center_display_state
+        # column went, and the distinction is the point: that column held
+        # Tesla's POLLED integer code, which no streamed value can be turned
+        # into without inventing a mapping, while this is the car's own word
+        # for the same state and needs no mapping at all. Nothing reads it
+        # yet; it is here so that whatever eventually wants display state
+        # starts from the form that cannot be silently wrong.
         "display_state_raw": enum_str("CenterDisplay"),
         # HvacPower is an enum, not a number: HvacPowerStateOn / ...Off /
         # ...Precondition / ...OverheatProtect. Anything that is not plainly

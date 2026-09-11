@@ -123,31 +123,6 @@ def test_snapshot_parses_door_and_window_openings():
     assert window["windows_open"] is True
 
 
-def test_snapshot_parses_display_state():
-    """Captured when the car reports it, None when it does not, so a later
-    look-back can tell "unknown" from a real value.
-
-    Its companion dashcam_state is gone: it existed only to test whether a
-    Sentry trigger leaked through the polled API indirectly, and telemetry
-    answered that outright with SentryMode's Aware and Panic states."""
-    absent = snapshot_from_vehicle_data({
-        "drive_state": {"timestamp": 1_760_000_000, "shift_state": "P"},
-        "charge_state": {"battery_level": 72},
-        "climate_state": {},
-        "vehicle_state": {},
-    })
-    assert absent["center_display_state"] is None
-    assert "dashcam_state" not in absent
-
-    present = snapshot_from_vehicle_data({
-        "drive_state": {"timestamp": 1_760_000_000, "shift_state": "P"},
-        "charge_state": {"battery_level": 72},
-        "climate_state": {},
-        "vehicle_state": {"center_display_state": 4},
-    })
-    assert present["center_display_state"] == 4
-
-
 def test_snapshot_parses_car_wash_mode():
     off = snapshot_from_vehicle_data({
         "drive_state": {"timestamp": 1_760_000_000, "shift_state": "P"},
@@ -3907,10 +3882,11 @@ def test_telemetry_snapshot_reads_cabin_overheat_and_climate_keeper():
     assert s["cabin_overheat_protection"] is None
     assert s["climate_keeper"] is None
 
-    # CenterDisplay IS streamed, but as an enum with no documented relation to
-    # the integers polling stores — so this column stays unknown rather than
-    # carrying a guessed mapping.
-    assert s["center_display_state"] is None
+    # CenterDisplay is kept as the car's own word for the state. The integer
+    # column that used to sit beside it is gone: it held Tesla's POLLED code
+    # on an undocumented scale, so no streamed value could become one without
+    # a mapping being invented for it.
+    assert "center_display_state" not in s
 
 
 def test_shadow_charge_records_the_lifetime_counter_across_a_session():

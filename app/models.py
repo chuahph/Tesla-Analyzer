@@ -283,15 +283,6 @@ class BatteryReading(Base):
     # alongside cabin_overheat_protection above — this is the one that means
     # COP is really drawing power, not just enabled as a setting.
     cabin_overheat_protection_actively_cooling: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
-    # What the centre screen was doing. Logged originally as half of a test of
-    # whether Tesla leaks a Sentry *trigger* indirectly — the other half was
-    # dashcam_state, now gone with the question it was asking (see the note
-    # where /api/sentry-check used to be in routes.py). This one stays because
-    # CenterDisplay IS a streamed field, and a display that is awake on a
-    # parked car is a draw worth attributing whatever else it indicates. The
-    # stream reports it as an enum whose correspondence to these integers is
-    # undocumented, so telemetry leaves it None rather than guessing.
-    center_display_state: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
 
 class SecurityEvent(Base):
@@ -321,8 +312,6 @@ class SecurityEvent(Base):
     sentry_mode: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     locked: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     soc: Mapped[float | None] = mapped_column(Float, nullable=True)
-    # The centre display as it read at the moment of the opening.
-    center_display_state: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
 
 class ArrivalTailSample(Base):
