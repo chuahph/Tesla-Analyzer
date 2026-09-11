@@ -3436,6 +3436,7 @@ def _promote_shadow_trips(session: Session, apply: bool = False,
             row.polled_km = row.distance_km
             row.polled_kwh = row.energy_used_kwh
         _apply_shadow_to_drive(row, t)
+        _geocode_shadow_drive(session, row, t)
     session.commit()
     for entry, (row, *_rest) in zip(changed, plan):
         if entry.get("was", {}).get("id") is None and row is not None:
@@ -3443,12 +3444,245 @@ def _promote_shadow_trips(session: Session, apply: bool = False,
     return changed
 
 
+# Which of the car's three counters energy_added_kwh is taken from.
+#
+# They disagree by about 11%, and the choice is still being settled. What is
+# known: the two meters agree with each other to within a percent over
+# eighteen recorded minutes, and both sit ~11% above the pack's own level. The
+# charging network billed 19.799 kWh for the 10 September session and the car
+# itself called it 18 kWh added — 90.9%, against the 89% measured between the
+# meters and the pack level. Those are the same number, which points at the
+# pack LEVEL being the figure the car reports as "Added", and the polled
+# history stores the car's figure.
+#
+# One partial session against one rounded display is not a settled answer, so
+# two things follow. Every promoted row records which counter it used in
+# Charge.energy_source, so a row written under this answer stays readable
+# after it changes. And promotion never overwrites a polled charge's energy —
+# it only fills sessions polling never saw at all, which is the case that
+# exists because the cron is being cut back, not a re-pricing of the history.
+CHARGE_ENERGY_SOURCE = "pack_level"
+_CHARGE_ENERGY_FIELD = {"pack_level": "kwh_pack_level",
+                        "pack_meter": "kwh_pack_meter",
+                        "wall": "kwh_wall",
+                        "lifetime": "kwh_lifetime"}
+
+
+def _shadow_charge_kwh(c: dict, prefer: str = CHARGE_ENERGY_SOURCE):
+    """The session's energy and which counter it came from.
+
+    Falls through the counters in a fixed order when the preferred one is
+    missing, because a session recorded without it is still a session and
+    reporting zero would be worse than reporting the next best measurement of
+    the same quantity. The source travels with the number either way.
+    """
+    order = [prefer] + [k for k in ("pack_level", "pack_meter", "wall", "lifetime")
+                        if k != prefer]
+    for name in order:
+        value = c.get(_CHARGE_ENERGY_FIELD[name])
+        if value is not None and float(value) > 0:
+            return round(float(value), 3), name
+    return None, ""
+
+
+def _promote_shadow_charges(session: Session, apply: bool = False,
+                            days: int = PROMOTE_MAX_DAYS,
+                            max_add: int | None = None) -> list[dict]:
+    """Write streamed charging sessions polling never recorded.
+
+    The last thing standing between this app and a cron that only wakes the
+    car. Charges are the one dashboard figure with no telemetry path — and
+    they carry more than their own cost, since usable pack capacity is fitted
+    from them. A 2.5-hour AC session fits entirely between four-hourly ticks,
+    and a missed session today leaves no trace at all.
+
+    Adds only. A polled charge is left exactly as it is, energy included:
+    which counter matches the car's own "Added" is not settled (see
+    CHARGE_ENERGY_SOURCE), and re-pricing a history that is already consistent
+    on an unsettled answer would be the expensive kind of wrong — every trip
+    costed from those charges moves with them. What telemetry supplies here is
+    the sessions that are simply not there.
+
+    Identity is the row's own start_time, to the second, in a DateTime column.
+    Not shadow_start_ts, which is a float: an epoch near 1.79e9 does not come
+    back bit-identical from Postgres, and deciding "have I written this one"
+    on float equality put 198 drives that never happened into this database.
+    """
+    import json as _json
+
+    try:
+        charges = _json.loads(
+            state.get(session, state.TELEMETRY_CHARGES_KEY) or "[]") or []
+    except ValueError:
+        return []
+    if not charges:
+        return []
+
+    vin_to_vehicle = {v.vin: v.id for v in session.scalars(select(Vehicle)).all() if v.vin}
+    since = sync_mod.now_local() - timedelta(days=days)
+    existing = session.scalars(
+        select(Charge).where(Charge.start_time >= since).order_by(Charge.start_time)
+    ).all()
+    by_shadow = {(c.vehicle_id, c.start_time.replace(microsecond=0)): c
+                 for c in existing
+                 if (c.source or "") == "telemetry" and c.start_time}
+    claimed: set[int] = set()
+    changed: list[dict] = []
+    plan: list[tuple] = []
+    settings = get_settings()
+
+    for c in sorted(charges, key=lambda x: float(x.get("start_ts") or 0.0)):
+        try:
+            c_start = sync_mod._dt(float(c["start_ts"]))
+            c_end = sync_mod._dt(float(c["end_ts"]))
+        except (KeyError, TypeError, ValueError, OSError):
+            continue
+        if c_end < since:
+            continue
+        vehicle_id = vin_to_vehicle.get(c.get("vin"))
+        if vehicle_id is None:
+            if len(vin_to_vehicle) != 1:
+                continue
+            vehicle_id = next(iter(vin_to_vehicle.values()))
+
+        row = by_shadow.get((vehicle_id, c_start.replace(microsecond=0)))
+        if row is None:
+            # The polled session covering the same minutes, if there is one —
+            # best overlap, and only if nothing else has taken it. Both rules
+            # come from the trip promotion, where taking the first overlap let
+            # an early session claim a charge belonging to a later one.
+            best = None
+            for e in existing:
+                if (e.vehicle_id != vehicle_id or e.id in claimed
+                        or not e.start_time or not e.end_time):
+                    continue
+                if e.start_time <= c_end and c_start <= e.end_time:
+                    overlap = min(e.end_time, c_end) - max(e.start_time, c_start)
+                    if best is None or overlap > best[1]:
+                        best = (e, overlap)
+            row = best[0] if best else None
+        if row is not None and row.id is not None:
+            claimed.add(row.id)
+
+        kwh, energy_source = _shadow_charge_kwh(c)
+        entry = {
+            "start": c.get("start_time"),
+            "end": c.get("end_time"),
+            "kwh": kwh,
+            "energy_source": energy_source,
+            # Every counter, beside the one chosen. The choice is unsettled,
+            # and a preview that showed only the winner would hide exactly
+            # what a person needs to judge it against their own charge.
+            "counters": {"pack_level": c.get("kwh_pack_level"),
+                         "pack_meter": c.get("kwh_pack_meter"),
+                         "wall": c.get("kwh_wall"),
+                         "lifetime": c.get("kwh_lifetime")},
+            "action": "add" if row is None else "already recorded",
+        }
+        if row is not None:
+            entry["matched_charge_id"] = row.id
+            entry["polled_kwh"] = round(row.energy_added_kwh or 0.0, 3)
+        changed.append(entry)
+        if row is None and kwh:
+            plan.append((c, vehicle_id, c_start, c_end, kwh, energy_source))
+
+    if not apply:
+        return changed
+
+    adds = len(plan)
+    if max_add is not None and adds > max_add:
+        return [{"action": "refused", "would_add": adds, "limit": max_add,
+                 "why": "an unattended run does not add this many at once; "
+                        "read /api/telemetry/promote-charges and apply it by hand"}]
+
+    for c, vehicle_id, c_start, c_end, kwh, energy_source in plan:
+        # The shadow carries lat/lon, not a formatted string — checked against
+        # _charge_close rather than assumed, after writing c.get("location")
+        # first and finding no such key.
+        lat, lon = c.get("lat"), c.get("lon")
+        raw_coords = (f"{float(lat):.4f}, {float(lon):.4f}"
+                      if lat is not None and lon is not None else "")
+        fast = bool(c.get("fast"))
+        source, rate = pricing_prefs.resolve_source_and_rate(
+            session, settings, raw_coords, fast, c_start)
+        row = Charge(
+            vehicle_id=vehicle_id,
+            start_time=c_start.replace(microsecond=0),
+            end_time=c_end.replace(microsecond=0),
+            duration_min=round(float(c.get("duration_min") or 0.0), 1),
+            start_soc=float(c.get("soc_start") or 0.0),
+            end_soc=float(c.get("soc_end") or 0.0),
+            energy_added_kwh=kwh,
+            charge_type="DC" if fast else "AC",
+            max_power_kw=round(float(c.get("peak_kw") or 0.0), 1),
+            location=_place(raw_coords, session) if raw_coords else "",
+            cost=round(kwh * rate, 2),
+            price_source=source,
+            # Same rule the polled path uses: a zero rate is a free session,
+            # not a paid one that happened to cost nothing. The charging
+            # analytics split on this flag, so a free charge in the paid group
+            # drags its average toward zero.
+            is_free=rate == 0,
+            # outside_temp_c is deliberately left to the column default. The
+            # shadow charge does not carry it — OutsideTemp is streamed but
+            # the charge machine never recorded it — and inventing 20 C from
+            # an absent reading would look like a measurement.
+            source="telemetry",
+            shadow_start_ts=float(int(float(c["start_ts"]))),
+            energy_source=energy_source,
+        )
+        session.add(row)
+    session.commit()
+    return changed
+
+
+def _geocode_shadow_drive(session: Session, row, t: dict) -> None:
+    """Give a streamed trip its place names, where it has none.
+
+    Telemetry streams Location at 30 seconds, so a trip it recorded knows
+    exactly where it started and stopped — but until now nothing turned those
+    coordinates into names, because promotion only ever corrected rows polling
+    had already named. A trip telemetry ADDS has no names at all, and the
+    names are not decoration: Top Routes groups by them, the Work/Personal tag
+    is a geofence match on them, and the per-place parked rates are keyed by
+    the end name. A trip without them is invisible to all three.
+
+    Fill only what is empty. A row polling already named keeps that name even
+    though the coordinates here are better, because re-geocoding every
+    promotion would churn a name a person may have corrected by hand, and
+    would spend a lookup per trip per run to arrive back where it started.
+    /api/data/relabel-drives exists for a deliberate refresh.
+
+    Coordinates themselves are written whenever the stream has them and the
+    row does not, which is the case that matters for the map link.
+    """
+    pairs = (("start", t.get("start_lat"), t.get("start_lon")),
+             ("end", t.get("end_lat"), t.get("end_lon")))
+    for end, lat, lon in pairs:
+        if lat is None or lon is None:
+            continue
+        coords = f"{float(lat):.4f}, {float(lon):.4f}"
+        if not (getattr(row, f"{end}_coords", "") or ""):
+            setattr(row, f"{end}_coords", coords)
+        if (getattr(row, f"{end}_location", "") or ""):
+            continue
+        # Same resolver polling uses — geofence first, then the network
+        # geocoder — so a Place named here is the identical string a polled
+        # trip would have got, and the two sources group together in Top
+        # Routes instead of fragmenting into near-duplicate entries.
+        name, area = _place_and_area(coords, session)
+        setattr(row, f"{end}_location", name or "")
+        setattr(row, f"{end}_area", area or "")
+
+
 def _apply_shadow_to_drive(row, t: dict) -> None:
     """Copy a streamed trip's figures onto a drive row.
 
-    Only what telemetry actually measured. Locations, tags, costs and every
-    other field polling filled in are left alone — this is a correction to
-    two numbers and the boundaries around them, not a replacement of the row.
+    Only what telemetry actually measured. Tags, costs and every other field
+    polling filled in are left alone — this is a correction to two numbers and
+    the boundaries around them, not a replacement of the row. Locations are
+    handled next door by _geocode_shadow_drive, which fills them only where
+    they are missing, for the same reason.
     """
     row.source = "telemetry"
     # Recorded, but nothing decides identity from it — see the comment in
@@ -11028,6 +11262,39 @@ def db_maintenance(
             conn.execute(sa_text(f'VACUUM (ANALYZE) "{row["table"]}"'))
         after = _snapshot(conn)
     return {"vacuumed": True, "before": before, "after": after}
+
+
+@router.api_route("/telemetry/promote-charges", methods=["GET", "POST"])
+def telemetry_promote_charges(
+    apply: bool = Query(False),
+    days: int = Query(PROMOTE_MAX_DAYS, ge=1, le=90),
+    session: Session = Depends(get_session),
+):
+    """Write streamed charging sessions that polling never recorded.
+
+    Adds only — a polled charge is left exactly as it is, energy included.
+    Which of the car's counters matches its own "Added" display is not settled
+    (see CHARGE_ENERGY_SOURCE), and re-pricing a consistent history on an
+    unsettled answer moves every trip costed from it. This fills the gaps.
+
+    Plans by default. The preview lists all four counters per session beside
+    the one that would be written, because the choice between them is the
+    open question and a preview showing only the winner would hide what a
+    person needs to judge it against their own charge.
+    """
+    changed = _promote_shadow_charges(session, apply=apply, days=days)
+    adds = sum(1 for c in changed if c.get("action") == "add")
+    if not apply:
+        return {
+            "would_add": adds,
+            "already_recorded": len(changed) - adds,
+            "energy_source": CHARGE_ENERGY_SOURCE,
+            "charges": changed,
+            "note": ("Nothing written. Add &apply=true to carry these across. "
+                     "energy_source names which counter would be used, and "
+                     "counters shows all four so it can be judged."),
+        }
+    return {"added": adds, "charges": changed}
 
 
 @router.api_route("/telemetry/drop-promoted", methods=["GET", "POST"])

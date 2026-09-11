@@ -422,6 +422,23 @@ class Charge(Base):
     # instrument that can.
     billed_kwh: Mapped[float] = mapped_column(Float, default=0.0)
 
+    # Which path put these figures here, and what polling had said before
+    # telemetry corrected it — the same pair Drive carries, for the same
+    # reason. Without polled_kwh the comparison that decides which source to
+    # believe would be reading telemetry against itself and agreeing
+    # perfectly for ever. shadow_start_ts links the row to the streamed
+    # session it came from; it is recorded for reading, never for identity
+    # (see _promote_shadow_trips for the 183 duplicate rows that taught that).
+    source: Mapped[str] = mapped_column(String(12), default="")
+    shadow_start_ts: Mapped[float | None] = mapped_column(Float, nullable=True)
+    polled_kwh: Mapped[float | None] = mapped_column(Float, nullable=True)
+    # Which of the car's counters energy_added_kwh was taken from, named on
+    # the row rather than assumed from the app's current preference. The three
+    # disagree by about 11%, the choice between them is still being settled
+    # against the car's own "Added" display, and a row written under one
+    # answer must stay readable after the answer changes.
+    energy_source: Mapped[str] = mapped_column(String(16), default="")
+
     # Usable pack capacity this session implies, measured from the slope of
     # energy-added against SoC across the whole charge rather than from its two
     # endpoints (see battery.capacity_from_curve). The endpoint method carries a

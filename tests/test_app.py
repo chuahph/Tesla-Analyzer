@@ -6655,3 +6655,172 @@ def test_telemetry_fields_reports_the_set_without_leaking_values():
             assert client.get("/api/telemetry/fields?key=abc123").status_code == 200
     finally:
         settings.app_passcode, settings.sync_key = old_pc, old_key
+
+
+def test_promoted_trip_gets_place_names_without_overwriting_polled_ones():
+    """A trip telemetry ADDS has no place names, and the names are not
+    decoration — Top Routes groups by them, the Work/Personal tag is a
+    geofence match on them, and the per-place parked rates are keyed by the
+    end name. A trip without them is invisible to all three.
+
+    A row polling already named keeps that name. Re-geocoding on every
+    promotion would churn a name someone may have corrected by hand and spend
+    a lookup per trip per run to arrive back where it started.
+    """
+    import json as _json
+
+    from app import state
+    from app.api.routes import _geocode_shadow_drive
+    from app.config import get_settings
+    from app.database import SessionLocal
+    from app.models import Drive, Place, Vehicle
+
+    settings = get_settings()
+    old_pc = settings.app_passcode
+    settings.app_passcode = ""
+    try:
+        with TestClient(app) as client:
+            with SessionLocal() as s:
+                v = Vehicle(vin="TESTVIN-GEO", name="Test", model="Model 3")
+                s.add(v)
+                s.add(Place(name="Home", lat=5.3435, lon=100.3112,
+                            radius_km=0.5, created_at=datetime(2026, 1, 1)))
+                s.commit()
+
+                shadow = {"start_lat": 5.3435, "start_lon": 100.3112,
+                          "end_lat": 5.3526, "end_lon": 100.3003}
+
+                # A trip telemetry added: no names, no coords.
+                fresh = Drive(
+                    vehicle_id=v.id, start_time=datetime(2026, 9, 12, 8, 0),
+                    end_time=datetime(2026, 9, 12, 8, 30), distance_km=7.6,
+                    duration_min=30, start_soc=80, end_soc=77,
+                    energy_used_kwh=1.5, avg_speed_kmh=15, max_speed_kmh=59,
+                    outside_temp_c=30)
+                s.add(fresh)
+                s.commit()
+                _geocode_shadow_drive(s, fresh, shadow)
+                s.commit()
+                # The geofence resolves without a network lookup, and gives
+                # the same string a polled trip would have got — so both
+                # sources group together in Top Routes.
+                assert fresh.start_location == "Home"
+                assert fresh.start_coords.startswith("5.3435")
+                assert fresh.end_coords.startswith("5.3526")
+
+                # A row polling already named: left alone.
+                named = Drive(
+                    vehicle_id=v.id, start_time=datetime(2026, 9, 12, 9, 0),
+                    end_time=datetime(2026, 9, 12, 9, 30), distance_km=7.6,
+                    duration_min=30, start_soc=77, end_soc=74,
+                    energy_used_kwh=1.5, avg_speed_kmh=15, max_speed_kmh=59,
+                    outside_temp_c=30,
+                    start_location="A name someone typed",
+                    start_coords="1.0000, 2.0000")
+                s.add(named)
+                s.commit()
+                _geocode_shadow_drive(s, named, shadow)
+                s.commit()
+                assert named.start_location == "A name someone typed"
+                assert named.start_coords == "1.0000, 2.0000"
+                # ...but its empty end still gets filled.
+                assert named.end_location
+    finally:
+        settings.app_passcode = old_pc
+
+
+def test_promote_charges_adds_missed_sessions_and_never_reprices_polled_ones():
+    """Charges are the last dashboard figure with no telemetry path, and they
+    carry more than their own cost — usable pack capacity is fitted from them.
+    A 2.5-hour AC session fits entirely between four-hourly ticks.
+
+    Adds only. Which counter matches the car's own "Added" is unsettled, so a
+    polled charge keeps its energy: re-pricing a consistent history on an
+    unsettled answer moves every trip costed from it.
+    """
+    import json as _json
+
+    from app import state
+    from app.config import get_settings
+    from app.database import SessionLocal
+    from app.models import Charge, Vehicle
+
+    settings = get_settings()
+    old_pc = settings.app_passcode
+    settings.app_passcode = ""
+    vin = "TESTVIN-PROMOCHG"
+    from app import sync as sync_mod
+
+    # Through the app's own clock, both ways. Stored times are naive MYT wall
+    # clock (see sync.now_local), so datetime.fromtimestamp here would be
+    # eight hours out on a UTC host and nothing would match.
+    base = sync_mod.to_epoch(datetime(2026, 9, 12, 12, 0))
+
+    def shadow(start_off, end_off, pack_level, wall):
+        return {"vin": vin, "start_ts": base + start_off, "end_ts": base + end_off,
+                "start_time": "2026-09-12T12:00:00", "end_time": "2026-09-12T14:00:00",
+                "duration_min": (end_off - start_off) / 60.0,
+                "kwh_pack_level": pack_level, "kwh_pack_meter": wall * 0.99,
+                "kwh_wall": wall, "kwh_lifetime": wall,
+                "soc_start": 54.0, "soc_end": 80.0, "peak_kw": 7.5,
+                "fast": False, "lat": 5.3435, "lon": 100.3112}
+
+    try:
+        with TestClient(app) as client:
+            with SessionLocal() as s:
+                v = Vehicle(vin=vin, name="Test", model="Model 3")
+                s.add(v)
+                s.commit()
+                vid = v.id
+                # One session polling already has, and one it never saw.
+                s.add(Charge(
+                    vehicle_id=vid,
+                    start_time=sync_mod._dt(base),
+                    end_time=sync_mod._dt(base + 7200),
+                    duration_min=120, start_soc=54, end_soc=80,
+                    energy_added_kwh=18.32, charge_type="AC",
+                    max_power_kw=7.5, location="Home", cost=16.49))
+                s.commit()
+                state.put(s, state.TELEMETRY_CHARGES_KEY, _json.dumps([
+                    shadow(0, 7200, 18.32, 20.6),            # the polled one
+                    shadow(90000, 97200, 12.10, 13.6),       # never recorded
+                ]))
+                s.commit()
+
+            plan = client.get("/api/telemetry/promote-charges?days=90").json()
+            assert plan["would_add"] == 1
+            assert plan["already_recorded"] == 1
+            # All four counters shown, because the choice between them is the
+            # open question and a preview showing only the winner hides it.
+            missed = next(c for c in plan["charges"] if c["action"] == "add")
+            assert set(missed["counters"]) == {"pack_level", "pack_meter",
+                                               "wall", "lifetime"}
+            assert missed["energy_source"] == "pack_level"
+            with SessionLocal() as s:
+                assert s.query(Charge).filter(Charge.vehicle_id == vid).count() == 1
+
+            done = client.post("/api/telemetry/promote-charges?apply=true&days=90").json()
+            assert done["added"] == 1
+            with SessionLocal() as s:
+                rows = s.scalars(select(Charge).where(Charge.vehicle_id == vid)
+                                 .order_by(Charge.start_time)).all()
+                assert len(rows) == 2
+                polled, added = rows
+                # The polled session is untouched, energy included.
+                assert polled.energy_added_kwh == 18.32
+                assert (polled.source or "") == ""
+                # The added one carries which counter it used, so a row
+                # written under this answer stays readable after it changes.
+                assert added.source == "telemetry"
+                assert added.energy_added_kwh == 12.10
+                assert added.energy_source == "pack_level"
+                assert added.charge_type == "AC"
+
+            # Running again adds nothing: identity is the row's own
+            # start_time, not a float epoch that fails to round-trip.
+            again = client.post("/api/telemetry/promote-charges?apply=true&days=90").json()
+            assert again["added"] == 0
+            with SessionLocal() as s:
+                assert s.query(Charge).filter(Charge.vehicle_id == vid).count() == 2
+    finally:
+        settings.app_passcode = old_pc
