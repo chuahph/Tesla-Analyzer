@@ -6817,7 +6817,7 @@ def test_promote_charges_adds_missed_sessions_and_never_reprices_polled_ones():
             missed = next(c for c in plan["charges"] if c["action"] == "add")
             assert set(missed["counters"]) == {"pack_level", "pack_meter",
                                                "wall", "lifetime"}
-            assert missed["energy_source"] == "pack_level"
+            assert missed["energy_source"] == "pack_meter"
             with SessionLocal() as s:
                 assert s.query(Charge).filter(Charge.vehicle_id == vid).count() == 1
 
@@ -6834,8 +6834,13 @@ def test_promote_charges_adds_missed_sessions_and_never_reprices_polled_ones():
                 # The added one carries which counter it used, so a row
                 # written under this answer stays readable after it changes.
                 assert added.source == "telemetry"
-                assert added.energy_added_kwh == 12.10
-                assert added.energy_source == "pack_level"
+                # pack_meter, per CHARGE_ENERGY_SOURCE: the fixture's
+                # wall x 0.99, not its pack level.
+                assert added.energy_added_kwh == pytest.approx(13.464)
+                # Named on the row, so a session written under one answer
+                # stays findable after the answer changes — which it did, on
+                # 11 September, from pack_level to pack_meter.
+                assert added.energy_source == "pack_meter"
                 assert added.charge_type == "AC"
 
             # Running again adds nothing: identity is the row's own

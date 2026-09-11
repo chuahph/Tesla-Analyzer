@@ -3741,22 +3741,35 @@ def _promote_shadow_trips(session: Session, apply: bool = False,
 
 # Which of the car's three counters energy_added_kwh is taken from.
 #
-# They disagree by about 11%, and the choice is still being settled. What is
-# known: the two meters agree with each other to within a percent over
-# eighteen recorded minutes, and both sit ~11% above the pack's own level. The
-# charging network billed 19.799 kWh for the 10 September session and the car
-# itself called it 18 kWh added — 90.9%, against the 89% measured between the
-# meters and the pack level. Those are the same number, which points at the
-# pack LEVEL being the figure the car reports as "Added", and the polled
-# history stores the car's figure.
+# Settled on 11 September by a session recorded end to end, against the car's
+# own figure at full precision rather than a rounded display. Polling stores
+# charge_energy_added from vehicle_data, which IS what the car means by
+# "Added"; it read 17.48 kWh for that session, and the car's screen showed the
+# same number rounded to 17.
 #
-# One partial session against one rounded display is not a settled answer, so
-# two things follow. Every promoted row records which counter it used in
-# Charge.energy_source, so a row written under this answer stays readable
-# after it changes. And promotion never overwrites a polled charge's energy —
-# it only fills sessions polling never saw at all, which is the case that
-# exists because the cron is being cut back, not a re-pricing of the history.
-CHARGE_ENERGY_SOURCE = "pack_level"
+#     DCChargingEnergyIn   17.42   -0.34%   <- this one
+#     ACChargingEnergyIn   18.161  +3.9%
+#     EnergyRemaining rise 16.56   -5.3%
+#
+# So the answer is the PACK METER: the energy that reached the battery, not
+# what left the wall and not the pack's own level estimate.
+#
+# The earlier guess here was pack_level, and it was reasoned from a three
+# minute window and one display rounded to whole kWh — 19.799 billed against
+# "18 added" is 90.9%, which happened to sit near a badly measured 89%. Two
+# rounded figures agreeing is not a measurement. Ninety-three minutes and one
+# unrounded figure are.
+#
+# What the other two are, now that this one is named: ACChargingEnergyIn minus
+# DCChargingEnergyIn is the onboard charger's loss, 95.9% over this session —
+# which is a plausible AC-DC efficiency and is what the 99.2% from eighteen
+# minutes was too short to see. The pack's own level then rises 95.1% of what
+# the meter put in, and that gap is the SoC estimate settling rather than
+# energy going anywhere.
+#
+# Every promoted row still records which counter it used in
+# Charge.energy_source, so rows written under the old answer stay findable.
+CHARGE_ENERGY_SOURCE = "pack_meter"
 _CHARGE_ENERGY_FIELD = {"pack_level": "kwh_pack_level",
                         "pack_meter": "kwh_pack_meter",
                         "wall": "kwh_wall",
