@@ -1360,73 +1360,6 @@ def arrival_tail_for_place(tail_km: float | None) -> tuple[float, float] | None:
     return km, sec
 
 
-def close_trip_on_sleep(open_trip: dict, last_snapshot: dict, capacity_kwh: float,
-                        drive_min_km: float = DRIVE_MIN_KM,
-                        place_tail_km: float | None = None):
-    """Close a trip the moment the car is confirmed properly asleep.
-
-    A car cannot reach true sleep while driving — it needs power to move, so
-    sleep is only reachable once parked and idle for a while. If a trip is
-    still open when that happens, it is therefore definitely over, and
-    ``last_snapshot`` (the most recent successful read) is a *good* anchor for
-    the end, not a guess: with the sync endpoint's own poll-throttle bypassing
-    for any car with an open trip, that reading is at most one poll interval
-    old, never the hours-stale reading a later reconnect could bring. This
-    avoids the whole-gap reconstruction (``_reanchor_stale``) and its inherent
-    "which end of the gap did the drive happen near" ambiguity entirely, for
-    this specific transition.
-    """
-    idle_min = _confirmed_idle_min(open_trip, last_snapshot["ts"])
-    # end_lost_km is UNKNOWN here, not zero. This used to claim a real 0.0 on
-    # the reasoning that sleep is only reachable once the car has stopped, so
-    # nothing can follow the last reading. Sleep does prove the car stopped; it
-    # says nothing about where the last reading was taken relative to that stop
-    # — the same distinction routes.py already draws for the arrival top-up,
-    # and the one this claim quietly contradicted.
-    #
-    # Measured on a car that parks on level 1 of a multi-storey: it loses
-    # signal at the ramp, drives up and along to its slot, and sleeps there.
-    # The closing reading is the street outside, and the tail is real —
-    # 0.05, 0.19 and 0.36 km across three arrivals, invisible in position
-    # (35-78 m of displacement) because a ramp climbs rather than travels.
-    # Asserting 0.0 there is not a conservative default, it is a wrong
-    # measurement: it tells odometer_continuity nothing is missing and leaves
-    # a reader unable to tell a confirmed-clean arrival from an unseen one.
-    #
-    # None restores that distinction. The caller still corrects it to a real
-    # figure when a later poll can measure the tail (see LAST_SLEEP_CLOSE_KEY
-    # in routes.py); when no such poll ever comes — which is what a permanent
-    # dead zone at the destination means — unknown is the honest answer and
-    # the only one this path can support.
-    #
-    # tail_trim_sec stays unset for a different reason: this path runs no
-    # pace-based stop estimate, so it genuinely never evaluates one, which is
-    # exactly what null means for that field.
-    # The unseen tail, folded in through the ordinary blind-distance path so
-    # distance, energy, Wh/km and the driving figures all derive from one
-    # place: a synthetic closing odometer plus end_folded_km, which
-    # _drive_from already prices at the trip's own efficiency. Patching the
-    # finished dict instead would leave those five to be kept in step by hand.
-    tail = arrival_tail_for_place(place_tail_km)
-    est = tail[0] if tail else None
-    close = {**last_snapshot, "end_lost_km": None}
-    if tail:
-        est, unseen_sec = tail
-        close["odo_km"] = last_snapshot["odo_km"] + est
-        close["end_folded_km"] = est
-        # The clock moves with the odometer. Same assumption, both halves of
-        # it: duration, and therefore average speed, stay consistent with a
-        # car that was slowing rather than one that suddenly went faster.
-        close["ts"] = last_snapshot["ts"] + unseen_sec
-    d = _drive_from(open_trip, close, capacity_kwh, open_trip.get("max_speed", 0.0),
-                    idle_min, idle_tracked=True, drive_min_km=drive_min_km)
-    if d is not None:
-        # Recorded separately so the estimate never passes for a measurement,
-        # and so the correction below it knows exactly how much to take back.
-        d["end_est_km"] = est
-    return d
-
-
 def live_trip(
     open_trip: dict | None, snap: dict | None, capacity_kwh: float = 75.0,
     drive_min_km: float = DRIVE_MIN_KM,
@@ -1545,22 +1478,6 @@ def _charge_from(start: dict, cur: dict, capacity_kwh: float, price_per_kwh: flo
         # capacity from the slope through them (see _charge_curve).
         "curve": start.get("curve") or [],
     }
-
-
-def close_charge_on_sleep(open_charge: dict, last_snapshot: dict, capacity_kwh: float,
-                          price_per_kwh: float, drive_min_km: float = DRIVE_MIN_KM,
-                          price_per_kwh_dc: float | None = None):
-    """Close a charge session the moment the car is confirmed asleep/gone
-    unreachable, symmetric to ``close_trip_on_sleep``.
-
-    Charging usually keeps a Tesla's computer awake, so this fires rarely —
-    but connectivity can still drop (Wi-Fi/cell issue at the charge site)
-    without the session having actually ended, so it's still worth closing
-    from the last real reading rather than leaving it open indefinitely
-    waiting for a reconnect that might be hours away.
-    """
-    return _charge_from(open_charge, last_snapshot, capacity_kwh, price_per_kwh, drive_min_km,
-                        price_per_kwh_dc)
 
 
 # AC (home/destination) charging routes mains power through the car's onboard

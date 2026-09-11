@@ -463,17 +463,6 @@ def _first_vehicle(session: Session) -> Vehicle:
     return vehicle
 
 
-def _attach_curve_capacity(c: dict) -> None:
-    """Turn a closed session's charging curve into the capacity it implies, and
-    drop the curve itself (transient, not a column). Measured per session so
-    the running median has real measurements to work from rather than
-    re-deriving everything from endpoints on every read."""
-    fit = battery_analysis.capacity_from_curve(
-        c.pop("curve", None) or [], c.get("charge_type", "AC"))
-    c["implied_capacity_kwh"] = fit["kwh"] if fit else None
-    c["capacity_samples"] = fit["samples"] if fit else None
-
-
 # How many trailing readings the capacity constant's degradation figure is a
 # median of. Far wider than the Battery Health card's 12, because the two want
 # opposite things: the card should follow the pack, while this number scales
@@ -4265,144 +4254,24 @@ def _sync_now_impl(wake: bool, session: Session):
             sustained_offline = (now_ts - unreachable_since) >= UNREACHABLE_CLOSE_MIN * 60
 
             if vstate == "asleep" or sustained_offline:
-                trip_key = state.scoped(state.OPEN_TRIP_KEY, vvin)
-                trip_raw = state.get(session, trip_key)
-                charge_key = state.scoped(state.OPEN_CHARGE_KEY, vvin)
-                charge_raw = state.get(session, charge_key)
-                last_raw = state.get(session, state.scoped(state.SNAPSHOT_KEY, vvin))
-                vehicle_row = (
-                    session.query(Vehicle).filter(Vehicle.vin == vvin).first()
-                    if (trip_raw or charge_raw) and last_raw else None
-                )
-                row_capacity_kwh = _usable_capacity(session, vehicle_row, settings)[0] if vehicle_row else 75.0
-                if trip_raw and last_raw and vehicle_row:
-                    # Where the car went dark decides the tail, so resolve the
-                    # place from the closing reading's own coordinates and ask
-                    # what that car park has actually shown.
-                    last_snap = _json.loads(last_raw)
-                    place_tail = _place_tail_km(
-                        session,
-                        _place_and_area(sync_mod._coords(last_snap) or "", session)[0])
-                    d = sync_mod.close_trip_on_sleep(
-                        _json.loads(trip_raw), last_snap,
-                        row_capacity_kwh, settings.drive_min_km,
-                        place_tail_km=place_tail,
-                    )
-                    if d:
-                        d["start_coords"], d["end_coords"] = d["start_location"], d["end_location"]
-                        d["start_location"], d["start_area"] = _place_and_area(d["start_location"], session)
-                        d["end_location"], d["end_area"] = _place_and_area(d["end_location"], session)
-                        drive_row = Drive(vehicle_id=vehicle_row.id, **d)
-                        session.add(drive_row)
+                # Nothing is written from here any more. A trip whose car went
+                # quiet is settled from the records the car already sent, and
+                # that is the better close of the two: it ends the journey
+                # where the car STOPPED, while this one ended it wherever the
+                # poll happened to notice, up to a poll interval later and
+                # with an estimated tail bolted on to cover the difference.
+                #
+                # The polled open-trip and open-charge state is cleared rather
+                # than left alone. Nothing opens either of them now, so
+                # anything still in there was written before the polling path
+                # stopped writing — and a stale open charge is not inert: the
+                # status below reads it and reports the car as "charging" for
+                # as long as it sits there.
+                for stale_key in (state.OPEN_TRIP_KEY, state.OPEN_CHARGE_KEY):
+                    scoped = state.scoped(stale_key, vvin)
+                    if state.get(session, scoped):
+                        state.put(session, scoped, "")
                         session.commit()
-                        total["drives"] += 1
-                        # "sustained offline" (unlike a direct "asleep" report) doesn't
-                        # guarantee the car had already stopped moving — a dead zone
-                        # right at arrival can close this trip a little short. Mark it
-                        # so the next successful poll can extend it instead of logging
-                        # the remainder as a disconnected phantom trip (see
-                        # state.LAST_SLEEP_CLOSE_KEY).
-                        #
-                        # Armed for BOTH reports, but recording which one, because
-                        # they earn different amounts of trust downstream. An
-                        # "asleep" close is anchored at a reading the car had
-                        # genuinely stopped moving by — yet not necessarily AT
-                        # the stop, since last_snapshot can be a poll interval
-                        # old, so a small arrival tail can still be missing
-                        # (trip 314). Sustained "offline" is weaker still: it can
-                        # fire mid-drive, so movement well past the close can
-                        # legitimately belong to the same trip. The reader uses
-                        # this to allow a small tail in both cases but the
-                        # time-based merge only for offline (see the top-up in
-                        # _process_vehicle). Note sustained_offline can't stand in
-                        # for this: unreachable_since is armed for anything not
-                        # "online", so a car asleep past UNREACHABLE_CLOSE_MIN
-                        # sets it too.
-                        state.put(
-                            session, state.scoped(state.LAST_SLEEP_CLOSE_KEY, vvin),
-                            _json.dumps({
-                                "drive_id": drive_row.id,
-                                "odo_km": _json.loads(last_raw)["odo_km"],
-                                "ts": _json.loads(last_raw)["ts"],
-                                "reason": "asleep" if vstate == "asleep" else "offline",
-                                # Distance already credited to this trip as an
-                                # estimate. The blind stretch is one fixed
-                                # quantity: whatever is given to the arriving
-                                # trip has to be taken off the departing one,
-                                # or both claim it. Carried on the marker so
-                                # the next poll can do exactly that.
-                                "est_km": d.get("end_est_km") or 0.0,
-                                # And the clock the estimate moved, which has
-                                # to come back with the kilometres or a
-                                # corrected trip keeps time it never spent —
-                                # duration and average speed both derive from
-                                # it. Recomputed rather than carried out of
-                                # close_trip_on_sleep because `d` becomes a
-                                # Drive row and only real columns may ride in
-                                # it; the inputs here are the same ones, so
-                                # the answer is the same one.
-                                "est_sec": (
-                                    (sync_mod.arrival_tail_for_place(place_tail)
-                                     or (0.0, 0.0))[1]
-                                ),
-                                # The speed the estimate was computed from.
-                                # Carried purely so the calibration sample can
-                                # record it (see ArrivalTailSample): the model
-                                # is speed times window, so a pair of estimate
-                                # and measurement says nothing about the window
-                                # unless the speed is known too. Read here
-                                # rather than reconstructed later, because by
-                                # the time the measurement arrives this
-                                # snapshot is long gone.
-                                "speed_kmh": (
-                                    _json.loads(last_raw).get("speed_kmh") or 0.0),
-                            }),
-                        )
-                        notifications.fire_webhook(
-                            "drive-complete", "Drive completed",
-                            f"{vehicle_row.name}: {d['distance_km']:.1f} km, "
-                            f"{d['duration_min']:.0f} min, {d['start_soc']:.0f}% → "
-                            f"{d['end_soc']:.0f}% (car went offline/asleep).",
-                        )
-                if trip_raw:
-                    state.put(session, trip_key, "")
-                # Charging usually keeps the car awake, so this rarely fires —
-                # but connectivity can still drop mid-session, and without
-                # this an interrupted charge would sit open indefinitely
-                # waiting for a reconnect, never logged to Neon at all.
-                if charge_raw and last_raw and vehicle_row:
-                    c = sync_mod.close_charge_on_sleep(
-                        _json.loads(charge_raw), _json.loads(last_raw),
-                        row_capacity_kwh, settings.energy_price_per_kwh, settings.drive_min_km,
-                    )
-                    if c:
-                        cap = sync_mod.implied_capacity_kwh(c)
-                        _attach_curve_capacity(c)
-                        c.pop("energy_measured", None)
-                        if cap:
-                            old_cap = vehicle_row.battery_capacity_kwh or 75.0
-                            vehicle_row.battery_capacity_kwh = round(0.8 * old_cap + 0.2 * cap, 1)
-                        raw_coords = c.get("location", "")
-                        c["location"] = _place(raw_coords, session)
-                        source, rate = pricing_prefs.resolve_source_and_rate(
-                            session, settings, raw_coords, c["charge_type"] == "DC", c["start_time"])
-                        c["cost"] = round(c["energy_added_kwh"] * rate, 2)
-                        c["price_source"] = source
-                        c["is_free"] = rate == 0   # see the same rule above
-                        session.add(Charge(vehicle_id=vehicle_row.id, **c))
-                        session.commit()
-                        total["charges"] += 1
-                        # Closed via the car going offline/asleep rather than a
-                        # clean "stopped charging" reading — could be complete
-                        # or genuinely interrupted, so the message stays neutral.
-                        notifications.notify(
-                            session, "Charging session ended",
-                            f"{vehicle_row.name}: {c['energy_added_kwh']:.1f} kWh added, "
-                            f"now at {c['end_soc']:.0f}% (car went offline/asleep).",
-                            tag="charge-complete",
-                        )
-                if charge_raw:
-                    state.put(session, charge_key, "")
             continue  # asleep/offline — nothing readable right now
 
         # Back online — this unreachable episode (if any) is over; the next

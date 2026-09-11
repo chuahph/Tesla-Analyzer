@@ -1,7 +1,7 @@
 """Tests for the snapshot session state machine (app/sync.py)."""
 import pytest
 
-from app.sync import (_energy_kwh, close_trip_on_sleep, is_driving,
+from app.sync import (_energy_kwh, is_driving,
                       snapshot_from_telemetry, advance_shadow,
                       process_snapshot, snapshot_from_vehicle_data,
                       recover_sleep_gap, ENERGY_QUANTUM_KWH, ENERGY_SAMPLE_SEC, MILES_TO_KM,
@@ -1000,28 +1000,6 @@ def test_blind_gap_close_folds_parking_creep_into_the_trip_that_ended():
     assert drives2[0]["distance_km"] == 8.4
 
 
-def test_close_trip_on_sleep_leaves_the_lost_tail_unknown():
-    """This asserted a real 0.0, on the reasoning that sleep is only reachable
-    once the car has stopped so nothing can follow the last reading. Sleep does
-    prove the car stopped; it says nothing about where the last reading sits
-    relative to that stop. Measured on a car parking on level 1 of a
-    multi-storey: signal dies at the ramp, and the closing reading is the
-    street outside with 0.05-0.36 km still to drive. Unknown is what this path
-    can support. tail_trim_sec stays null for its own reason — no pace-based
-    stop estimate is ever evaluated here."""
-    open_trip = {
-        "ts": T0, "odo_km": 8000.0, "soc": 80, "range_km": 400.0,
-        "max_speed": 50.0, "idle_min": 0.0, "still_run": 0.0, "still_since": None,
-    }
-    last_snapshot = snap(T0 + 600, 8006.0, 78, shift="P", speed=0.0,
-                         locked=True, range_km=394.0)
-    d = close_trip_on_sleep(open_trip, last_snapshot, 60.0)
-    assert d is not None
-    assert d["distance_km"] == 6.0
-    assert d["end_lost_km"] is None        # unknown, not a measured zero
-    assert d["tail_trim_sec"] is None
-
-
 def test_the_arrival_tail_comes_from_the_place_not_from_the_speed():
     """The speed-based model is gone. Four arrivals measured against the car's
     own trip meter needed windows of 17, 51, 119 and 868 seconds to fit, and
@@ -1049,36 +1027,6 @@ def test_the_arrival_tail_comes_from_the_place_not_from_the_speed():
     big_km, big_sec = arrival_tail_for_place(50.0)
     assert big_km == ARRIVAL_EST_MAX_KM
     assert big_sec == ARRIVAL_EST_MAX_MIN * 60.0
-
-
-def test_a_sleep_close_folds_its_estimated_tail_in_and_records_it_as_estimated():
-    """The estimate goes into distance so the trip reads closer to the car's own
-    figure, and into end_est_km so it can never pass for a measurement — and so
-    the correction that supersedes it knows exactly how much to take back."""
-    from app.sync import close_trip_on_sleep
-
-    open_trip = {
-        "ts": T0, "odo_km": 8000.0, "soc": 80, "range_km": 400.0,
-        "max_speed": 50.0, "idle_min": 0.0, "still_run": 0.0, "still_since": None,
-    }
-    last = snap(T0 + 600, 8006.0, 78, shift="D", speed=20.0, range_km=394.0)
-    plain = close_trip_on_sleep(open_trip, last, 60.0)
-    assert plain["end_est_km"] is None            # no measurements, no estimate
-    assert plain["distance_km"] == 6.0
-
-    est = close_trip_on_sleep(open_trip, last, 60.0, place_tail_km=0.5)
-    assert est["end_est_km"] == 0.5               # what the place has measured
-    assert est["distance_km"] == 6.5              # folded in
-    # The clock moved with it, so the trip reads as one that slowed to a stop
-    # rather than one that covered more ground in the same time.
-    assert est["duration_min"] == pytest.approx(plain["duration_min"] + 3.0)
-    assert est["avg_speed_kmh"] < plain["avg_speed_kmh"]
-    assert est["end_lost_km"] is None             # still nothing measured
-    # Energy came with it, so Wh/km doesn't collapse by the folded share.
-    assert est["energy_used_kwh"] > plain["energy_used_kwh"]
-    def whkm(d):
-        return d["energy_used_kwh"] * 1000.0 / d["distance_km"]
-    assert abs(whkm(est) - whkm(plain)) < 0.5
 
 
 def test_tail_trim_changes_duration_only_never_distance_or_energy():
@@ -2113,25 +2061,6 @@ def test_a_trip_opens_on_the_shift_not_on_the_unlock():
     _, _, trip, _ = step(s2, s3, trip)
     assert trip is not None, "and stays open while it drives"
 
-
-def test_close_trip_on_sleep_uses_last_snapshot_as_the_end():
-    """A car can't reach true sleep mid-drive, so an open trip is definitely
-    over once it does — close using the last successful read as the end,
-    not a guess."""
-    from app.sync import _dt, close_trip_on_sleep
-
-    open_trip = {"ts": T0, "odo_km": 10_000.0, "soc": 80, "max_speed": 70.0}
-    last_snapshot = snap(T0 + 900, 10_012.0, 76)  # last read before it went asleep
-    d = close_trip_on_sleep(open_trip, last_snapshot, 60.0)
-    assert d is not None
-    assert d["distance_km"] == 12.0
-    assert d["duration_min"] == 15.0
-    # Anchored at the last real reading's own timestamp, not a guess.
-    assert d["end_time"] == _dt(T0 + 900)
-    assert d["start_time"] == _dt(T0)
-
-
-# --- Trimmed-tail standby correction ---------------------------------------
 
 def test_trim_standby_removes_the_parked_tail_from_trip_energy():
     """Regression for trip 316: a 4.2 km arrival into a dead zone was trimmed
