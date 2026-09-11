@@ -6021,6 +6021,47 @@ def test_a_trip_is_only_compared_against_its_own_car():
         settings.app_passcode = old_pc
 
 
+def test_energy_uncertainty_uses_the_interval_the_trip_was_driven_under():
+    """A trip does not get more precise because the car was reconfigured.
+
+    The figure is computed when a trip is DISPLAYED, not stored on it, so
+    the constant it reads is whatever is in force at read time. When
+    EnergyRemaining went from sixty seconds to ten, every trip ever driven
+    would otherwise have silently claimed six times the precision it was
+    measured with — and the accuracy report sums these in quadrature, so the
+    whole history's error bar would have shrunk on a day nothing was measured.
+
+    The cutover is the start of the day AFTER the field set went to the car,
+    so a trip driven between the change and midnight keeps the conservative
+    figure. That errs the safe way: overstating an error bar is a smaller sin
+    than understating one.
+    """
+    from app.api.routes import _energy_unc_kwh
+    from app import sync as sync_mod
+
+    def at(day: int) -> float:
+        return datetime(2026, 9, day, 12, 0, tzinfo=sync_mod.MYT).timestamp()
+
+    # 1.5 kWh over 11 minutes: one minute of it is 0.136 kWh, ten seconds
+    # 0.023 — both far above the field's own 0.02 step, which is the point.
+    trip = {"energy_kwh": 1.5, "duration_min": 11.0}
+
+    assert _energy_unc_kwh({**trip, "start_ts": at(10)}) == pytest.approx(0.136, abs=0.001)
+    assert _energy_unc_kwh({**trip, "start_ts": at(11)}) == pytest.approx(0.136, abs=0.001), \
+        "the day of the change still sampled at sixty seconds for part of it"
+    assert _energy_unc_kwh({**trip, "start_ts": at(12)}) == pytest.approx(0.023, abs=0.001)
+
+    # No timestamp, or an unusable one, falls back to the wide figure rather
+    # than quietly claiming the narrow one.
+    assert _energy_unc_kwh(trip) == pytest.approx(0.136, abs=0.001)
+    assert _energy_unc_kwh({**trip, "start_ts": "not a time"}) == pytest.approx(0.136, abs=0.001)
+
+    # The 0.02 quantum is still the floor. A long gentle trip is sampled far
+    # more finely than the field can resolve, and the step is what is left.
+    assert _energy_unc_kwh({"energy_kwh": 0.5, "duration_min": 60.0,
+                            "start_ts": at(20)}) == pytest.approx(0.02, abs=0.0001)
+
+
 def test_purge_pre_telemetry_plans_then_deletes_and_restores():
     """The purge deletes only trips older than the first telemetry-sourced
     one, states what the parked-drain fits lose, and can be undone.

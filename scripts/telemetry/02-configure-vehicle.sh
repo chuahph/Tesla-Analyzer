@@ -134,28 +134,56 @@ kill -0 $PROXY_PID 2>/dev/null || die "the proxy exited on startup (see $LOG)"
 #                a queue and what a door event only implies.
 #   Energy       LifetimeEnergyUsedDrive is monotonic and traction-only, so a
 #                lost record costs nothing and climate does not contaminate a
-#                trip. LifetimeEnergyGainedRegen gives regen, which this app
-#                has never had at all.
+#                trip.
+#
+#                EnergyRemaining at TEN seconds, not sixty. A trip's energy is
+#                the difference between two readings of it, so each end of the
+#                bracket is taken up to one interval from the boundary it
+#                marks — at sixty seconds that is worth about 0.06 kWh on this
+#                car, three times the field's own 0.02 kWh step and the floor
+#                under every energy figure the app produces. Measured against
+#                the car across ten trips: distance settled at -0.4% while
+#                energy sat at 2.85%, and one interval accounts for the
+#                difference. At ten seconds the term drops to about 0.01 kWh.
+#
+#                It costs stream volume, and only while driving: the field
+#                changes continuously under load and barely at all parked, so
+#                a parked car sends no more than before.
 #   Charging     ChargerVoltage x ChargeAmps x ChargerPhases is wall power
 #                measured by the car, against EnergyRemaining for pack energy
 #                — wall-to-pack efficiency on every charge, instead of
 #                photographing receipts.
 #
-#                LifetimeEnergyChargedKwh (field 261) is the third counter,
-#                and the only monotonic one. ACChargingEnergyIn RESETS per
-#                session — measured: 16.70 days before the 10 September
-#                charge and 4.72 partway through it — so reading a session
-#                from it means catching both of its ends cleanly, and the
-#                first session this app ever recorded was joined halfway
-#                through. A lifetime counter cannot reset underneath a
-#                session, and a lost record costs nothing because the next
-#                one carries the same total.
+#                A session is read from DCChargingEnergyIn, the pack meter,
+#                which is what the car's own "Added" figure counts: 17.42
+#                against the car's 17.48, or -0.34%, where the wall total
+#                reads +3.9% and the SoC-derived figure -5.3%.
+#
+#                It resets per session, as ACChargingEnergyIn does — measured
+#                at 16.70 days before the 10 September charge and 4.72 partway
+#                through it — so a session read from it has to be caught at
+#                both ends, and a session joined halfway through cannot be
+#                recovered. LifetimeEnergyChargedKwh would have removed that
+#                requirement, being monotonic; the car will not send it (see
+#                Removed), so the fragment guard in the promoter handles it
+#                instead, refusing to rewrite a recorded session from a shadow
+#                that covers less than 80% of it.
 #   Security     SentryMode is a state machine, not a switch: Off, Idle,
 #                Armed, Aware, Panic, Quiet. Aware means the car noticed
 #                something and Panic means the alarm went off — neither is
 #                visible through vehicle_data, which reports a bare boolean.
 #                At ten seconds an escalation is caught; at the old three
 #                hundred, an entire incident could pass between readings.
+#   Removed      LifetimeEnergyGainedRegen (field 134) and
+#                LifetimeEnergyChargedKwh (261). Both were configured,
+#                accepted by Tesla and confirmed on the car with synced true —
+#                and both sent nothing, ever. Regen had nineteen trips to move
+#                and a monotonic counter moves on every one; the charge
+#                counter had a ninety-three minute session. A field the car
+#                will not send is not a field, and leaving them in made
+#                configured_but_quiet permanently non-empty, which dulls the
+#                one diagnostic that says whether a configuration landed.
+#
 #   Parked draw  CabinOverheatProtectionMode and ClimateKeeperMode. Both are
 #                large draws that run while the car is parked and neither has
 #                ever been visible to this app on the telemetry path, so the
@@ -296,8 +324,7 @@ cat > "$WORK/config.json" <<EOF
       "Odometer":                  {"interval_seconds": 30},
       "Location":                  {"interval_seconds": 30},
 $DEFAULT_DRIVE_COUNTER
-      "LifetimeEnergyGainedRegen": {"interval_seconds": 60},
-      "EnergyRemaining":           {"interval_seconds": 60},
+      "EnergyRemaining":           {"interval_seconds": 10},
       "Soc":                       {"interval_seconds": 60},
       "RatedRange":                {"interval_seconds": 300},
       "DetailedChargeState":       {"interval_seconds": 30},
@@ -306,7 +333,6 @@ $DEFAULT_DRIVE_COUNTER
       "DCChargingPower":           {"interval_seconds": 60},
       "ACChargingEnergyIn":        {"interval_seconds": 60},
       "DCChargingEnergyIn":        {"interval_seconds": 60},
-      "LifetimeEnergyChargedKwh":  {"interval_seconds": 60},
       "ChargerVoltage":            {"interval_seconds": 60},
       "ChargeAmps":                {"interval_seconds": 60},
       "ChargerPhases":             {"interval_seconds": 60},

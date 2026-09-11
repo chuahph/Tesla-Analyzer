@@ -3013,6 +3013,25 @@ ENERGY_QUANTUM_KWH = 0.02
 # trip made it look like a large one — a 1.0 kWh journey carries the same
 # 0.06 kWh as a 2.5 kWh journey and reports three times the percentage.
 ENERGY_SAMPLE_SEC = 60.0
+# Tightened to ten seconds on the car, which cuts that term sixfold — about
+# 0.01 kWh, putting trip energy on the same footing as trip distance, which
+# has been settled at -0.4% for days while energy sat at 2.85%.
+#
+# Dated, because this is read when a trip is DISPLAYED rather than stored on
+# it, and a trip recorded while the car still sampled once a minute did not
+# somehow become six times more precise when the configuration changed. The
+# cutover is the start of the day after the field set went to the car: a trip
+# driven between the change and midnight keeps the conservative figure, which
+# errs the safe way.
+ENERGY_SAMPLE_FINE_SEC = 10.0
+ENERGY_SAMPLE_FINE_FROM = datetime(2026, 9, 12)
+
+
+def energy_sample_sec(when: datetime | None = None) -> float:
+    """The EnergyRemaining sampling interval in force for a trip at ``when``."""
+    if when is not None and when >= ENERGY_SAMPLE_FINE_FROM:
+        return ENERGY_SAMPLE_FINE_SEC
+    return ENERGY_SAMPLE_SEC
 
 
 # How long the stream must have been silent before a trip is closed without

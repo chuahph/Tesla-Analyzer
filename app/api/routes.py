@@ -11147,7 +11147,7 @@ def telemetry_config(session: Session = Depends(get_session)):
     on its own that is ambiguous: Fleet Telemetry transmits a field when it
     CHANGES, so one that has not arrived may be missing from the car's
     configuration, or may simply not have moved since the configuration
-    landed. LifetimeEnergyChargedKwh does not move unless the car is charging;
+    landed. ACChargingEnergyIn does not move unless the car is charging;
     DCChargingPower does not move unless a DC charger is delivering.
 
     This asks Tesla instead. ``synced`` is the car's own acknowledgement, and
@@ -11382,16 +11382,29 @@ def fleet_token(session: Session = Depends(get_session)):
 def _energy_unc_kwh(t: dict) -> float | None:
     """What a shadow trip's energy figure is worth, computed from the trip.
 
-    The larger of EnergyRemaining's 0.02 kWh step and one 60-second sampling
-    interval at the trip's own average power — see sync.ENERGY_SAMPLE_SEC for
-    what the measurement behind that is.
+    The larger of EnergyRemaining's 0.02 kWh step and one sampling interval at
+    the trip's own average power — see sync.ENERGY_SAMPLE_SEC for what the
+    measurement behind that is.
+
+    The interval is the one that was in force when the trip was DRIVEN, not
+    the one configured now. This figure is computed on read, so a trip
+    recorded while the car sampled once a minute would otherwise become six
+    times more precise the moment the field set changed, which is not
+    something that happened to it.
     """
     energy = t.get("energy_kwh")
     minutes = float(t.get("duration_min") or 0.0)
     if energy is None or minutes <= 0:
         return None
+    when = None
+    try:
+        raw = t.get("start_ts")
+        if raw is not None:
+            when = sync_mod._dt(float(raw))
+    except (TypeError, ValueError, OSError):
+        when = None
     return round(max(sync_mod.ENERGY_QUANTUM_KWH,
-                     abs(float(energy)) * sync_mod.ENERGY_SAMPLE_SEC
+                     abs(float(energy)) * sync_mod.energy_sample_sec(when)
                      / (minutes * 60.0)), 3)
 
 
