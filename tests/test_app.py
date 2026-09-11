@@ -5353,8 +5353,16 @@ def test_a_trip_that_is_mostly_rounding_does_not_referee_the_others():
         # Summed as well as judged, over the same set. A boundary drawn in
         # the wrong place moves energy between two trips without losing any,
         # so a median calls that an error twice while a sum cancels it.
-        assert body["totals"]["km"] == [10.8, 10.8, 10.8], body["totals"]
-        assert body["totals"]["km_err_pct"] == [0.0, 0.0]
+        # Two columns now, not three: totals are telemetry against the
+        # car, and the polled sum moved to its own key because it is
+        # taken over a different set of trips (see judged_polled), and
+        # printing it alongside would invite an invalid comparison.
+        assert body["totals"]["km"] == [10.8, 10.8], body["totals"]
+        assert body["totals"]["order"] == "telemetry, car"
+        # A single figure now: telemetry against the car. The polled
+        # error lives at totals.polled_km_err_pct, over its own set.
+        assert body["totals"]["km_err_pct"] == 0.0
+        assert body["totals"]["polled_km_err_pct"] == 0.0
         whys = " ".join(e["why"] for e in body["not_judged"])
         assert "quantisation" in whys and "no odometer bracket" in whys, whys
         # And the total carries what it is worth, which is the only thing

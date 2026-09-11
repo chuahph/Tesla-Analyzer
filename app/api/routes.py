@@ -12087,14 +12087,27 @@ def telemetry_compare(
         rows.append(row)
 
     paired = [r for r in rows if r["polled"]]
-    # Every median below is taken over these same rows, so a row qualifies
-    # only when all four figures exist. Gating on telemetry_km_pct alone let a
-    # trip through whose Wh/km is None — which happens whenever the energy
-    # counter did not move — and percentile() cannot order None against a
-    # float, so one such trip took down the whole report.
-    judged = [r for r in paired if r["vs_car"] and all(
+    # Judged against the CAR, which needs no polled row — the car's own screen
+    # is independent of both sources. Gating this on `paired` tied the only
+    # comparison that still means anything to the one that has stopped: at a
+    # half-hourly cron polling records journeys wrongly or not at all, so as
+    # its rows thin out the car comparison would have gone quiet with them and
+    # looked like the accuracy report breaking.
+    #
+    # A row still qualifies only when its own figures are all present. Gating
+    # on telemetry_km_pct alone let a trip through whose Wh/km is None — which
+    # happens whenever the energy counter did not move — and percentile()
+    # cannot order None against a float, so one such trip took down the whole
+    # report.
+    judged = [r for r in rows if r["vs_car"] and all(
         r["vs_car"][k] is not None for k in
-        ("polled_km_pct", "telemetry_km_pct", "polled_whkm_pct", "telemetry_whkm_pct"))]
+        ("telemetry_km_pct", "telemetry_whkm_pct"))]
+    # The polled half, where it exists. Every one of these was logged at a
+    # one-minute cron; nothing logged at half-hourly belongs in an accuracy
+    # figure, and this is kept as the historical record that justified the
+    # migration rather than as a live measurement.
+    judged_polled = [r for r in judged if r["vs_car"].get("polled_km_pct") is not None
+                     and r["vs_car"].get("polled_whkm_pct") is not None]
     # Two kinds of trip cannot judge anything, and averaging them in makes
     # the verdict worse rather than more cautious.
     #
@@ -12139,15 +12152,19 @@ def telemetry_compare(
         # rather than silently dropped: a shrinking judged count with no
         # explanation is how a comparison quietly stops meaning anything.
         "not_judged": excluded,
+        "judged_polled": len(judged_polled),
         "vs_car": None if not judged else {
-            "polled_km_err_pct": round(percentile(
-                [r["vs_car"]["polled_km_pct"] for r in judged], 0.5), 2),
             "telemetry_km_err_pct": round(percentile(
                 [r["vs_car"]["telemetry_km_pct"] for r in judged], 0.5), 2),
-            "polled_whkm_err_pct": round(percentile(
-                [r["vs_car"]["polled_whkm_pct"] for r in judged], 0.5), 2),
             "telemetry_whkm_err_pct": round(percentile(
                 [r["vs_car"]["telemetry_whkm_pct"] for r in judged], 0.5), 2),
+            # Historical. Every trip behind these was logged at a one-minute
+            # cron, and nothing logged at half-hourly is added — see
+            # judged_polled for how many still stand behind them.
+            "polled_km_err_pct": None if not judged_polled else round(percentile(
+                [r["vs_car"]["polled_km_pct"] for r in judged_polled], 0.5), 2),
+            "polled_whkm_err_pct": None if not judged_polled else round(percentile(
+                [r["vs_car"]["polled_whkm_pct"] for r in judged_polled], 0.5), 2),
         },
         # Summed, not just averaged. A median compares each trip against the
         # car and treats a boundary drawn in the wrong place as an error —
@@ -12161,22 +12178,24 @@ def telemetry_compare(
         # 18.0 km against 18.004. The disagreement was never about how much
         # energy was used, only about which trip used it.
         "totals": None if not judged else {
+            # Telemetry against the car. The polled column is summed over
+            # judged_polled instead, because a sum of a different set of trips
+            # is not comparable with these two and printing it beside them
+            # would invite exactly that comparison.
             "km": [round(sum(r["telemetry"]["km"] for r in judged), 2),
-                   round(sum(r["polled"]["km"] for r in judged), 2),
                    round(sum(r["car"]["km"] for r in judged), 2)],
             "kwh": [round(sum(r["telemetry"]["kwh"] or 0.0 for r in judged), 2),
-                    round(sum(r["polled"]["kwh"] for r in judged), 2),
                     round(sum(r["car"]["kwh"] for r in judged), 2)],
-            "km_err_pct": [
-                pct(sum(r["telemetry"]["km"] for r in judged),
-                    sum(r["car"]["km"] for r in judged)),
-                pct(sum(r["polled"]["km"] for r in judged),
-                    sum(r["car"]["km"] for r in judged))],
-            "kwh_err_pct": [
-                pct(sum(r["telemetry"]["kwh"] or 0.0 for r in judged),
-                    sum(r["car"]["kwh"] for r in judged)),
-                pct(sum(r["polled"]["kwh"] for r in judged),
-                    sum(r["car"]["kwh"] for r in judged))],
+            "km_err_pct": pct(sum(r["telemetry"]["km"] for r in judged),
+                              sum(r["car"]["km"] for r in judged)),
+            "kwh_err_pct": pct(sum(r["telemetry"]["kwh"] or 0.0 for r in judged),
+                               sum(r["car"]["kwh"] for r in judged)),
+            "polled_km_err_pct": None if not judged_polled else pct(
+                sum(r["polled"]["km"] for r in judged_polled),
+                sum(r["car"]["km"] for r in judged_polled)),
+            "polled_kwh_err_pct": None if not judged_polled else pct(
+                sum(r["polled"]["kwh"] for r in judged_polled),
+                sum(r["car"]["kwh"] for r in judged_polled)),
             # What the telemetry energy total is worth, which is the only
             # thing that says whether its error is a finding or a coin toss.
             # Each trip's uncertainty is dominated by EnergyRemaining's
@@ -12189,7 +12208,7 @@ def telemetry_compare(
                               for r in judged))  # recomputed, see _energy_unc_kwh
                 / sum(r["car"]["kwh"] for r in judged) * 100.0, 2)
             if sum(r["car"]["kwh"] for r in judged) else None,
-            "order": "telemetry, polled, car",
+            "order": "telemetry, car",
         },
         "summary": {
             # Kilometres the odometer recorded between trips rather than
