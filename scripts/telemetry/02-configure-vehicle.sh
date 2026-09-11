@@ -424,21 +424,23 @@ case "$HTTP" in
       say "Accepted"
       cat <<EOF
 
-The car has the configuration. It connects when it next wakes, so an idle
-log until then is expected rather than a fault.
+Tesla has the configuration. It is delivered when the car next connects, so
+a sleeping car reports success here and takes it hours later — an idle log
+until then is expected rather than a fault.
 
-Confirm the car has taken it (synced turns true once it wakes):
-  $APP_URL/api/telemetry/recent      # new fields appearing is the proof
+Confirm the CAR has it (asks Tesla what the vehicle is holding):
+  $APP_URL/api/telemetry/config      # synced true is the car's own word
+
+Confirm what is ARRIVING (evidence, not bookkeeping):
+  $APP_URL/api/telemetry/fields      # configured_but_quiet should be empty
 
 Watch it arrive:
   docker logs -f fleet-telemetry     # the car's connection
   journalctl -u tesla-bridge -f      # records being forwarded
 
-Then read what it actually sent:
-  $APP_URL/api/telemetry/recent
-
-Nothing in the app derives anything from those records yet — units come
-first, from real values.
+Read the two together: configured and synced but not arriving means the
+field is quiet, which is ordinary. Not configured means the send did not
+take, which is not.
 EOF
       ;;
   412) die "412: the vehicle rejected the configuration. Usually the virtual
