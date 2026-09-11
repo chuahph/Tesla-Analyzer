@@ -515,9 +515,11 @@ def _place_tail_km(session: Session, place: str) -> float | None:
 
     The tail is a property of the car park — a ramp and a slot, or a surface
     bay with signal to the door — which is why this is keyed on place and not
-    on anything about the drive (see sync.arrival_tail_for_place). None until
-    a place has enough measurements, and None is a real answer: no estimate at
-    all beat the speed model it replaced.
+    on anything about the drive. None until a place has enough measurements,
+    and None is a real answer: across four arrivals, no estimate at all beat
+    the speed model that used to guess one (0.208 km of error against 0.200).
+    Reported now rather than applied — the estimator it fed belonged to the
+    polled sleep-close, and what replaced that measures the ground instead.
     """
     if not place:
         return None
@@ -2921,313 +2923,20 @@ def _process_vehicle(
     open_trip = _json.loads(state.get(session, tk) or "null")
     open_charge = _json.loads(state.get(session, ck) or "null")
 
-    # A trip closed on sustained "offline" (see LAST_SLEEP_CLOSE_KEY) may have
-    # been cut short by the same dead zone that caused the closure — this poll
-    # is the first fresh reading since, so it's the only chance to tell.
-    # Further movement while the car now reads parked belongs to that same
-    # drive continuing through the dead zone, not a new one; extend the trip
-    # that already closed rather than let process_snapshot() log the rest as
-    # an unrelated phantom trip. Two different guards for two different risks:
-    # a small amount (GAP_CREEP_MAX_KM) merges regardless of how long the
-    # reconnect took — that's just final parking creep. A larger amount still
-    # merges as long as it's within SLEEP_CLOSE_MERGE_MAX_MIN of the close —
-    # sustained "offline" is only 3 minutes, routinely exceeded by an active
-    # drive through a real dead zone, so a few km turning up minutes later is
-    # still more likely the same continuing drive than a genuine second one.
-    # Past both guards, or if the car's already driving again, don't guess —
-    # record the real amount instead of leaving the false 0.0 from close time.
-    sleep_close_key = state.scoped(state.LAST_SLEEP_CLOSE_KEY, vin)
-    sleep_close_raw = state.get(session, sleep_close_key)
-    if sleep_close_raw and prev:
-        marker = _json.loads(sleep_close_raw)
-        est_credited = marker.get("est_km") or 0.0
-        # Kept unclamped for the calibration sample below. est_credited is
-        # about to be trimmed to whatever the car actually covered, which is
-        # the right value for correcting the trip and exactly the wrong one for
-        # scoring the model — a prediction trimmed to fit the outcome always
-        # scores perfectly.
-        est_predicted = est_credited
-        est_sec = marker.get("est_sec") or 0.0
-        # Everything the odometer has done since the close. The estimate was a
-        # claim on part of it, and this is the first moment anything can check
-        # that claim against a measurement.
-        raw_moved = snap["odo_km"] - marker["odo_km"]
-        # Zero is a measurement, not the absence of one, and on this path it is
-        # the strongest one available: it proves the tail did not happen. A car
-        # whose last reading really was its arrival is next read at the same
-        # odometer, and requiring strictly positive movement excluded exactly
-        # that case — the one where the estimate is most wrong and where
-        # nothing else will ever revisit it, since this block runs once and
-        # then clears its marker.
-        if marker.get("corrected"):
-            # Already reconciled by hand against the car's own trip meter, so
-            # the closed trip needs nothing from this poll — but the HAND-OVER
-            # still does. That is the half that was missed: this marker does
-            # two jobs, correcting the trip that closed and telling the next
-            # trip where to begin, and repair_arrival_tail used to clear it
-            # outright, which cancelled both. Measured on trip 333, which
-            # anchored to the pre-blackout reading and re-counted 0.320 km
-            # already credited to 332 — 11.0 km against the car's 10.7.
-            #
-            # No calibration sample either: the prediction was superseded by a
-            # human reading a screen, so scoring the model against what is left
-            # would score it against an answer it did not produce.
-            if est_credited and prev.get("odo_km") == marker["odo_km"]:
-                prev = {**prev, "odo_km": prev["odo_km"] + est_credited}
-        elif prev.get("odo_km") == marker["odo_km"] and raw_moved >= 0:
-            closed_drive = session.get(Drive, marker["drive_id"])
-            # An estimate larger than the ground the car actually covered is
-            # simply wrong, and wrong in the direction that matters: left
-            # standing it would also push the next trip's start past its own
-            # beginning. Trimmed to fit before anything else reads it.
-            if closed_drive is not None and est_credited > raw_moved:
-                over = est_credited - raw_moved
-                _retract_estimated_tail(
-                    closed_drive, over,
-                    est_sec * (over / est_credited) if est_credited else 0.0)
-                est_sec *= raw_moved / est_credited
-                est_credited = raw_moved
-            # The boundary is where the estimate left it, not the raw reading —
-            # the estimated tail already belongs to the closed trip.
-            moved = raw_moved - est_credited
-            close_ts = marker.get("ts")
-            elapsed_min = (snap["ts"] - close_ts) / 60.0 if close_ts else float("inf")
-            # Which report closed the trip decides how much this poll may
-            # attribute to it. "asleep" is the trustworthy one — a car cannot
-            # reach sleep while moving, so the drive really was over. But that
-            # only proves the car had STOPPED, not that last_snapshot was taken
-            # at the stop: that reading can still be a poll interval stale, and
-            # a trip closed on it then reads short by whatever the car covered
-            # in between (confirmed live, trip 314: 0.4 km and a minute of
-            # arrival missing, with tail_trim_sec null marking the sleep-close
-            # path). So a small tail still folds in. What must NOT apply is the
-            # time-based branch, which exists because sustained "offline" can
-            # fire mid-drive; after a genuine sleep any sizable movement is a
-            # new trip, not this one continuing. Markers written before the
-            # field default to the offline (less trusting) rules.
-            asleep_close = marker.get("reason") == "asleep"
-            fold_in = (
-                closed_drive is not None and not sync_mod.is_driving(snap)
-                and (moved <= sync_mod.GAP_CREEP_MAX_KM
-                     or (not asleep_close
-                         and elapsed_min <= sync_mod.SLEEP_CLOSE_MERGE_MAX_MIN))
-            )
-            if fold_in:
-                # A poll can finally see this ground, so the estimate made at
-                # close time is superseded — taken back whole before the
-                # measurement goes in, or the trip would carry both. This is
-                # the correction the estimate exists to wait for.
-                #
-                # Whole estimate out, whole measurement in: raw_moved, not
-                # moved. The two are different quantities and only one of them
-                # belongs here. `moved` is what is left over ONCE the estimate
-                # is allowed to stand, which is the right question for the
-                # branches that leave it standing — but this branch has just
-                # revoked it, so the trip is short by the full stretch from the
-                # marker's anchor to here. Subtracting the estimate and then
-                # adding only the remainder credited the tail to nobody.
-                _retract_estimated_tail(
-                    closed_drive, closed_drive.end_est_km or 0.0, est_sec)
-                closed_drive.distance_km = round(closed_drive.distance_km + raw_moved, 1)
-                # Distance alone isn't the whole trip. wh_per_km is derived
-                # (energy / distance) and soc_used_pct is derived from the
-                # energy too, so growing distance while leaving energy at its
-                # close-time value silently understates both — measured on the
-                # 4 km case, +33% distance against +0.00 kWh dropped Wh/km by
-                # 25%. prev is the close reading itself (the odo_km guard above
-                # proves nothing has moved the snapshot since), so it's the
-                # right "from" end for the stretch being folded in, and snap
-                # carries the fresh soc/range to measure it against.
-                #
-                # Gated the same way the departure-side recovery is gated, for
-                # the same reason: a car that reached its destination early in
-                # the window sat parked for the rest of it, accruing standby
-                # drain that is not this drive's. Past either bound the distance
-                # still folds in — the odometer is measured either way — but the
-                # energy stays as measured at close time.
-                #
-                # BOTH bounds, because efficiency alone cannot do this job.
-                # Trip 319 proved it on the departure side: 0.21 kWh over
-                # 0.517 km is 406 Wh/km, comfortably under the threshold,
-                # because 400 Wh/km is ordinary for half a kilometre of
-                # parking-lot crawl in the heat — so a 2.3 h park passed as
-                # plausible driving. The identical hole was here, and this is
-                # the likelier end for it to open: a sleep close means the car
-                # went quiet, so a long gap before the next poll is the normal
-                # case on this path rather than the exception. Duration is what
-                # separates an arrival from a stale anchor.
-                extra_kwh = sync_mod._energy_kwh(prev, snap, capacity_kwh)
-                # raw_moved can now legitimately be zero — the car parked where
-                # it was last read and never moved again. There is no distance
-                # to price and no implied efficiency to test, so the whole
-                # question is moot rather than failed: fall through, where a
-                # blind distance of zero leaves the energy exactly as it is.
-                if (raw_moved > 0
-                        and extra_kwh * 1000.0 / raw_moved <= sync_mod.MAX_PLAUSIBLE_WH_PER_KM
-                        and elapsed_min <= sync_mod.STALE_ANCHOR_MAX_MIN):
-                    closed_drive.energy_used_kwh = round(
-                        closed_drive.energy_used_kwh + extra_kwh, 2)
-                    # end_soc moves with it or not at all — it is what
-                    # soc_used_pct falls back on when energy is unknown, so a
-                    # fresh end_soc against a stale energy figure would leave
-                    # the two disagreeing about the same trip.
-                    closed_drive.end_soc = snap["soc"]
-                else:
-                    # Refusing the measurement is not the same as refusing to
-                    # account for the kilometres. The distance folded in above
-                    # regardless — the odometer is measured at any staleness —
-                    # so leaving energy untouched here grows the numerator's
-                    # denominator and nothing else, diluting Wh/km by exactly
-                    # the folded share. That is the identical defect
-                    # energy_for_blind_distance was written for and that the
-                    # sustained-offline top-up already had once (+33% distance
-                    # against +0.00 kWh, Wh/km down a quarter); this path was
-                    # the last place still carrying it.
-                    #
-                    # So the blind stretch gets priced at the trip's own
-                    # measured efficiency, which is what "the SoC drop across a
-                    # two-hour park is not this drive's energy" actually calls
-                    # for: not zero, but the drive's own rate over ground the
-                    # drive really covered. The estimated tail's share, taken
-                    # out by the retraction above, comes back through the same
-                    # arithmetic rather than separately — it is blind distance
-                    # by the same definition. Refused outright once the blind
-                    # part is more than half the trip (BLIND_DISTANCE_MAX_SHARE),
-                    # where holding Wh/km constant would amplify an error
-                    # instead of extending a measurement.
-                    closed_drive.energy_used_kwh = round(
-                        sync_mod.energy_for_blind_distance(
-                            closed_drive.energy_used_kwh,
-                            closed_drive.distance_km, raw_moved), 2)
-                # end_time was anchored to the marker's own timestamp — the
-                # last reading *before* the dead zone, same stale anchor
-                # distance had. Folding in the distance without also moving
-                # the clock forward would leave duration understated by
-                # however long the dead zone lasted (confirmed live: a trip
-                # read 2 minutes short with distance/energy both otherwise
-                # clean). No pace evidence is available here — the car reads
-                # parked now, so its current speed says nothing about how
-                # fast it covered the extra distance — so this uses the same
-                # CITY_SPEED_KMH floor the departure-side estimate falls back
-                # on when it's equally in the dark. Clamped to snap's own
-                # timestamp so the estimate can only move the stop closer to
-                # the truth, never past the moment it was actually observed.
-                # close_ts is only missing for a marker written before it was
-                # added to LAST_SLEEP_CLOSE_KEY — skip the timestamp estimate
-                # then rather than guess from nothing; distance still gets
-                # the fold-in above regardless.
-                if close_ts:
-                    travel_sec = raw_moved / sync_mod.CITY_SPEED_KMH * 3600.0
-                    est_end_ts = min(close_ts + travel_sec, snap["ts"])
-                    closed_drive.end_time = sync_mod._dt(est_end_ts)
-                    # start_time is naive but represents MYT wall-clock (see
-                    # sync._dt) — re-attaching that tzinfo before .timestamp()
-                    # is what makes this epoch math correct regardless of the
-                    # server's own system timezone.
-                    start_ts = closed_drive.start_time.replace(tzinfo=sync_mod.MYT).timestamp()
-                    closed_drive.duration_min = round((est_end_ts - start_ts) / 60.0, 1)
-                    if closed_drive.duration_min > 0:
-                        closed_drive.avg_speed_kmh = round(
-                            closed_drive.distance_km / (closed_drive.duration_min / 60.0), 1)
-                # The arrival point moves with the distance, the mirror of the
-                # departure-side rule in sync.py: growing a trip's odometer
-                # while leaving its end coordinates at the pre-blackout anchor
-                # makes the row claim two different places for one arrival. The
-                # car reads parked right now, so snap IS where it came to rest,
-                # however late the reading is — a stopped car doesn't move, the
-                # same argument the departure side uses about a parked one.
-                #
-                # This matters most on the offline path, which has no distance
-                # bound at all: a drive through a dead zone that reconnects
-                # several km later folds every one of them in, and without this
-                # would name the tunnel mouth as its destination.
-                # And so does the odometer the trip records stopping at. It is
-                # not decoration: odometer_continuity reads exactly this field
-                # against the next trip's start_odo_km, so a trip whose
-                # distance grew to cover the dead zone while its end_odo_km
-                # stayed at the pre-blackout anchor reports the very ground it
-                # just absorbed as missing. snap is the reading the fold-in
-                # trusted for everything else here; it has to be trusted for
-                # this too.
-                closed_drive.end_odo_km = round(snap["odo_km"], 3)
-                end_coords = sync_mod._coords(snap)
-                if end_coords:
-                    closed_drive.end_coords = end_coords
-                    closed_drive.end_location, closed_drive.end_area = (
-                        _place_and_area(end_coords, session))
-                # This branch, and only this branch, has both halves of a
-                # calibration pair: a prediction made when the car went dark,
-                # and a poll that has just measured the very stretch it was
-                # about. Recorded rather than acted on — the arrival model has
-                # a free parameter that shipped set to the poller's own timeout,
-                # and one trip's worth of evidence already proved enough to
-                # mis-tune it once (see ArrivalTailSample).
-                #
-                # raw_moved, not moved: the prediction was about the whole
-                # unseen stretch, so that is what it has to be scored against.
-                _record_tail_sample(
-                    session, closed_drive, est_predicted, raw_moved,
-                    speed_kmh=marker.get("speed_kmh"),
-                    est_sec=marker.get("est_sec"),
-                    elapsed_min=round(elapsed_min, 1) if close_ts else None,
-                    reason=marker.get("reason") or "")
-                session.commit()
-                # Tell process_snapshot() this ground is already covered, so its
-                # own gap-reconstruction sees no movement here and stays quiet.
-                prev = {**prev, "odo_km": snap["odo_km"]}
-            elif (closed_drive and not asleep_close
-                  and not sync_mod.is_driving(snap)
-                  and elapsed_min <= sync_mod.SLEEP_CLOSE_MERGE_MAX_MIN):
-                # Never for an asleep close: that anchor is only ever a poll
-                # interval short, so movement big enough to be refused above
-                # belongs to a later trip, and stamping it here would report a
-                # loss this trip never had.
-                # Only inside the same window the merge uses. Past it, movement
-                # after the anchor is far more likely a genuinely separate
-                # later departure than a tail this trip was cut short of — and
-                # stamping it here would double-report distance the following
-                # trip already accounts for, since process_snapshot runs next
-                # against this same unmodified prev and either pulls the
-                # movement into the new trip (departure recovery) or records it
-                # as that trip's start_lost_km. Confirmed: a close, 8 h parked,
-                # then a drive off logged end_lost_km 2.0 on the old trip while
-                # the new trip's anchor was pulled back to cover the same 2 km.
-                # Reporting the same distance twice under two names is exactly
-                # what the blind-gap fold-in avoids (see sync.py's
-                # GAP_CREEP_MAX_KM branch); this is the same rule.
-                #
-                # And never when the car is ALREADY DRIVING at this poll, which
-                # the time window alone did not catch. `moved` then spans two
-                # trips: the arrival this one was cut short of, and the
-                # departure the next one is in the middle of, with no reading
-                # between them to say where one ends. The whole of it is not
-                # this trip's tail, and the next trip's departure recovery is
-                # about to claim the same distance — which is precisely the
-                # double-report above, arriving through a door the window left
-                # open.
-                #
-                # Measured: trip 334 closed at 17:33, the next contact was
-                # 27 minutes later with the car already driving, and it logged
-                # end_lost_km 0.425 while trip 335 recorded start_recovered_km
-                # 0.425 for the same ground. The real tail was about 0.198; the
-                # rest was trip 335's own departure.
-                #
-                # Left as None — unknown — because that is what it is. The
-                # distance is not lost: the next trip carries it, and says so
-                # in start_recovered_km. What cannot be said is how much of it
-                # belonged to this trip, and a number here would be asserting
-                # exactly that.
-                closed_drive.end_lost_km = round(moved, 3)
-                session.commit()
-            if not fold_in and est_credited:
-                # The fold-in, when it runs, already hands the whole stretch
-                # over. When it doesn't, the estimate stands and the departing
-                # trip has to start past it — one fixed quantity, credited
-                # once. Independent of the branches above, which decide what
-                # the CLOSED trip records, not where the next one begins.
-                prev = {**prev, "odo_km": prev["odo_km"] + est_credited}
-        state.put(session, sleep_close_key, "")
-
+    # Nothing corrects a polled sleep-close here any more, because nothing
+    # creates one. That correction ran off a marker the close wrote, and
+    # polling stopped writing drives — so the 292 lines that read it, merging
+    # further movement into a trip a dead zone had cut short, trimming an
+    # estimate the car never drove, and feeding the arrival model a
+    # measurement, could only ever have fired on a marker left behind before
+    # that change.
+    #
+    # The same ground is still recovered, by the same measurement, from the
+    # other end: /api/repair-arrivals reads the odometer against the readings
+    # taken while the car sat parked, needs no marker from the close, and
+    # works on a streamed trip exactly as well as on a polled one. That is
+    # what will give trip 731 back the 245 m it lost when the stream went
+    # quiet before the car finished moving.
     # Where the last closed trip ended, for the departure recovery — see
     # process_snapshot's prev_close_odo_km. Looked up only in the one shape
     # that can use it (no trip open, the car driving now, and the last
@@ -4396,12 +4105,6 @@ def _sync_now_impl(wake: bool, session: Session):
     # doubt clears the window rather than setting it: a missed departure
     # costs boundary precision, and being wrong in that direction is the one
     # this whole week was spent undoing.
-    # A pending LAST_SLEEP_CLOSE_KEY is deliberately NOT counted. It looks like
-    # unfinished business — an arrival waiting to be measured — but the poll it
-    # waits for needs vehicle_data, and a sleeping car is never read. Treating
-    # it as a reason to keep listing would hold the back-off off for exactly
-    # the hours it exists for: a car parked overnight carries that marker the
-    # whole time, and no amount of listing can act on it.
     any_trip = any(
         state.get(session, state.scoped(state.OPEN_TRIP_KEY, v.get("vin")))
         for v in vehicles)
@@ -6442,12 +6145,11 @@ def repair_arrival_tail(
     to trade with — the kilometres belong to nobody, which is exactly the
     complaint. Here the distance simply leaves.
 
-    The correction that runs automatically (see LAST_SLEEP_CLOSE_KEY) only ever
-    gets one chance, at the first poll after the close. A trip whose estimate
-    was already wrong before that correction existed, or whose marker has since
-    been cleared, is past it — the row is written and nothing revisits it. This
-    is that repair, driven by the one authority that settles it: the car's own
-    trip meter.
+    There is no automatic correction to wait for either: the one that used to
+    run belonged to the polled sleep-close and went with it. A row with an
+    over-estimated tail is written and nothing revisits it. This is that
+    repair, driven by the one authority that settles it: the car's own trip
+    meter.
 
     Both figures come from the same screen and are applied together, because
     the estimate produced both from one assumption. Give distance alone and the
@@ -6547,47 +6249,12 @@ def repair_arrival_tail(
         "end_odo_km": target.end_odo_km, "end_est_km": target.end_est_km,
         "end_time": target.end_time.isoformat(),
     }
-    # The automatic correction may still be pending on this very trip — the
-    # marker survives until the next poll reaches the car, which for a sleeping
-    # car in a car park can be hours. Both are the same correction from
-    # different evidence, and running them both would apply it twice: the
-    # marker still carries the ORIGINAL est_km, so the clamp would measure the
-    # overshoot against a row that has already given it back.
-    #
-    # The car's own trip meter is the better authority of the two, so this one
-    # wins and the pending one is stood down. Only when it names this drive —
-    # a marker for any other trip is not ours to clear.
-    import json as _json
-
-    pending = None
-    vehicle = session.get(Vehicle, drive.vehicle_id)
-    if vehicle is not None:
-        sleep_key = state.scoped(state.LAST_SLEEP_CLOSE_KEY, vehicle.vin)
-        raw = state.get(session, sleep_key)
-        if raw:
-            try:
-                pending = _json.loads(raw).get("drive_id")
-            except ValueError:
-                pending = None
-        if apply and pending == drive_id:
-            # Updated, not cleared. Clearing it stopped the double-correction
-            # it was meant to stop and also threw away the hand-over — the
-            # instruction that tells the NEXT trip to start past the tail this
-            # one keeps. Trip 333 then anchored to the pre-blackout reading and
-            # re-counted 0.320 km that trip 332 already held.
-            #
-            # est_km becomes whatever survived the repair, which is exactly the
-            # amount the next trip must not claim. odo_km is left alone: it is
-            # the last reading the poller actually took, a fact no repair
-            # changes.
-            marker = _json.loads(raw)
-            old_est = marker.get("est_km") or 0.0
-            new_est = round(drive.end_est_km or 0.0, 3)
-            if old_est:
-                marker["est_sec"] = (marker.get("est_sec") or 0.0) * (new_est / old_est)
-            marker["est_km"] = new_est
-            marker["corrected"] = True
-            state.put(session, sleep_key, _json.dumps(marker))
+    # No automatic correction can be pending on this trip. The one that used
+    # to run lived on a marker the polled sleep-close wrote, and polling no
+    # longer closes trips — so there is nothing here to stand down, and
+    # nothing to hand over to the next trip either. What remains is this
+    # repair and /api/repair-arrivals, and both measure the ground from the
+    # odometer rather than inheriting an estimate from a close.
     # A trip that already has a successor cannot have its end moved alone. The
     # correction proves the car parked EARLIER than recorded, so the next trip
     # set off from there too — and if it was logged before this repair ran, its
@@ -6674,7 +6341,6 @@ def repair_arrival_tail(
         "difference_km": km,
         # So a dry run says whether it is racing the automatic correction, and
         # an applied one says it stood it down.
-        "pending_auto_correction": pending == drive_id,
         # The successor, when moving this end left a hole under it.
         "next_trip": gap_plan,
         "before": before, "after": after,

@@ -68,7 +68,7 @@ def _reset_to_demo():
         state.delete_scoped(
             s, state.SNAPSHOT_KEY, state.OPEN_TRIP_KEY, state.OPEN_CHARGE_KEY,
             state.LAST_VSTATE_KEY, state.WOKE_AT_KEY, state.LAST_POLL_KEY,
-            state.UNREACHABLE_SINCE_KEY, state.LAST_SLEEP_CLOSE_KEY,
+            state.UNREACHABLE_SINCE_KEY,
         )
     seed_demo_if_empty()
 
@@ -1161,17 +1161,6 @@ def test_repair_arrival_tail_takes_back_only_what_the_estimate_credited(monkeypa
                                params={"drive_id": did, "true_distance_km": 15.0})
             assert short.status_code == 409
 
-            # A pending automatic correction on this same trip would apply the
-            # same fix a second time, against a marker still carrying the
-            # original estimate. The dry run has to say so, and applying has to
-            # stand it down.
-            with SessionLocal() as s:
-                veh = s.get(Vehicle, s.get(Drive, did).vehicle_id)
-                state.put(s, state.scoped(state.LAST_SLEEP_CLOSE_KEY, veh.vin),
-                          _json.dumps({"drive_id": did, "odo_km": 28956.689,
-                                       "ts": 0.0, "est_km": 0.483}))
-                s.commit()
-
             r = client.get("/api/repair-arrival-tail",
                            params={"drive_id": did, "true_distance_km": 13.9,
                                    "true_duration_min": 18})
@@ -1181,7 +1170,6 @@ def test_repair_arrival_tail_takes_back_only_what_the_estimate_credited(monkeypa
             assert body["retracted_km"] == 0.163
             assert body["after"]["distance_km"] == 13.9
             assert body["after"]["end_est_km"] is None
-            assert body["pending_auto_correction"] is True
             assert body["after"]["end_odo_km"] == pytest.approx(28957.009)
             assert body["after"]["duration_min"] == 18.0
             # Energy leaves with the kilometres, at the trip's own rate.
@@ -1196,12 +1184,6 @@ def test_repair_arrival_tail_takes_back_only_what_the_estimate_credited(monkeypa
                        params={"drive_id": did, "true_distance_km": 13.9,
                                "true_duration_min": 18, "apply": "true"})
             with SessionLocal() as s:
-                # Stood down, so the next poll cannot re-apply the same fix —
-                # but NOT cleared, or the hand-over it also carries dies with
-                # it and the next trip re-counts the tail (see trip 333).
-                m = _json.loads(state.get(
-                    s, state.scoped(state.LAST_SLEEP_CLOSE_KEY, veh.vin)))
-                assert m["corrected"] is True
                 fixed = s.get(Drive, did)
                 assert fixed.distance_km == 13.9
                 assert fixed.end_est_km is None
@@ -1392,56 +1374,6 @@ def test_arrival_estimates_reports_what_each_place_has_measured(monkeypatch):
         assert body["summary"]["over_predicting"] is True
         # And nothing about a window, because there is no longer one to tune.
         assert "suggested_window_sec" not in body["summary"]
-    finally:
-        settings.app_passcode = old
-        _reset_to_demo()
-
-
-def test_a_hand_repaired_trip_still_hands_its_tail_over(monkeypatch):
-    """Trip 333. The sleep-close marker does two jobs — correct the trip that
-    closed, and tell the NEXT trip where to begin — and repair_arrival_tail
-    cleared it outright to stop the first. That cancelled the second too, so
-    the following trip anchored to the pre-blackout reading and re-counted
-    0.320 km trip 332 already held: 11.0 km against the car's 10.7.
-
-    The marker is now updated rather than dropped, carrying the estimate that
-    survived the repair, which is exactly the amount the next trip must start
-    past."""
-    from app import state
-    from app.models import Drive
-
-    settings = get_settings()
-    old = settings.app_passcode
-    settings.app_passcode = ""
-    try:
-        with TestClient(app) as client:
-            with SessionLocal() as s:
-                d = s.query(Drive).order_by(Drive.id).first()
-                d.distance_km, d.end_est_km, d.end_est_verified = 14.1, 0.483, None
-                d.start_odo_km, d.end_odo_km = 28943.109, 28957.172
-                d.energy_used_kwh, d.duration_min = 1.77, 20.8
-                d.end_time = d.start_time + timedelta(minutes=20.8)
-                veh = s.get(Vehicle, d.vehicle_id)
-                key = state.scoped(state.LAST_SLEEP_CLOSE_KEY, veh.vin)
-                state.put(s, key, _json.dumps(
-                    {"drive_id": d.id, "odo_km": 28956.689, "ts": 0.0,
-                     "est_km": 0.483, "est_sec": 180.0, "reason": "asleep"}))
-                s.commit()
-                did, vin = d.id, veh.vin
-
-            client.get("/api/repair-arrival-tail",
-                       params={"drive_id": did, "true_distance_km": 13.9,
-                               "true_duration_min": 18, "apply": "true"})
-
-        with SessionLocal() as s:
-            marker = _json.loads(state.get(s, state.scoped(
-                state.LAST_SLEEP_CLOSE_KEY, vin)))
-        # Alive, so the hand-over survives...
-        assert marker["corrected"] is True
-        # ...and carrying the corrected amount, not the original 0.483, which
-        # is what made keeping it dangerous before.
-        assert marker["est_km"] == pytest.approx(0.32)
-        assert marker["odo_km"] == 28956.689     # a reading, not a claim
     finally:
         settings.app_passcode = old
         _reset_to_demo()

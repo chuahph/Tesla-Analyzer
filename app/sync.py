@@ -1308,58 +1308,19 @@ def _drive_from(start: dict, cur: dict, capacity_kwh: float, max_speed: float = 
 # invisible: no reading covers it, and the next one comes only once the car is
 # moving again, by which point its odometer also carries the new trip's start.
 #
-# So this is an estimate and is kept as one. It lands in its own field
-# (Drive.end_est_km) rather than disappearing into the distance, and the moment
-# a poll can actually measure the tail the estimate is thrown away and replaced
-# (see LAST_SLEEP_CLOSE_KEY in routes.py).
+# Nothing estimates that tail any more. The estimator belonged to the polled
+# sleep-close, which no longer exists, and what remains is measurement: the
+# odometer against the readings taken while the car sat parked, applied by
+# /api/repair-arrivals once the ground is actually visible. An estimate had to
+# be made at close time, before anything could see the tail; a measurement can
+# simply wait.
 #
-# The model is deliberately the most conservative one that is still worth
-# having: the car was last seen at some speed and had to reach zero, so half
-# that speed over the unseen window is a lower bound on nothing and an upper
-# bound on nothing, but it is the midpoint of a decelerating run rather than a
-# guess at physics. Capped at the same creep threshold the fold-in trusts.
-#
-# It errs low on purpose. Reading short is the failure this record already
-# documents and understands; inventing distance a trip never drove is the one
-# that corrupted two trips in a morning.
+# The cap survives it, because the question it answers outlived the estimate:
+# how far past its recorded stop a trip may be extended before the likelier
+# story is a journey nobody logged. Measured, a 1.82 km overnight gap at Home
+# was exactly that, and folding it into the arriving trip would have buried
+# the evidence.
 ARRIVAL_EST_MAX_KM = GAP_CREEP_MAX_KM
-# The window the tail is spread over. Not the poll timeout it used to be: a
-# car park manoeuvre runs at a crawl whatever the car was doing on the street,
-# so the seconds follow from the distance at that crawl rather than from how
-# long we took to notice. Capped so a large tail cannot invent minutes.
-ARRIVAL_EST_MAX_MIN = 3.0
-ARRIVAL_CRAWL_KMH = 10.0
-
-
-def arrival_tail_for_place(tail_km: float | None) -> tuple[float, float] | None:
-    """(km, seconds) for an arrival at a place whose tail has been MEASURED.
-
-    This replaces a model that guessed the tail from the last-seen speed. Four
-    arrivals measured against the car's own trip meter killed it: to fit them
-    all it needed a window of 17, 51, 119 and 868 seconds, and the two slowest
-    readings produced the largest and the smallest tails. Speed at the last
-    reading says nothing about what happens after it — a car at 1.6 km/h can be
-    halted at a gate with 190 m still to drive, or already in its bay.
-
-    What does predict it is WHERE. The tail is a property of the car park: this
-    car's home multi-storey has measured 0.320, 0.193, 0.111 and 0.053 km,
-    while a surface car park with signal to the door measured 0.015. So the
-    caller supplies the median of what that place has actually shown, and this
-    only turns it into the pair the close needs.
-
-    None when the place has no measurements — an honest absence, which the
-    evidence says beats a guess: across those four arrivals the speed model
-    averaged 0.200 km of error against 0.208 km for not estimating at all.
-    """
-    if not tail_km or tail_km <= 0:
-        return None
-    km = round(min(tail_km, ARRIVAL_EST_MAX_KM), 3)
-    if not km:
-        return None
-    sec = min(km / ARRIVAL_CRAWL_KMH * 3600.0, ARRIVAL_EST_MAX_MIN * 60.0)
-    return km, sec
-
-
 def live_trip(
     open_trip: dict | None, snap: dict | None, capacity_kwh: float = 75.0,
     drive_min_km: float = DRIVE_MIN_KM,

@@ -1000,35 +1000,6 @@ def test_blind_gap_close_folds_parking_creep_into_the_trip_that_ended():
     assert drives2[0]["distance_km"] == 8.4
 
 
-def test_the_arrival_tail_comes_from_the_place_not_from_the_speed():
-    """The speed-based model is gone. Four arrivals measured against the car's
-    own trip meter needed windows of 17, 51, 119 and 868 seconds to fit, and
-    the two slowest readings produced the largest and smallest tails — speed at
-    the last reading says nothing about what follows it.
-
-    A place does. The caller supplies what that car park has measured, and this
-    only turns it into the (km, seconds) pair the close needs."""
-    from app.sync import (ARRIVAL_CRAWL_KMH, ARRIVAL_EST_MAX_KM,
-                          ARRIVAL_EST_MAX_MIN, arrival_tail_for_place)
-
-    km, sec = arrival_tail_for_place(0.193)
-    assert km == 0.193
-    # Seconds follow the distance at a car-park crawl, not from how long we
-    # took to notice the car had gone quiet.
-    assert sec == pytest.approx(0.193 / ARRIVAL_CRAWL_KMH * 3600.0)
-
-    # No measurements, no estimate — an honest absence, and the one the
-    # evidence prefers: the speed model averaged 0.200 km of error against
-    # 0.208 km for estimating nothing at all.
-    assert arrival_tail_for_place(None) is None
-    assert arrival_tail_for_place(0.0) is None
-
-    # Still bounded, so one freak measurement cannot run away with a trip.
-    big_km, big_sec = arrival_tail_for_place(50.0)
-    assert big_km == ARRIVAL_EST_MAX_KM
-    assert big_sec == ARRIVAL_EST_MAX_MIN * 60.0
-
-
 def test_tail_trim_changes_duration_only_never_distance_or_energy():
     """The stop-time correction rewrites the recorded timestamp and nothing
     else — the stop snapshot keeps the real reading's odometer and range, so

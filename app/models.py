@@ -212,15 +212,13 @@ class Drive(Base):
     # the other end. Three closes normally record 0.0: the parked one keeps
     # extending its stop point while the odometer climbs; the blind-gap one
     # folds the gap's movement in as the tail of the drive that just ended;
-    # and a sustained-offline sleep-close gets topped up by routes.py on the
-    # next successful poll if further movement turns up while the car now
-    # reads parked — a small amount always folds in, and so does a larger one
-    # within SLEEP_CLOSE_MERGE_MAX_MIN of the close, since sustained "offline"
-    # is only 3 minutes and routinely fires mid-drive through a real dead zone
-    # (see state.LAST_SLEEP_CLOSE_KEY). Nonzero where a fold is refused —
-    # too far past that window to still be the same drive, so it is reported
-    # rather than attributed on a guess. None means the trip predates this
-    # field.
+    # Nonzero where ground the car covered was refused rather than folded in
+    # — too far past the close to still be the same drive, so it is reported
+    # instead of attributed on a guess. None means the trip predates the
+    # field. Nothing writes it now: it belonged to the polled close, and the
+    # streamed trips that replaced it recover the same ground by measurement
+    # (see /api/repair-arrivals). Kept because the rows that carry it are
+    # still on the dashboard and the figure is still true of them.
     end_lost_km: Mapped[float | None] = mapped_column(Float, nullable=True)
 
     # Manually-entered cost, used only when the charge-layer cost model
