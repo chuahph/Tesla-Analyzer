@@ -6824,3 +6824,88 @@ def test_promote_charges_adds_missed_sessions_and_never_reprices_polled_ones():
                 assert s.query(Charge).filter(Charge.vehicle_id == vid).count() == 2
     finally:
         settings.app_passcode = old_pc
+
+
+def test_telemetry_raises_the_parked_alerts_and_does_not_double_send():
+    """The three parked-car alerts move to the stream, because at a
+    four-hourly tick every one of them becomes useless: low battery reported
+    hours after the crossing, a Sentry episode judged from two readings hours
+    apart, and an intrusion check watching a door someone could open and shut
+    twice between ticks.
+
+    Both paths share the same state flags, so whichever source crosses the
+    line first sends the message and the other finds the flag already set.
+    Two sources cannot make two notifications out of one event.
+    """
+    import json as _json
+
+    from app import state
+    from app.api import routes as routes_mod
+    from app.config import get_settings
+    from app.database import SessionLocal
+    from app.models import SecurityEvent, Vehicle
+
+    settings = get_settings()
+    saved = (settings.app_passcode, settings.low_soc_notify_pct,
+             settings.intrusion_notify)
+    settings.app_passcode = ""
+    settings.low_soc_notify_pct = 20.0
+    settings.intrusion_notify = True
+    vin = "TESTVIN-TELEALERT"
+    sent = []
+
+    def fake_notify(session, title, body, tag=None, **kw):
+        sent.append(tag)
+
+    try:
+        with TestClient(app) as client:
+            with SessionLocal() as s:
+                s.add(Vehicle(vin=vin, name="Test", model="Model 3"))
+                s.commit()
+                state.put(s, state.TELEMETRY_LATEST_KEY, _json.dumps({}))
+                state.put(s, state.TELEMETRY_SHADOW_KEY, _json.dumps({vin: {}}))
+                s.commit()
+
+            import unittest.mock as _mock
+            with _mock.patch.object(routes_mod.notifications, "notify", fake_notify):
+                def batch(ts, soc, door="DoorStateClosed"):
+                    return {"records": [{"vin": vin, "createdAt": ts, "data": [
+                        {"key": "Soc", "value": {"doubleValue": soc}},
+                        {"key": "RatedRange", "value": {"doubleValue": 250.0}},
+                        {"key": "Odometer", "value": {"doubleValue": 19337.0}},
+                        {"key": "SentryMode", "value": {"stringValue": "SentryModeStateArmed"}},
+                        {"key": "Locked", "value": {"booleanValue": True}},
+                        {"key": "DoorState", "value": {"doorValue": {"DriverFront": door == "open"}}},
+                        {"key": "Gear", "value": {"stringValue": "ShiftStateP"}},
+                        {"key": "VehicleSpeed", "value": {"doubleValue": 0}}]}]}
+
+                client.post("/api/telemetry", json=batch("2026-09-13T02:00:00Z", 50.0))
+                assert "low-soc" not in sent
+
+                # Crossing the threshold: the stream raises it.
+                client.post("/api/telemetry", json=batch("2026-09-13T03:00:00Z", 18.0))
+                assert sent.count("low-soc") == 1
+
+                # Still low on the next batch: the flag holds it to one.
+                client.post("/api/telemetry", json=batch("2026-09-13T03:01:00Z", 17.0))
+                assert sent.count("low-soc") == 1
+
+                # A door opening on a locked, unoccupied car: alert plus a
+                # persisted SecurityEvent, exactly as the polled path does.
+                client.post("/api/telemetry", json=batch(
+                    "2026-09-13T03:02:00Z", 17.0, door="open"))
+                assert "intrusion" in sent
+                with SessionLocal() as s:
+                    v = s.scalars(select(Vehicle).where(Vehicle.vin == vin)).first()
+                    assert s.query(SecurityEvent).filter(
+                        SecurityEvent.vehicle_id == v.id).count() == 1
+
+            # And the dashboard's status card now comes from the stream.
+            with SessionLocal() as s:
+                status = _json.loads(
+                    state.get(s, state.scoped(state.LAST_STATUS_KEY, vin)))
+                assert status["source"] == "telemetry"
+                assert status["soc"] == 17.0
+    finally:
+        (settings.app_passcode, settings.low_soc_notify_pct,
+         settings.intrusion_notify) = saved

@@ -2498,6 +2498,139 @@ def oauth_callback(
     return RedirectResponse(f"/?linked={result['source']}")
 
 
+def _evaluate_alerts(session: Session, vehicle, vin: str, snap: dict,
+                     open_trip, open_charge, settings) -> None:
+    """The three parked-car alerts, from whichever source saw the car.
+
+    Lifted out of the polling tick so the stream can raise them too. That is
+    not a tidy-up: polling is being cut back to a wake-up call, and at four
+    hours a tick every one of these becomes useless or worse. Low battery
+    would be reported some hours after the crossing. A Sentry episode would be
+    judged from two SoC readings hours apart. And the intrusion check — which
+    exists because an OPENING persists where an alarm does not — would be
+    watching a door that someone could open and close twice between ticks.
+
+    Telemetry sees all three properly: Soc every 60s, SentryMode every 10,
+    DoorState and the four window fields every 10.
+
+    Safe to run from both paths at once, and that is the point of the state
+    keys rather than an accident of them. Each alert is gated on a stored flag
+    — LOW_SOC_NOTIFIED_KEY and the rest — so whichever source crosses the line
+    first sends the message and the other finds the flag already set. Two
+    sources cannot make two notifications out of one event.
+    """
+    import json as _json
+
+    sentry_now = snap.get("sentry_mode")
+
+    # Low-battery alert: fires once per low episode (a state.py flag,
+    # cleared once SoC recovers past the threshold + a small hysteresis
+    # band so it doesn't flicker on/off right at the line), not on every
+    # sync tick while it stays low.
+    threshold = settings.low_soc_notify_pct
+    if threshold > 0:
+        notified_key = state.scoped(state.LOW_SOC_NOTIFIED_KEY, vin)
+        already_notified = state.get(session, notified_key) == "1"
+        if snap["soc"] <= threshold and not already_notified:
+            notifications.notify(
+                session, "Battery low",
+                f"{vehicle.name} is at {snap['soc']:.0f}% — time to plug in.",
+                tag="low-soc",
+            )
+            state.put(session, notified_key, "1")
+        elif snap["soc"] > threshold + 5 and already_notified:
+            state.put(session, notified_key, "")
+
+    # Live Sentry-drain alert: Sentry Mode keeps the car online, so this
+    # poll sees it draining in near-real-time (unlike a truly asleep car).
+    # Anchor the SoC when a parked-with-Sentry episode starts, then fire
+    # once it's cost at least sentry_drain_notify_pct points — a prompt
+    # "turn it off" nudge, not a next-day retrospective. The episode resets
+    # whenever the car drives/charges or Sentry goes off (below), so a real
+    # short errand with Sentry on never trips it.
+    sentry_pct = settings.sentry_drain_notify_pct
+    if sentry_pct > 0:
+        ep_key = state.scoped(state.SENTRY_DRAIN_EPISODE_KEY, vin)
+        sentry_notified_key = state.scoped(state.SENTRY_DRAIN_NOTIFIED_KEY, vin)
+        parked_sentry = bool(sentry_now) and not open_trip and not open_charge
+        if parked_sentry:
+            ep_raw = state.get(session, ep_key)
+            if not ep_raw:
+                state.put(session, ep_key, _json.dumps({"soc": snap["soc"]}))
+            else:
+                start_soc = _json.loads(ep_raw).get("soc", snap["soc"])
+                drop = start_soc - snap["soc"]
+                if drop >= sentry_pct and state.get(session, sentry_notified_key) != "1":
+                    notifications.notify(
+                        session, "Sentry Mode is draining your battery",
+                        f"{vehicle.name} has lost {drop:.0f}% to Sentry Mode since it "
+                        "parked. Turn Sentry off if the car's somewhere safe.",
+                        tag="sentry-drain",
+                    )
+                    state.put(session, sentry_notified_key, "1")
+        elif state.get(session, ep_key) or state.get(session, sentry_notified_key) == "1":
+            # Drove off, started charging, or Sentry switched off — end the
+            # episode so the next parked-with-Sentry stretch is judged fresh.
+            state.put(session, ep_key, "")
+            state.put(session, sentry_notified_key, "")
+
+    # Parked-intrusion alert: a door, trunk or window opening while the car
+    # sits with Sentry armed and nobody aboard. Unlike Sentry's own alarm
+    # state — which Tesla's API doesn't expose at all — an opening persists
+    # until someone shuts it, so this poll cadence catches it reliably
+    # instead of having to land inside a ~1 min alarm window.
+    #
+    # Deliberately entry-only. There is no accelerometer, tilt or impact
+    # field on vehicle_data, so a Sentry trigger from someone touching or
+    # leaning on the car cannot be seen here at all; Tesla's own app stays
+    # the only alert for those. Named for what it actually detects rather
+    # than borrowing "Sentry alert", which would overstate it.
+    if settings.intrusion_notify:
+        intrusion_key = state.scoped(state.INTRUSION_NOTIFIED_KEY, vin)
+        # Armed by Sentry OR simply by being locked — it's the locked
+        # state that makes an opening anomalous, not Sentry, and requiring
+        # Sentry meant a car parked locked without it was silently
+        # unwatched. Widening costs nothing: both flags are already in the
+        # payload, and the trip/charge/occupant guards still keep ordinary
+        # use quiet.
+        armed = (
+            (bool(sentry_now) or bool(snap.get("locked")))
+            and not open_trip and not open_charge
+            and not snap["user_present"]
+        )
+        opened_doors = bool(snap.get("doors_open"))
+        opened_windows = bool(snap.get("windows_open"))
+        breached = armed and (opened_doors or opened_windows)
+        if breached and state.get(session, intrusion_key) != "1":
+            what = "A door or trunk" if opened_doors else "A window"
+            notifications.notify(
+                session, "Car opened while parked",
+                f"{what} was opened on {vehicle.name} while it sat parked "
+                f"{'with Sentry Mode on' if sentry_now else 'and locked'} "
+                "with nobody aboard.",
+                tag="intrusion",
+            )
+            # Persisted as well as pushed. The alert alone left no trace
+            # once dismissed, which is why the Sentry-visibility question
+            # kept stalling on "when did one actually happen?" — see
+            # SecurityEvent. The display is captured as it read right
+            # now, at the moment of the opening.
+            session.add(SecurityEvent(
+                vehicle_id=vehicle.id,
+                ts=sync_mod._dt(snap["ts"]),
+                kind="door" if opened_doors else "window",
+                sentry_mode=sentry_now,
+                locked=snap.get("locked"),
+                soc=snap.get("soc"),
+                center_display_state=snap.get("center_display_state"),
+            ))
+            state.put(session, intrusion_key, "1")
+        elif not breached and state.get(session, intrusion_key) == "1":
+            # Everything shut again (or the car was driven/occupied) — arm
+            # the alert for the next separate opening.
+            state.put(session, intrusion_key, "")
+
+
 def _process_vehicle(
     session: Session, data: dict, v_summary: dict, settings, migrate_legacy: bool = False
 ) -> tuple:
@@ -3110,112 +3243,8 @@ def _process_vehicle(
                 cabin_overheat_protection_actively_cooling=cop_cooling_now,
                 center_display_state=display_now,
             ))
-        # Low-battery alert: fires once per low episode (a state.py flag,
-        # cleared once SoC recovers past the threshold + a small hysteresis
-        # band so it doesn't flicker on/off right at the line), not on every
-        # sync tick while it stays low.
-        threshold = settings.low_soc_notify_pct
-        if threshold > 0:
-            notified_key = state.scoped(state.LOW_SOC_NOTIFIED_KEY, vin)
-            already_notified = state.get(session, notified_key) == "1"
-            if snap["soc"] <= threshold and not already_notified:
-                notifications.notify(
-                    session, "Battery low",
-                    f"{vehicle.name} is at {snap['soc']:.0f}% — time to plug in.",
-                    tag="low-soc",
-                )
-                state.put(session, notified_key, "1")
-            elif snap["soc"] > threshold + 5 and already_notified:
-                state.put(session, notified_key, "")
-
-        # Live Sentry-drain alert: Sentry Mode keeps the car online, so this
-        # poll sees it draining in near-real-time (unlike a truly asleep car).
-        # Anchor the SoC when a parked-with-Sentry episode starts, then fire
-        # once it's cost at least sentry_drain_notify_pct points — a prompt
-        # "turn it off" nudge, not a next-day retrospective. The episode resets
-        # whenever the car drives/charges or Sentry goes off (below), so a real
-        # short errand with Sentry on never trips it.
-        sentry_pct = settings.sentry_drain_notify_pct
-        if sentry_pct > 0:
-            ep_key = state.scoped(state.SENTRY_DRAIN_EPISODE_KEY, vin)
-            sentry_notified_key = state.scoped(state.SENTRY_DRAIN_NOTIFIED_KEY, vin)
-            parked_sentry = bool(sentry_now) and not open_trip and not open_charge
-            if parked_sentry:
-                ep_raw = state.get(session, ep_key)
-                if not ep_raw:
-                    state.put(session, ep_key, _json.dumps({"soc": snap["soc"]}))
-                else:
-                    start_soc = _json.loads(ep_raw).get("soc", snap["soc"])
-                    drop = start_soc - snap["soc"]
-                    if drop >= sentry_pct and state.get(session, sentry_notified_key) != "1":
-                        notifications.notify(
-                            session, "Sentry Mode is draining your battery",
-                            f"{vehicle.name} has lost {drop:.0f}% to Sentry Mode since it "
-                            "parked. Turn Sentry off if the car's somewhere safe.",
-                            tag="sentry-drain",
-                        )
-                        state.put(session, sentry_notified_key, "1")
-            elif state.get(session, ep_key) or state.get(session, sentry_notified_key) == "1":
-                # Drove off, started charging, or Sentry switched off — end the
-                # episode so the next parked-with-Sentry stretch is judged fresh.
-                state.put(session, ep_key, "")
-                state.put(session, sentry_notified_key, "")
-
-        # Parked-intrusion alert: a door, trunk or window opening while the car
-        # sits with Sentry armed and nobody aboard. Unlike Sentry's own alarm
-        # state — which Tesla's API doesn't expose at all — an opening persists
-        # until someone shuts it, so this poll cadence catches it reliably
-        # instead of having to land inside a ~1 min alarm window.
-        #
-        # Deliberately entry-only. There is no accelerometer, tilt or impact
-        # field on vehicle_data, so a Sentry trigger from someone touching or
-        # leaning on the car cannot be seen here at all; Tesla's own app stays
-        # the only alert for those. Named for what it actually detects rather
-        # than borrowing "Sentry alert", which would overstate it.
-        if settings.intrusion_notify:
-            intrusion_key = state.scoped(state.INTRUSION_NOTIFIED_KEY, vin)
-            # Armed by Sentry OR simply by being locked — it's the locked
-            # state that makes an opening anomalous, not Sentry, and requiring
-            # Sentry meant a car parked locked without it was silently
-            # unwatched. Widening costs nothing: both flags are already in the
-            # payload, and the trip/charge/occupant guards still keep ordinary
-            # use quiet.
-            armed = (
-                (bool(sentry_now) or bool(snap.get("locked")))
-                and not open_trip and not open_charge
-                and not snap["user_present"]
-            )
-            opened_doors = bool(snap.get("doors_open"))
-            opened_windows = bool(snap.get("windows_open"))
-            breached = armed and (opened_doors or opened_windows)
-            if breached and state.get(session, intrusion_key) != "1":
-                what = "A door or trunk" if opened_doors else "A window"
-                notifications.notify(
-                    session, "Car opened while parked",
-                    f"{what} was opened on {vehicle.name} while it sat parked "
-                    f"{'with Sentry Mode on' if sentry_now else 'and locked'} "
-                    "with nobody aboard.",
-                    tag="intrusion",
-                )
-                # Persisted as well as pushed. The alert alone left no trace
-                # once dismissed, which is why the Sentry-visibility question
-                # kept stalling on "when did one actually happen?" — see
-                # SecurityEvent. The display is captured as it read right
-                # now, at the moment of the opening.
-                session.add(SecurityEvent(
-                    vehicle_id=vehicle.id,
-                    ts=sync_mod._dt(snap["ts"]),
-                    kind="door" if opened_doors else "window",
-                    sentry_mode=sentry_now,
-                    locked=snap.get("locked"),
-                    soc=snap.get("soc"),
-                    center_display_state=snap.get("center_display_state"),
-                ))
-                state.put(session, intrusion_key, "1")
-            elif not breached and state.get(session, intrusion_key) == "1":
-                # Everything shut again (or the car was driven/occupied) — arm
-                # the alert for the next separate opening.
-                state.put(session, intrusion_key, "")
+        _evaluate_alerts(session, vehicle, vin, snap,
+                         open_trip, open_charge, settings)
 
     session.commit()
     state.put(session, sk, _json.dumps(snap))
@@ -3435,8 +3464,20 @@ def _promote_shadow_trips(session: Session, apply: bool = False,
             # with itself.
             row.polled_km = row.distance_km
             row.polled_kwh = row.energy_used_kwh
+        added = row.id is None
         _apply_shadow_to_drive(row, t)
         _geocode_shadow_drive(session, row, t)
+        if added:
+            # Only for a trip the stream ADDED. A correction to a row polling
+            # already announced would fire a second time for one journey, and
+            # a home-automation consumer acting on arrive-home would act
+            # twice. Webhook-only, like the polled path: a push per drive is
+            # noise, an automation trigger per drive is the point.
+            notifications.fire_webhook(
+                "drive-complete", "Drive completed",
+                f"{row.distance_km:.1f} km, {row.duration_min:.0f} min, "
+                f"{row.start_soc:.0f}% → {row.end_soc:.0f}%.",
+            )
     session.commit()
     for entry, (row, *_rest) in zip(changed, plan):
         if entry.get("was", {}).get("id") is None and row is not None:
@@ -3632,6 +3673,18 @@ def _promote_shadow_charges(session: Session, apply: bool = False,
             energy_source=energy_source,
         )
         session.add(row)
+        # Usable capacity is fitted from charges, so a session that only the
+        # stream saw has to feed the same EMA a polled one does — otherwise
+        # cutting the cron quietly stops the pack measurement updating, and
+        # capacity is the constant every kWh figure in the app is linear in.
+        implied = sync_mod.implied_capacity_kwh({
+            "start_soc": row.start_soc, "end_soc": row.end_soc,
+            "energy_added_kwh": row.energy_added_kwh})
+        if implied:
+            vehicle = session.get(Vehicle, vehicle_id)
+            if vehicle is not None:
+                old_cap = vehicle.battery_capacity_kwh or 75.0
+                vehicle.battery_capacity_kwh = round(0.8 * old_cap + 0.2 * implied, 1)
     session.commit()
     return changed
 
@@ -10711,9 +10764,35 @@ def telemetry_ingest(
     # flag is what goes wrong later, when a new code path mutates one of
     # these and forgets to set it. A blob that did not change cannot be
     # written by accident this way, and one that did cannot be skipped.
+    settings = get_settings()
     for vin, snap in last_snaps.items():
         if _telemetry_battery_reading(session, vin, snap):
             readings_written += 1
+        vehicle = session.scalars(select(Vehicle).where(Vehicle.vin == vin)).first()
+        if vehicle is None:
+            continue
+        # The three parked-car alerts, and the status the dashboard reads on
+        # page load. Both were polling's alone; both stop working at a
+        # four-hourly tick. Given the shadow machines' own notion of whether a
+        # trip or charge is open, so "parked" here means the same thing it
+        # means to the rest of the stream.
+        _evaluate_alerts(session, vehicle, vin, snap,
+                         (shadows.get(vin) or {}).get("open"),
+                         (charge_shadows.get(vin) or {}).get("open"),
+                         settings)
+        _save_last_status(
+            session, vin,
+            status=("driving" if (snap.get("speed_kmh") or 0) > 0
+                    else "charging" if snap.get("charging") else "online"),
+            ts=float(snap["ts"]), soc=snap.get("soc"),
+            odo_km=round(snap.get("odo_km") or 0.0, 1),
+            speed_kmh=snap.get("speed_kmh"),
+            # Named for where it came from. A record arriving IS the car
+            # talking, which is a stronger statement than a poll that found it
+            # awake — and it is the difference between "asleep" and "the cron
+            # has not looked recently", which the dashboard's staleness flag
+            # could not previously tell apart.
+            note="Streaming from the car.", source="telemetry")
 
     def put_if_changed(key: str, value: str, was: str | None) -> None:
         if value != (was or ""):
