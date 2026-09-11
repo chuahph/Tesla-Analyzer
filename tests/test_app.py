@@ -6056,6 +6056,76 @@ def test_a_trip_is_only_compared_against_its_own_car():
         settings.app_passcode = old_pc
 
 
+def test_the_bridge_watchdog_fires_on_the_stamp_it_actually_stored():
+    """The one check that can notice a dead receiver, on the shape it reads.
+
+    last_record_ts_by_vin holds a float epoch — it is written from
+    _telemetry_ts's own output. The watchdog then handed that float BACK to
+    _telemetry_ts, which parsed ISO strings only, got 0.0, and read 0.0 as
+    "this car has never streamed", which it treats as none of its business.
+
+    So it could never fire. On a pipeline where the stream is the only source
+    of data and a push-only channel cannot report its own silence, that is
+    the whole safety net. Tested against a stored float rather than a
+    hand-written ISO string, because the string was never the failing case.
+    """
+    import json as _json
+    import time as _time
+
+    from app import state, notifications
+    from app.api.routes import _check_bridge_quiet
+    from app.config import get_settings as _settings
+    from app.database import SessionLocal
+    from app.models import Vehicle
+
+    sent: list[str] = []
+    real_notify = notifications.notify
+    notifications.notify = lambda session, title, body, tag=None: (
+        sent.append(tag or title) or 0)
+    sess = SessionLocal()
+    prev_seen = state.get(sess, state.TELEMETRY_SEEN_KEY)
+    settings = _settings()
+    old_min = getattr(settings, "bridge_quiet_alert_min", 20.0)
+    settings.bridge_quiet_alert_min = 20.0
+    try:
+        car = sess.query(Vehicle).first()
+        if car is None:
+            car = Vehicle(name="Mine", vin="QUIETVIN00000001")
+            sess.add(car)
+            sess.commit()
+        now = _time.time()
+        key = state.scoped(state.BRIDGE_QUIET_NOTIFIED_KEY, car.vin)
+        state.put(sess, key, "")
+        # Exactly what the ingest writes: a float, not a string.
+        state.put(sess, state.TELEMETRY_SEEN_KEY, _json.dumps(
+            {"last_record_ts_by_vin": {car.vin: now - 45 * 60}}))
+        sess.commit()
+
+        # Awake, reachable, and silent for three quarters of an hour.
+        snap = {"ts": now, "soc": 70.0, "range_km": 300.0}
+        assert _check_bridge_quiet(sess, car, car.vin, snap, settings) is True
+        assert sent == ["bridge-quiet"], f"the watchdog stayed quiet: {sent}"
+
+        # Once per outage, not once per tick.
+        assert _check_bridge_quiet(sess, car, car.vin, snap, settings) is False
+        assert len(sent) == 1
+
+        # And back in touch re-arms it for the next one.
+        state.put(sess, state.TELEMETRY_SEEN_KEY, _json.dumps(
+            {"last_record_ts_by_vin": {car.vin: now - 30}}))
+        sess.commit()
+        assert _check_bridge_quiet(sess, car, car.vin, snap, settings) is False
+        assert state.get(sess, key) != "1"
+    finally:
+        notifications.notify = real_notify
+        settings.bridge_quiet_alert_min = old_min
+        state.put(sess, state.TELEMETRY_SEEN_KEY, prev_seen or "{}")
+        state.put(sess, state.scoped(state.BRIDGE_QUIET_NOTIFIED_KEY,
+                                     "QUIETVIN00000001"), "")
+        sess.commit()
+        sess.close()
+
+
 def test_a_refused_promotion_is_announced_instead_of_passing_for_silence():
     """A run that wrote nothing looked exactly like a run with nothing to write.
 

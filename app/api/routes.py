@@ -10185,12 +10185,32 @@ def _sentry_alert(session: Session, vin: str, sentry_state: str, what: str,
     )
 
 
-def _telemetry_ts(stamp: str | None) -> float:
-    """Epoch seconds from a telemetry record's createdAt, or 0.0."""
+def _telemetry_ts(stamp: str | float | None) -> float:
+    """Epoch seconds from a telemetry record's createdAt, or 0.0.
+
+    Takes an epoch back as readily as the ISO string it came from, because
+    this function's own output gets stored and handed to it again:
+    last_record_ts_by_vin holds what this returned, as a float, and the
+    bridge watchdog reads it from there. Parsing that float as a date failed,
+    returned 0.0, and 0.0 reads as "this car has never streamed" — which the
+    watchdog treats as none of its business. So the one check that can notice
+    a dead receiver could never fire, on a pipeline where the stream is now
+    the only source of data. A push-only channel cannot report its own
+    silence; this is what was supposed to.
+    """
     if not stamp:
         return 0.0
+    if isinstance(stamp, (int, float)) and not isinstance(stamp, bool):
+        return float(stamp)
+    text = str(stamp)
     try:
-        return datetime.fromisoformat(str(stamp).replace("Z", "+00:00")).timestamp()
+        return datetime.fromisoformat(text.replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        pass
+    try:
+        # An epoch that has been through JSON as a string. Unambiguous: no
+        # ISO timestamp parses as a float.
+        return float(text)
     except ValueError:
         return 0.0
 
