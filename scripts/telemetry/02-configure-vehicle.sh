@@ -380,7 +380,10 @@ if [ "${HTTP:0:1}" = "2" ]; then
   curl -sS "$BASE/api/1/vehicles/$VIN/fleet_telemetry_config" \
     -H "Authorization: Bearer $(jq -r .access_token "$WORK/tok.json")" \
     -o "$WORK/state.json" 2>/dev/null || true
-  SYNCED=$(jq -r '.response.synced // "unknown"' "$WORK/state.json" 2>/dev/null)
+  # .synced, not .response.synced. The GET is not wrapped the way the POST
+  # is, so this read "unknown" on every run since it was written — including
+  # the two runs on 11 September that did land on the car.
+  SYNCED=$(jq -r '.synced // .response.synced // "unknown"' "$WORK/state.json" 2>/dev/null)
   echo "  synced: $SYNCED"
   [ "$SYNCED" = "true" ] || echo "  (not yet — the car applies it when it next wakes)"
 fi

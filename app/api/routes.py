@@ -10986,21 +10986,16 @@ def telemetry_config(session: Session = Depends(get_session)):
                 "detail": exc.response.text[:400]}
     except httpx.RequestError as exc:
         return {"error": f"could not reach Tesla: {exc}"}
-    body = raw.get("response") if isinstance(raw, dict) else None
-    # Tesla's shape for this GET is not documented and is not the shape the
-    # POST takes. Both this and the configure script read .response.config
-    # .fields and both came back empty against a car demonstrably streaming 38
-    # fields — the script has been printing "synced: unknown" since the day it
-    # was written. So the likely places are tried in turn rather than one
-    # being assumed, and the raw body is returned when none of them holds.
-    config = {}
-    for candidate in ((body or {}).get("config"),
-                      (body or {}).get("fleet_telemetry_config"),
-                      body if isinstance(body, dict) and "fields" in (body or {}) else None,
-                      raw if isinstance(raw, dict) and "fields" in raw else None):
-        if isinstance(candidate, dict) and candidate.get("fields"):
-            config = candidate
-            break
+    # TeslaClient._get already strips Tesla's "response" envelope, so what
+    # comes back here IS the body: {"synced": ..., "config": {"fields": ...}}.
+    # Reaching for .response again found nothing and reported a configured car
+    # as unconfigured. The unwrap is tolerated a second time rather than
+    # assumed absent, because one of these two layers doing it is a detail of
+    # the client that this endpoint should not depend on.
+    body = raw if isinstance(raw, dict) else {}
+    if isinstance(body.get("response"), dict):
+        body = body["response"]
+    config = body.get("config") or {}
     fields = sorted((config.get("fields") or {}).keys())
     arrived = set(telemetry_fields(session)["fields"])
     if not fields:
@@ -11011,7 +11006,7 @@ def telemetry_config(session: Session = Depends(get_session)):
         # that sends someone to reconfigure a car that is working.
         return {
             "error": "could not find a field list in Tesla's response",
-            "synced": (body or {}).get("synced") if isinstance(body, dict) else None,
+            "synced": body.get("synced"),
             "arriving_now": len(arrived),
             "note": ("The car IS configured if fields are arriving — see "
                      "/api/telemetry/fields. This endpoint could not read the "
@@ -11019,7 +11014,7 @@ def telemetry_config(session: Session = Depends(get_session)):
             "raw": _json.dumps(raw)[:1200],
         }
     return {
-        "synced": (body or {}).get("synced"),
+        "synced": body.get("synced"),
         "count": len(fields),
         "hostname": config.get("hostname"),
         # Configured on the car and nothing has arrived from it. Ordinary for

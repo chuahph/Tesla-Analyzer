@@ -7169,10 +7169,13 @@ def test_telemetry_config_separates_a_quiet_field_from_a_missing_one():
                 state.put(s, state.TOKEN_KEY, "tok")
                 s.commit()
 
-            fake = {"response": {"synced": True, "config": {
+            # The shape Tesla actually returns, taken from production:
+            # TeslaClient._get has already stripped the "response" envelope,
+            # so synced and config sit at the top.
+            fake = {"synced": True, "config": {
                 "hostname": "telemetry.example",
                 "fields": {"Soc": {}, "Gear": {},
-                           "LifetimeEnergyChargedKwh": {}}}}}
+                           "LifetimeEnergyChargedKwh": {}}}}
             with mock.patch(
                     "app.tesla_client.TeslaClient.telemetry_config",
                     lambda self, v: fake):
@@ -7219,7 +7222,7 @@ def test_telemetry_config_does_not_blame_the_car_when_it_cannot_read_the_answer(
 
             # A shape neither this endpoint nor the configure script expects.
             with mock.patch("app.tesla_client.TeslaClient.telemetry_config",
-                            lambda self, v: {"response": {"something_else": 1}}):
+                            lambda self, v: {"something_else": 1}):
                 out = client.get("/api/telemetry/config").json()
             assert "error" in out
             assert out["arriving_now"] == 2
@@ -7230,8 +7233,7 @@ def test_telemetry_config_does_not_blame_the_car_when_it_cannot_read_the_answer(
             # And a shape that puts the fields one level up is still read,
             # rather than being called an error.
             with mock.patch("app.tesla_client.TeslaClient.telemetry_config",
-                            lambda self, v: {"response": {
-                                "synced": True,
+                            lambda self, v: {"synced": True, "config": {
                                 "fields": {"Soc": {}, "Gear": {}, "BMSState": {}}}}):
                 out = client.get("/api/telemetry/config").json()
             assert out["count"] == 3
