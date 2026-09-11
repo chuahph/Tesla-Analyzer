@@ -10971,6 +10971,8 @@ def telemetry_config(session: Session = Depends(get_session)):
     vehicle = _first_vehicle(session)
     if vehicle is None:
         return {"error": "no vehicle linked"}
+    import json as _json
+
     from ..tesla_client import TeslaClient
 
     token = state.active_token(session)
@@ -10985,12 +10987,37 @@ def telemetry_config(session: Session = Depends(get_session)):
     except httpx.RequestError as exc:
         return {"error": f"could not reach Tesla: {exc}"}
     body = raw.get("response") if isinstance(raw, dict) else None
-    config = (body or {}).get("config") or {}
+    # Tesla's shape for this GET is not documented and is not the shape the
+    # POST takes. Both this and the configure script read .response.config
+    # .fields and both came back empty against a car demonstrably streaming 38
+    # fields — the script has been printing "synced: unknown" since the day it
+    # was written. So the likely places are tried in turn rather than one
+    # being assumed, and the raw body is returned when none of them holds.
+    config = {}
+    for candidate in ((body or {}).get("config"),
+                      (body or {}).get("fleet_telemetry_config"),
+                      body if isinstance(body, dict) and "fields" in (body or {}) else None,
+                      raw if isinstance(raw, dict) and "fields" in raw else None):
+        if isinstance(candidate, dict) and candidate.get("fields"):
+            config = candidate
+            break
     fields = sorted((config.get("fields") or {}).keys())
-    # The comparison, done here rather than left to be done by eye. Two
-    # endpoints each holding half an answer is how a quiet field gets read as
-    # a failed configuration.
     arrived = set(telemetry_fields(session)["fields"])
+    if not fields:
+        # Nothing readable. Reporting every arriving field as "unconfigured"
+        # here would be worse than saying nothing: the car is plainly
+        # configured — it is streaming — so the fault is in reading the
+        # answer, and a diagnostic that blames the car for it is a diagnostic
+        # that sends someone to reconfigure a car that is working.
+        return {
+            "error": "could not find a field list in Tesla's response",
+            "synced": (body or {}).get("synced") if isinstance(body, dict) else None,
+            "arriving_now": len(arrived),
+            "note": ("The car IS configured if fields are arriving — see "
+                     "/api/telemetry/fields. This endpoint could not read the "
+                     "configuration back, which is a separate problem."),
+            "raw": _json.dumps(raw)[:1200],
+        }
     return {
         "synced": (body or {}).get("synced"),
         "count": len(fields),

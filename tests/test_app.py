@@ -7186,3 +7186,55 @@ def test_telemetry_config_separates_a_quiet_field_from_a_missing_one():
             assert out["arriving_unconfigured"] == []
     finally:
         settings.app_passcode = old_pc
+
+
+def test_telemetry_config_does_not_blame_the_car_when_it_cannot_read_the_answer():
+    """Reported live: the endpoint read Tesla's response as an empty config
+    and duly listed all 38 arriving fields as "arriving unconfigured" — on a
+    car that was plainly configured, because it was streaming them.
+
+    A diagnostic that blames the car for a parsing failure is worse than one
+    that says nothing: it sends someone to reconfigure a car that works.
+    """
+    from unittest import mock
+
+    from app import state
+    from app.config import get_settings
+    from app.database import SessionLocal
+    from app.models import Vehicle
+
+    settings = get_settings()
+    old_pc = settings.app_passcode
+    settings.app_passcode = ""
+    vin = "TESTVIN-CFGSHAPE"
+    try:
+        with TestClient(app) as client:
+            with SessionLocal() as s:
+                s.add(Vehicle(vin=vin, name="Test", model="Model 3"))
+                state.put(s, state.TELEMETRY_LATEST_KEY,
+                          json.dumps({vin: {"Soc": 70.0, "Gear": "ShiftStateP"}}))
+                state.put(s, state.TELEMETRY_RAW_KEY, "[]")
+                state.put(s, state.TOKEN_KEY, "tok")
+                s.commit()
+
+            # A shape neither this endpoint nor the configure script expects.
+            with mock.patch("app.tesla_client.TeslaClient.telemetry_config",
+                            lambda self, v: {"response": {"something_else": 1}}):
+                out = client.get("/api/telemetry/config").json()
+            assert "error" in out
+            assert out["arriving_now"] == 2
+            assert "arriving_unconfigured" not in out
+            # The raw body is returned, because the shape is the finding.
+            assert "something_else" in out["raw"]
+
+            # And a shape that puts the fields one level up is still read,
+            # rather than being called an error.
+            with mock.patch("app.tesla_client.TeslaClient.telemetry_config",
+                            lambda self, v: {"response": {
+                                "synced": True,
+                                "fields": {"Soc": {}, "Gear": {}, "BMSState": {}}}}):
+                out = client.get("/api/telemetry/config").json()
+            assert out["count"] == 3
+            assert out["configured_but_quiet"] == ["BMSState"]
+    finally:
+        settings.app_passcode = old_pc
