@@ -7317,3 +7317,95 @@ def test_duplicate_trips_keeps_the_copy_that_saw_the_whole_journey():
                 "/api/data/duplicate-trips?days=7").json()["would_remove"] == 0
     finally:
         settings.app_passcode = old_pc
+
+
+def test_polling_does_not_re_record_a_journey_the_stream_already_has():
+    """The cause of the 11 September duplicate, closed at the point the second
+    row would be written.
+
+    Promotion runs first in a sync tick and adds a row for a finished shadow
+    trip; _process_vehicle runs second and, knowing nothing about it, wrote
+    the same journey again. Promotion cannot prevent that from its side — by
+    the time polling writes, promotion has already run — so the check belongs
+    where the second row is about to be created.
+    """
+    from types import SimpleNamespace
+
+    from app.api.routes import _process_vehicle
+    from app.database import SessionLocal
+    from app.models import Drive, Vehicle
+    from app.sync import _dt as sync_mod_dt
+
+    settings = SimpleNamespace(
+        energy_price_per_kwh=0.90, energy_price_ac_kwh=0.0, energy_price_dc_kwh=0.0,
+        energy_price_peak_kwh=0.0, energy_price_offpeak_kwh=0.0,
+        tariff_peak_start_hour=8, tariff_peak_end_hour=22,
+        tariff_weekend_offpeak=True, battery_capacity_kwh=0.0,
+        battery_new_range_km=0.0, low_soc_notify_pct=0.0,
+        sentry_drain_notify_pct=0.0, intrusion_notify=False, drive_min_km=0.5,
+        polling_writes=True, bridge_quiet_alert_min=0.0)
+
+    def vdata(ts, odo, soc, shift):
+        return {
+            "vin": "TESTVIN-NODUPE", "display_name": "Test", "vehicle_config": {},
+            "vehicle_state": {"odometer": odo, "is_user_present": False,
+                              "locked": True, "sentry_mode": False},
+            "drive_state": {"timestamp": ts * 1000, "shift_state": shift,
+                            "speed": 60 if shift == "D" else 0,
+                            "latitude": 5.34, "longitude": 100.31},
+            "charge_state": {"battery_level": soc, "battery_range": 200.0,
+                             "charging_state": "Disconnected",
+                             "charger_power": 0.0, "charge_energy_added": 0.0},
+            "climate_state": {"outside_temp": 30.0},
+        }
+
+    t = 1_789_200_000
+    try:
+        with SessionLocal() as s:
+            v = Vehicle(vin="TESTVIN-NODUPE", name="Test", model="Model 3")
+            s.add(v)
+            s.commit()
+            vid = v.id
+
+            def tick(dt, odo, soc, shift):
+                _process_vehicle(s, vdata(t + dt, odo, soc, shift),
+                                 {"vin": "TESTVIN-NODUPE"}, settings)
+                s.commit()
+
+            # The stream got there first, as it does on a slow cron.
+            streamed = Drive(
+                vehicle_id=vid,
+                # Through the app's own clock. Stored times are naive MYT (see
+                # sync.now_local), so datetime.fromtimestamp here would put the
+                # streamed row eight hours from the polled one on a UTC host
+                # and the overlap check would find nothing to compare.
+                start_time=sync_mod_dt(t + 300),
+                end_time=sync_mod_dt(t + 1800),
+                distance_km=10.794, duration_min=25.0, start_soc=80, end_soc=77,
+                energy_used_kwh=1.96, avg_speed_kmh=26, max_speed_kmh=80,
+                outside_temp_c=30, source="telemetry")
+            s.add(streamed)
+            s.commit()
+
+            # Polling now drives the same journey through its own machine.
+            tick(0, 2000.0, 80, "P")
+            tick(300, 2000.0, 80, "D")
+            tick(1800, 2006.7, 77, "P")
+
+            rows = s.scalars(select(Drive).where(Drive.vehicle_id == vid)).all()
+            assert len(rows) == 1, [(r.id, r.source, r.distance_km) for r in rows]
+            assert rows[0].source == "telemetry"
+            assert rows[0].energy_used_kwh == 1.96
+
+            # A genuinely separate later journey is still recorded — the guard
+            # must not swallow real trips.
+            tick(9000, 2006.7, 77, "D")
+            tick(10800, 2020.0, 74, "P")
+            assert s.query(Drive).filter(Drive.vehicle_id == vid).count() == 2
+    finally:
+        with SessionLocal() as s:
+            v = s.query(Vehicle).filter(Vehicle.vin == "TESTVIN-NODUPE").first()
+            if v:
+                s.query(Drive).filter(Drive.vehicle_id == v.id).delete()
+                s.delete(v)
+                s.commit()

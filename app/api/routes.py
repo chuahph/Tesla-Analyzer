@@ -2826,6 +2826,46 @@ def _evaluate_alerts(session: Session, vehicle, vin: str, snap: dict,
             state.put(session, intrusion_key, "")
 
 
+def _already_streamed(session: Session, vehicle_id: int, d: dict) -> bool:
+    """Is this journey already in the history, recorded from the stream?
+
+    Both paths write drives while polling still writes at all, and they do not
+    know about each other. On 11 September that produced one journey twice:
+    promotion added row 727 from the stream, and _process_vehicle added 728
+    for the same drive later in the SAME sync tick — promotion runs first and
+    had no row to correct, then polling arrived and had no reason to look for
+    one. A duplicate journey double-counts distance and energy in every total.
+
+    Promotion cannot prevent this from its side; by the time polling writes,
+    promotion has already run. So the check belongs here, where the second row
+    is about to be created.
+
+    Sixty percent of the shorter trip, matching /api/data/duplicate-trips —
+    two genuinely separate journeys can touch at the edges, and refusing a
+    real trip is worse than writing a duplicate someone can delete.
+    """
+    start, end = d.get("start_time"), d.get("end_time")
+    if not start or not end:
+        return False
+    mine = session.scalars(
+        select(Drive).where(
+            Drive.vehicle_id == vehicle_id,
+            Drive.source == "telemetry",
+            Drive.start_time <= end,
+            Drive.end_time >= start,
+        )
+    ).all()
+    span = max((end - start).total_seconds(), 0.0)
+    for row in mine:
+        if not row.start_time or not row.end_time:
+            continue
+        overlap = (min(row.end_time, end) - max(row.start_time, start)).total_seconds()
+        shorter = min(span, max((row.end_time - row.start_time).total_seconds(), 0.0))
+        if shorter > 0 and overlap / shorter >= DUPLICATE_OVERLAP_SHARE:
+            return True
+    return False
+
+
 def _process_vehicle(
     session: Session, data: dict, v_summary: dict, settings, migrate_legacy: bool = False
 ) -> tuple:
@@ -3370,6 +3410,8 @@ def _process_vehicle(
         d["start_location"], d["start_area"] = _place_and_area(d["start_location"], session)
         d["end_location"], d["end_area"] = _place_and_area(d["end_location"], session)
         _unoverlap_previous(session, vehicle.id, d["start_time"])
+        if _already_streamed(session, vehicle.id, d):
+            continue
         session.add(Drive(vehicle_id=vehicle.id, **d))
         # Webhook-only (not routed through notify()'s push channel) — a
         # push alert per every single drive would be unwanted noise for
