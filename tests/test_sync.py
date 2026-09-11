@@ -5,7 +5,8 @@ from app.sync import (_energy_kwh, close_trip_on_sleep, is_driving,
                       snapshot_from_telemetry, advance_shadow,
                       process_snapshot, snapshot_from_vehicle_data,
                       recover_sleep_gap, ENERGY_QUANTUM_KWH, ENERGY_SAMPLE_SEC, MILES_TO_KM,
-                      advance_charge, settle_charge, CHARGE_GAP_SEC)
+                      advance_charge, settle_charge, CHARGE_GAP_SEC,
+                      SHADOW_GAP_SEC, SHADOW_SETTLE_SEC)
 
 T0 = 1_760_000_000.0  # seconds epoch
 
@@ -3666,6 +3667,98 @@ def test_a_trip_records_what_its_uncertainty_is_derived_from_not_the_answer():
     assert trip["duration_min"] == pytest.approx(11.0, abs=0.1)
     assert (trip["energy_kwh"] * ENERGY_SAMPLE_SEC
             / (trip["duration_min"] * 60.0)) == pytest.approx(0.136, abs=0.002)
+
+
+def test_a_trip_measures_how_often_its_own_energy_readings_arrived():
+    """The sampling interval is measured per trip, not assumed from a constant.
+
+    It is a setting on the CAR, and a configuration change reaches the car
+    whenever the car next connects — which can be days after it was sent and
+    is not knowable from the app. Hard-coding a cutover date means guessing
+    that moment, and guessing it early tells every trip driven in between
+    that it was six times more precise than it was.
+
+    So each trip counts the gaps between its own EnergyRemaining values and
+    keeps the median. Nothing has to be told when the car changed.
+    """
+    def drive(step: float) -> dict:
+        shadow: dict = {}
+        energy, odo, ts = 30.0, 100.0, 0.0
+        # Twenty readings, each one a real change — the field moves under
+        # load, which is why a change is a send.
+        for _ in range(20):
+            advance_shadow(shadow, _tel(ts, odo, round(energy, 3)))
+            ts += step
+            odo += step * 0.005
+            energy -= step * 0.0005
+        advance_shadow(shadow, _tel(ts, odo, round(energy, 3), gear="ShiftStateP",
+                                    speed_mph=0.0, door=True))
+        trip = advance_shadow(shadow, _tel(ts + SHADOW_SETTLE_SEC + 60, odo,
+                                           round(energy, 3), gear="ShiftStateP",
+                                           speed_mph=0.0))
+        assert trip is not None
+        return trip
+
+    assert drive(60.0)["energy_sample_sec"] == pytest.approx(60.0)
+    assert drive(10.0)["energy_sample_sec"] == pytest.approx(10.0)
+
+
+def test_a_wait_mid_trip_is_not_a_slow_sampling_interval():
+    """The median, not the mean.
+
+    A car waiting at a pickup with the drive still open sends speed and gear
+    the whole time, but EnergyRemaining barely moves — it is sent when it
+    CHANGES. So one gap between its values spans the whole wait, and the car
+    was not sampling once every five minutes: it had nothing to say.
+
+    Twenty-three gaps here, twenty-two of them ten seconds and one of three
+    hundred. The median is ten and the mean is 22.6, so this fails if the
+    figure is ever averaged.
+    """
+    shadow: dict = {}
+    energy, odo, ts = 30.0, 100.0, 0.0
+    for _ in range(12):                      # driving, ten seconds apart
+        advance_shadow(shadow, _tel(ts, odo, round(energy, 3)))
+        ts += 10.0
+        odo += 0.05
+        energy -= 0.005
+    for _ in range(30):                      # five minutes stopped, energy still
+        advance_shadow(shadow, _tel(ts, odo, round(energy, 3), speed_mph=0.0))
+        ts += 10.0
+    for _ in range(12):                      # and away again
+        energy -= 0.005
+        advance_shadow(shadow, _tel(ts, odo, round(energy, 3)))
+        ts += 10.0
+        odo += 0.05
+    advance_shadow(shadow, _tel(ts, odo, round(energy, 3), gear="ShiftStateP",
+                                speed_mph=0.0, door=True))
+    trip = advance_shadow(shadow, _tel(ts + SHADOW_SETTLE_SEC + 60, odo,
+                                       round(energy, 3), gear="ShiftStateP",
+                                       speed_mph=0.0))
+    assert trip is not None
+    # One trip, not two: records kept arriving throughout, so nothing here
+    # was a blackout and the wait belongs to the journey.
+    assert trip["duration_min"] == pytest.approx(9.0, abs=0.2)
+    assert trip["energy_sample_sec"] == pytest.approx(10.0)
+
+
+def test_too_few_readings_says_nothing_rather_than_guessing():
+    """Two readings make one gap, and one gap is an anecdote.
+
+    A single record delayed by a reconnect would otherwise set the figure for
+    the whole trip. None here means the reader falls back to the interval
+    this car streamed at before any of it was measured, which is the wide one
+    — overstating an error bar is the smaller sin.
+    """
+    shadow: dict = {}
+    advance_shadow(shadow, _tel(0, 100.0, 30.0))
+    advance_shadow(shadow, _tel(60, 106.0, 28.5))
+    advance_shadow(shadow, _tel(120, 106.0, 28.5, gear="ShiftStateP",
+                                speed_mph=0.0, door=True))
+    trip = advance_shadow(shadow, _tel(400, 106.0, 28.5, gear="ShiftStateP",
+                                       speed_mph=0.0))
+    assert trip is not None
+    assert trip["energy_sample_sec"] is None
 
 
 def test_the_odometer_gives_back_what_a_sleeping_car_never_sent():

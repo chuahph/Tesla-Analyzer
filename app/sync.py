@@ -3012,26 +3012,62 @@ ENERGY_QUANTUM_KWH = 0.02
 # error was the sampling interval, and taking it as a percentage of a small
 # trip made it look like a large one — a 1.0 kWh journey carries the same
 # 0.06 kWh as a 2.5 kWh journey and reports three times the percentage.
-ENERGY_SAMPLE_SEC = 60.0
-# Tightened to ten seconds on the car, which cuts that term sixfold — about
-# 0.01 kWh, putting trip energy on the same footing as trip distance, which
-# has been settled at -0.4% for days while energy sat at 2.85%.
+# The fallback only. Every trip closed by this machine now carries the
+# interval its OWN readings arrived at, measured from their timestamps —
+# see _energy_gap_sec. This constant is what a trip without that measurement
+# gets, which means the ones recorded before it existed, and they were all
+# driven while the car was configured at sixty seconds.
 #
-# Dated, because this is read when a trip is DISPLAYED rather than stored on
-# it, and a trip recorded while the car still sampled once a minute did not
-# somehow become six times more precise when the configuration changed. The
-# cutover is the start of the day after the field set went to the car: a trip
-# driven between the change and midnight keeps the conservative figure, which
-# errs the safe way.
-ENERGY_SAMPLE_FINE_SEC = 10.0
-ENERGY_SAMPLE_FINE_FROM = datetime(2026, 9, 12)
+# It is a constant rather than a date because a configuration change reaches
+# the car when the car next connects, which may be hours or days after it was
+# sent and is not knowable from here. Dating the cutover by hand meant
+# guessing that moment, and guessing it early is the bad direction: it would
+# have told every trip driven in the meantime that it was six times more
+# precise than it was. Measuring the interval per trip removes the guess
+# entirely, and keeps working the next time an interval changes.
+ENERGY_SAMPLE_SEC = 60.0
+# How many gaps between readings are enough to call the cadence measured. Two
+# readings make one gap and one gap is an anecdote — a single record delayed
+# by a reconnect would set the figure for the whole trip. Three is the point
+# where the median stops being the only sample.
+ENERGY_SAMPLE_MIN_GAPS = 3
+# What a measured cadence is allowed to be. Below the first, something is
+# wrong with the timestamps rather than fast with the car; above the second,
+# the trip was streaming so poorly that the fallback is the honest answer.
+ENERGY_SAMPLE_MIN_SEC = 2.0
+ENERGY_SAMPLE_MAX_SEC = 300.0
 
 
-def energy_sample_sec(when: datetime | None = None) -> float:
-    """The EnergyRemaining sampling interval in force for a trip at ``when``."""
-    if when is not None and when >= ENERGY_SAMPLE_FINE_FROM:
-        return ENERGY_SAMPLE_FINE_SEC
-    return ENERGY_SAMPLE_SEC
+def _energy_gap_sec(hist: dict | None) -> float | None:
+    """The median gap between EnergyRemaining readings, from a trip's tally.
+
+    A histogram of whole seconds rather than a list of them: a trip holds
+    hundreds of readings and this lives in a JSON blob that is rewritten on
+    every batch. The median, not the mean, because one blackout mid-trip is
+    a single enormous gap and the mean would hand it the whole answer.
+    """
+    if not isinstance(hist, dict):
+        return None
+    pairs = []
+    for key, count in hist.items():
+        try:
+            pairs.append((float(key), int(count)))
+        except (TypeError, ValueError):
+            continue
+    pairs.sort()
+    total = sum(c for _, c in pairs if c > 0)
+    if total < ENERGY_SAMPLE_MIN_GAPS:
+        return None
+    half, seen = (total + 1) // 2, 0
+    for gap, count in pairs:
+        if count <= 0:
+            continue
+        seen += count
+        if seen >= half:
+            if gap < ENERGY_SAMPLE_MIN_SEC or gap > ENERGY_SAMPLE_MAX_SEC:
+                return None
+            return gap
+    return None
 
 
 # How long the stream must have been silent before a trip is closed without
@@ -3140,6 +3176,32 @@ def advance_shadow(shadow: dict[str, Any], snap: dict[str, Any]) -> dict[str, An
     last = shadow.get("last")
     open_at = shadow.get("open")
     done = None
+
+    # How often EnergyRemaining actually arrives, tallied while a trip is
+    # open. A trip's energy is the difference between two readings of it, so
+    # each end of that bracket is stale by up to one interval — and how large
+    # that interval is cannot be assumed from here. It is a setting on the
+    # car, changed by a configuration the car adopts whenever it next
+    # connects, which may be days after it was sent.
+    #
+    # Counted on CHANGES of the value, not on records carrying the field: the
+    # composite carries the last value forward, so every snapshot reports
+    # EnergyRemaining once any record has. The car sends the field when it
+    # moves and under load it always moves, so a change is a send.
+    e_val = snap.get("energy_kwh")
+    if e_val is not None:
+        e_prev, e_ts = shadow.get("e_val"), float(shadow.get("e_ts") or 0.0)
+        if e_prev is None or e_val != e_prev:
+            gap = ts - e_ts
+            # Not across a blackout. A car that went quiet for an hour was
+            # not sampling once an hour; it was not sampling at all, and the
+            # gap log is where that belongs.
+            if open_at and e_ts and 0.0 < gap <= SHADOW_GAP_SEC:
+                hist = shadow.setdefault("e_gaps", {})
+                key = str(int(round(gap)))
+                hist[key] = int(hist.get(key) or 0) + 1
+            shadow["e_val"] = e_val
+            shadow["e_ts"] = ts
 
     # A stream that stops mid-trip closes it at the last motion seen, not at
     # the next record — which could be the following morning.
@@ -3262,6 +3324,10 @@ def advance_shadow(shadow: dict[str, Any], snap: dict[str, Any]) -> dict[str, An
                 and float(snap.get("speed_kmh") or 0.0) > 0.0):
             shadow["open"] = dict(snap)
             shadow["max_speed_kmh"] = 0.0
+            # Per trip. The cadence is a property of the journey it was
+            # measured during, not of the car in general — the configuration
+            # can change between two trips on the same day.
+            shadow["e_gaps"] = {}
             open_at = shadow["open"]
         elif not open_at:
             # Nothing to open yet, and nothing to measure until there is.
@@ -3720,6 +3786,7 @@ def _shadow_close(shadow: dict[str, Any], end: dict[str, Any],
     final = readings or end
     start = shadow.pop("open", None)
     max_speed = float(shadow.pop("max_speed_kmh", 0.0) or 0.0)
+    sample_sec = _energy_gap_sec(shadow.pop("e_gaps", None))
     # Read before clearing: this is reported on the trip, and popping it
     # first would make every trip claim it ended on a timeout.
     exit_seen = bool(shadow.get("exit_seen"))
@@ -3802,6 +3869,17 @@ def _shadow_close(shadow: dict[str, Any], end: dict[str, Any],
         # larger. Trips closed either side of that carried different answers
         # to the same question and the accuracy report added them together.
         # See _energy_unc_kwh in the API layer, which works it out on read.
+        #
+        # What IS stored is the third input, because unlike the other two it
+        # cannot be recovered later: how often this trip's own readings
+        # actually arrived. That is a measurement of the conditions the trip
+        # was recorded under — the same kind of thing as its odometer
+        # bracket, not an answer derived from them — and nothing on a closed
+        # trip can reconstruct it once the records have rolled out of the
+        # buffer. None means too few readings to say, and the reader falls
+        # back to the interval this car streamed at before any of this was
+        # measured.
+        "energy_sample_sec": sample_sec,
         # Measured, not estimated from average speed — which is what lets a
         # streamed trip say its driving-only figure is real rather than
         # wearing the dashboard's "estimated" badge for want of a stop

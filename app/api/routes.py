@@ -11386,26 +11386,26 @@ def _energy_unc_kwh(t: dict) -> float | None:
     the trip's own average power — see sync.ENERGY_SAMPLE_SEC for what the
     measurement behind that is.
 
-    The interval is the one that was in force when the trip was DRIVEN, not
-    the one configured now. This figure is computed on read, so a trip
-    recorded while the car sampled once a minute would otherwise become six
-    times more precise the moment the field set changed, which is not
-    something that happened to it.
+    The interval is the trip's OWN, measured from the gaps between its
+    readings and stored when it closed. It is not a property of the app or of
+    today's configuration: this figure is computed on read, so a trip
+    recorded while the car sampled once a minute must not become six times
+    more precise the moment the car is reconfigured. Trips closed before that
+    was measured fall back to the constant, which is what this car streamed
+    at for all of them.
     """
     energy = t.get("energy_kwh")
     minutes = float(t.get("duration_min") or 0.0)
     if energy is None or minutes <= 0:
         return None
-    when = None
     try:
-        raw = t.get("start_ts")
-        if raw is not None:
-            when = sync_mod._dt(float(raw))
-    except (TypeError, ValueError, OSError):
-        when = None
+        sample = float(t.get("energy_sample_sec") or 0.0)
+    except (TypeError, ValueError):
+        sample = 0.0
+    if not sample > 0:
+        sample = sync_mod.ENERGY_SAMPLE_SEC
     return round(max(sync_mod.ENERGY_QUANTUM_KWH,
-                     abs(float(energy)) * sync_mod.energy_sample_sec(when)
-                     / (minutes * 60.0)), 3)
+                     abs(float(energy)) * sample / (minutes * 60.0)), 3)
 
 
 def _compare_row(t: dict, d, t_start, car_by_drive: dict, pct) -> dict:
