@@ -207,9 +207,15 @@ class Settings(BaseSettings):
     sentry_drain_notify_pct: float = 0.0
     # Notify when a door/trunk/window opens while the car sits parked with
     # Sentry armed and nobody aboard — physical-entry detection, fired once
-    # per opening. NOT a Sentry trigger alert: Tesla's API publishes no
-    # accelerometer, tilt or alarm-state field, so someone merely touching or
-    # leaning on the car is invisible here (only Tesla's own app sees that).
+    # per opening.
+    #
+    # Separate from the Sentry trigger alert, which is not a setting and needs
+    # none: SentryMode streams as a state machine, and Aware and Panic are the
+    # car saying it noticed something and that the alarm went off. That was
+    # genuinely invisible while this app polled — vehicle_data reports Sentry
+    # as a bare boolean — and it is not any more. This setting is for the
+    # opening itself, which the stream reports as DoorState and which happens
+    # whether or not Sentry ever noticed.
     intrusion_notify: bool = False
 
     # Analysis parameters

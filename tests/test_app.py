@@ -6056,6 +6056,63 @@ def test_a_trip_is_only_compared_against_its_own_car():
         settings.app_passcode = old_pc
 
 
+def test_an_unreadable_trip_store_is_left_alone_rather_than_replaced():
+    """A failed read here is not a read fallback. It is a write.
+
+    The ingest falls back to an empty list so streaming survives a corrupt
+    store — then appends this batch's finished journeys to that empty list and
+    writes the result back. One unparseable store therefore becomes a store
+    holding the last twenty seconds, and the shadow record of every journey
+    before it is gone, silently.
+    """
+    import json as _json
+
+    from app import state, notifications
+    from app.database import SessionLocal
+    from app.models import Vehicle
+
+    sent: list[str] = []
+    real_notify = notifications.notify
+    notifications.notify = lambda session, title, body, tag=None: (
+        sent.append(tag or title) or 0)
+    sess = SessionLocal()
+    prev = state.get(sess, state.TELEMETRY_TRIPS_KEY)
+    settings = get_settings()
+    old_pc = settings.app_passcode
+    settings.app_passcode = ""
+    try:
+        car = sess.query(Vehicle).first()
+        vin = car.vin if car else "STOREVIN00000001"
+        if car is None:
+            sess.add(Vehicle(name="Mine", vin=vin))
+            sess.commit()
+        broken = '[{"vin": "x", "start_ts": 1.0'          # truncated
+        state.put(sess, state.TELEMETRY_TRIPS_KEY, broken)
+        state.put(sess, state.STORE_UNREADABLE_KEY, "")
+        sess.commit()
+
+        with TestClient(app) as client:
+            r = client.post("/api/telemetry", json={"records": [{
+                "vin": vin,
+                "createdAt": "2026-09-11T12:00:00.000Z",
+                "data": [{"key": "Soc", "value": {"doubleValue": 70.0}},
+                         {"key": "VehicleSpeed", "value": {"doubleValue": 0.0}}],
+            }]})
+            assert r.status_code == 200
+
+        with SessionLocal() as s2:
+            # Untouched: corrupt and inspectable beats truncated and tidy.
+            assert state.get(s2, state.TELEMETRY_TRIPS_KEY) == broken
+        assert sent == ["store-unreadable"], f"the loss was silent: {sent}"
+    finally:
+        notifications.notify = real_notify
+        settings.app_passcode = old_pc
+        state.put(sess, state.TELEMETRY_TRIPS_KEY, prev or "[]")
+        state.put(sess, state.STORE_UNREADABLE_KEY, "")
+        sess.commit()
+        sess.close()
+
+
 def test_the_bridge_watchdog_fires_on_the_stamp_it_actually_stored():
     """The one check that can notice a dead receiver, on the shape it reads.
 

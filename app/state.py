@@ -126,6 +126,11 @@ UNREACHABLE_SINCE_KEY = "unreachable_since_ts"  # epoch a car was first seen not
 # moment one succeeds, so the alert fires per episode rather than per tick —
 # and it has to fire at all: the waiting trips are dropped from the promoter's
 # window after PROMOTE_MAX_DAYS, and silently.
+# "1" while a telemetry history store will not parse. The ingest falls back
+# to an empty list to keep streaming, and that fallback is what makes a read
+# failure dangerous: appending to it and writing back replaces the history
+# with one batch. So the write is skipped and this says so, once.
+STORE_UNREADABLE_KEY = "telemetry_store_unreadable"
 PROMOTE_REFUSED_KEY = "promote_refused"
 LOW_SOC_NOTIFIED_KEY = "low_soc_notified"  # "1" once the low-SoC push has fired
 # for the current low-battery episode, per VIN — cleared once SoC recovers

@@ -10412,16 +10412,23 @@ def telemetry_ingest(
         shadows = _json.loads(state.get(session, state.TELEMETRY_SHADOW_KEY) or "{}") or {}
     except ValueError:
         shadows = {}
+    # These two hold history rather than in-flight state, and a failed parse
+    # here is not a read fallback: the batch appends to the empty list it
+    # falls back to and writes the result back, so one unreadable store
+    # becomes a store containing only the last twenty seconds. Whether it can
+    # be read is therefore tracked, and an unreadable one is left exactly as
+    # it is — corrupt and inspectable — rather than quietly replaced.
+    unreadable: list[str] = []
     stored_trips = state.get(session, state.TELEMETRY_TRIPS_KEY)
     try:
         trips = _json.loads(stored_trips or "[]") or []
     except ValueError:
-        trips = []
+        trips, _ = [], unreadable.append("trips")
     stored_charges = state.get(session, state.TELEMETRY_CHARGES_KEY)
     try:
         charges = _json.loads(stored_charges or "[]") or []
     except ValueError:
-        charges = []
+        charges, _ = [], unreadable.append("charges")
     stored_charge_shadows = state.get(session, state.TELEMETRY_CHARGE_SHADOW_KEY)
     try:
         charge_shadows = _json.loads(
@@ -10667,10 +10674,28 @@ def telemetry_ingest(
                    _json.dumps(modes[-TELEMETRY_MODES_MAX:]), stored_modes)
     state.put(session, state.TELEMETRY_LATEST_KEY, _json.dumps(latest))
     state.put(session, state.TELEMETRY_SHADOW_KEY, _json.dumps(shadows))
-    put_if_changed(state.TELEMETRY_TRIPS_KEY,
-                   _json.dumps(trips[-TELEMETRY_TRIPS_MAX:]), stored_trips)
-    put_if_changed(state.TELEMETRY_CHARGES_KEY,
-                   _json.dumps(charges[-TELEMETRY_TRIPS_MAX:]), stored_charges)
+    if "trips" not in unreadable:
+        put_if_changed(state.TELEMETRY_TRIPS_KEY,
+                       _json.dumps(trips[-TELEMETRY_TRIPS_MAX:]), stored_trips)
+    if "charges" not in unreadable:
+        put_if_changed(state.TELEMETRY_CHARGES_KEY,
+                       _json.dumps(charges[-TELEMETRY_TRIPS_MAX:]), stored_charges)
+    if unreadable:
+        # Said once, and not per batch: a parked car posts one every twenty
+        # seconds, and an alert that repeats three thousand times a day is an
+        # alert nobody reads.
+        if state.get(session, state.STORE_UNREADABLE_KEY) != "1":
+            state.put(session, state.STORE_UNREADABLE_KEY, "1")
+            session.commit()
+            notifications.notify(
+                session, "A telemetry store cannot be read",
+                f"{' and '.join(unreadable)} would not parse, so it is being "
+                "left untouched rather than overwritten with this batch "
+                "alone. Streaming continues; the shadow record of finished "
+                "journeys is not being updated.",
+                tag="store-unreadable")
+    elif state.get(session, state.STORE_UNREADABLE_KEY) == "1":
+        state.put(session, state.STORE_UNREADABLE_KEY, "")
     put_if_changed(state.TELEMETRY_CHARGE_SHADOW_KEY,
                    _json.dumps(charge_shadows), stored_charge_shadows)
 

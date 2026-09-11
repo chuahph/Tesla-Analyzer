@@ -396,10 +396,11 @@ def snapshot_from_vehicle_data(data: dict[str, Any]) -> dict[str, Any]:
         # slept. None (not False) when Tesla didn't report the field at all,
         # kept distinct from a confirmed off.
         "sentry_mode": vs.get("sentry_mode") if "sentry_mode" in vs else None,
-        # Physical-entry signals for the parked-intrusion alert (see
-        # /api/sync). Unlike Sentry's own alarm state — which Tesla doesn't
-        # publish at all — an opened door persists until someone shuts it,
-        # so a 1-2 min poll catches it reliably rather than by luck.
+        # Physical-entry signals for the parked-intrusion alert. Unlike
+        # Sentry's own alarm state, which vehicle_data cannot report — it
+        # gives a bare boolean, where the stream gives Aware and Panic — an
+        # opened door persists until someone shuts it, so even a slow poll
+        # catches it reliably rather than by luck.
         "doors_open": _any_open(vs, _DOOR_FIELDS),
         "windows_open": _any_open(vs, _WINDOW_FIELDS),
         "climate_on": cl.get("is_climate_on") if "is_climate_on" in cl else None,
