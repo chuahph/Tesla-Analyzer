@@ -2533,6 +2533,63 @@ def oauth_callback(
     return RedirectResponse(f"/?linked={result['source']}")
 
 
+def _check_bridge_quiet(session: Session, vehicle, vin: str, snap: dict,
+                        settings) -> bool:
+    """Tell someone when the stream has gone quiet on a car that is awake.
+
+    This is the whole reason polling still exists. Telemetry is push-only, so
+    when it stops there are two explanations and the stream itself cannot tell
+    them apart: the car is asleep, which is ordinary, or the receiver is down,
+    the certificate has lapsed, or the car's configuration has been taken off
+    it — which is not. A one-way channel cannot report its own failure.
+
+    Polling can, because reaching the car at all proves it is awake. An awake
+    car streams every twenty seconds or so; an awake car that has said nothing
+    for twenty minutes has a broken path between it and here.
+
+    Measured, 11 September: a configuration re-run reported "fields sent: 34"
+    and silently took BMSState off the car. Nothing looked wrong. Trips kept
+    closing on the gear-and-speed fallback, the dashboard read normally, and
+    the only trace was a number nobody had reason to count. That is the shape
+    of every failure this check exists for.
+    """
+    import json as _json
+
+    minutes = float(getattr(settings, "bridge_quiet_alert_min", 0.0) or 0.0)
+    if minutes <= 0:
+        return False
+    try:
+        seen = _json.loads(state.get(session, state.TELEMETRY_SEEN_KEY) or "{}") or {}
+    except ValueError:
+        return False
+    last_raw = (seen.get("last_record_ts_by_vin") or {}).get(vin)
+    if not last_raw:
+        # Never streamed at all. That is a car that was never configured, not
+        # a bridge that has failed, and it is not this check's business.
+        return False
+    last_ts = _telemetry_ts(last_raw)
+    if not last_ts:
+        return False
+    quiet_min = (float(snap.get("ts") or 0.0) - last_ts) / 60.0
+    key = state.scoped(state.BRIDGE_QUIET_NOTIFIED_KEY, vin)
+    if quiet_min < minutes:
+        # Back in touch — re-arm, so the next outage is reported too.
+        if state.get(session, key) == "1":
+            state.put(session, key, "")
+        return False
+    if state.get(session, key) == "1":
+        return False
+    notifications.notify(
+        session, "Telemetry has gone quiet",
+        f"{vehicle.name} is awake and reachable, but nothing has streamed for "
+        f"{quiet_min:.0f} minutes. The receiver, its certificate, or the car's "
+        "telemetry configuration is the place to look.",
+        tag="bridge-quiet",
+    )
+    state.put(session, key, "1")
+    return True
+
+
 def _evaluate_alerts(session: Session, vehicle, vin: str, snap: dict,
                      open_trip, open_charge, settings) -> None:
     """The three parked-car alerts, from whichever source saw the car.
@@ -3141,6 +3198,21 @@ def _process_vehicle(
         fleet_wh_per_km=_fleet_wh_per_km(session, vehicle.id),
     )
     drives = recovered + drives  # include a drive recovered from the upgrade gap
+    # getattr, not attribute access: several callers build a settings stand-in
+    # with only the fields they need, and a watchdog switch that crashes the
+    # sync when it is absent is worse than one that defaults to writing.
+    if not getattr(settings, "polling_writes", True):
+        # Discarded, not skipped. The state machine above still runs and still
+        # advances, so open_trip and open_charge stay truthful for the alerts
+        # below and the next tick starts from the right place — only the rows
+        # are dropped. Skipping the machine instead would leave a half-open
+        # trip in the store the moment this setting was turned back on.
+        #
+        # Telemetry is the author of these now. Two sources writing the same
+        # history is how a polled row that merged two real trips ends up
+        # beside the two telemetry trips that split them correctly, and at a
+        # half-hourly tick polling merges trips routinely.
+        drives, charges = [], []
     # A trimmed tail is time the car spent parked, so its standby draw is not
     # this drive's energy — but the trim only moves the clock, leaving the
     # stop snapshot's SoC where the late reading found it (see
@@ -3260,7 +3332,9 @@ def _process_vehicle(
             or last_reading.cabin_overheat_protection != cop_now
             or last_reading.cabin_overheat_protection_actively_cooling != cop_cooling_now
         )
-        if last_reading is None or abs(last_reading.soc - snap["soc"]) >= 1.0 or state_changed:
+        if (getattr(settings, "polling_writes", True)
+                and (last_reading is None or abs(last_reading.soc - snap["soc"]) >= 1.0
+                     or state_changed)):
             session.add(BatteryReading(
                 vehicle_id=vehicle.id,
                 ts=datetime.fromtimestamp(snap["ts"], sync_mod.MYT).replace(tzinfo=None),
@@ -3274,6 +3348,10 @@ def _process_vehicle(
             ))
         _evaluate_alerts(session, vehicle, vin, snap,
                          open_trip, open_charge, settings)
+        # Only polling can raise this: reaching the car is what proves it is
+        # awake, and an awake car saying nothing is the fault the stream
+        # cannot report about itself.
+        _check_bridge_quiet(session, vehicle, vin, snap, settings)
 
     session.commit()
     state.put(session, sk, _json.dumps(snap))

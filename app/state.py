@@ -54,6 +54,10 @@ TELEMETRY_LATEST_KEY = "telemetry_latest"  # JSON {vin: {field: value}} — the
 # the running composite is what a snapshot can be built from.
 TELEMETRY_SHADOW_KEY = "telemetry_shadow"  # JSON {vin: machine state}: the
 # open shadow trip and what has been seen since it started.
+BRIDGE_QUIET_NOTIFIED_KEY = "bridge_quiet_notified"  # "1" while a
+# telemetry-outage alert stands, cleared when records start arriving again, so
+# a broken receiver is reported once rather than on every tick until fixed.
+
 FROZEN_RATES_KEY = "frozen_parked_rates"  # JSON {at, places: {name: kW},
 # sentry_armed_kw, whole_history_kw, from_drives, from_gaps}: what the
 # parked-drain fits resolved to while the history they were measured from

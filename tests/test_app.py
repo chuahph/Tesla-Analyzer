@@ -6971,3 +6971,166 @@ def test_status_staleness_is_judged_against_the_source_own_cadence():
                           soc=70.0, source="polled")
         s.commit()
         assert _json.loads(state.get(s, key))["cadence"]["polled"] == observed
+
+
+def test_polling_stops_writing_dashboard_rows_but_keeps_watching():
+    """With polling_writes off, the tick stops being a second author of the
+    same history and becomes what it is uniquely good for.
+
+    Telemetry supplies drives, charges and readings now, and two sources
+    writing one history is how a polled row that merged two real trips ends up
+    beside the two telemetry trips that split them correctly — which a
+    half-hourly tick does routinely. What must NOT stop is the status card and
+    the alerts: those are the watchdog's own output, and the alerts are the
+    failsafe for exactly the case where the bridge is down and the stream
+    cannot raise them.
+    """
+    from types import SimpleNamespace
+
+    import json as _json
+
+    from app import state
+    from app.api.routes import _process_vehicle
+    from app.database import SessionLocal
+    from app.models import BatteryReading, Drive, Vehicle
+
+    def make_settings(writes):
+        return SimpleNamespace(
+            energy_price_per_kwh=0.90, energy_price_ac_kwh=0.0,
+            energy_price_dc_kwh=0.0, energy_price_peak_kwh=0.0,
+            energy_price_offpeak_kwh=0.0, tariff_peak_start_hour=8,
+            tariff_peak_end_hour=22, tariff_weekend_offpeak=True,
+            battery_capacity_kwh=0.0, battery_new_range_km=0.0,
+            low_soc_notify_pct=0.0, sentry_drain_notify_pct=0.0,
+            intrusion_notify=False, drive_min_km=0.5,
+            polling_writes=writes, bridge_quiet_alert_min=0.0)
+
+    def vdata(ts, odo, soc, shift):
+        return {
+            "vin": "TESTVIN-NOWRITE", "display_name": "Test", "vehicle_config": {},
+            "vehicle_state": {"odometer": odo, "is_user_present": False,
+                              "locked": True, "sentry_mode": False},
+            "drive_state": {"timestamp": ts * 1000, "shift_state": shift,
+                            "speed": 60 if shift == "D" else 0,
+                            "latitude": 5.34, "longitude": 100.31},
+            "charge_state": {"battery_level": soc, "battery_range": 200.0,
+                             "charging_state": "Disconnected",
+                             "charger_power": 0.0, "charge_energy_added": 0.0},
+            "climate_state": {"outside_temp": 30.0},
+        }
+
+    t = 1_789_100_000
+    try:
+        with SessionLocal() as s:
+            v = Vehicle(vin="TESTVIN-NOWRITE", name="Test", model="Model 3")
+            s.add(v)
+            s.commit()
+            vid = v.id
+
+            def tick(dt, odo, soc, shift, writes):
+                _process_vehicle(s, vdata(t + dt, odo, soc, shift),
+                                 {"vin": "TESTVIN-NOWRITE"}, make_settings(writes))
+                s.commit()
+
+            def counts():
+                return (s.query(Drive).filter(Drive.vehicle_id == vid).count(),
+                        s.query(BatteryReading).filter(
+                            BatteryReading.vehicle_id == vid).count())
+
+            # A whole trip, with writes off: park -> drive -> park.
+            tick(0, 2000.0, 80, "P", False)
+            tick(300, 2005.0, 78, "D", False)
+            tick(600, 2012.0, 75, "P", False)
+            assert counts() == (0, 0), counts()
+
+            # The tick still ran the state machine rather than skipping it:
+            # the snapshot it saw is stored, so the next tick starts from the
+            # right place and turning writes back on cannot resume mid-trip.
+            snap_raw = state.get(
+                s, state.scoped(state.SNAPSHOT_KEY, "TESTVIN-NOWRITE"))
+            assert snap_raw
+            # In km: vehicle_data reports the odometer in MILES, which the
+            # snapshot converts. The whole project's worst class of bug is a
+            # figure quietly scaled wrong, so the test states the conversion
+            # rather than a number someone would have to trust.
+            assert _json.loads(snap_raw)["odo_km"] == pytest.approx(
+                2012.0 * 1.60934, abs=0.01)
+
+            # And with writes on, the same sequence does produce rows, so the
+            # switch is what changed and not the fixture.
+            tick(900, 2012.0, 75, "P", True)
+            tick(1200, 2018.0, 73, "D", True)
+            tick(1500, 2025.0, 70, "P", True)
+            drives, readings = counts()
+            assert drives >= 1, (drives, readings)
+    finally:
+        with SessionLocal() as s:
+            v = s.query(Vehicle).filter(Vehicle.vin == "TESTVIN-NOWRITE").first()
+            if v:
+                for model in (Drive, BatteryReading):
+                    s.query(model).filter(model.vehicle_id == v.id).delete()
+                s.delete(v)
+                s.commit()
+
+
+def test_bridge_quiet_alert_fires_only_when_the_car_is_awake_and_silent():
+    """The one fault the stream cannot report about itself.
+
+    A dead receiver and a sleeping car look identical from inside the app —
+    both are silence. Reaching the car is what tells them apart, and only
+    polling can do that.
+    """
+    import json as _json
+    from types import SimpleNamespace
+    from unittest import mock
+
+    from app import state
+    from app.api import routes as routes_mod
+    from app.api.routes import _check_bridge_quiet
+    from app.database import SessionLocal
+
+    vin = "TESTVIN-BRIDGE"
+    settings = SimpleNamespace(bridge_quiet_alert_min=20.0)
+    vehicle = SimpleNamespace(name="Test")
+    sent = []
+
+    with SessionLocal() as s:
+        state.put(s, state.TELEMETRY_SEEN_KEY, _json.dumps(
+            {"last_record_ts_by_vin": {vin: "2026-09-13T02:00:00Z"}}))
+        state.put(s, state.scoped(state.BRIDGE_QUIET_NOTIFIED_KEY, vin), "")
+        s.commit()
+        last = routes_mod._telemetry_ts("2026-09-13T02:00:00Z")
+
+        with mock.patch.object(routes_mod.notifications, "notify",
+                               lambda *a, **k: sent.append(k.get("tag"))):
+            # Five minutes quiet: ordinary.
+            assert _check_bridge_quiet(
+                s, vehicle, vin, {"ts": last + 300}, settings) is False
+            assert sent == []
+
+            # Forty minutes quiet on a car polling just reached: not ordinary.
+            assert _check_bridge_quiet(
+                s, vehicle, vin, {"ts": last + 2400}, settings) is True
+            assert sent == ["bridge-quiet"]
+
+            # Still quiet: reported once, not every tick until fixed.
+            assert _check_bridge_quiet(
+                s, vehicle, vin, {"ts": last + 3000}, settings) is False
+            assert sent == ["bridge-quiet"]
+
+            # Records arrive again -> re-armed for the next outage.
+            state.put(s, state.TELEMETRY_SEEN_KEY, _json.dumps(
+                {"last_record_ts_by_vin": {vin: "2026-09-13T03:00:00Z"}}))
+            s.commit()
+            back = routes_mod._telemetry_ts("2026-09-13T03:00:00Z")
+            assert _check_bridge_quiet(
+                s, vehicle, vin, {"ts": back + 60}, settings) is False
+            assert _check_bridge_quiet(
+                s, vehicle, vin, {"ts": back + 2400}, settings) is True
+            assert sent == ["bridge-quiet", "bridge-quiet"]
+
+        # A car that has never streamed is not a broken bridge.
+        state.put(s, state.TELEMETRY_SEEN_KEY, _json.dumps({}))
+        s.commit()
+        assert _check_bridge_quiet(
+            s, vehicle, vin, {"ts": back + 9999}, settings) is False

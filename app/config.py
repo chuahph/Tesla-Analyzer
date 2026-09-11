@@ -120,6 +120,29 @@ class Settings(BaseSettings):
     # non-trip as a tiny phantom drive. See DRIVE_MIN_KM in app/sync.py.
     drive_min_km: float = 0.1
 
+    # Whether the polling tick still writes dashboard data — drives, charges
+    # and battery readings — or only watches.
+    #
+    # Telemetry supplies all three now, so with this off the cron stops being
+    # a second author of the same history and becomes what it is uniquely good
+    # for: waking the car, proving the Fleet API path still works, and
+    # noticing when the stream has gone quiet on a car that is demonstrably
+    # awake. The stream cannot report its own silence; only an independent
+    # channel can.
+    #
+    # What it does NOT switch off: the status card, the parked-car alerts, the
+    # sleep scheduling or the sync log. Those are the watchdog's own output,
+    # and the alerts specifically are the failsafe for the case where the
+    # bridge is down and the stream cannot raise them.
+    polling_writes: bool = True
+    # How long the stream may be silent, on a car polling can see is awake,
+    # before that is worth telling someone about. An awake car streams every
+    # twenty seconds or so; a few minutes of nothing while it is plainly
+    # online means the bridge, the certificate or the car's configuration has
+    # failed — the exact class of fault that is otherwise invisible, since a
+    # dead stream and a sleeping car look identical from inside the app.
+    bridge_quiet_alert_min: float = 20.0
+
     # Tesla OAuth (Fleet API). Required only for the "Sign in with Tesla" button;
     # the access-token paste flow and demo/import modes do not need these.
     tesla_client_id: str = ""
