@@ -3660,6 +3660,7 @@ def _promote_shadow_charges(session: Session, apply: bool = False,
     claimed: set[int] = set()
     changed: list[dict] = []
     plan: list[tuple] = []
+    corrections: list[tuple] = []
     settings = get_settings()
 
     for c in sorted(charges, key=lambda x: float(x.get("start_ts") or 0.0)):
@@ -3713,6 +3714,40 @@ def _promote_shadow_charges(session: Session, apply: bool = False,
         if row is not None:
             entry["matched_charge_id"] = row.id
             entry["polled_kwh"] = round(row.energy_added_kwh or 0.0, 3)
+            # A matched row keeps its energy and gets its BOUNDARIES corrected.
+            #
+            # Those are two different questions. Polling's energy is the car's
+            # own charge_energy_added — the figure the car itself calls
+            # "Added", and the thing pack_meter was settled against — so there
+            # is nothing to improve. Its times are a different matter: they
+            # are wherever the poll ticks happened to fall.
+            #
+            # Measured, 11 September. The session stopped at 13:56:05 and the
+            # polled row says it ran to 14:00. The trip that set off at
+            # 13:58:18 therefore started BEFORE the charge had ended as far as
+            # the row was concerned, and the since-charge window — which
+            # opens at exactly this timestamp — dropped it. A four-minute
+            # error in a boundary made a whole journey invisible.
+            fixes = {}
+            if abs((row.start_time - c_start).total_seconds()) >= 1.0:
+                fixes["start_time"] = c_start.replace(microsecond=0)
+            if abs((row.end_time - c_end).total_seconds()) >= 1.0:
+                fixes["end_time"] = c_end.replace(microsecond=0)
+            # SoC travels with the boundaries for the same reason: polling
+            # reads whole percent at a tick, the stream reads fractions at the
+            # moment the session actually started and stopped.
+            for field, key in (("start_soc", "soc_start"), ("end_soc", "soc_end")):
+                value = c.get(key)
+                if value is not None and abs(
+                        float(getattr(row, field) or 0.0) - float(value)) >= 0.01:
+                    fixes[field] = float(value)
+            if fixes:
+                entry["action"] = "correct"
+                entry["corrections"] = {
+                    k: (v.isoformat(timespec="seconds")
+                        if hasattr(v, "isoformat") else round(v, 3))
+                    for k, v in fixes.items()}
+                corrections.append((row, fixes, c))
         changed.append(entry)
         if row is None and kwh:
             plan.append((c, vehicle_id, c_start, c_end, kwh, energy_source))
@@ -3720,9 +3755,26 @@ def _promote_shadow_charges(session: Session, apply: bool = False,
     if not apply:
         return changed
 
+    # Corrections first, and before the cap. The cap is about ADDING: a
+    # correction is bounded by the rows that already exist and cannot invent a
+    # session, so refusing one would leave a boundary wrong for the sake of a
+    # limit that was never about it.
+    for row, fixes, c in corrections:
+        for field, value in fixes.items():
+            setattr(row, field, value)
+        # Duration follows the boundaries it is derived from.
+        row.duration_min = round(
+            (row.end_time - row.start_time).total_seconds() / 60.0, 1)
+        # And say where the boundaries came from, so a row that is part polled
+        # and part streamed is not silently reported as either.
+        row.shadow_start_ts = float(int(float(c["start_ts"])))
+    if corrections:
+        session.commit()
+
     adds = len(plan)
     if max_add is not None and adds > max_add:
         return [{"action": "refused", "would_add": adds, "limit": max_add,
+                 "corrected": len(corrections),
                  "why": "an unattended run does not add this many at once; "
                         "read /api/telemetry/promote-charges and apply it by hand"}]
 
@@ -11613,16 +11665,20 @@ def telemetry_promote_charges(
     changed = _promote_shadow_charges(session, apply=apply, days=days)
     adds = sum(1 for c in changed if c.get("action") == "add")
     if not apply:
+        corrects = sum(1 for c in changed if c.get("action") == "correct")
         return {
             "would_add": adds,
-            "already_recorded": len(changed) - adds,
+            "would_correct": corrects,
+            "already_recorded": len(changed) - adds - corrects,
             "energy_source": CHARGE_ENERGY_SOURCE,
             "charges": changed,
             "note": ("Nothing written. Add &apply=true to carry these across. "
                      "energy_source names which counter would be used, and "
                      "counters shows all four so it can be judged."),
         }
-    return {"added": adds, "charges": changed}
+    return {"added": adds,
+            "corrected": sum(1 for c in changed if c.get("action") == "correct"),
+            "charges": changed}
 
 
 @router.api_route("/telemetry/drop-promoted", methods=["GET", "POST"])

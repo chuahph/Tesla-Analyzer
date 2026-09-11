@@ -7344,3 +7344,94 @@ def test_a_promoted_trip_fires_the_drive_complete_webhook():
                 s.delete(v)
             state.put(s, state.TELEMETRY_TRIPS_KEY, "[]")
             s.commit()
+
+
+def test_a_polled_charge_keeps_its_energy_and_gets_its_boundaries_fixed():
+    """Two different questions about the same row.
+
+    Polling's energy IS the car's own charge_energy_added — the figure the car
+    calls "Added", and what pack_meter was settled against — so there is
+    nothing to improve. Its times are wherever the poll ticks happened to
+    fall.
+
+    Measured, 11 September: the session stopped at 13:56:05 and the polled row
+    said 14:00. The trip that set off at 13:58:18 therefore began before the
+    charge had ended as far as the row was concerned, and the since-charge
+    window — which opens at exactly that timestamp — dropped a whole journey.
+    """
+    import json as _json
+
+    from app import state, sync as sync_mod
+    from app.config import get_settings
+    from app.database import SessionLocal
+    from app.models import Charge, Vehicle
+
+    settings = get_settings()
+    old_pc = settings.app_passcode
+    settings.app_passcode = ""
+    vin = "TESTVIN-CHGFIX"
+    try:
+        with TestClient(app) as client:
+            with SessionLocal() as s:
+                v = Vehicle(vin=vin, name="Test", model="Model 3")
+                s.add(v)
+                s.commit()
+                vid = v.id
+                real_start = sync_mod.now_local().replace(
+                    microsecond=0) - timedelta(hours=5, minutes=34)
+                real_end = real_start + timedelta(minutes=93, seconds=31)
+                # What polling recorded: tick boundaries, whole-percent SoC,
+                # and the car's own Added figure.
+                s.add(Charge(
+                    vehicle_id=vid,
+                    start_time=real_start - timedelta(minutes=22),
+                    end_time=real_end + timedelta(minutes=4),
+                    duration_min=120, start_soc=67, end_soc=92,
+                    energy_added_kwh=17.48, charge_type="AC",
+                    max_power_kw=11.7, location="All Season Place", cost=0.0))
+                s.commit()
+                state.put(s, state.TELEMETRY_CHARGES_KEY, _json.dumps([{
+                    "vin": vin,
+                    "start_ts": sync_mod.to_epoch(real_start),
+                    "end_ts": sync_mod.to_epoch(real_end),
+                    "start_time": real_start.isoformat(timespec="seconds"),
+                    "end_time": real_end.isoformat(timespec="seconds"),
+                    "duration_min": 93.5,
+                    "kwh_pack_meter": 17.42, "kwh_pack_level": 16.56,
+                    "kwh_wall": 18.161, "kwh_lifetime": None,
+                    "soc_start": 65.46883773161144, "soc_end": 89.0,
+                    "peak_kw": 11.7, "fast": False,
+                    "lat": 5.397018, "lon": 100.291249}]))
+                s.commit()
+
+            client.post("/api/active-vehicle", json={"vin": vin})
+            plan = client.get("/api/telemetry/promote-charges?days=7").json()
+            assert plan["would_add"] == 0
+            assert plan["would_correct"] == 1
+
+            client.post("/api/telemetry/promote-charges?apply=true&days=7")
+            with SessionLocal() as s:
+                row = s.scalars(select(Charge).where(Charge.vehicle_id == vid)).one()
+                # Boundaries to the second, from the stream.
+                assert row.end_time == real_end
+                assert row.start_time == real_start
+                assert row.duration_min == pytest.approx(93.5, abs=0.1)
+                # SoC travels with them: fractions at the real moments.
+                assert row.start_soc == pytest.approx(65.4688, abs=0.001)
+                # Energy untouched — polling had the car's own figure.
+                assert row.energy_added_kwh == pytest.approx(17.48)
+
+            # And again changes nothing.
+            again = client.post(
+                "/api/telemetry/promote-charges?apply=true&days=7").json()
+            assert again["corrected"] == 0
+            assert again["added"] == 0
+    finally:
+        settings.app_passcode = old_pc
+        with SessionLocal() as s:
+            v = s.query(Vehicle).filter(Vehicle.vin == vin).first()
+            if v:
+                s.query(Charge).filter(Charge.vehicle_id == v.id).delete()
+                s.delete(v)
+            state.put(s, state.TELEMETRY_CHARGES_KEY, "[]")
+            s.commit()
