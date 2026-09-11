@@ -11339,18 +11339,6 @@ def fleet_token(session: Session = Depends(get_session)):
     }
 
 
-def _polled_km(d) -> float:
-    """What polling said this drive was, even after telemetry corrected it."""
-    was = getattr(d, "polled_km", None)
-    return float(was if was is not None else (d.distance_km or 0.0))
-
-
-def _polled_kwh(d) -> float:
-    """What polling said this drive spent, even after telemetry corrected it."""
-    was = getattr(d, "polled_kwh", None)
-    return float(was if was is not None else (d.energy_used_kwh or 0.0))
-
-
 def _energy_unc_kwh(t: dict) -> float | None:
     """What a shadow trip's energy figure is worth, computed from the trip.
 
@@ -11422,23 +11410,11 @@ def _compare_row(t: dict, d, t_start, car_by_drive: dict, pct) -> dict:
             # _shadow_close.
             "ended_on": t.get("ended_on"),
         },
-        # polled_km/polled_kwh where telemetry has corrected the row, the
-        # live values where it has not. Reading the row's current figures
-        # after promotion would score telemetry against its own output and
-        # report perfect agreement for ever — the comparison would stop
-        # being able to detect the thing it exists to detect on the same day
-        # telemetry took over.
-        "polled": None if not d else {
-            "id": d.id,
-            "start": d.start_time.isoformat(timespec="seconds"),
-            "end": d.end_time.isoformat(timespec="seconds"),
-            "km": round(_polled_km(d), 3),
-            "kwh": round(_polled_kwh(d), 3),
-            "wh_per_km": round(_polled_kwh(d) * 1000.0
-                               / (_polled_km(d) or 1e-9), 1),
-            "min": d.duration_min,
-            "estimated_energy": bool(getattr(d, "energy_estimated", False)),
-        },
+        # The drive row this streamed trip became, named only so a finding
+        # here can be looked up. Its figures are not reported: they ARE the
+        # telemetry figures once promotion has run, and printing them beside
+        # would be telemetry scored against itself.
+        "drive_id": None if not d else d.id,
         "car": None if not d or d.id not in car_by_drive else {
             "km": car_by_drive[d.id]["km"],
             "kwh": round(car_by_drive[d.id]["wh_per_km"]
@@ -11450,23 +11426,9 @@ def _compare_row(t: dict, d, t_start, car_by_drive: dict, pct) -> dict:
         # departure or arrival looks like, and it inflates Wh/km by the
         # same proportion.
         "vs_car": None if not d or d.id not in car_by_drive else {
-            "polled_km_pct": pct(_polled_km(d), car_by_drive[d.id]["km"]),
             "telemetry_km_pct": pct(t["distance_km"], car_by_drive[d.id]["km"]),
-            "polled_whkm_pct": pct(
-                _polled_kwh(d) * 1000.0 / (_polled_km(d) or 1e-9),
-                car_by_drive[d.id]["wh_per_km"]),
             "telemetry_whkm_pct": pct(t["wh_per_km"],
                                       car_by_drive[d.id]["wh_per_km"]),
-        },
-        "delta": None if not d else {
-            "km_pct": pct(t["distance_km"], _polled_km(d)),
-            "kwh_pct": pct(t["energy_kwh"], _polled_kwh(d)),
-            # Positive means polling started the trip LATE — the blind
-            # head, in minutes.
-            "start_delta_min": round(
-                (d.start_time - t_start).total_seconds() / 60.0, 1),
-            "end_delta_min": round(
-                (d.end_time - t_end).total_seconds() / 60.0, 1),
         },
     }
 
@@ -12086,9 +12048,13 @@ def telemetry_compare(
             prev_end_odo = float(t["end_odo_km"])
         rows.append(row)
 
-    paired = [r for r in rows if r["polled"]]
+    # Trips the stream matched to a drive row. Named for what it is: the
+    # polled FIGURES are gone from this report, but whether a streamed trip
+    # found its row at all is still worth counting — an unmatched one is a
+    # journey the history does not have.
+    matched = [r for r in rows if r["drive_id"] is not None]
     # Judged against the CAR, which needs no polled row — the car's own screen
-    # is independent of both sources. Gating this on `paired` tied the only
+    # is independent of both sources. Gating this on a polled row tied the only
     # comparison that still means anything to the one that has stopped: at a
     # half-hourly cron polling records journeys wrongly or not at all, so as
     # its rows thin out the car comparison would have gone quiet with them and
@@ -12123,14 +12089,6 @@ def telemetry_compare(
     judged = [r for r in judged
               if r["telemetry"]["odo"] is not None
               and (r["telemetry"]["energy_unc_pct"] or 0.0) <= TELEMETRY_UNC_MAX_PCT]
-    # The polled half, where it exists — derived AFTER the exclusions above so
-    # both sides clear the same quality bar. Every trip behind these was
-    # logged at a one-minute cron; nothing logged at half-hourly belongs in an
-    # accuracy figure, so this is the historical record that justified the
-    # migration rather than a live measurement.
-    judged_polled = [r for r in judged
-                     if r["vs_car"].get("polled_km_pct") is not None
-                     and r["vs_car"].get("polled_whkm_pct") is not None]
     # Against the car, not against polling. These two medians used to be
     # telemetry-versus-polled — how far the streamed trip sat from the polled
     # one, and how much of its opening polling had missed. Both were questions
@@ -12143,44 +12101,34 @@ def telemetry_compare(
                  if r["vs_car"] and r["vs_car"]["telemetry_km_pct"] is not None]
     whkm_deltas = [r["vs_car"]["telemetry_whkm_pct"] for r in judged
                    if r["vs_car"] and r["vs_car"]["telemetry_whkm_pct"] is not None]
-    # Kept, but scoped to the trips polling actually measured. A blind head is
-    # a fact about a polled row, so averaging it over trips that have none
-    # would report a number about nothing.
-    heads = [r["delta"]["start_delta_min"] for r in judged_polled
-             if r.get("delta") and r["delta"].get("start_delta_min") is not None]
+
     return {
         "days": days,
         # Records the store held but this could not read. Empty is the normal
         # case; anything here names what went wrong with that one trip.
         "skipped": skipped,
         "telemetry_trips": len(rows),
-        "matched": len(paired),
-        "telemetry_only": len(rows) - len(paired),
-        # A polled trip with no telemetry counterpart is expected while both
-        # run: the car only streams when awake, so anything driven before the
-        # configuration landed, or during a stream outage, has no shadow.
-        "polled_only": len([d for d in drives if d.id not in matched_ids]),
-        # Judged, where the car has spoken. Two medians of the same quantity
-        # against the same reference is the only comparison that settles which
-        # source to believe — everything else is the two of them disagreeing.
+        "matched": len(matched),
+        # A streamed trip with no drive row is a journey the history does not
+        # have. Expected only for something driven before promotion caught up.
+        "unmatched": len(rows) - len(matched),
+        # A drive row with no streamed trip: driven before the configuration
+        # landed, or during a stream outage. Worth watching rather than
+        # ignoring — it is the shape a bridge failure takes in this report.
+        "no_stream": len([d for d in drives if d.id not in matched_ids]),
+        # Judged, where the car has spoken. The car is the only reference that
+        # does not come from this app, which is what makes it a referee rather
+        # than a second opinion.
         "judged": len(judged),
         # Trips the car spoke for but which cannot referee, and why. Listed
         # rather than silently dropped: a shrinking judged count with no
         # explanation is how a comparison quietly stops meaning anything.
         "not_judged": excluded,
-        "judged_polled": len(judged_polled),
         "vs_car": None if not judged else {
-            "telemetry_km_err_pct": round(percentile(
+            "km_err_pct": round(percentile(
                 [r["vs_car"]["telemetry_km_pct"] for r in judged], 0.5), 2),
-            "telemetry_whkm_err_pct": round(percentile(
+            "whkm_err_pct": round(percentile(
                 [r["vs_car"]["telemetry_whkm_pct"] for r in judged], 0.5), 2),
-            # Historical. Every trip behind these was logged at a one-minute
-            # cron, and nothing logged at half-hourly is added — see
-            # judged_polled for how many still stand behind them.
-            "polled_km_err_pct": None if not judged_polled else round(percentile(
-                [r["vs_car"]["polled_km_pct"] for r in judged_polled], 0.5), 2),
-            "polled_whkm_err_pct": None if not judged_polled else round(percentile(
-                [r["vs_car"]["polled_whkm_pct"] for r in judged_polled], 0.5), 2),
         },
         # Summed, not just averaged. A median compares each trip against the
         # car and treats a boundary drawn in the wrong place as an error —
@@ -12194,10 +12142,6 @@ def telemetry_compare(
         # 18.0 km against 18.004. The disagreement was never about how much
         # energy was used, only about which trip used it.
         "totals": None if not judged else {
-            # Telemetry against the car. The polled column is summed over
-            # judged_polled instead, because a sum of a different set of trips
-            # is not comparable with these two and printing it beside them
-            # would invite exactly that comparison.
             "km": [round(sum(r["telemetry"]["km"] for r in judged), 2),
                    round(sum(r["car"]["km"] for r in judged), 2)],
             "kwh": [round(sum(r["telemetry"]["kwh"] or 0.0 for r in judged), 2),
@@ -12206,12 +12150,6 @@ def telemetry_compare(
                               sum(r["car"]["km"] for r in judged)),
             "kwh_err_pct": pct(sum(r["telemetry"]["kwh"] or 0.0 for r in judged),
                                sum(r["car"]["kwh"] for r in judged)),
-            "polled_km_err_pct": None if not judged_polled else pct(
-                sum(r["polled"]["km"] for r in judged_polled),
-                sum(r["car"]["km"] for r in judged_polled)),
-            "polled_kwh_err_pct": None if not judged_polled else pct(
-                sum(r["polled"]["kwh"] for r in judged_polled),
-                sum(r["car"]["kwh"] for r in judged_polled)),
             # What the telemetry energy total is worth, which is the only
             # thing that says whether its error is a finding or a coin toss.
             # Each trip's uncertainty is dominated by EnergyRemaining's
@@ -12240,11 +12178,6 @@ def telemetry_compare(
             if whkm_deltas else None,
             "worst_whkm_err_pct": round(max(whkm_deltas, key=abs), 2)
             if whkm_deltas else None,
-            # A fact about polled rows, so reported only over the trips that
-            # have one. Expect it to go quiet as polling stops writing.
-            "median_blind_head_min": round(percentile(heads, 0.5), 2)
-            if heads else None,
-            "worst_blind_head_min": round(max(heads), 1) if heads else None,
         },
         "trips": rows[-60:],
     }

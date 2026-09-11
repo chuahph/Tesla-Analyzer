@@ -4970,8 +4970,10 @@ def test_a_row_telemetry_added_is_not_offered_as_pollings_answer():
             body = client.get("/api/telemetry/compare?days=1").json()
         row = next(r for r in body["trips"]
                    if r["telemetry"]["start"] == at.isoformat(timespec="seconds"))
-        assert row["polled"] is None, "telemetry was offered as polling's answer"
-        assert row["delta"] is None
+        # drive_id, not a polled figure block: a row telemetry wrote is not
+        # an independent answer, and offering it as one would score telemetry
+        # against itself.
+        assert row["drive_id"] is None, "telemetry was offered as polling's answer"
     finally:
         with SessionLocal() as cleanup:
             if vehicle is not None:
@@ -5348,7 +5350,7 @@ def test_a_trip_that_is_mostly_rounding_does_not_referee_the_others():
             body = client.get("/api/telemetry/compare").json()
 
         assert body["telemetry_trips"] == 3, "all three still reported"
-        assert body["matched"] == 3, [r["polled"] for r in body["trips"]]
+        assert body["matched"] == 3, [r["drive_id"] for r in body["trips"]]
         assert body["judged"] == 1, body["not_judged"]
         # Summed as well as judged, over the same set. A boundary drawn in
         # the wrong place moves energy between two trips without losing any,
@@ -5359,10 +5361,11 @@ def test_a_trip_that_is_mostly_rounding_does_not_referee_the_others():
         # printing it alongside would invite an invalid comparison.
         assert body["totals"]["km"] == [10.8, 10.8], body["totals"]
         assert body["totals"]["order"] == "telemetry, car"
-        # A single figure now: telemetry against the car. The polled
-        # error lives at totals.polled_km_err_pct, over its own set.
+        # One figure: telemetry against the car. Polling is no longer a
+        # column here at all — it was measuring at a cadence that cannot
+        # referee a trip, and a second opinion from a worse instrument is
+        # not a comparison.
         assert body["totals"]["km_err_pct"] == 0.0
-        assert body["totals"]["polled_km_err_pct"] == 0.0
         whys = " ".join(e["why"] for e in body["not_judged"])
         assert "quantisation" in whys and "no odometer bracket" in whys, whys
         # And the total carries what it is worth, which is the only thing
@@ -6256,15 +6259,14 @@ def test_a_trip_is_only_compared_against_its_own_car():
 
         with TestClient(app) as client:
             row = client.get("/api/telemetry/compare").json()["trips"][0]
-            assert row["polled"] is None, \
-                f"matched another car's drive: {row['polled']}"
+            assert row["drive_id"] is None, \
+                f"matched another car's drive: {row['drive_id']}"
 
             sess.add(Drive(vehicle_id=mine.id, start_time=start, end_time=end,
                            distance_km=5.1, energy_used_kwh=1.05, duration_min=30))
             sess.commit()
             row = client.get("/api/telemetry/compare").json()["trips"][0]
-        assert row["polled"] is not None, "its own car's drive was not matched"
-        assert row["polled"]["km"] == pytest.approx(5.1, abs=0.01)
+        assert row["drive_id"] is not None, "its own car's drive was not matched"
     finally:
         state.put(sess, state.TELEMETRY_TRIPS_KEY, prev or "[]")
         sess.commit()
