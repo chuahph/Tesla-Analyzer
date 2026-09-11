@@ -103,3 +103,43 @@ def test_stale_vehicle_id_reuse_does_not_leak_readings_across_cars(session):
     degradation = _degradation_pct(session, new, settings)
     assert degradation is not None
     assert degradation < 5.0   # the new car's own healthy data, not the old car's bad reading
+
+
+def test_drop_column_removes_it_once_and_then_does_nothing():
+    """The one destructive migration in the project, so it is tested on both
+    counts: it actually removes the column, and running again is a no-op
+    rather than an error.
+
+    init_db runs on every boot and several workers can boot at once, so a
+    second pass finding the column already gone is the normal case, not the
+    exception.
+    """
+    import sqlalchemy
+    from sqlalchemy import inspect, text
+
+    from app import database as db
+
+    def columns(engine, table):
+        return {c["name"] for c in inspect(engine).get_columns(table)}
+
+    engine = sqlalchemy.create_engine("sqlite://", future=True)
+    with engine.begin() as conn:
+        conn.execute(text(
+            "CREATE TABLE battery_readings (id INTEGER PRIMARY KEY, "
+            "soc FLOAT, dashcam_state VARCHAR(16))"))
+
+    was, db.engine = db.engine, engine
+    try:
+        assert "dashcam_state" in columns(engine, "battery_readings")
+        db._drop_column("battery_readings", "dashcam_state")
+        assert "dashcam_state" not in columns(engine, "battery_readings")
+        # Everything else survives.
+        assert {"id", "soc"} <= columns(engine, "battery_readings")
+
+        # Again: nothing to do, and no exception.
+        db._drop_column("battery_readings", "dashcam_state")
+        # A table that does not exist at all is also fine — a fresh database
+        # reaches init_db before any of these tables have rows or history.
+        db._drop_column("no_such_table", "dashcam_state")
+    finally:
+        db.engine = was

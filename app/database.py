@@ -63,6 +63,39 @@ def _ensure_column(table: str, column: str, ddl_type: str, default_sql: str) -> 
         conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {column} {ddl_type} DEFAULT {default_sql}"))
 
 
+def _drop_column(table: str, column: str) -> None:
+    """Remove a column that nothing maps any more.
+
+    The one destructive operation in this file, and deliberately the only one.
+    ``_ensure_column`` above is additive because a column added by mistake
+    costs nothing and a column dropped by mistake costs the rows in it — so
+    this exists only for a field that has already been removed from the models
+    and is being cleared out behind that removal, never as a way to change a
+    schema that is still in use.
+
+    Idempotent, and safe to run from several workers at once: the column is
+    checked first, and Postgres is asked with IF EXISTS on top of that so a
+    race between two startups cannot turn into a 500. SQLite has supported
+    DROP COLUMN since 3.35; a database old enough to refuse is left as it is
+    rather than failing the boot over a column nothing reads.
+    """
+    from sqlalchemy import inspect, text
+
+    inspector = inspect(engine)
+    if not inspector.has_table(table):
+        return
+    if column not in {c["name"] for c in inspector.get_columns(table)}:
+        return
+    guard = " IF EXISTS" if engine.dialect.name == "postgresql" else ""
+    try:
+        with engine.begin() as conn:
+            conn.execute(text(f"ALTER TABLE {table} DROP COLUMN{guard} {column}"))
+    except Exception:
+        # A drop that cannot happen must not stop the app starting. Nothing
+        # reads this column; leaving it costs a little disk and no behaviour.
+        pass
+
+
 def _widen_to_text(table: str, column: str) -> None:
     """Relax a bounded VARCHAR to unbounded TEXT on an existing table.
 
@@ -145,22 +178,17 @@ def init_db() -> None:
     _ensure_column("battery_readings", "climate_on", "BOOLEAN", "NULL")
     _ensure_column("battery_readings", "cabin_overheat_protection", "VARCHAR(10)", "NULL")
     _ensure_column("battery_readings", "cabin_overheat_protection_actively_cooling", "BOOLEAN", "NULL")
-    # dashcam_state is deliberately absent from this list and NOT dropped.
+    # dashcam_state existed to test one thing: whether Tesla leaked a Sentry
+    # TRIGGER through the polled API indirectly, a clip being written standing
+    # in for an alarm state the API does not publish. Telemetry answered it
+    # outright — SentryMode carries Aware and Panic at ten seconds — so the
+    # field went from the models and these drop the columns behind it.
     #
-    # The field is gone from the models: it existed only to test whether a
-    # Sentry trigger leaked through the polled API indirectly, and telemetry
-    # answered that outright with SentryMode's Aware and Panic states. Nothing
-    # reads or writes it any more.
-    #
-    # The COLUMN stays, because this helper is additive by design and dropping
-    # is the one migration that cannot be taken back. An unmapped nullable
-    # column is inert — inserts omit it, Postgres defaults it NULL, and it
-    # costs nothing to carry. Removing the field achieves everything removing
-    # the column would, minus the irreversibility. Drop it by hand if you ever
-    # want the rows gone:
-    #
-    #   ALTER TABLE battery_readings DROP COLUMN dashcam_state;
-    #   ALTER TABLE security_events  DROP COLUMN dashcam_state;
+    # Asked for explicitly after the trade was put plainly: the rows in these
+    # two columns are the cost, and they are worth nothing, because the
+    # question they were recorded for has a better answer now.
+    _drop_column("battery_readings", "dashcam_state")
+    _drop_column("security_events", "dashcam_state")
     _ensure_column("battery_readings", "center_display_state", "INTEGER", "NULL")
 
 
