@@ -3908,3 +3908,60 @@ def test_telemetry_snapshot_reads_cabin_overheat_and_climate_keeper():
     # Dashcam has no field anywhere in Tesla's proto, so it stays unknown on
     # this path however the car is configured.
     assert s["dashcam_state"] is None
+
+
+def test_shadow_charge_records_the_lifetime_counter_across_a_session():
+    """LifetimeEnergyChargedKwh is the only charge counter that cannot reset
+    under a session.
+
+    ACChargingEnergyIn is per-session — measured at 16.70 days before the 10
+    September charge and 4.72 partway through it — so a session read from it
+    depends on having watched it from zero, and the first session this app
+    ever recorded was joined halfway through. A lifetime total gives the same
+    kWh as the difference of its ends whenever those ends are seen.
+    """
+    from app.sync import advance_charge
+
+    def snap(ts, charging, ac_in, dc_in, lifetime, energy):
+        return {"ts": ts, "charging": charging, "charger_kw": 7.5,
+                "charge_energy_in_raw": ac_in, "dc_energy_in_raw": dc_in,
+                "lifetime_charged_raw": lifetime, "energy_kwh": energy,
+                "soc": 60.0, "fast": False, "shift": "P", "speed_kmh": 0.0}
+
+    shadow: dict = {}
+    # Joined mid-session on purpose: the per-session counters are already
+    # partway up, and only the lifetime one is unaffected by that.
+    assert advance_charge(shadow, snap(1000.0, True, 4.72, 4.48, 3120.5, 40.0)) is None
+    assert advance_charge(shadow, snap(1300.0, True, 8.72, 8.46, 3124.5, 43.6)) is None
+    done = advance_charge(shadow, snap(1600.0, False, 8.72, 8.46, 3124.5, 43.6))
+
+    assert done is not None
+    assert done["kwh_wall"] == pytest.approx(4.0)
+    assert done["kwh_pack_meter"] == pytest.approx(3.98)
+    assert done["kwh_lifetime"] == pytest.approx(4.0)
+    # The final reading, not only the movement. Two sessions' readings of a
+    # lifetime total are directly comparable, and the difference between them
+    # is every kWh the pack took in between — including a charge the app
+    # missed entirely, which is how it would learn that it had.
+    assert done["lifetime_meter_end"] == pytest.approx(3124.5)
+
+
+def test_shadow_charge_still_closes_when_only_the_lifetime_counter_moves():
+    """A session where the per-session counters never arrive is still a
+    session. The size check has to weigh every counter, not only the two it
+    was written with."""
+    from app.sync import advance_charge
+
+    def snap(ts, charging, lifetime):
+        return {"ts": ts, "charging": charging, "charger_kw": 7.0,
+                "charge_energy_in_raw": None, "dc_energy_in_raw": None,
+                "lifetime_charged_raw": lifetime, "energy_kwh": None,
+                "soc": 60.0, "fast": False, "shift": "P", "speed_kmh": 0.0}
+
+    shadow: dict = {}
+    advance_charge(shadow, snap(1000.0, True, 3120.5))
+    advance_charge(shadow, snap(1300.0, True, 3124.5))
+    done = advance_charge(shadow, snap(1600.0, False, 3124.5))
+    assert done is not None
+    assert done["kwh_lifetime"] == pytest.approx(4.0)
+    assert done["kwh_wall"] is None

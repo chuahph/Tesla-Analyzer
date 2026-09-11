@@ -140,6 +140,16 @@ kill -0 $PROXY_PID 2>/dev/null || die "the proxy exited on startup (see $LOG)"
 #                measured by the car, against EnergyRemaining for pack energy
 #                — wall-to-pack efficiency on every charge, instead of
 #                photographing receipts.
+#
+#                LifetimeEnergyChargedKwh (field 261) is the third counter,
+#                and the only monotonic one. ACChargingEnergyIn RESETS per
+#                session — measured: 16.70 days before the 10 September
+#                charge and 4.72 partway through it — so reading a session
+#                from it means catching both of its ends cleanly, and the
+#                first session this app ever recorded was joined halfway
+#                through. A lifetime counter cannot reset underneath a
+#                session, and a lost record costs nothing because the next
+#                one carries the same total.
 #   Security     SentryMode is a state machine, not a switch: Off, Idle,
 #                Armed, Aware, Panic, Quiet. Aware means the car noticed
 #                something and Panic means the alarm went off — neither is
@@ -296,6 +306,7 @@ $DEFAULT_DRIVE_COUNTER
       "DCChargingPower":           {"interval_seconds": 60},
       "ACChargingEnergyIn":        {"interval_seconds": 60},
       "DCChargingEnergyIn":        {"interval_seconds": 60},
+      "LifetimeEnergyChargedKwh":  {"interval_seconds": 60},
       "ChargerVoltage":            {"interval_seconds": 60},
       "ChargeAmps":                {"interval_seconds": 60},
       "ChargerPhases":             {"interval_seconds": 60},

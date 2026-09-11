@@ -2791,6 +2791,21 @@ def snapshot_from_telemetry(fields: dict[str, Any], ts: float) -> dict[str, Any]
         # guess is the one mistake here that would be expensive.
         "charge_energy_in_raw": num("ACChargingEnergyIn"),
         "dc_energy_in_raw": num("DCChargingEnergyIn"),
+        # The third counter, and the only one that cannot reset under a
+        # session. The two above are per-session and the first charge this app
+        # ever recorded was joined halfway through, which left its deltas
+        # measuring the part that was seen while the counters themselves had
+        # been climbing since the plug went in. A lifetime total is immune to
+        # both problems: a session is the difference of its ends whenever
+        # those ends are observed, and a dropped record costs nothing because
+        # the next one carries the same running total.
+        #
+        # Still raw and unconverted, name notwithstanding. The field is called
+        # ...Kwh, and the odometer was called Odometer and arrived in miles.
+        # It is checked against a quantity already known before anything is
+        # derived from it — see the shadow charge, which now carries this
+        # delta beside the two it already had.
+        "lifetime_charged_raw": num("LifetimeEnergyChargedKwh"),
         "charge_state_raw": charge_state or None,
         "fast": charge_state.startswith("DetailedChargeStateDC"),
         "out_temp": num("OutsideTemp") if num("OutsideTemp") is not None else 20.0,
@@ -3532,9 +3547,14 @@ def _charge_close(shadow: dict[str, Any], end: dict[str, Any]) -> dict[str, Any]
     kwh_wall = delta("charge_energy_in_raw")
     kwh_pack_meter = delta("dc_energy_in_raw")
     kwh_pack_level = delta("energy_kwh")
+    # The lifetime counter's movement across this session. Same quantity as
+    # one of the two above — which one is exactly the open question — but
+    # arrived at without depending on a per-session counter having been
+    # watched from zero.
+    kwh_lifetime = delta("lifetime_charged_raw")
     minutes = max((float(end["ts"]) - float(start["ts"])) / 60.0, 0.0)
-    biggest = max((v for v in (kwh_wall, kwh_pack_meter, kwh_pack_level)
-                   if v is not None), default=0.0)
+    biggest = max((v for v in (kwh_wall, kwh_pack_meter, kwh_pack_level,
+                               kwh_lifetime) if v is not None), default=0.0)
     if biggest < CHARGE_MIN_KWH or minutes <= 0:
         return None
 
@@ -3547,6 +3567,7 @@ def _charge_close(shadow: dict[str, Any], end: dict[str, Any]) -> dict[str, Any]
         "kwh_wall": kwh_wall,
         "kwh_pack_meter": kwh_pack_meter,
         "kwh_pack_level": kwh_pack_level,
+        "kwh_lifetime": kwh_lifetime,
         # The counters as they finished, not only how far they moved. A
         # session recorded from partway through — the machine was deployed
         # mid-charge the first time it ever ran — has a delta that measures
@@ -3556,6 +3577,12 @@ def _charge_close(shadow: dict[str, Any], end: dict[str, Any]) -> dict[str, Any]
         # final reading proves whether this is the same meter.
         "wall_meter_end": end.get("charge_energy_in_raw"),
         "pack_meter_end": end.get("dc_energy_in_raw"),
+        # Kept for the same reason as the two above, and for one more: this
+        # one is a lifetime total, so two sessions' readings of it are
+        # directly comparable and the difference between them is every kWh
+        # that went into the pack in between — including any charge the app
+        # missed entirely, which is the check that says whether it missed one.
+        "lifetime_meter_end": end.get("lifetime_charged_raw"),
         # Two ratios, because the first session measured properly showed they
         # are not the same question.
         #
