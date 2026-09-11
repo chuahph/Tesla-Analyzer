@@ -4918,15 +4918,20 @@ def test_a_trip_never_takes_a_drive_that_belongs_to_a_later_one():
         sess.close()
 
 
-def test_a_row_telemetry_added_is_not_offered_as_pollings_answer():
-    """A journey polling never saw cannot be polling's side of a comparison.
+def test_a_row_telemetry_added_can_still_be_judged_against_the_car():
+    """A journey polling never saw is exactly the one telemetry exists to
+    capture, so it must not be excluded from the accuracy report.
 
-    Polling merged the 17:30 trip into the one before it, so promotion added
-    that row. Matched against the telemetry trip it came from, it would pair
-    telemetry with itself, report a delta of zero and add a perfect agreement
-    to every median — the same trap polled_km was added to close, one step
-    further on. A corrected row still belongs, because what polling said
-    about it survives on it.
+    These rows used to be filtered out, and rightly so while the comparison
+    was telemetry against polling: pairing a telemetry trip with a row
+    telemetry wrote would have reported a delta of zero and added a perfect
+    agreement to every median.
+
+    That reasoning does not survive the reference changing. Against the CAR,
+    the row is not the thing being compared — it is only how a car reading is
+    found, since readings are recorded against a drive id. Measured, 11
+    September: the 11:48 trip was promoted as a new row, the filter hid it,
+    and the trip reported drive_id null with no vs_car at all.
     """
     import json as _json
 
@@ -4970,10 +4975,13 @@ def test_a_row_telemetry_added_is_not_offered_as_pollings_answer():
             body = client.get("/api/telemetry/compare?days=1").json()
         row = next(r for r in body["trips"]
                    if r["telemetry"]["start"] == at.isoformat(timespec="seconds"))
-        # drive_id, not a polled figure block: a row telemetry wrote is not
-        # an independent answer, and offering it as one would score telemetry
-        # against itself.
-        assert row["drive_id"] is None, "telemetry was offered as polling's answer"
+        # The row IS found, so a car reading recorded against it can attach.
+        assert row["drive_id"] is not None, \
+            "a promoted row was hidden, so its car reading has nowhere to go"
+        # And its own figures are nowhere in the report: there is no polled
+        # block any more, so telemetry cannot be scored against itself
+        # however the rows are matched.
+        assert "polled" not in row and "delta" not in row
     finally:
         with SessionLocal() as cleanup:
             if vehicle is not None:

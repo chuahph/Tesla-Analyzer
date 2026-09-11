@@ -11941,17 +11941,21 @@ def telemetry_compare(
         select(Drive).where(Drive.start_time >= since).order_by(Drive.start_time)
     ).all()
     # Rows telemetry ADDED are not polling's answer to anything, and must not
-    # stand in for one. Polling never logged the 17:30 journey — it merged it
-    # into the trip before — so once promotion writes that row, matching a
-    # telemetry trip against it would pair telemetry with itself, report a
-    # delta of zero, and quietly add a perfect agreement to every median in
-    # this report. That is the same trap polled_km was added to close, one
-    # step further along: a row polling never saw has no polled figures to
-    # preserve, so the only honest thing is to leave it out of the comparison
-    # entirely. A row telemetry CORRECTED still belongs here, because what
-    # polling said about it survives on it.
-    drives = [d for d in drives
-              if not ((d.source or "") == "telemetry" and d.polled_km is None)]
+    # stand in for one. Rows promotion CREATED used to be excluded here,
+    # because pairing a telemetry trip with a row telemetry wrote would have
+    # reported a delta of zero and added a perfect agreement to every median.
+    #
+    # That was right while the comparison was telemetry against polling. It is
+    # wrong now that it is telemetry against the CAR: the row is no longer the
+    # reference, it is only how a car reading is found — readings are recorded
+    # against a drive id. Excluding these rows meant a trip polling never saw
+    # could never be judged at all, which is precisely backwards, since those
+    # are the journeys telemetry exists to capture.
+    #
+    # Measured, 11 September: the 11:48 trip was promoted as a new row, and
+    # this filter hid it, so its car reading had nowhere to attach and the
+    # trip reported drive_id null with no vs_car at all.
+
 
     def pct(new: float | None, old: float | None) -> float | None:
         if new is None or not old:
