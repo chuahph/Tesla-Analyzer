@@ -6673,3 +6673,67 @@ def test_telemetry_writes_battery_readings_on_pollings_own_rules():
             assert stored[-1].cabin_overheat_protection is None
     finally:
         settings.app_passcode = old_pc
+
+
+def test_telemetry_fields_reports_the_set_without_leaking_values():
+    """The configure script reads this to avoid sending the car a smaller
+    field set than it already has.
+
+    Measured, 11 September: a plain re-run reported "fields sent: 34" — the
+    bare default — to a car that had been streaming BMSState for a fortnight,
+    and BMSState is what trip ends are detected from. The level file the
+    script consulted was read but never written by anything, so it could only
+    ever be absent. This is the check that does not depend on local state.
+    """
+    import json as _json
+
+    from app import state
+    from app.config import get_settings
+    from app.database import SessionLocal
+
+    settings = get_settings()
+    old_pc, old_key = settings.app_passcode, settings.sync_key
+    settings.app_passcode = ""
+    try:
+        with TestClient(app) as client:
+            with SessionLocal() as s:
+                state.put(s, state.TELEMETRY_RAW_KEY, _json.dumps([
+                    {"vin": "V1", "fields": {"Gear": "ShiftStateP", "Soc": 70.0}}]))
+                # BMSState lives only in the composite here, not the recent
+                # buffer — which is the normal case for a parked car, since a
+                # field that is not changing stops being sent. Reading the
+                # buffer alone would call a correctly configured car a
+                # downgrade and refuse a good configuration.
+                state.put(s, state.TELEMETRY_LATEST_KEY, _json.dumps(
+                    {"V1": {"BMSState": "BMSStateStandby", "Odometer": 19337.0}}))
+                s.commit()
+
+            out = client.get("/api/telemetry/fields").json()
+            assert out["level"] == 2                     # BMSState present
+            assert "BMSState" in out["fields"]
+            assert "Gear" in out["fields"]
+            # Names only. A sync-key holder must not be able to read the car's
+            # location out of this.
+            assert all(isinstance(f, str) for f in out["fields"])
+            assert "70.0" not in _json.dumps(out)
+
+            with SessionLocal() as s:
+                state.put(s, state.TELEMETRY_LATEST_KEY, _json.dumps(
+                    {"V1": {"BMSState": "BMSStateStandby", "FdWindow": "Closed"}}))
+                s.commit()
+            assert client.get("/api/telemetry/fields").json()["level"] == 3
+
+            with SessionLocal() as s:
+                state.put(s, state.TELEMETRY_LATEST_KEY, _json.dumps({"V1": {"Gear": "P"}}))
+                s.commit()
+            assert client.get("/api/telemetry/fields").json()["level"] == 1
+
+        # Reachable with the sync key alone: the script on the receiver box
+        # has no passcode cookie.
+        settings.app_passcode = "shh"
+        settings.sync_key = "abc123"
+        with TestClient(app) as client:
+            assert client.get("/api/telemetry/fields").status_code == 401
+            assert client.get("/api/telemetry/fields?key=abc123").status_code == 200
+    finally:
+        settings.app_passcode, settings.sync_key = old_pc, old_key

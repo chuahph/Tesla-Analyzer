@@ -10608,6 +10608,57 @@ def telemetry_ingest(
             "seen": seen}
 
 
+# Which of the three configured sets a field list corresponds to. The script
+# that configures the car has to know this to avoid re-sending a smaller set
+# than the car already has, and it cannot work it out from its own local state
+# — that state is a file on one VM, and VMs get rebuilt.
+TELEMETRY_LEVEL_MARKERS = ((3, "FdWindow"), (2, "BMSState"))
+
+
+@router.get("/telemetry/fields")
+def telemetry_fields(session: Session = Depends(get_session)):
+    """Field NAMES the car has actually been streaming, and the set they imply.
+
+    Names only — no values. /api/telemetry/recent already returns the records
+    themselves, but this is read by a shell script on the receiver box holding
+    the sync key, and that key should not be a way to read the car's location
+    out of the app. The names answer the question being asked ("which set does
+    this car have") and nothing else.
+
+    ``level`` is 3, 2 or 1 by the highest marker field present. Sets are
+    cumulative, so the marker for the largest set present settles it.
+    """
+    import json as _json
+
+    try:
+        buffered = _json.loads(state.get(session, state.TELEMETRY_RAW_KEY) or "[]") or []
+    except ValueError:
+        buffered = []
+    try:
+        latest = _json.loads(state.get(session, state.TELEMETRY_LATEST_KEY) or "{}") or {}
+    except ValueError:
+        latest = {}
+
+    names: set[str] = set()
+    for record in buffered:
+        names.update((record.get("fields") or {}).keys())
+    # The composite as well as the buffer. The buffer holds only the most
+    # recent records, and a field that changes rarely — BMSState on a parked
+    # car, the window fields on a car nobody has opened — can be absent from
+    # it while the car is streaming it perfectly well. Reading the buffer
+    # alone would call that a downgrade and refuse a correct configuration.
+    for car in latest.values():
+        if isinstance(car, dict):
+            names.update(car.keys())
+
+    level = 1
+    for value, marker in TELEMETRY_LEVEL_MARKERS:
+        if marker in names:
+            level = value
+            break
+    return {"fields": sorted(names), "count": len(names), "level": level}
+
+
 @router.get("/telemetry/recent")
 def telemetry_recent(
     limit: int = Query(30, ge=1, le=TELEMETRY_RAW_MAX),

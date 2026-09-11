@@ -245,6 +245,30 @@ if [ "${TELEMETRY_V3:-0}" = "1" ]; then
   say "TELEMETRY_V3 set: four windows, paired-key count, charge port door, driver seat belt"
 fi
 
+# Belt and braces behind the level file, because the level file is local state
+# and local state goes missing — a rebuilt VM, a restored image, a first run on
+# a car configured from somewhere else. This asks the APP which fields the car
+# has actually been streaming, which is evidence rather than bookkeeping, and
+# refuses to send a smaller set on top of a larger one.
+if [ -z "${TELEMETRY_FORCE:-}" ]; then
+  HAVE=$(curl -fsS --max-time 20 "$APP_URL/api/telemetry/fields?key=$SYNC_KEY" 2>/dev/null \
+         | jq -r '.level // empty' 2>/dev/null)
+  WANT=1
+  [ "${TELEMETRY_V2:-0}" = "1" ] && WANT=2
+  [ "${TELEMETRY_V3:-0}" = "1" ] && WANT=3
+  if [ -n "$HAVE" ] && [ "$HAVE" -gt "$WANT" ] 2>/dev/null; then
+    die "this car is already streaming the V$HAVE set, and this run would send V$WANT — taking fields away.
+       V2 carries BMSState, which trip ends are detected from (see sync.BMS_DRIVE).
+       V3 also carries the window fields the break-in check reads.
+       Re-run as:  sudo TELEMETRY_V${HAVE}=1 bash \$0
+       Override with TELEMETRY_FORCE=1 if the downgrade is deliberate."
+  fi
+  # || true so this can never be the failing last command of a block. set -e
+  # lets a standalone AND-list fail harmlessly today, which is a subtlety no
+  # future edit should have to know about.
+  [ -n "$HAVE" ] && echo "  car is currently streaming the V$HAVE set" || true
+fi
+
 say "Building the configuration"
 CA=$(sed ':a;N;$!ba;s/\n/\\n/g' "/etc/letsencrypt/live/$TELEMETRY_HOST/chain.pem")
 cat > "$WORK/config.json" <<EOF
@@ -325,6 +349,21 @@ echo "  fields sent: $(jq '.config.fields | length' "$WORK/config.json")"
 # delivers it when the car next connects, so a config sent to a sleeping or
 # out-of-coverage car reports success here and reaches the vehicle hours
 # later. Its own synced flag is the only thing that says it arrived.
+# Remember what was sent. The read of this file above has existed since the
+# V2 set did; the WRITE never did, so the file it looks for was never created
+# by anything and every plain re-run quietly sent the smallest set. Measured:
+# a run on 11 September reported "fields sent: 34" — the bare default —
+# against a car that had been streaming BMSState for a fortnight, and BMSState
+# is what trip ends are detected from. The downgrade was invisible because
+# fields simply stop arriving; nothing anywhere says why.
+if [ "${HTTP:0:1}" = "2" ]; then
+  mkdir -p "$(dirname "$LEVEL_FILE")"
+  if [ "${TELEMETRY_V3:-0}" = "1" ]; then echo 3 > "$LEVEL_FILE"
+  elif [ "${TELEMETRY_V2:-0}" = "1" ]; then echo 2 > "$LEVEL_FILE"
+  else echo 1 > "$LEVEL_FILE"; fi
+  echo "  level recorded: $(cat "$LEVEL_FILE") (a plain re-run will resend this set)"
+fi
+
 if [ "${HTTP:0:1}" = "2" ]; then
   say "Checking whether the car has it yet"
   curl -sS "$BASE/api/1/vehicles/$VIN/fleet_telemetry_config" \

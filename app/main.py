@@ -139,6 +139,13 @@ async def _passcode_gate(request: Request, call_next):
                      # It holds the same key the cron does and has no way to
                      # hold a passcode cookie.
                      "/api/telemetry",
+                     # And the configure script on that box reads here, to
+                     # check it is not about to send the car a SMALLER field
+                     # set than the one it already has. Names only, no values
+                     # — see telemetry_fields for why that distinction is the
+                     # reason this is a separate endpoint from
+                     # /api/telemetry/recent rather than a flag on it.
+                     "/api/telemetry/fields",
                      # And the receiver box asks here for the token it needs to
                      # send the car its telemetry configuration. That call has
                      # to be signed by a private key that deliberately never
