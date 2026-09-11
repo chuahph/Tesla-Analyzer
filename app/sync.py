@@ -3220,7 +3220,18 @@ def advance_shadow(shadow: dict[str, Any], snap: dict[str, Any]) -> dict[str, An
             # Per trip. The cadence is a property of the journey it was
             # measured during, not of the car in general — the configuration
             # can change between two trips on the same day.
+            #
+            # The anchor goes with the histogram. Clearing one and not the
+            # other measured this trip's first gap from the previous trip's
+            # last reading, across the park between them — and any park under
+            # SHADOW_GAP_SEC passes the blackout guard, which is every park
+            # shorter than ten minutes. The median absorbs one outlier among
+            # many; what it cannot absorb is the count, and a trip owning two
+            # gaps of its own has too few to report a cadence at all until
+            # the park is counted as a third.
             shadow["e_gaps"] = {}
+            shadow.pop("e_ts", None)
+            shadow.pop("e_val", None)
             open_at = shadow["open"]
         elif not open_at:
             # Nothing to open yet, and nothing to measure until there is.

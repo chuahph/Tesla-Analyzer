@@ -4496,16 +4496,15 @@ def standby_evidence(session: Session = Depends(get_session)):
     # over and the car's own screen reports separately. BatteryReading writes a
     # row on any sentry_mode change (see /api/sync), so a park that armed or
     # disarmed leaves one even when SoC never moved a whole point.
-    readings = list(session.scalars(
-        select(BatteryReading).where(BatteryReading.vehicle_id == vehicle.id)
-        .order_by(BatteryReading.ts)))
+    # The same index the dashboard uses, for the same reason. This walked
+    # every reading in the car's history to answer one gap and then did it
+    # again for the next gap: at 40,000 readings and a hundred gaps that is
+    # four million comparisons, on top of building an ORM object per row to
+    # read two columns off it. A pair of bisects answers each gap instead.
+    readings = _parked_readings(session, vehicle.id)
 
     def sentry_during(start, end):
-        seen = [r.sentry_mode for r in readings
-                if start <= r.ts <= end and r.sentry_mode is not None]
-        if not seen:
-            return None
-        return any(seen)
+        return driving_analysis.gap_sentry_state(readings, start, end)
 
     by_place: dict[str, list[float]] = {}
     by_sentry: dict[str, list[float]] = {}

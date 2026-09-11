@@ -3603,6 +3603,55 @@ def test_a_trip_measures_how_often_its_own_energy_readings_arrived():
     assert drive(10.0)["energy_sample_sec"] == pytest.approx(10.0)
 
 
+def test_a_trips_cadence_does_not_start_at_the_previous_trips_last_reading():
+    """The tally is per trip. Its clock has to be too.
+
+    A trip resets the gap histogram when it opens, but the anchor it measures
+    from lived outside it — so the first gap of a journey was measured from
+    the last EnergyRemaining change of the PREVIOUS one, across the park. Any
+    park under the blackout threshold passes the guard, which is every park
+    shorter than ten minutes.
+
+    The median absorbs one outlier among many, so this shows where it cannot:
+    a trip with only two gaps of its own has too few to report a cadence at
+    all and must say None. Counting the park as a third manufactures a
+    measurement out of the time the car spent standing still.
+    """
+    shadow: dict = {}
+    energy, odo, ts = 30.0, 100.0, 0.0
+
+    # A first trip, to leave an anchor behind.
+    for _ in range(12):
+        advance_shadow(shadow, _tel(ts, odo, round(energy, 3)))
+        ts += 10.0; odo += 0.05; energy -= 0.005
+    advance_shadow(shadow, _tel(ts, odo, round(energy, 3), gear="ShiftStateP",
+                                speed_mph=0.0, door=True))
+    assert advance_shadow(shadow, _tel(ts + SHADOW_SETTLE_SEC + 10, odo,
+                                       round(energy, 3), gear="ShiftStateP",
+                                       speed_mph=0.0)) is not None
+
+    # Five minutes parked — short enough that nothing treats it as a
+    # blackout — then a real journey whose ENERGY only moves three times, so
+    # it owns two gaps: one short of the three this will report on. The first
+    # move comes AFTER the trip opens, which is the shape that leaks: while
+    # the opening record is itself a change the anchor is reset in passing and
+    # nothing is counted.
+    ts += 300.0
+    for i in range(15):
+        if i in (1, 6, 11):
+            energy -= 0.02
+        advance_shadow(shadow, _tel(ts, odo, round(energy, 3)))
+        ts += 10.0; odo += 0.2
+    advance_shadow(shadow, _tel(ts, odo, round(energy, 3), gear="ShiftStateP",
+                                speed_mph=0.0, door=True))
+    second = advance_shadow(shadow, _tel(ts + SHADOW_SETTLE_SEC + 10, odo,
+                                         round(energy, 3), gear="ShiftStateP",
+                                         speed_mph=0.0))
+    assert second is not None
+    assert second["energy_sample_sec"] is None, \
+        "the park was counted as one of this trip's own intervals"
+
+
 def test_a_wait_mid_trip_is_not_a_slow_sampling_interval():
     """The median, not the mean.
 
