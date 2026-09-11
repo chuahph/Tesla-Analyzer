@@ -11892,9 +11892,59 @@ def telemetry_gaps(
         shadows = {}
     replayed = {vin: int((sh or {}).get("out_of_order") or 0)
                 for vin, sh in shadows.items() if isinstance(sh, dict)}
+
+    # Which silences contain a journey.
+    #
+    # This is the whole difference between a sleeping car and a dead bridge,
+    # and both halves of it were already here — the gap list and the drive
+    # history — never crossed. Every gap in this log reads alike: a parked car
+    # says nothing, and so does a receiver that has stopped.
+    #
+    # A gap with a drive inside it does not. Measured, 8 September: the stream
+    # went quiet at 17:39 and returned at 06:39, which looks exactly like an
+    # overnight sleep — except three journeys were driven inside it, 9.2 km
+    # that only polling recorded. It surfaced three days later as an odometer
+    # discontinuity, because nothing looks for this.
+    #
+    # Retrospective, unlike the bridge-quiet alert, which can only catch a
+    # fault while a poll happens to be looking. This finds one after the fact,
+    # from evidence already on record — and once polling stops writing, a
+    # journey lost this way leaves no row at all, so the gap is the only place
+    # it will ever be visible.
+    # Per car. A gap belongs to one vehicle, and matching it against every
+    # drive on the account would let one car's journeys mark another car's
+    # silence as a fault. Entries written before gaps carried a vin have none;
+    # those are matched against everything, which is the truth about them —
+    # there was one car when they were written.
+    vin_to_vehicle = {v.vin: v.id for v in session.scalars(select(Vehicle)).all() if v.vin}
+    drives = session.scalars(select(Drive).order_by(Drive.start_time)).all()
+    marked = []
+    for g in gaps[-limit:]:
+        row = dict(g)
+        try:
+            a = datetime.fromisoformat(str(g.get("from")))
+            b = datetime.fromisoformat(str(g.get("to")))
+        except (TypeError, ValueError):
+            marked.append(row)
+            continue
+        want = vin_to_vehicle.get(g.get("vin"))
+        inside = [d for d in drives
+                  if d.start_time and d.end_time
+                  and (want is None or d.vehicle_id == want)
+                  and d.start_time >= a and d.end_time <= b]
+        row["drives_inside"] = len(inside)
+        row["km_inside"] = round(sum(d.distance_km or 0.0 for d in inside), 3)
+        # Named for what it means rather than what it measures. A silence the
+        # car drove through is a silence something was missed in.
+        row["missed_journeys"] = bool(inside)
+        marked.append(row)
     return {"gaps": len(gaps), "over_seconds": TELEMETRY_GAP_MIN_SEC,
             "replayed": replayed, "replayed_total": sum(replayed.values()),
-            "recent": gaps[-limit:]}
+            # The count that matters. Zero means every silence here was a
+            # parked car; anything else is a stream that missed a journey.
+            "gaps_with_journeys": sum(1 for g in marked if g.get("missed_journeys")),
+            "km_missed": round(sum(g.get("km_inside") or 0.0 for g in marked), 3),
+            "recent": marked}
 
 
 @router.get("/telemetry/compare")

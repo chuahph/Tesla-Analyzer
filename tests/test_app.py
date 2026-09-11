@@ -7427,3 +7427,70 @@ def test_polling_does_not_re_record_a_journey_the_stream_already_has():
                 s.query(Drive).filter(Drive.vehicle_id == v.id).delete()
                 s.delete(v)
                 s.commit()
+
+
+def test_a_gap_the_car_drove_through_is_marked_as_a_missed_journey():
+    """A sleeping car and a dead receiver both produce silence, and every gap
+    in this log reads alike — except one the car drove through.
+
+    Measured, 8 September: the stream went quiet at 17:39 and returned at
+    06:39, indistinguishable from an overnight sleep, except three journeys
+    were driven inside it and only polling recorded them. It surfaced three
+    days later as an odometer discontinuity, because nothing looked for this.
+    """
+    import json as _json
+
+    from app import state, sync as sync_mod
+    from app.config import get_settings
+    from app.database import SessionLocal
+    from app.models import Drive, Vehicle
+
+    settings = get_settings()
+    old_pc = settings.app_passcode
+    settings.app_passcode = ""
+    vin = "TESTVIN-GAPDRIVE"
+    try:
+        with TestClient(app) as client:
+            with SessionLocal() as s:
+                v = Vehicle(vin=vin, name="Test", model="Model 3")
+                s.add(v)
+                s.commit()
+                base = sync_mod.now_local().replace(microsecond=0)
+                # One journey inside the first silence, none inside the second.
+                s.add(Drive(
+                    vehicle_id=v.id,
+                    start_time=base - timedelta(hours=10),
+                    end_time=base - timedelta(hours=9, minutes=40),
+                    distance_km=9.2, duration_min=20, start_soc=77, end_soc=73,
+                    energy_used_kwh=1.74, avg_speed_kmh=28, max_speed_kmh=60,
+                    outside_temp_c=31))
+                state.put(s, state.TELEMETRY_GAPS_KEY, _json.dumps([
+                    {"vin": vin,
+                     "from": (base - timedelta(hours=12)).isoformat(),
+                     "to": (base - timedelta(hours=2)).isoformat(),
+                     "seconds": 36000},
+                    {"vin": vin,
+                     "from": (base - timedelta(hours=1)).isoformat(),
+                     "to": base.isoformat(), "seconds": 3600},
+                ]))
+                s.commit()
+
+            out = client.get("/api/telemetry/gaps").json()
+            assert out["gaps_with_journeys"] == 1
+            assert out["km_missed"] == 9.2
+
+            drove_through, slept = out["recent"]
+            assert drove_through["missed_journeys"] is True
+            assert drove_through["drives_inside"] == 1
+            assert drove_through["km_inside"] == 9.2
+            # The ordinary case stays ordinary: a parked car is not a fault.
+            assert slept["missed_journeys"] is False
+            assert slept["drives_inside"] == 0
+    finally:
+        settings.app_passcode = old_pc
+        with SessionLocal() as s:
+            v = s.query(Vehicle).filter(Vehicle.vin == vin).first()
+            if v:
+                s.query(Drive).filter(Drive.vehicle_id == v.id).delete()
+                s.delete(v)
+                s.commit()
