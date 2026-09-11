@@ -1141,222 +1141,6 @@ def test_petrol_comparison_hidden_unless_configured_then_reflects_settings():
         settings.petrol_price_per_liter, settings.petrol_l_per_100km = old_price, old_l100
 
 
-def test_charge_cost_uses_time_of_use_pricing_at_write_time():
-    """A charge session logged through _process_vehicle is re-priced at its
-    own start time under configured TOU rates, not the flat default."""
-    from types import SimpleNamespace
-
-    from app.api.routes import _process_vehicle
-    from app.database import SessionLocal
-    from app.models import Charge, Vehicle
-
-    settings = SimpleNamespace(
-        energy_price_per_kwh=0.90, energy_price_ac_kwh=0.0, energy_price_dc_kwh=0.0,
-        energy_price_peak_kwh=1.20,
-        energy_price_offpeak_kwh=0.45, tariff_peak_start_hour=8,
-        tariff_peak_end_hour=22, tariff_weekend_offpeak=True,
-        battery_capacity_kwh=0.0, battery_new_range_km=0.0, low_soc_notify_pct=0.0, sentry_drain_notify_pct=0.0,
-        intrusion_notify=False,
-        drive_min_km=0.5,
-    )
-
-    def vehicle_data(vin, ts, odo_mi, soc, added_kwh, charging, lat=None, lon=None):
-        return {
-            "vin": vin, "display_name": "Test",
-            "vehicle_config": {},
-            "vehicle_state": {"odometer": odo_mi, "is_user_present": True, "locked": False},
-            "drive_state": {"timestamp": ts * 1000, "shift_state": "P", "speed": 0,
-                            "latitude": lat, "longitude": lon},
-            "charge_state": {
-                "battery_level": soc, "battery_range": 200.0,
-                "charging_state": "Charging" if charging else "Complete",
-                "charger_power": 7.0 if charging else 0.0,
-                "charge_energy_added": added_kwh,
-            },
-            "climate_state": {"outside_temp": 25.0},
-        }
-
-    with SessionLocal() as s:
-        v = Vehicle(vin="TESTVIN-TOU", name="Test", model="Model 3")
-        s.add(v)
-        # This test is about ToU pricing specifically, not about which source a
-        # charge defaults to when nothing else matches — pin it explicitly so
-        # it stays independent of that default (currently "home").
-        from app import state
-        state.put(s, state.DEFAULT_PRICE_SOURCE_KEY, "public")
-        s.commit()
-
-        # Monday 2pm MYT (peak, per the settings above): start charging.
-        # Built as a UTC epoch (MYT is UTC+8, no DST) so the result doesn't
-        # depend on the test runner's own local timezone.
-        import calendar
-        from datetime import datetime as _dt, timedelta as _td
-
-        base_ts = calendar.timegm((_dt(2026, 7, 6, 14, 0, 0) - _td(hours=8)).timetuple())
-        d1 = vehicle_data("TESTVIN-TOU", base_ts, 1000.0, 40, 0.0, True)
-        _process_vehicle(s, d1, {"vin": "TESTVIN-TOU"}, settings)
-        s.commit()
-        # 10 minutes later, charging stops with 5 kWh added.
-        d2 = vehicle_data("TESTVIN-TOU", base_ts + 600, 1000.0, 47, 5.0, False)
-        _process_vehicle(s, d2, {"vin": "TESTVIN-TOU"}, settings)
-        s.commit()
-
-        charge = s.query(Charge).filter(Charge.vehicle_id == v.id).first()
-        assert charge is not None
-        assert charge.energy_added_kwh == 5.0
-        assert charge.cost == round(5.0 * 1.20, 2)   # peak rate, not the flat 0.90
-
-
-def test_charge_cost_uses_ac_dc_rate_at_write_time():
-    """AC/DC rates win over ToU (and the flat rate) when configured — real
-    bills differ far more by charger type than by time of day."""
-    from types import SimpleNamespace
-
-    from app.api.routes import _process_vehicle
-    from app.database import SessionLocal
-    from app.models import Charge, Vehicle
-
-    settings = SimpleNamespace(
-        energy_price_per_kwh=0.90, energy_price_ac_kwh=0.90, energy_price_dc_kwh=1.13,
-        # ToU also configured, to prove AC/DC wins over it too.
-        energy_price_peak_kwh=1.20, energy_price_offpeak_kwh=0.45,
-        tariff_peak_start_hour=8, tariff_peak_end_hour=22, tariff_weekend_offpeak=True,
-        battery_capacity_kwh=0.0, battery_new_range_km=0.0, low_soc_notify_pct=0.0, sentry_drain_notify_pct=0.0,
-        intrusion_notify=False,
-        drive_min_km=0.5,
-    )
-
-    def vehicle_data(vin, ts, odo_mi, soc, added_kwh, charging, fast=False):
-        return {
-            "vin": vin, "display_name": "Test",
-            "vehicle_config": {},
-            "vehicle_state": {"odometer": odo_mi, "is_user_present": True, "locked": False},
-            "drive_state": {"timestamp": ts * 1000, "shift_state": "P", "speed": 0,
-                            "latitude": None, "longitude": None},
-            "charge_state": {
-                "battery_level": soc, "battery_range": 200.0,
-                "charging_state": "Charging" if charging else "Complete",
-                "charger_power": 150.0 if fast else 7.0,
-                "charge_energy_added": added_kwh,
-                "fast_charger_present": fast,
-            },
-            "climate_state": {"outside_temp": 25.0},
-        }
-
-    with SessionLocal() as s:
-        v = Vehicle(vin="TESTVIN-ACDC", name="Test", model="Model 3")
-        s.add(v)
-        s.commit()
-
-        import calendar
-        from datetime import datetime as _dt, timedelta as _td
-
-        base_ts = calendar.timegm((_dt(2026, 7, 6, 14, 0, 0) - _td(hours=8)).timetuple())
-
-        # AC session: home charger, 5 kWh added.
-        d1 = vehicle_data("TESTVIN-ACDC", base_ts, 1000.0, 40, 0.0, True)
-        _process_vehicle(s, d1, {"vin": "TESTVIN-ACDC"}, settings)
-        s.commit()
-        d2 = vehicle_data("TESTVIN-ACDC", base_ts + 600, 1000.0, 47, 5.0, False)
-        _process_vehicle(s, d2, {"vin": "TESTVIN-ACDC"}, settings)
-        s.commit()
-
-        # DC fast-charge session: 10 kWh added, an hour later. Odometer stays
-        # put (parked between sessions) — any movement here would register as
-        # a whole-gap drive, which isn't what this test is about.
-        d3 = vehicle_data("TESTVIN-ACDC", base_ts + 3600, 1000.0, 50, 0.0, True, fast=True)
-        _process_vehicle(s, d3, {"vin": "TESTVIN-ACDC"}, settings)
-        s.commit()
-        d4 = vehicle_data("TESTVIN-ACDC", base_ts + 4200, 1000.0, 63, 10.0, False, fast=True)
-        _process_vehicle(s, d4, {"vin": "TESTVIN-ACDC"}, settings)
-        s.commit()
-
-        charges = s.query(Charge).filter(Charge.vehicle_id == v.id).order_by(Charge.start_time).all()
-        assert len(charges) == 2
-        assert charges[0].charge_type == "AC"
-        assert charges[0].cost == round(5.0 * 0.90, 2)
-        assert charges[1].charge_type == "DC"
-        assert charges[1].cost == round(10.0 * 1.13, 2)
-
-
-def test_drive_complete_fires_event_webhook_but_not_push(monkeypatch):
-    """Logging a drive through _process_vehicle fires the generic event
-    webhook (for home-automation consumers) without going through the push
-    channel — a push alert per every single drive would be unwanted noise
-    for anyone who already has charge/low-battery push enabled."""
-    from types import SimpleNamespace
-
-    from app.api.routes import _process_vehicle
-    from app.database import SessionLocal
-    from app.models import Vehicle
-
-    settings = SimpleNamespace(
-        energy_price_per_kwh=0.90, energy_price_ac_kwh=0.0, energy_price_dc_kwh=0.0,
-        energy_price_peak_kwh=0.0,
-        energy_price_offpeak_kwh=0.0, tariff_peak_start_hour=8,
-        tariff_peak_end_hour=22, tariff_weekend_offpeak=True,
-        battery_capacity_kwh=0.0, battery_new_range_km=0.0, low_soc_notify_pct=0.0, sentry_drain_notify_pct=0.0,
-        intrusion_notify=False,
-        drive_min_km=0.5,
-    )
-
-    def vehicle_data(vin, ts, odo_mi, soc, shift, speed=0):
-        return {
-            "vin": vin, "display_name": "Test",
-            "vehicle_config": {},
-            "vehicle_state": {"odometer": odo_mi, "is_user_present": True, "locked": shift == "P"},
-            "drive_state": {"timestamp": ts * 1000, "shift_state": shift, "speed": speed,
-                            "latitude": None, "longitude": None},
-            "charge_state": {"battery_level": soc, "battery_range": 200.0,
-                             "charging_state": "Complete", "charger_power": 0.0,
-                             "charge_energy_added": 0.0},
-            "climate_state": {"outside_temp": 25.0},
-        }
-
-    webhook_calls = []
-    push_calls = []
-    monkeypatch.setattr(
-        "app.api.routes.notifications.fire_webhook",
-        lambda event, title, body: webhook_calls.append((event, title, body)),
-    )
-    monkeypatch.setattr(
-        "app.api.routes.notifications.notify",
-        lambda *a, **k: push_calls.append((a, k)),
-    )
-
-    try:
-        with SessionLocal() as s:
-            v = Vehicle(vin="TESTVIN-DRIVE", name="Test", model="Model 3")
-            s.add(v)
-            s.commit()
-
-            base_ts = 1_760_000_000
-            d1 = vehicle_data("TESTVIN-DRIVE", base_ts, 1000.0, 80, "P")
-            _process_vehicle(s, d1, {"vin": "TESTVIN-DRIVE"}, settings)
-            s.commit()
-            d2 = vehicle_data("TESTVIN-DRIVE", base_ts + 600, 1000.0, 80, "D", speed=40)
-            _process_vehicle(s, d2, {"vin": "TESTVIN-DRIVE"}, settings)
-            s.commit()
-            d3 = vehicle_data("TESTVIN-DRIVE", base_ts + 1800, 1010.0, 75, "P")
-            _process_vehicle(s, d3, {"vin": "TESTVIN-DRIVE"}, settings)
-            s.commit()
-
-        assert any(c[0] == "drive-complete" for c in webhook_calls)
-        assert push_calls == []   # drive completion never goes through the push channel
-    finally:
-        # This vehicle's drive rows aren't scoped out of other tests'
-        # global counts (e.g. clear-drives) — remove them so this test
-        # doesn't pollute the shared demo DB for the rest of the suite.
-        with SessionLocal() as s:
-            from app.models import Drive as _Drive
-
-            leftover = s.query(Vehicle).filter(Vehicle.vin == "TESTVIN-DRIVE").first()
-            if leftover:
-                s.query(_Drive).filter(_Drive.vehicle_id == leftover.id).delete()
-                s.delete(leftover)
-                s.commit()
-
-
 def test_sentry_drain_alert_fires_once_per_parked_episode(monkeypatch):
     """While parked with Sentry on, the live drain alert fires once the drop
     since parking crosses the threshold — then stays quiet for that episode,
@@ -1423,79 +1207,6 @@ def test_sentry_drain_alert_fires_once_per_parked_episode(monkeypatch):
                 s.query(BatteryReading).filter(BatteryReading.vehicle_id == v.id).delete()
                 s.delete(v)
                 s.commit()
-
-
-def test_display_state_flicker_forces_a_battery_reading(monkeypatch):
-    """A watched state changing must write its own BatteryReading row even
-    with SoC unmoved.
-
-    Sentry arming is the case that matters: it happens as the car parks,
-    before it sleeps and polling stops seeing it, and SoC will not have moved
-    a whole point by then. Keying the write on SoC alone would drop the one
-    sample that decides how the whole parked gap is priced — see
-    driving.gap_sentry_state."""
-    from types import SimpleNamespace
-
-    from app.api.routes import _process_vehicle
-    from app.database import SessionLocal
-    from app.models import BatteryReading, Vehicle
-
-    settings = SimpleNamespace(
-        energy_price_per_kwh=0.90, energy_price_ac_kwh=0.0, energy_price_dc_kwh=0.0,
-        energy_price_peak_kwh=0.0, energy_price_offpeak_kwh=0.0, tariff_peak_start_hour=8,
-        tariff_peak_end_hour=22, tariff_weekend_offpeak=True,
-        battery_capacity_kwh=0.0, battery_new_range_km=0.0, low_soc_notify_pct=0.0,
-        sentry_drain_notify_pct=0.0, intrusion_notify=False, drive_min_km=0.5,
-    )
-
-    def vdata(ts, sentry):
-        return {
-            "vin": "TESTVIN-DISPLAY", "display_name": "Test", "vehicle_config": {},
-            "vehicle_state": {"odometer": 2000.0, "is_user_present": False,
-                              "locked": True, "sentry_mode": sentry},
-            "drive_state": {"timestamp": ts * 1000, "shift_state": "P", "speed": 0,
-                            "latitude": None, "longitude": None},
-            "charge_state": {"battery_level": 80, "battery_range": 200.0,
-                             "charging_state": "Disconnected", "charger_power": 0.0,
-                             "charge_energy_added": 0.0},
-            "climate_state": {"outside_temp": 25.0},
-        }
-
-    t = 1_760_700_000
-    try:
-        with SessionLocal() as s:
-            v = Vehicle(vin="TESTVIN-DISPLAY", name="Test", model="Model 3")
-            s.add(v)
-            s.commit()
-            vid = v.id
-
-            def tick(dt, sentry):
-                _process_vehicle(s, vdata(t + dt, sentry),
-                                 {"vin": "TESTVIN-DISPLAY"}, settings)
-                s.commit()
-
-            def rows():
-                return s.query(BatteryReading).filter(
-                    BatteryReading.vehicle_id == vid).order_by(BatteryReading.ts).all()
-
-            tick(0, True)      # first reading
-            tick(60, True)     # unchanged, SoC unmoved -> no new row
-            before = len(rows())
-            tick(120, False)   # Sentry went off (SoC identical) -> must log
-            after = rows()
-            assert len(after) == before + 1
-            assert after[-1].sentry_mode is False
-    finally:
-        with SessionLocal() as s:
-            from app.models import Drive as _Drive
-            v = s.query(Vehicle).filter(Vehicle.vin == "TESTVIN-DISPLAY").first()
-            if v:
-                s.query(_Drive).filter(_Drive.vehicle_id == v.id).delete()
-                s.query(BatteryReading).filter(BatteryReading.vehicle_id == v.id).delete()
-                s.delete(v)
-                s.commit()
-
-
 def test_repair_moves_a_boundary_and_the_figures_that_follow_from_it(monkeypatch):
     """Undoing the reverted place-split's damage: it credited an arriving trip
     1.311 km it never drove and starved the departing one by the same amount.
@@ -7022,108 +6733,6 @@ def test_status_staleness_is_judged_against_the_source_own_cadence():
                           soc=70.0, source="polled")
         s.commit()
         assert _json.loads(state.get(s, key))["cadence"]["polled"] == observed
-
-
-def test_polling_stops_writing_dashboard_rows_but_keeps_watching():
-    """With polling_writes off, the tick stops being a second author of the
-    same history and becomes what it is uniquely good for.
-
-    Telemetry supplies drives, charges and readings now, and two sources
-    writing one history is how a polled row that merged two real trips ends up
-    beside the two telemetry trips that split them correctly — which a
-    half-hourly tick does routinely. What must NOT stop is the status card and
-    the alerts: those are the watchdog's own output, and the alerts are the
-    failsafe for exactly the case where the bridge is down and the stream
-    cannot raise them.
-    """
-    from types import SimpleNamespace
-
-    import json as _json
-
-    from app import state
-    from app.api.routes import _process_vehicle
-    from app.database import SessionLocal
-    from app.models import BatteryReading, Drive, Vehicle
-
-    def make_settings(writes):
-        return SimpleNamespace(
-            energy_price_per_kwh=0.90, energy_price_ac_kwh=0.0,
-            energy_price_dc_kwh=0.0, energy_price_peak_kwh=0.0,
-            energy_price_offpeak_kwh=0.0, tariff_peak_start_hour=8,
-            tariff_peak_end_hour=22, tariff_weekend_offpeak=True,
-            battery_capacity_kwh=0.0, battery_new_range_km=0.0,
-            low_soc_notify_pct=0.0, sentry_drain_notify_pct=0.0,
-            intrusion_notify=False, drive_min_km=0.5,
-            polling_writes=writes, bridge_quiet_alert_min=0.0)
-
-    def vdata(ts, odo, soc, shift):
-        return {
-            "vin": "TESTVIN-NOWRITE", "display_name": "Test", "vehicle_config": {},
-            "vehicle_state": {"odometer": odo, "is_user_present": False,
-                              "locked": True, "sentry_mode": False},
-            "drive_state": {"timestamp": ts * 1000, "shift_state": shift,
-                            "speed": 60 if shift == "D" else 0,
-                            "latitude": 5.34, "longitude": 100.31},
-            "charge_state": {"battery_level": soc, "battery_range": 200.0,
-                             "charging_state": "Disconnected",
-                             "charger_power": 0.0, "charge_energy_added": 0.0},
-            "climate_state": {"outside_temp": 30.0},
-        }
-
-    t = 1_789_100_000
-    try:
-        with SessionLocal() as s:
-            v = Vehicle(vin="TESTVIN-NOWRITE", name="Test", model="Model 3")
-            s.add(v)
-            s.commit()
-            vid = v.id
-
-            def tick(dt, odo, soc, shift, writes):
-                _process_vehicle(s, vdata(t + dt, odo, soc, shift),
-                                 {"vin": "TESTVIN-NOWRITE"}, make_settings(writes))
-                s.commit()
-
-            def counts():
-                return (s.query(Drive).filter(Drive.vehicle_id == vid).count(),
-                        s.query(BatteryReading).filter(
-                            BatteryReading.vehicle_id == vid).count())
-
-            # A whole trip, with writes off: park -> drive -> park.
-            tick(0, 2000.0, 80, "P", False)
-            tick(300, 2005.0, 78, "D", False)
-            tick(600, 2012.0, 75, "P", False)
-            assert counts() == (0, 0), counts()
-
-            # The tick still ran the state machine rather than skipping it:
-            # the snapshot it saw is stored, so the next tick starts from the
-            # right place and turning writes back on cannot resume mid-trip.
-            snap_raw = state.get(
-                s, state.scoped(state.SNAPSHOT_KEY, "TESTVIN-NOWRITE"))
-            assert snap_raw
-            # In km: vehicle_data reports the odometer in MILES, which the
-            # snapshot converts. The whole project's worst class of bug is a
-            # figure quietly scaled wrong, so the test states the conversion
-            # rather than a number someone would have to trust.
-            assert _json.loads(snap_raw)["odo_km"] == pytest.approx(
-                2012.0 * 1.60934, abs=0.01)
-
-            # And with writes on, the same sequence does produce rows, so the
-            # switch is what changed and not the fixture.
-            tick(900, 2012.0, 75, "P", True)
-            tick(1200, 2018.0, 73, "D", True)
-            tick(1500, 2025.0, 70, "P", True)
-            drives, readings = counts()
-            assert drives >= 1, (drives, readings)
-    finally:
-        with SessionLocal() as s:
-            v = s.query(Vehicle).filter(Vehicle.vin == "TESTVIN-NOWRITE").first()
-            if v:
-                for model in (Drive, BatteryReading):
-                    s.query(model).filter(model.vehicle_id == v.id).delete()
-                s.delete(v)
-                s.commit()
-
-
 def test_bridge_quiet_alert_fires_only_when_the_car_is_awake_and_silent():
     """The one fault the stream cannot report about itself.
 
@@ -7368,100 +6977,6 @@ def test_duplicate_trips_keeps_the_copy_that_saw_the_whole_journey():
                 "/api/data/duplicate-trips?days=7").json()["would_remove"] == 0
     finally:
         settings.app_passcode = old_pc
-
-
-def test_polling_does_not_re_record_a_journey_the_stream_already_has():
-    """The cause of the 11 September duplicate, closed at the point the second
-    row would be written.
-
-    Promotion runs first in a sync tick and adds a row for a finished shadow
-    trip; _process_vehicle runs second and, knowing nothing about it, wrote
-    the same journey again. Promotion cannot prevent that from its side — by
-    the time polling writes, promotion has already run — so the check belongs
-    where the second row is about to be created.
-    """
-    from types import SimpleNamespace
-
-    from app.api.routes import _process_vehicle
-    from app.database import SessionLocal
-    from app.models import Drive, Vehicle
-    from app.sync import _dt as sync_mod_dt
-
-    settings = SimpleNamespace(
-        energy_price_per_kwh=0.90, energy_price_ac_kwh=0.0, energy_price_dc_kwh=0.0,
-        energy_price_peak_kwh=0.0, energy_price_offpeak_kwh=0.0,
-        tariff_peak_start_hour=8, tariff_peak_end_hour=22,
-        tariff_weekend_offpeak=True, battery_capacity_kwh=0.0,
-        battery_new_range_km=0.0, low_soc_notify_pct=0.0,
-        sentry_drain_notify_pct=0.0, intrusion_notify=False, drive_min_km=0.5,
-        polling_writes=True, bridge_quiet_alert_min=0.0)
-
-    def vdata(ts, odo, soc, shift):
-        return {
-            "vin": "TESTVIN-NODUPE", "display_name": "Test", "vehicle_config": {},
-            "vehicle_state": {"odometer": odo, "is_user_present": False,
-                              "locked": True, "sentry_mode": False},
-            "drive_state": {"timestamp": ts * 1000, "shift_state": shift,
-                            "speed": 60 if shift == "D" else 0,
-                            "latitude": 5.34, "longitude": 100.31},
-            "charge_state": {"battery_level": soc, "battery_range": 200.0,
-                             "charging_state": "Disconnected",
-                             "charger_power": 0.0, "charge_energy_added": 0.0},
-            "climate_state": {"outside_temp": 30.0},
-        }
-
-    t = 1_789_200_000
-    try:
-        with SessionLocal() as s:
-            v = Vehicle(vin="TESTVIN-NODUPE", name="Test", model="Model 3")
-            s.add(v)
-            s.commit()
-            vid = v.id
-
-            def tick(dt, odo, soc, shift):
-                _process_vehicle(s, vdata(t + dt, odo, soc, shift),
-                                 {"vin": "TESTVIN-NODUPE"}, settings)
-                s.commit()
-
-            # The stream got there first, as it does on a slow cron.
-            streamed = Drive(
-                vehicle_id=vid,
-                # Through the app's own clock. Stored times are naive MYT (see
-                # sync.now_local), so datetime.fromtimestamp here would put the
-                # streamed row eight hours from the polled one on a UTC host
-                # and the overlap check would find nothing to compare.
-                start_time=sync_mod_dt(t + 300),
-                end_time=sync_mod_dt(t + 1800),
-                distance_km=10.794, duration_min=25.0, start_soc=80, end_soc=77,
-                energy_used_kwh=1.96, avg_speed_kmh=26, max_speed_kmh=80,
-                outside_temp_c=30, source="telemetry")
-            s.add(streamed)
-            s.commit()
-
-            # Polling now drives the same journey through its own machine.
-            tick(0, 2000.0, 80, "P")
-            tick(300, 2000.0, 80, "D")
-            tick(1800, 2006.7, 77, "P")
-
-            rows = s.scalars(select(Drive).where(Drive.vehicle_id == vid)).all()
-            assert len(rows) == 1, [(r.id, r.source, r.distance_km) for r in rows]
-            assert rows[0].source == "telemetry"
-            assert rows[0].energy_used_kwh == 1.96
-
-            # A genuinely separate later journey is still recorded — the guard
-            # must not swallow real trips.
-            tick(9000, 2006.7, 77, "D")
-            tick(10800, 2020.0, 74, "P")
-            assert s.query(Drive).filter(Drive.vehicle_id == vid).count() == 2
-    finally:
-        with SessionLocal() as s:
-            v = s.query(Vehicle).filter(Vehicle.vin == "TESTVIN-NODUPE").first()
-            if v:
-                s.query(Drive).filter(Drive.vehicle_id == v.id).delete()
-                s.delete(v)
-                s.commit()
-
-
 def test_a_gap_the_car_drove_through_is_marked_as_a_missed_journey():
     """A sleeping car and a dead receiver both produce silence, and every gap
     in this log reads alike — except one the car drove through.
@@ -7647,4 +7162,185 @@ def test_the_live_readout_comes_from_the_stream_not_the_last_poll():
             if v:
                 s.delete(v)
             state.put(s, state.TELEMETRY_SHADOW_KEY, "{}")
+            s.commit()
+
+
+def test_a_promoted_charge_is_priced_by_type_and_time():
+    """Charge pricing followed the charges onto the telemetry path.
+
+    It used to happen where polling wrote the row, and that code is gone with
+    the rest of the polling write path — but the rule did not change, and it
+    is money: AC/DC rates win over time-of-use, which wins over the flat rate.
+    Asserted here where the row is actually written now.
+    """
+    import json as _json
+
+    from app import state, sync as sync_mod
+    from app.config import get_settings
+    from app.database import SessionLocal
+    from app.models import Charge, Vehicle
+
+    settings = get_settings()
+    saved = (settings.app_passcode, settings.energy_price_per_kwh,
+             settings.energy_price_ac_kwh, settings.energy_price_dc_kwh,
+             settings.energy_price_peak_kwh, settings.energy_price_offpeak_kwh)
+    settings.app_passcode = ""
+    vin = "TESTVIN-CHGPRICE"
+
+    def shadow(start, mins, kwh, fast):
+        ts = sync_mod.to_epoch(start)
+        return {"vin": vin, "start_ts": ts, "end_ts": ts + mins * 60,
+                "start_time": start.isoformat(timespec="seconds"),
+                "end_time": (start + timedelta(minutes=mins)).isoformat(
+                    timespec="seconds"),
+                "duration_min": float(mins),
+                # pack_meter is what energy_added_kwh is taken from, settled
+                # 11 September against the car's own unrounded figure.
+                "kwh_pack_meter": kwh, "kwh_pack_level": kwh * 0.95,
+                "kwh_wall": kwh * 1.04, "kwh_lifetime": None,
+                "soc_start": 50.0, "soc_end": 70.0, "peak_kw": 50.0 if fast else 7.5,
+                # Deliberately nowhere near a saved Place. A geofenced
+                # location resolves to the home/office rate and never reaches
+                # time-of-use at all — which is correct, and is exactly how
+                # the first version of this test fooled itself.
+                "fast": fast, "lat": 3.1390, "lon": 101.6869}
+
+    try:
+        with TestClient(app) as client:
+            with SessionLocal() as s:
+                v = Vehicle(vin=vin, name="Test", model="Model 3")
+                s.add(v)
+                s.commit()
+                vid = v.id
+            client.post("/api/active-vehicle", json={"vin": vin})
+
+            # A weekday at 14:00, inside the peak window: tariff_weekend_
+            # offpeak would otherwise make a Saturday test pass for the wrong
+            # reason on five days in seven and fail on two.
+            base = sync_mod.now_local().replace(
+                hour=14, minute=0, second=0, microsecond=0) - timedelta(days=1)
+            while base.weekday() >= 5:
+                base -= timedelta(days=1)
+            settings.tariff_peak_start_hour = 8
+            settings.tariff_peak_end_hour = 22
+            # Time-of-use only ever prices PUBLIC charging: an unmatched
+            # location still falls to the default source, which is home. That
+            # is the real rule and it is why this test needs saying — a
+            # geofenced charge never sees a ToU rate at all.
+            with SessionLocal() as s:
+                state.put(s, state.DEFAULT_PRICE_SOURCE_KEY, "public")
+                s.commit()
+
+            # AC/DC configured: the charger type sets the rate, and beats ToU.
+            settings.energy_price_per_kwh = 0.90
+            settings.energy_price_ac_kwh = 0.90
+            settings.energy_price_dc_kwh = 1.13
+            settings.energy_price_peak_kwh = 1.20
+            settings.energy_price_offpeak_kwh = 0.45
+            with SessionLocal() as s:
+                state.put(s, state.TELEMETRY_CHARGES_KEY,
+                          _json.dumps([shadow(base, 30, 10.0, fast=True)]))
+                s.commit()
+            client.post("/api/telemetry/promote-charges?apply=true&days=7")
+            with SessionLocal() as s:
+                row = s.scalars(select(Charge).where(Charge.vehicle_id == vid)).one()
+                assert row.charge_type == "DC"
+                assert row.cost == pytest.approx(11.3)      # 10 kWh x DC rate
+                assert row.energy_added_kwh == pytest.approx(10.0)
+                s.delete(row)
+                s.commit()
+
+            # No AC/DC rates: time of day decides instead.
+            settings.energy_price_ac_kwh = 0.0
+            settings.energy_price_dc_kwh = 0.0
+            with SessionLocal() as s:
+                state.put(s, state.TELEMETRY_CHARGES_KEY,
+                          _json.dumps([shadow(base + timedelta(hours=1), 30, 10.0,
+                                              fast=False)]))
+                s.commit()
+            client.post("/api/telemetry/promote-charges?apply=true&days=7")
+            with SessionLocal() as s:
+                row = s.scalars(select(Charge).where(Charge.vehicle_id == vid)).one()
+                assert row.charge_type == "AC"
+                assert row.cost == pytest.approx(12.0)      # 10 kWh x peak
+    finally:
+        (settings.app_passcode, settings.energy_price_per_kwh,
+         settings.energy_price_ac_kwh, settings.energy_price_dc_kwh,
+         settings.energy_price_peak_kwh, settings.energy_price_offpeak_kwh) = saved
+        with SessionLocal() as s:
+            state.put(s, state.DEFAULT_PRICE_SOURCE_KEY, "home")
+            s.commit()
+        with SessionLocal() as s:
+            v = s.query(Vehicle).filter(Vehicle.vin == vin).first()
+            if v:
+                s.query(Charge).filter(Charge.vehicle_id == v.id).delete()
+                s.delete(v)
+            state.put(s, state.TELEMETRY_CHARGES_KEY, "[]")
+            s.commit()
+
+
+def test_a_promoted_trip_fires_the_drive_complete_webhook():
+    """The webhook followed the drives onto the telemetry path.
+
+    Polling used to fire it where it wrote the row, and that code is gone. It
+    is webhook-only, never push: a notification per drive is noise, but an
+    arrive-home automation wants exactly this event. Fired only for a trip the
+    stream ADDED — a correction to a journey already announced would trigger
+    the automation a second time.
+    """
+    import json as _json
+    from unittest import mock
+
+    from app import state, sync as sync_mod
+    from app.api import routes as routes_mod
+    from app.config import get_settings
+    from app.database import SessionLocal
+    from app.models import Drive, Vehicle
+
+    settings = get_settings()
+    old_pc = settings.app_passcode
+    settings.app_passcode = ""
+    vin = "TESTVIN-HOOK"
+    fired, pushed = [], []
+    try:
+        with TestClient(app) as client:
+            with SessionLocal() as s:
+                v = Vehicle(vin=vin, name="Test", model="Model 3")
+                s.add(v)
+                s.commit()
+                vid = v.id
+                start = sync_mod.now_local().replace(microsecond=0) - timedelta(hours=2)
+                state.put(s, state.TELEMETRY_TRIPS_KEY, _json.dumps([{
+                    "vin": vin,
+                    "start_ts": sync_mod.to_epoch(start),
+                    "end_ts": sync_mod.to_epoch(start + timedelta(minutes=20)),
+                    "start_time": start.isoformat(timespec="seconds"),
+                    "end_time": (start + timedelta(minutes=20)).isoformat(
+                        timespec="seconds"),
+                    "distance_km": 8.4, "duration_min": 20.0, "energy_kwh": 1.4,
+                    "wh_per_km": 166.7, "soc_start": 70.0, "soc_end": 68.0,
+                    "start_odo_km": 31000.0, "end_odo_km": 31008.4}]))
+                s.commit()
+            client.post("/api/active-vehicle", json={"vin": vin})
+
+            with mock.patch.object(routes_mod.notifications, "fire_webhook",
+                                   lambda *a, **k: fired.append(a[0])), \
+                 mock.patch.object(routes_mod.notifications, "notify",
+                                   lambda *a, **k: pushed.append(1)):
+                client.post("/api/telemetry/promote?apply=true&days=7")
+                assert fired == ["drive-complete"]
+                assert pushed == []
+
+                # Running again corrects the row it already wrote and must not
+                # announce the same journey twice.
+                client.post("/api/telemetry/promote?apply=true&days=7")
+                assert fired == ["drive-complete"]
+    finally:
+        settings.app_passcode = old_pc
+        with SessionLocal() as s:
+            v = s.query(Vehicle).filter(Vehicle.vin == vin).first()
+            if v:
+                s.query(Drive).filter(Drive.vehicle_id == v.id).delete()
+                s.delete(v)
+            state.put(s, state.TELEMETRY_TRIPS_KEY, "[]")
             s.commit()

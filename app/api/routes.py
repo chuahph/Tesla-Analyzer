@@ -591,42 +591,6 @@ def _record_tail_sample(session: Session, drive: Drive, est_km: float,
         est_km=round(est_km, 3), measured_km=round(measured_km, 3), **extra))
 
 
-def _unoverlap_previous(session: Session, vehicle_id: int, new_start) -> None:
-    """Pull an ESTIMATED arrival back so it cannot end after the next trip begins.
-
-    A sleep close moves the clock forward with the odometer, both from one
-    assumption about how long the car went on arriving (see
-    sync.arrival_tail_for_place). Nothing bounded that by reality: measured
-    live, trip 339 was credited three minutes of arriving while the car was
-    driving again within one, so it ended at 17:01 while trip 340 started at
-    16:59 — two trips overlapping in time, which services.edit_drive already
-    refuses to let a person create by hand.
-
-    Only ever an estimated end (end_est_km set) and only ever backwards. A
-    measured end is a reading, and if a reading really did land after the next
-    trip's start then something is wrong that moving a timestamp would hide.
-    """
-    prev = session.scalars(
-        select(Drive).where(Drive.vehicle_id == vehicle_id)
-        .order_by(Drive.start_time.desc()).limit(1)
-    ).first()
-    if prev is None or not prev.end_est_km or prev.end_time <= new_start:
-        return
-    if new_start <= prev.start_time:
-        return  # not an overlap this can fix — the two trips are tangled
-    prev.end_time = new_start
-    prev.duration_min = round(
-        (new_start - prev.start_time).total_seconds() / 60.0, 1)
-    if prev.duration_min > 0:
-        prev.avg_speed_kmh = round(
-            prev.distance_km / (prev.duration_min / 60.0), 1)
-    # The distance estimate is deliberately left alone. It was handed to this
-    # trip and the next one already starts past it (see LAST_SLEEP_CLOSE_KEY),
-    # so trimming it here would leave the ground belonging to neither — the
-    # exact failure the hand-over exists to prevent. What was wrong was the
-    # clock, and that is what this corrects.
-
-
 def _newest_readings(session: Session, vehicle_id: int, columns: tuple,
                      limit: int = 2000) -> list:
     """The most recent ``limit`` battery readings, returned oldest-first.
@@ -1474,12 +1438,10 @@ def health(session: Session = Depends(get_session)):
         # otherwise no way to tell from here whether it took — and the two
         # states differ in what gets written to real history.
         "polling": {
-            "writes_history": bool(getattr(settings, "polling_writes", True)),
+            "writes_history": False,
             "bridge_quiet_alert_min": float(
                 getattr(settings, "bridge_quiet_alert_min", 0.0) or 0.0),
-            "role": ("data source and watchdog"
-                     if getattr(settings, "polling_writes", True)
-                     else "watchdog only — wake, reachability, stream silence"),
+            "role": "watchdog only — wake, reachability, stream silence",
         },
     }
 
@@ -2839,46 +2801,6 @@ def _evaluate_alerts(session: Session, vehicle, vin: str, snap: dict,
             state.put(session, intrusion_key, "")
 
 
-def _already_streamed(session: Session, vehicle_id: int, d: dict) -> bool:
-    """Is this journey already in the history, recorded from the stream?
-
-    Both paths write drives while polling still writes at all, and they do not
-    know about each other. On 11 September that produced one journey twice:
-    promotion added row 727 from the stream, and _process_vehicle added 728
-    for the same drive later in the SAME sync tick — promotion runs first and
-    had no row to correct, then polling arrived and had no reason to look for
-    one. A duplicate journey double-counts distance and energy in every total.
-
-    Promotion cannot prevent this from its side; by the time polling writes,
-    promotion has already run. So the check belongs here, where the second row
-    is about to be created.
-
-    Sixty percent of the shorter trip, matching /api/data/duplicate-trips —
-    two genuinely separate journeys can touch at the edges, and refusing a
-    real trip is worse than writing a duplicate someone can delete.
-    """
-    start, end = d.get("start_time"), d.get("end_time")
-    if not start or not end:
-        return False
-    mine = session.scalars(
-        select(Drive).where(
-            Drive.vehicle_id == vehicle_id,
-            Drive.source == "telemetry",
-            Drive.start_time <= end,
-            Drive.end_time >= start,
-        )
-    ).all()
-    span = max((end - start).total_seconds(), 0.0)
-    for row in mine:
-        if not row.start_time or not row.end_time:
-            continue
-        overlap = (min(row.end_time, end) - max(row.start_time, start)).total_seconds()
-        shorter = min(span, max((row.end_time - row.start_time).total_seconds(), 0.0))
-        if shorter > 0 and overlap / shorter >= DUPLICATE_OVERLAP_SHARE:
-            return True
-    return False
-
-
 def _process_vehicle(
     session: Session, data: dict, v_summary: dict, settings, migrate_legacy: bool = False
 ) -> tuple:
@@ -3356,21 +3278,6 @@ def _process_vehicle(
         fleet_wh_per_km=_fleet_wh_per_km(session, vehicle.id),
     )
     drives = recovered + drives  # include a drive recovered from the upgrade gap
-    # getattr, not attribute access: several callers build a settings stand-in
-    # with only the fields they need, and a watchdog switch that crashes the
-    # sync when it is absent is worse than one that defaults to writing.
-    if not getattr(settings, "polling_writes", True):
-        # Discarded, not skipped. The state machine above still runs and still
-        # advances, so open_trip and open_charge stay truthful for the alerts
-        # below and the next tick starts from the right place — only the rows
-        # are dropped. Skipping the machine instead would leave a half-open
-        # trip in the store the moment this setting was turned back on.
-        #
-        # Telemetry is the author of these now. Two sources writing the same
-        # history is how a polled row that merged two real trips ends up
-        # beside the two telemetry trips that split them correctly, and at a
-        # half-hourly tick polling merges trips routinely.
-        drives, charges = [], []
     # A trimmed tail is time the car spent parked, so its standby draw is not
     # this drive's energy — but the trim only moves the clock, leaving the
     # stop snapshot's SoC where the late reading found it (see
@@ -3385,127 +3292,30 @@ def _process_vehicle(
     # (start_park_min) drained it without this drive turning a wheel. Same
     # rate, same floor, same function — the only difference is which end of
     # the trip the parked minutes sit at.
-    if any((d.get("tail_trim_sec") or 0) > 0 or (d.get("start_park_min") or 0) > 0
-           for d in drives):
-        past_drives = session.scalars(
-            select(Drive).where(Drive.vehicle_id == vehicle.id).order_by(Drive.start_time)
-        ).all()
-        past_charges = session.scalars(
-            select(Charge).where(Charge.vehicle_id == vehicle.id)
-        ).all()
-        past_drives, past_charges = list(past_drives), list(past_charges)
-
-        def rate_at(coords: str) -> float | None:
-            return _parked_rate_kw_for(
-                session, _geofence_name(coords, session),
-                past_drives, past_charges, capacity_kwh)
-
-        for d in drives:
-            # The two ends are different places and, since a place can now be
-            # told its own draw, potentially very different rates. Weighted by
-            # the seconds each contributes so one call still prices both — and
-            # so the total taken off here is what vampire_drain puts back.
-            tail = d.get("tail_trim_sec") or 0.0
-            park = (d.get("start_park_min") or 0.0) * 60.0
-            # Still coords at this point; geocoding runs in the loop below.
-            end_kw = rate_at(d["end_location"]) if tail else None
-            start_kw = rate_at(d["start_location"]) if park else None
-            known = [(sec, kw) for sec, kw in ((tail, end_kw), (park, start_kw)) if kw]
-            if not known:
-                continue
-            secs = sum(sec for sec, _ in known)
-            d["energy_used_kwh"] = sync_mod.trim_standby_kwh(
-                d["energy_used_kwh"], d["distance_km"], secs,
-                sum(sec * kw for sec, kw in known) / secs)
-    for d in drives:
-        # Keep the raw coords (for map links) before geocoding replaces them.
-        d["start_coords"], d["end_coords"] = d["start_location"], d["end_location"]
-        d["start_location"], d["start_area"] = _place_and_area(d["start_location"], session)
-        d["end_location"], d["end_area"] = _place_and_area(d["end_location"], session)
-        _unoverlap_previous(session, vehicle.id, d["start_time"])
-        if _already_streamed(session, vehicle.id, d):
-            continue
-        session.add(Drive(vehicle_id=vehicle.id, **d))
-        # Webhook-only (not routed through notify()'s push channel) — a
-        # push alert per every single drive would be unwanted noise for
-        # anyone who already has charge-complete/low-battery push enabled,
-        # but a home-automation webhook consumer (arrive-home triggers,
-        # trip logging, ...) very much wants this event.
-        notifications.fire_webhook(
-            "drive-complete", "Drive completed",
-            f"{vehicle.name}: {d['distance_km']:.1f} km, {d['duration_min']:.0f} min, "
-            f"{d['start_soc']:.0f}% → {d['end_soc']:.0f}%.",
-        )
-    for c in charges:
-        cap = sync_mod.implied_capacity_kwh(c)
-        _attach_curve_capacity(c)
-        c.pop("energy_measured", None)  # transient flag, not a DB column
-        if cap:
-            old = vehicle.battery_capacity_kwh or 75.0
-            vehicle.battery_capacity_kwh = round(0.8 * old + 0.2 * cap, 1)
-        raw_coords = c.get("location", "")
-        c["location"] = _place(raw_coords, session)
-        # Re-price at the session's own start time and actual charger type —
-        # auto-matched Home/Office location (or the saved default source)
-        # takes priority; Public falls back to flat/ToU pricing.
-        source, rate = pricing_prefs.resolve_source_and_rate(
-            session, settings, raw_coords, c["charge_type"] == "DC", c["start_time"])
-        c["cost"] = round(c["energy_added_kwh"] * rate, 2)
-        c["price_source"] = source
-        # A rate of zero IS the free flag on an auto-logged session. Nothing in
-        # telemetry distinguishes a Tesla Destination Charger from a paid AC
-        # one (see the manual-entry path), so is_free could only ever be set by
-        # hand — and an automatic session that priced at zero was therefore
-        # stored as a PAID charge costing nothing. The cost came out right and
-        # the label came out wrong, which is worse than either: the charging
-        # analytics separate free from paid on this flag, so a free session sat
-        # in the paid group dragging its average toward zero.
-        #
-        # Reported live: a Tesla Destination Charger session logged rate 0,
-        # cost 0, is_free false. The edit path has always used exactly this
-        # rule (charge.is_free = rate == 0); only the automatic one did not.
-        c["is_free"] = rate == 0
-        session.add(Charge(vehicle_id=vehicle.id, **c))
-        notifications.notify(
-            session, "Charging complete",
-            f"{vehicle.name}: {c['energy_added_kwh']:.1f} kWh added, now at {c['end_soc']:.0f}%.",
-            tag="charge-complete",
-        )
+    # The drives and charges this tick produced are DISCARDED.
+    #
+    # Polling no longer authors the history. The stream writes a drive row the
+    # moment a journey closes and a charge row the moment a session does, and
+    # two sources writing one history is how a polled row that merged two real
+    # trips ended up beside the two telemetry trips that split them correctly.
+    # Worse, polling at a watchdog cadence does not merely disagree: it sees a
+    # fraction of each journey, closes trips where the driver was only
+    # waiting, and misses short ones entirely.
+    #
+    # The machine above still RUNS, and that is deliberate. open_trip and
+    # open_charge tell the alerts below whether the car is parked, and tell
+    # the sync loop whether to look again sooner — and the machine has to be
+    # stepped every tick to keep those truthful. Only its output is dropped.
+    #
+    # What used to be here: the tail-trim and departure standby corrections,
+    # geocoding, the layered cost, the capacity EMA, the drive-complete
+    # webhook, and the two session.add calls. All of it belongs to the
+    # telemetry path now — see _promote_shadow_trips, _geocode_shadow_drive
+    # and _promote_shadow_charges.
+    # Battery readings come from the stream too — Soc every 60s, SentryMode
+    # every 10, against a watchdog tick that may be hours apart. What stays
+    # here is the pair of things only a poll can do.
     if snap["soc"] > 0 and snap.get("range_km", 0) > 0:
-        last_reading = session.scalars(
-            select(BatteryReading)
-            .where(BatteryReading.vehicle_id == vehicle.id)
-            .order_by(BatteryReading.ts.desc())
-        ).first()
-        sentry_now = snap.get("sentry_mode")
-        climate_now = snap.get("climate_on")
-        cop_now = snap.get("cabin_overheat_protection")
-        cop_cooling_now = snap.get("cabin_overheat_protection_actively_cooling")
-        # Also write a row on a Sentry/climate/COP change even with SoC
-        # unmoved — the whole point is catching the state right as the car
-        # parks (before it sleeps and this polling stops seeing it), and SoC
-        # usually hasn't dropped a full point yet by then. These move in brief
-        # flickers that SoC will not have shifted a whole point for, so keying
-        # the write on SoC alone would miss the one sample that mattered.
-        state_changed = last_reading is not None and (
-            last_reading.sentry_mode != sentry_now or last_reading.climate_on != climate_now
-            or last_reading.cabin_overheat_protection != cop_now
-            or last_reading.cabin_overheat_protection_actively_cooling != cop_cooling_now
-        )
-        if (getattr(settings, "polling_writes", True)
-                and (last_reading is None or abs(last_reading.soc - snap["soc"]) >= 1.0
-                     or state_changed)):
-            session.add(BatteryReading(
-                vehicle_id=vehicle.id,
-                ts=datetime.fromtimestamp(snap["ts"], sync_mod.MYT).replace(tzinfo=None),
-                soc=snap["soc"],
-                range_km=round(snap["range_km"], 1),
-                odo_km=round(snap["odo_km"], 1),
-                sentry_mode=sentry_now,
-                climate_on=climate_now,
-                cabin_overheat_protection=cop_now,
-                cabin_overheat_protection_actively_cooling=cop_cooling_now,
-            ))
         _evaluate_alerts(session, vehicle, vin, snap,
                          open_trip, open_charge, settings)
         # Only polling can raise this: reaching the car is what proves it is

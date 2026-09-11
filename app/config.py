@@ -120,21 +120,12 @@ class Settings(BaseSettings):
     # non-trip as a tiny phantom drive. See DRIVE_MIN_KM in app/sync.py.
     drive_min_km: float = 0.1
 
-    # Whether the polling tick still writes dashboard data — drives, charges
-    # and battery readings — or only watches.
-    #
-    # Telemetry supplies all three now, so with this off the cron stops being
-    # a second author of the same history and becomes what it is uniquely good
-    # for: waking the car, proving the Fleet API path still works, and
-    # noticing when the stream has gone quiet on a car that is demonstrably
-    # awake. The stream cannot report its own silence; only an independent
-    # channel can.
-    #
-    # What it does NOT switch off: the status card, the parked-car alerts, the
-    # sleep scheduling or the sync log. Those are the watchdog's own output,
-    # and the alerts specifically are the failsafe for the case where the
-    # bridge is down and the stream cannot raise them.
-    polling_writes: bool = True
+    # POLLING_WRITES was here. It gated whether the polling tick still wrote
+    # drives, charges and battery readings; that code is gone rather than
+    # switched off, so there is nothing left to gate. Polling is a watchdog:
+    # it wakes the car, proves the Fleet API path works, raises the parked-car
+    # alerts as a failsafe, and notices when the stream has gone quiet on a
+    # car that is demonstrably awake.
     # How long the stream may be silent, on a car polling can see is awake,
     # before that is worth telling someone about. An awake car streams every
     # twenty seconds or so; a few minutes of nothing while it is plainly

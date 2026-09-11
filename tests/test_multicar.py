@@ -310,55 +310,6 @@ def _mk_snap(ts, odo_km, soc, range_km):
     })
 
 
-def test_sync_recovers_drive_missed_at_multicar_upgrade(monkeypatch):
-    """A drive taken around the pre-VIN → per-VIN upgrade must not be dropped.
-
-    Reproduces the field bug: the legacy global snapshot held the pre-drive
-    odometer, the new scoped snapshot the post-drive odometer, and the drive
-    between them was never logged. The migration reconstructs it.
-    """
-    import json
-
-    from app import services, state
-    from app.models import Drive
-
-    settings = get_settings()
-    old = settings.app_passcode
-    settings.app_passcode = ""
-    try:
-        monkeypatch.setattr("app.tesla_client.TeslaClient", _FakeClient)
-        with SessionLocal() as s:
-            services.link_with_token(s, "tok")
-            vin = "VINAAAAAAAAAAAAAA"
-            state.put(s, state.ACTIVE_VIN_KEY, vin)
-            state.put(s, state.LINKED_VIN_KEY, vin)
-            # Legacy global snapshot (pre-drive) + scoped snapshot (post-drive),
-            # built like real snapshots so they carry every field _drive_from reads.
-            legacy = _mk_snap(1_760_490_000.0, 10000.0, 82, 400.0)
-            scoped = _mk_snap(1_760_499_000.0, 10030.0, 74, 370.0)
-            state.put(s, state.SNAPSHOT_KEY, json.dumps(legacy))            # global
-            state.put(s, state.scoped(state.SNAPSHOT_KEY, vin), json.dumps(scoped))
-            vid = s.query(Vehicle).filter(Vehicle.vin == vin).first().id
-
-        monkeypatch.setattr("app.tesla_client.TeslaClient", _SyncClient)
-        with TestClient(app) as client:
-            resp = client.post("/api/sync")
-            assert resp.status_code == 200
-            assert resp.json()["logged"]["drives"] == 1     # the missed drive recovered
-
-        with SessionLocal() as s:
-            drives = s.query(Drive).filter(Drive.vehicle_id == vid).all()
-            assert len(drives) == 1
-            assert abs(drives[0].distance_km - 30.0) < 0.1   # 10000 -> 10030 km
-            # Sensible reconstructed duration (not a multi-hour sleep gap).
-            assert 0 < drives[0].duration_min < 120
-            # Legacy global keys are consumed so it never double-logs.
-            assert state.get(s, state.SNAPSHOT_KEY) == ""
-    finally:
-        settings.app_passcode = old
-        _reset_to_demo()
-
-
 class _DrivingClient:
     """An online car actively driving — for the poll_fast=True-while-driving case."""
     VIN = "VINAAAAAAAAAAAAAA"
@@ -1271,26 +1222,6 @@ class _SlowlyArrivesThenDrivesAgainClient(_AsleepThenDrivesAgainClient):
         return d
 
 
-def test_an_estimated_tail_is_credited_once_not_to_both_trips(monkeypatch):
-    """The blind stretch between the last reading and the next is one fixed
-    quantity. Crediting the arriving trip with an estimate of it and then
-    letting the departing trip's recovery claim the whole thing counts the same
-    ground twice — which is precisely how the reverted place-split corrupted
-    two trips. Whatever the estimate takes, the next trip must start past."""
-    closed_id, dist_before, _e, drives, _logged, _s = _run_asleep_close(
-        monkeypatch, _SlowlyArrivesThenDrivesAgainClient, place_tail=0.8)
-    rows = sorted(drives, key=lambda d: d.id)
-    assert len(rows) >= 2, "needs both trips to check the hand-over"
-    assert rows[0].end_est_km, "the estimate must actually have fired here"
-    # However the tail was handled, consecutive trips must not overlap: each
-    # starts at or after the previous one's end. An overlap is double-counting.
-    for a, b in zip(rows, rows[1:]):
-        if a.end_odo_km is not None and b.start_odo_km is not None:
-            assert b.start_odo_km >= a.end_odo_km - 0.002, (
-                f"trip {b.id} starts {a.end_odo_km - b.start_odo_km:.3f} km "
-                f"before trip {a.id} ended")
-
-
 class _SlowlyArrivesThenBarelyMovesClient(_AsleepThenParksWithCreepClient):
     """The place has measured a 0.8 km tail — but the car had very nearly arrived and the
     odometer, once a poll can read it again, has moved only 0.1 km. The
@@ -1668,74 +1599,6 @@ def test_sustained_offline_top_up_folds_in_energy_with_the_distance(monkeypatch)
             # The whole point: same driving, same efficiency figure. Before the
             # fix this dropped by 3/15 of itself.
             assert abs(d.wh_per_km - wh_before) < wh_before * 0.01
-    finally:
-        settings.app_passcode = old
-        _reset_to_demo()
-
-
-def test_sustained_offline_close_records_a_gap_too_late_to_merge(monkeypatch):
-    """Past SLEEP_CLOSE_MERGE_MAX_MIN, a large further movement is more likely
-    a genuinely separate, later drive than a continuation — the closed trip's
-    distance must stay untouched.
-
-    And it must not be reported as lost from that trip either: process_snapshot
-    runs next against the same unmodified prev and turns the movement into its
-    own drive (asserted below), so stamping end_lost_km on the closed trip as
-    well would report the same distance twice under two names — the thing the
-    blind-gap fold-in explicitly avoids. The 0.0 recorded at close time is the
-    right answer here: this trip really did end where it said it did."""
-    import time as _time
-
-    from app import services, state
-    from app.models import Drive
-
-    settings = get_settings()
-    old = settings.app_passcode
-    settings.app_passcode = ""
-    _OfflineThenParksFarAndLateClient.step = 0
-    try:
-        monkeypatch.setattr("app.tesla_client.TeslaClient", _FakeClient)
-        vin = "VINAAAAAAAAAAAAAA"
-        with SessionLocal() as s:
-            services.link_with_token(s, "tok")
-            vid = s.query(Vehicle).filter(Vehicle.vin == vin).first().id
-
-        monkeypatch.setattr("app.tesla_client.TeslaClient", _OfflineThenParksFarAndLateClient)
-        with TestClient(app) as client:
-            client.post("/api/sync")
-            _OfflineThenParksFarAndLateClient.step = 1
-            client.post("/api/sync")
-            _OfflineThenParksFarAndLateClient.step = 2
-            client.post("/api/sync")                       # offline episode begins
-
-        with SessionLocal() as s:
-            state.put(s, state.scoped(state.UNREACHABLE_SINCE_KEY, vin),
-                      str(_time.time() - 4 * 60))
-
-        with TestClient(app) as client:
-            client.post("/api/sync")                       # sustained offline -> closes at 12.0 km
-
-        with SessionLocal() as s:
-            closed_id = s.query(Drive).filter(Drive.vehicle_id == vid).first().id
-
-        _OfflineThenParksFarAndLateClient.step = 3
-        with TestClient(app) as client:
-            resp = client.post("/api/sync")                # back online, parked, 1.5 km further, 65 min later
-            assert resp.json()["logged"]["drives"] == 1      # the 1.5 km becomes its own drive
-
-        with SessionLocal() as s:
-            drives = s.query(Drive).filter(Drive.vehicle_id == vid).order_by(Drive.id).all()
-            assert len(drives) == 2
-            closed = next(d for d in drives if d.id == closed_id)
-            assert closed.distance_km == 12.0                # unchanged, not guessed at
-            # Not double-reported. Unknown, not a measured zero — the close
-            # can't see past its own last reading.
-            assert closed.end_lost_km is None
-            # The 1.5 km is accounted for exactly once — on the drive that
-            # actually covers it, not as a phantom loss on the one before.
-            later = next(d for d in drives if d.id != closed_id)
-            assert later.distance_km == 1.5
-            assert state.get(s, state.scoped(state.LAST_SLEEP_CLOSE_KEY, vin)) == ""
     finally:
         settings.app_passcode = old
         _reset_to_demo()
@@ -2478,61 +2341,6 @@ def test_clearing_a_duplicated_loss_refuses_to_erase_a_real_one(monkeypatch):
             # The next trip keeps its record: the ground is still accounted
             # for, once, by the trip that actually covered it.
             assert s.get(Drive, bid).start_recovered_km == 0.425
-    finally:
-        settings.app_passcode = old
-        _reset_to_demo()
-
-
-def test_an_estimated_arrival_cannot_end_after_the_next_trip_starts(monkeypatch):
-    """Trip 339 ended at 17:01 while trip 340 started at 16:59. The sleep-close
-    estimate moves the clock forward with the odometer, and nothing bounded it
-    by what happened next: it credited three minutes of arriving to a car that
-    was driving again within one.
-
-    services.edit_drive already refuses to let a person create overlapping
-    trips by hand, so the app was producing a state it will not accept."""
-    from datetime import datetime as _dt
-
-    from app.api.routes import _unoverlap_previous
-    from app.models import Drive, Vehicle as _V
-
-    settings = get_settings()
-    old = settings.app_passcode
-    settings.app_passcode = ""
-    try:
-        with TestClient(app) as client:
-            assert client
-            with SessionLocal() as s:
-                vid = s.query(_V).first().id
-                s.query(Drive).delete()
-                est = Drive(vehicle_id=vid, start_time=_dt(2026, 8, 5, 16, 26),
-                            end_time=_dt(2026, 8, 5, 17, 1), distance_km=7.1,
-                            duration_min=34.0, avg_speed_kmh=12.0, end_est_km=0.394)
-                s.add(est)
-                s.commit()
-                eid = est.id
-
-                _unoverlap_previous(s, vid, _dt(2026, 8, 5, 16, 59))
-                s.commit()
-                fixed = s.get(Drive, eid)
-                assert fixed.end_time == _dt(2026, 8, 5, 16, 59)
-                assert fixed.duration_min == 33.0
-                # Speed follows the clock, or the row contradicts itself.
-                assert fixed.avg_speed_kmh == pytest.approx(7.1 / (33.0 / 60.0), abs=0.05)
-                # The distance stays: the next trip already begins past it, so
-                # trimming it here would leave that ground belonging to nobody.
-                assert fixed.distance_km == 7.1
-
-                # A MEASURED end is never moved. If a real reading lands after
-                # the next start, something is wrong that a timestamp cannot fix.
-                meas = Drive(vehicle_id=vid, start_time=_dt(2026, 8, 5, 18, 0),
-                             end_time=_dt(2026, 8, 5, 18, 30), distance_km=5.0,
-                             duration_min=30.0, avg_speed_kmh=10.0, end_est_km=None)
-                s.add(meas)
-                s.commit()
-                _unoverlap_previous(s, vid, _dt(2026, 8, 5, 18, 20))
-                s.commit()
-                assert s.get(Drive, meas.id).end_time == _dt(2026, 8, 5, 18, 30)
     finally:
         settings.app_passcode = old
         _reset_to_demo()
