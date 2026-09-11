@@ -405,7 +405,6 @@ def snapshot_from_vehicle_data(data: dict[str, Any]) -> dict[str, Any]:
         # Logged only, nothing reads these yet — they exist to find out
         # empirically whether a Sentry trigger is visible in the API at all
         # (see BatteryReading's own note). Free to collect: same payload.
-        "dashcam_state": vs.get("dashcam_state") if "dashcam_state" in vs else None,
         "center_display_state": (
             vs.get("center_display_state") if "center_display_state" in vs else None
         ),
@@ -2827,7 +2826,6 @@ def snapshot_from_telemetry(fields: dict[str, Any], ts: float) -> dict[str, Any]
         # the one way in the stream could not see. Partially open counts:
         # a window lowered an inch is not shut.
         "windows_open": _any_window_open(fields),
-        "dashcam_state": None,
         # CenterDisplay IS streamed, and is deliberately not mapped here.
         # Polling stores this as Tesla's integer code; telemetry reports an
         # enum string (DisplayStateDriving, DisplayStateSentry, ...) whose

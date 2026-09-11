@@ -3083,21 +3083,18 @@ def _process_vehicle(
         climate_now = snap.get("climate_on")
         cop_now = snap.get("cabin_overheat_protection")
         cop_cooling_now = snap.get("cabin_overheat_protection_actively_cooling")
-        dashcam_now = snap.get("dashcam_state")
         display_now = snap.get("center_display_state")
         # Also write a row on a Sentry/climate/COP change even with SoC
         # unmoved — the whole point is catching the state right as the car
         # parks (before it sleeps and this polling stops seeing it), and SoC
-        # usually hasn't dropped a full point yet by then. dashcam/display are
-        # in this list for the same reason and more so: if a Sentry trigger is
-        # visible through either, it's a brief flicker that SoC won't have
-        # moved for at all, so keying the write on SoC alone would miss the
-        # one sample that mattered.
+        # usually hasn't dropped a full point yet by then. The display is in
+        # this list for the same reason and more so: it moves in brief
+        # flickers that SoC will not have shifted a whole point for, so keying
+        # the write on SoC alone would miss the one sample that mattered.
         state_changed = last_reading is not None and (
             last_reading.sentry_mode != sentry_now or last_reading.climate_on != climate_now
             or last_reading.cabin_overheat_protection != cop_now
             or last_reading.cabin_overheat_protection_actively_cooling != cop_cooling_now
-            or last_reading.dashcam_state != dashcam_now
             or last_reading.center_display_state != display_now
         )
         if last_reading is None or abs(last_reading.soc - snap["soc"]) >= 1.0 or state_changed:
@@ -3111,7 +3108,6 @@ def _process_vehicle(
                 climate_on=climate_now,
                 cabin_overheat_protection=cop_now,
                 cabin_overheat_protection_actively_cooling=cop_cooling_now,
-                dashcam_state=dashcam_now,
                 center_display_state=display_now,
             ))
         # Low-battery alert: fires once per low episode (a state.py flag,
@@ -3204,8 +3200,8 @@ def _process_vehicle(
                 # Persisted as well as pushed. The alert alone left no trace
                 # once dismissed, which is why the Sentry-visibility question
                 # kept stalling on "when did one actually happen?" — see
-                # SecurityEvent. The two fields under test are captured as
-                # they read right now, at the moment of the opening.
+                # SecurityEvent. The display is captured as it read right
+                # now, at the moment of the opening.
                 session.add(SecurityEvent(
                     vehicle_id=vehicle.id,
                     ts=sync_mod._dt(snap["ts"]),
@@ -3213,7 +3209,6 @@ def _process_vehicle(
                     sentry_mode=sentry_now,
                     locked=snap.get("locked"),
                     soc=snap.get("soc"),
-                    dashcam_state=snap.get("dashcam_state"),
                     center_display_state=snap.get("center_display_state"),
                 ))
                 state.put(session, intrusion_key, "1")
@@ -9346,13 +9341,16 @@ def backfill_start_locations(
 # wake someone at night.
 #
 # Removed rather than left in place. Its input was BatteryReading.dashcam_state,
-# which only the polling path writes and which no telemetry field can supply —
+# which only the polling path wrote and which no telemetry field can supply —
 # there is no dashcam field anywhere in Tesla's 494. As polling winds down it
 # would have reported "reported": false and found nothing, which reads as a
 # broken feature rather than a finished investigation.
 #
-# The columns stay. Polling still fills them while it runs, and a column is
-# cheap where a misleading endpoint is not.
+# dashcam_state went with it: it existed for this and nothing else. The
+# database column is left in place unmapped — see database.py for why that is
+# not the same as keeping the field. center_display_state stays mapped,
+# because CenterDisplay is genuinely streamed and a display awake on a parked
+# car is a draw worth attributing whatever else it may indicate.
 
 
 @router.get("/summary")
@@ -10153,13 +10151,12 @@ def _telemetry_battery_reading(session: Session, vin: str, snap: dict) -> bool:
     climate_now = snap.get("climate_on")
     cop_now = snap.get("cabin_overheat_protection")
     cop_cooling_now = snap.get("cabin_overheat_protection_actively_cooling")
-    # Everything the configured field set actually reports. Dashcam and the
-    # centre display are left out on purpose: dashcam has no field anywhere in
-    # Tesla's 494 (checked, not assumed), and CenterDisplay arrives as an enum
-    # whose correspondence to the integers polling stores is undocumented.
-    # Comparing a column the stream always leaves None against a polled row
-    # that has a value would read as "changed" every time and write a row per
-    # batch.
+    # Everything the configured field set actually reports. The centre display
+    # is left out on purpose: CenterDisplay arrives as an enum whose
+    # correspondence to the integers polling stores is undocumented, so the
+    # stream always leaves that column None — and comparing it against a
+    # polled row that has a value would read as "changed" every time and write
+    # a row per batch.
     changed = last is not None and (
         last.sentry_mode != sentry_now or last.climate_on != climate_now
         or last.cabin_overheat_protection != cop_now
@@ -10182,10 +10179,9 @@ def _telemetry_battery_reading(session: Session, vin: str, snap: dict) -> bool:
         climate_on=climate_now,
         cabin_overheat_protection=cop_now,
         cabin_overheat_protection_actively_cooling=cop_cooling_now,
-        # Not streamed, and one of them never will be. None is "unknown",
-        # which is what these genuinely are here — the column was built to
-        # keep that distinct from a confirmed off (see database.py).
-        dashcam_state=None,
+        # Not streamed in a form this column can hold. None is "unknown",
+        # which is what it genuinely is here — the column was built to keep
+        # that distinct from a confirmed off (see database.py).
         center_display_state=None,
     ))
     return True

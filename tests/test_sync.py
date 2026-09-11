@@ -123,26 +123,28 @@ def test_snapshot_parses_door_and_window_openings():
     assert window["windows_open"] is True
 
 
-def test_snapshot_parses_dashcam_and_display_state():
-    """Both are logged-only probes (see BatteryReading) for whether a Sentry
-    trigger shows up in the API at all — captured when reported, None when
-    not, so a later look-back can tell "unknown" from a real value."""
+def test_snapshot_parses_display_state():
+    """Captured when the car reports it, None when it does not, so a later
+    look-back can tell "unknown" from a real value.
+
+    Its companion dashcam_state is gone: it existed only to test whether a
+    Sentry trigger leaked through the polled API indirectly, and telemetry
+    answered that outright with SentryMode's Aware and Panic states."""
     absent = snapshot_from_vehicle_data({
         "drive_state": {"timestamp": 1_760_000_000, "shift_state": "P"},
         "charge_state": {"battery_level": 72},
         "climate_state": {},
         "vehicle_state": {},
     })
-    assert absent["dashcam_state"] is None
     assert absent["center_display_state"] is None
+    assert "dashcam_state" not in absent
 
     present = snapshot_from_vehicle_data({
         "drive_state": {"timestamp": 1_760_000_000, "shift_state": "P"},
         "charge_state": {"battery_level": 72},
         "climate_state": {},
-        "vehicle_state": {"dashcam_state": "Recording", "center_display_state": 4},
+        "vehicle_state": {"center_display_state": 4},
     })
-    assert present["dashcam_state"] == "Recording"
     assert present["center_display_state"] == 4
 
 
@@ -3905,9 +3907,10 @@ def test_telemetry_snapshot_reads_cabin_overheat_and_climate_keeper():
     assert s["cabin_overheat_protection"] is None
     assert s["climate_keeper"] is None
 
-    # Dashcam has no field anywhere in Tesla's proto, so it stays unknown on
-    # this path however the car is configured.
-    assert s["dashcam_state"] is None
+    # CenterDisplay IS streamed, but as an enum with no documented relation to
+    # the integers polling stores — so this column stays unknown rather than
+    # carrying a guessed mapping.
+    assert s["center_display_state"] is None
 
 
 def test_shadow_charge_records_the_lifetime_counter_across_a_session():

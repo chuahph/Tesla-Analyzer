@@ -1426,11 +1426,11 @@ def test_sentry_drain_alert_fires_once_per_parked_episode(monkeypatch):
 
 
 def test_display_state_flicker_forces_a_battery_reading(monkeypatch):
-    """A center_display_state / dashcam_state change must write its own
-    BatteryReading row even with SoC unmoved. If a Sentry trigger is visible
-    through either field at all it's a brief flicker between two identical
-    SoC readings, so keying the write on SoC alone would drop the one sample
-    the whole probe exists to capture."""
+    """A center_display_state change must write its own BatteryReading row
+    even with SoC unmoved. The display wakes in brief flickers between two
+    identical SoC readings, so keying the write on SoC alone would drop the
+    sample entirely — and a screen awake on a parked car is a draw worth
+    attributing."""
     from types import SimpleNamespace
 
     from app.api.routes import _process_vehicle
@@ -1450,7 +1450,6 @@ def test_display_state_flicker_forces_a_battery_reading(monkeypatch):
             "vin": "TESTVIN-DISPLAY", "display_name": "Test", "vehicle_config": {},
             "vehicle_state": {"odometer": 2000.0, "is_user_present": False,
                               "locked": True, "sentry_mode": True,
-                              "dashcam_state": "Recording",
                               "center_display_state": display},
             "drive_state": {"timestamp": ts * 1000, "shift_state": "P", "speed": 0,
                             "latitude": None, "longitude": None},
@@ -1484,7 +1483,6 @@ def test_display_state_flicker_forces_a_battery_reading(monkeypatch):
             after = rows()
             assert len(after) == before + 1
             assert after[-1].center_display_state == 2
-            assert after[-1].dashcam_state == "Recording"
     finally:
         with SessionLocal() as s:
             from app.models import Drive as _Drive
@@ -6583,10 +6581,9 @@ def test_telemetry_writes_battery_readings_on_pollings_own_rules():
             stored = rows()
             assert stored == sorted(stored, key=lambda r: r.ts)
 
-            # Fields the configured set does not carry stay unknown, not False
-            # — the column exists to keep those distinct.
-            assert stored[-1].dashcam_state is None
-            assert stored[-1].cabin_overheat_protection is None
+            # A field the configured set does not carry stays unknown, not
+            # False — the column exists to keep those distinct.
+            assert stored[-1].center_display_state is None
     finally:
         settings.app_passcode = old_pc
 

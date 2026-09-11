@@ -145,7 +145,22 @@ def init_db() -> None:
     _ensure_column("battery_readings", "climate_on", "BOOLEAN", "NULL")
     _ensure_column("battery_readings", "cabin_overheat_protection", "VARCHAR(10)", "NULL")
     _ensure_column("battery_readings", "cabin_overheat_protection_actively_cooling", "BOOLEAN", "NULL")
-    _ensure_column("battery_readings", "dashcam_state", "VARCHAR(16)", "NULL")
+    # dashcam_state is deliberately absent from this list and NOT dropped.
+    #
+    # The field is gone from the models: it existed only to test whether a
+    # Sentry trigger leaked through the polled API indirectly, and telemetry
+    # answered that outright with SentryMode's Aware and Panic states. Nothing
+    # reads or writes it any more.
+    #
+    # The COLUMN stays, because this helper is additive by design and dropping
+    # is the one migration that cannot be taken back. An unmapped nullable
+    # column is inert — inserts omit it, Postgres defaults it NULL, and it
+    # costs nothing to carry. Removing the field achieves everything removing
+    # the column would, minus the irreversibility. Drop it by hand if you ever
+    # want the rows gone:
+    #
+    #   ALTER TABLE battery_readings DROP COLUMN dashcam_state;
+    #   ALTER TABLE security_events  DROP COLUMN dashcam_state;
     _ensure_column("battery_readings", "center_display_state", "INTEGER", "NULL")
 
 

@@ -283,15 +283,14 @@ class BatteryReading(Base):
     # alongside cabin_overheat_protection above — this is the one that means
     # COP is really drawing power, not just enabled as a setting.
     cabin_overheat_protection_actively_cooling: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
-    # Recorded purely to find out, empirically, whether Tesla leaks a Sentry
-    # *trigger* through either field — the API has no documented alarm-state
-    # or accelerometer signal, so nothing here is relied on yet. The theory
-    # worth testing: an escalating Sentry event wakes the centre screen
-    # (center_display_state) and writes a clip (dashcam_state). Both arrive in
-    # the vehicle_state payload the sync already fetches, so logging them
-    # costs no extra API calls. Check them against a known Sentry event before
-    # building anything on top. None when unreported, as above.
-    dashcam_state: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    # What the centre screen was doing. Logged originally as half of a test of
+    # whether Tesla leaks a Sentry *trigger* indirectly — the other half was
+    # dashcam_state, now gone with the question it was asking (see the note
+    # where /api/sentry-check used to be in routes.py). This one stays because
+    # CenterDisplay IS a streamed field, and a display that is awake on a
+    # parked car is a draw worth attributing whatever else it indicates. The
+    # stream reports it as an enum whose correspondence to these integers is
+    # undocumented, so telemetry leaves it None rather than guessing.
     center_display_state: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
 
@@ -299,22 +298,15 @@ class SecurityEvent(Base):
     """A physical opening while the car sat parked, armed and unoccupied.
 
     The alert for this has always been push-only, which meant the event left
-    no trace once the notification was dismissed. Persisting it exists for one
-    specific purpose: Tesla publishes no accelerometer, tilt or alarm-state
-    field, so whether a Sentry trigger is visible in the API at all is an open
-    question, and the only way to answer it is to compare a *known* real event
-    against what the API was reporting at that moment.
+    no trace once the notification was dismissed. This is the record of it.
 
-    ``dashcam_state`` and ``center_display_state`` are therefore captured here
-    as they read when the opening was detected — the same two fields
-    BatteryReading logs on every change (see routes.py, which forces a row
-    whenever either moves). One row here plus those transitions is the whole
-    experiment: if an escalating Sentry event really does wake the screen or
-    write a clip, it should show up around these timestamps and nowhere else.
-
-    A door opening is not itself a Sentry trigger — it is a proxy, and a good
-    one, since an opening on an armed car escalates Sentry. Nothing is built
-    on top of this yet, and nothing should be until the correlation is real.
+    It was also, originally, half of an experiment: Tesla's polled API
+    publishes no accelerometer, tilt or alarm-state field, so whether a Sentry
+    trigger was visible AT ALL was an open question, and a known real opening
+    was the only fixed point to test candidate signals against. Telemetry
+    settled that — SentryMode arrives as a state machine carrying Aware and
+    Panic outright — so the experiment is over and the row is now just what it
+    reads as: a log of someone opening the car while it sat armed.
     """
 
     __tablename__ = "security_events"
@@ -329,8 +321,7 @@ class SecurityEvent(Base):
     sentry_mode: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     locked: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     soc: Mapped[float | None] = mapped_column(Float, nullable=True)
-    # The two fields under test, as they read at the moment of the opening.
-    dashcam_state: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    # The centre display as it read at the moment of the opening.
     center_display_state: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
 
