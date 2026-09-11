@@ -1745,6 +1745,111 @@ def thaw_parked_rates(session: Session = Depends(get_session)):
     return {"thawed": bool(had), "was": had or None}
 
 
+# How much of the shorter trip must overlap the longer before the two are one
+# journey recorded twice. Well over half: two genuinely separate trips can
+# touch at the edges (a trip closed a moment late, the next opened a moment
+# early) and must not be read as duplicates of each other.
+DUPLICATE_OVERLAP_SHARE = 0.6
+
+
+@router.api_route("/data/duplicate-trips", methods=["GET", "POST"])
+def duplicate_trips(
+    days: int = Query(30, ge=1, le=730),
+    apply: bool = Query(False),
+    session: Session = Depends(get_session),
+):
+    """Find journeys recorded twice, and remove the weaker copy.
+
+    Two sources writing one history is how this happens, and it is not
+    hypothetical: on 11 September the stream recorded the 11:48 trip as row
+    727 and the half-hourly cron wrote the same journey again as row 728, at
+    0.432 kWh and 40 Wh/km because polling saw only part of it. Both rows
+    stood, and a duplicate journey double-counts distance and energy in every
+    total on the dashboard.
+
+    Which copy goes is decided by evidence, not by age. A telemetry row is
+    kept over a polled one — it saw the whole journey rather than two samples
+    of it — and where neither is telemetry the longer-observed row wins, since
+    the shorter one is the one that missed something.
+
+    Plans by default. Removed rows are serialised first, into their own key
+    rather than the purge's: two single-slot backups overwriting each other is
+    exactly how the purge backup was lost.
+    """
+    vehicle = _first_vehicle(session)
+    if vehicle is None:
+        return {"error": "no vehicle"}
+    since = sync_mod.now_local() - timedelta(days=days)
+    drives = session.scalars(
+        select(Drive).where(Drive.vehicle_id == vehicle.id, Drive.start_time >= since)
+        .order_by(Drive.start_time)
+    ).all()
+
+    def seconds(d) -> float:
+        return max((d.end_time - d.start_time).total_seconds(), 0.0)
+
+    pairs: list[dict] = []
+    doomed: dict[int, object] = {}
+    for i, a in enumerate(drives):
+        for b in drives[i + 1:]:
+            if b.start_time >= a.end_time:
+                break  # ordered by start, so nothing later can overlap either
+            overlap = (min(a.end_time, b.end_time)
+                       - max(a.start_time, b.start_time)).total_seconds()
+            shorter = min(seconds(a), seconds(b))
+            if shorter <= 0 or overlap / shorter < DUPLICATE_OVERLAP_SHARE:
+                continue
+            a_tel = (a.source or "") == "telemetry"
+            b_tel = (b.source or "") == "telemetry"
+            if a_tel != b_tel:
+                keep, drop = (a, b) if a_tel else (b, a)
+                why = "telemetry saw the whole journey"
+            else:
+                keep, drop = (a, b) if seconds(a) >= seconds(b) else (b, a)
+                why = "observed for longer"
+            if drop.id in doomed or keep.id in doomed:
+                continue
+            doomed[drop.id] = drop
+            pairs.append({
+                "overlap_pct": round(overlap / shorter * 100.0, 1),
+                "keep": {"id": keep.id, "source": keep.source or "polled",
+                         "km": round(keep.distance_km or 0.0, 3),
+                         "kwh": round(keep.energy_used_kwh or 0.0, 3),
+                         "min": round(seconds(keep) / 60.0, 1),
+                         "start": keep.start_time.isoformat(timespec="seconds")},
+                "drop": {"id": drop.id, "source": drop.source or "polled",
+                         "km": round(drop.distance_km or 0.0, 3),
+                         "kwh": round(drop.energy_used_kwh or 0.0, 3),
+                         "min": round(seconds(drop) / 60.0, 1),
+                         "start": drop.start_time.isoformat(timespec="seconds")},
+                "why": why,
+            })
+
+    plan = {
+        "window_days": days,
+        "trips_checked": len(drives),
+        "would_remove": len(pairs),
+        # What the duplicates are adding to every total on the dashboard.
+        "double_counted_km": round(
+            sum(p["drop"]["km"] for p in pairs), 2),
+        "double_counted_kwh": round(
+            sum(p["drop"]["kwh"] for p in pairs), 2),
+        "pairs": pairs,
+    }
+    if not apply:
+        plan["applied"] = False
+        return plan
+    if pairs:
+        backup = {"at": sync_mod.now_local().isoformat(timespec="seconds"),
+                  "rows": [_drive_row_dict(d) for d in doomed.values()]}
+        state.put(session, state.DEDUPED_DRIVES_KEY, _json_mod.dumps(backup))
+        session.commit()
+        services.delete_drives(session, list(doomed))
+    plan["applied"] = True
+    plan["removed"] = len(pairs)
+    return plan
+
+
 @router.api_route("/data/purge-pre-telemetry", methods=["GET", "POST"])
 def purge_pre_telemetry(
     apply: bool = Query(False),

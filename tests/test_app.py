@@ -7240,3 +7240,80 @@ def test_telemetry_config_does_not_blame_the_car_when_it_cannot_read_the_answer(
             assert out["configured_but_quiet"] == ["BMSState"]
     finally:
         settings.app_passcode = old_pc
+
+
+def test_duplicate_trips_keeps_the_copy_that_saw_the_whole_journey():
+    """Reported live, 11 September: the stream recorded the 11:48 trip as row
+    727 and the half-hourly cron wrote the same journey again as 728, at 0.432
+    kWh and 40 Wh/km because polling saw only part of it. Both stood, and a
+    duplicate journey double-counts distance and energy in every total.
+
+    Which copy goes is decided by evidence, not by age or id order.
+    """
+    from app.config import get_settings
+    from app.database import SessionLocal
+    from app.models import Drive, Vehicle
+
+    settings = get_settings()
+    old_pc = settings.app_passcode
+    settings.app_passcode = ""
+    vin = "TESTVIN-DEDUPE"
+    try:
+        with TestClient(app) as client:
+            with SessionLocal() as s:
+                v = Vehicle(vin=vin, name="Test", model="Model 3")
+                s.add(v)
+                s.commit()
+                vid = v.id
+                now = __import__("app.sync", fromlist=["x"]).now_local()
+
+                def drive(start_min, end_min, km, kwh, source=""):
+                    return Drive(
+                        vehicle_id=vid,
+                        start_time=now - timedelta(minutes=start_min),
+                        end_time=now - timedelta(minutes=end_min),
+                        distance_km=km, duration_min=start_min - end_min,
+                        start_soc=70, end_soc=68, energy_used_kwh=kwh,
+                        avg_speed_kmh=20, max_speed_kmh=60, outside_temp_c=30,
+                        source=source)
+
+                # The real pair: one journey, two rows. The polled copy is the
+                # LOWER id here so the test cannot pass by preferring newest.
+                s.add(drive(100, 80, 10.8, 0.432))                # polled
+                s.add(drive(100, 67, 10.794, 1.96, "telemetry"))  # stream
+                # And a genuinely separate trip that merely abuts the first —
+                # a close a moment late and an open a moment early must not
+                # read as a duplicate.
+                s.add(drive(66, 40, 5.0, 0.9))
+                s.commit()
+
+            client.post("/api/active-vehicle", json={"vin": vin})
+            plan = client.get("/api/data/duplicate-trips?days=7").json()
+            assert plan["would_remove"] == 1
+            assert plan["trips_checked"] == 3
+            pair = plan["pairs"][0]
+            assert pair["keep"]["source"] == "telemetry"
+            assert pair["keep"]["kwh"] == 1.96
+            assert pair["drop"]["kwh"] == 0.432
+            assert pair["why"] == "telemetry saw the whole journey"
+            # Stated in the terms that matter: what it was adding to the totals.
+            assert plan["double_counted_km"] == 10.8
+
+            with SessionLocal() as s:
+                assert s.query(Drive).filter(Drive.vehicle_id == vid).count() == 3
+
+            done = client.post("/api/data/duplicate-trips?days=7&apply=true").json()
+            assert done["removed"] == 1
+            with SessionLocal() as s:
+                left = s.scalars(select(Drive).where(Drive.vehicle_id == vid)).all()
+                assert len(left) == 2
+                assert 0.432 not in [d.energy_used_kwh for d in left]
+                # The backup went to its own key, not the purge's.
+                from app import state as state_mod
+                assert state_mod.get(s, state_mod.DEDUPED_DRIVES_KEY)
+
+            # Nothing left to find.
+            assert client.get(
+                "/api/data/duplicate-trips?days=7").json()["would_remove"] == 0
+    finally:
+        settings.app_passcode = old_pc

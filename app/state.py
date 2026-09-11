@@ -66,6 +66,11 @@ FROZEN_RATES_KEY = "frozen_parked_rates"  # JSON {at, places: {name: kW},
 # override on a working one. Written by /api/data/freeze-parked-rates, which
 # the purge runs first.
 
+DEDUPED_DRIVES_KEY = "deduped_drives"  # JSON {at, rows: [...]}: drive rows
+# removed as duplicates of a journey already recorded. Its own key rather than
+# sharing the purge's, because two single-slot backups that overwrite each
+# other are how the purge backup was lost.
+
 PURGED_DRIVES_KEY = "purged_drives"  # JSON {at, cutover, rows: [...]}: every
 # drive row deleted by /api/data/purge-pre-telemetry, serialised whole. The
 # purge is the one destructive operation in this app that cannot be recomputed
