@@ -9969,6 +9969,29 @@ def summary(
     session.execute(sa_text("SELECT 1")).scalar()
     _marks.append(("ping_ms", round((time.monotonic() - _ping0) * 1000.0, 1)))
 
+    # Close and record anything the stream finished but could not announce.
+    #
+    # The ingest promotes a trip the moment it closes, which covers every
+    # journey that ends in coverage. It cannot cover the one that ends with
+    # the car going to sleep: the shadow stays open, no further records
+    # arrive, and nothing runs. That was the cron's job, and at thirty minutes
+    # — let alone four hours — it is why a finished trip can be missing from
+    # the page that exists to show it.
+    #
+    # So the dashboard settles its own. Reading is the moment someone wants
+    # the answer, and this needs no network: it reads state this process
+    # wrote and writes a row the ingest would have written had the car still
+    # been talking.
+    #
+    # Swallowed entirely. A settle that fails costs one late trip; a summary
+    # that raises costs the whole page.
+    try:
+        if _settle_shadows(session):
+            _promote_shadow_trips(session, apply=True, max_add=PROMOTE_AUTO_MAX_ADD)
+    except Exception:  # noqa: BLE001
+        pass
+    _mark("settle")
+
     settings = get_settings()
     vehicle = _first_vehicle(session)
     _mark("vehicle")
@@ -10771,6 +10794,7 @@ def telemetry_ingest(
     last_snaps: dict[str, dict] = {}
     readings_written = 0
     closed = 0
+    charged = 0
     for record in records:
         if not isinstance(record, dict):
             continue
@@ -10967,10 +10991,12 @@ def telemetry_ingest(
             # has no distance, and its whole purpose is to hold three energy
             # figures side by side — so sharing the trip machine would mean
             # one set of thresholds serving two jobs badly.
-            charged = sync_mod.advance_charge(charge_shadows.setdefault(vin, {}), snap)
-            if charged:
-                charged["vin"] = vin
-                charges.append(charged)
+            finished_charge = sync_mod.advance_charge(
+                charge_shadows.setdefault(vin, {}), snap)
+            if finished_charge:
+                finished_charge["vin"] = vin
+                charges.append(finished_charge)
+                charged += 1
             was_open = bool(shadow.get("open"))
             finished = sync_mod.advance_shadow(shadow, snap)
             if finished:
@@ -11100,6 +11126,21 @@ def telemetry_ingest(
     # an unattended write to real records earns a limit on how wrong it can
     # go in one run.
     promoted = 0
+    charges_promoted = 0
+    if charged:
+        # Charges the same way, and for the same reason: a session that has
+        # finished belongs in the history now. Nothing automatic has ever
+        # promoted these — only the manual endpoint — so a charge recorded by
+        # the stream simply sat in the shadow store until someone asked for
+        # it. That was survivable while polling recorded every session; it
+        # will not be once polling stops writing.
+        try:
+            charges_promoted = sum(
+                1 for c in _promote_shadow_charges(
+                    session, apply=True, max_add=PROMOTE_AUTO_MAX_ADD)
+                if c.get("action") == "add")
+        except Exception:  # noqa: BLE001 — never let this reject the batch
+            charges_promoted = 0
     if closed:
         try:
             promoted = len(_promote_shadow_trips(
@@ -11136,6 +11177,7 @@ def telemetry_ingest(
             # Trips that closed in this batch, and drive rows written for
             # them without waiting for the cron.
             "closed_trips": closed, "promoted": promoted,
+            "closed_charges": charged, "charges_promoted": charges_promoted,
             "seen": seen}
 
 

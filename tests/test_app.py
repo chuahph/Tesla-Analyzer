@@ -7527,3 +7527,65 @@ def test_a_gap_the_car_drove_through_is_marked_as_a_missed_journey():
                 s.query(Drive).filter(Drive.vehicle_id == v.id).delete()
                 s.delete(v)
                 s.commit()
+
+
+def test_the_dashboard_settles_a_trip_that_ended_while_the_car_slept():
+    """The one journey the ingest cannot announce for itself.
+
+    A trip closing in coverage is promoted the moment the stream says so. A
+    trip that ends with the car going to sleep is different: the shadow stays
+    open, no further records arrive, and nothing runs. That was the cron's
+    job, which at thirty minutes — let alone four hours — is why a finished
+    trip could be missing from the page that exists to show it.
+    """
+    import json as _json
+
+    from app import state, sync as sync_mod
+    from app.config import get_settings
+    from app.database import SessionLocal
+    from app.models import Drive, Vehicle
+
+    settings = get_settings()
+    old_pc = settings.app_passcode
+    settings.app_passcode = ""
+    vin = "TESTVIN-SETTLE"
+    try:
+        with TestClient(app) as client:
+            with SessionLocal() as s:
+                s.add(Vehicle(vin=vin, name="Test", model="Model 3"))
+                s.commit()
+                # A shadow trip left open, its last record long past the
+                # window that decides the stream is gone.
+                long_ago = sync_mod.to_epoch(
+                    sync_mod.now_local() - timedelta(hours=3))
+                state.put(s, state.TELEMETRY_TRIPS_KEY, "[]")
+                state.put(s, state.TELEMETRY_SHADOW_KEY, _json.dumps({vin: {
+                    "open": {"ts": long_ago, "odo_km": 31000.0, "soc": 70.0,
+                             "energy_kwh": 48.0, "shift": "D", "speed_kmh": 40.0,
+                             "lat": 5.34, "lon": 100.31},
+                    "last": {"ts": long_ago + 900, "odo_km": 31008.0, "soc": 68.0,
+                             "energy_kwh": 46.6, "shift": "D", "speed_kmh": 0.0,
+                             "lat": 5.35, "lon": 100.30},
+                }}))
+                s.commit()
+                before = s.query(Drive).count()
+
+            client.post("/api/active-vehicle", json={"vin": vin})
+            # Reading the dashboard is what closes it. No cron, no network.
+            client.get("/api/summary?days=7")
+
+            with SessionLocal() as s:
+                assert s.query(Drive).count() == before + 1
+                row = s.scalars(select(Drive).order_by(Drive.id.desc())).first()
+                assert row.source == "telemetry"
+                assert round(row.distance_km, 1) == 8.0
+    finally:
+        settings.app_passcode = old_pc
+        with SessionLocal() as s:
+            v = s.query(Vehicle).filter(Vehicle.vin == vin).first()
+            if v:
+                s.query(Drive).filter(Drive.vehicle_id == v.id).delete()
+                s.delete(v)
+            state.put(s, state.TELEMETRY_SHADOW_KEY, "{}")
+            state.put(s, state.TELEMETRY_TRIPS_KEY, "[]")
+            s.commit()
