@@ -7426,6 +7426,44 @@ def test_a_polled_charge_keeps_its_energy_and_gets_its_boundaries_fixed():
                 "/api/telemetry/promote-charges?apply=true&days=7").json()
             assert again["corrected"] == 0
             assert again["added"] == 0
+
+            # A shadow that joined the session partway through must NOT move
+            # the boundaries. Reported live on charge 81: eighteen minutes of
+            # a 159-minute charge, which would have rewritten the session as
+            # eighteen minutes long and discarded 24 points of its SoC range.
+            with SessionLocal() as s:
+                row = s.scalars(select(Charge).where(Charge.vehicle_id == vid)).one()
+                row.start_time = real_start - timedelta(minutes=22)
+                row.end_time = real_end + timedelta(minutes=4)
+                row.start_soc, row.end_soc = 67.0, 92.0
+                row.shadow_start_ts = None
+                s.commit()
+                fragment_start = real_end - timedelta(minutes=18)
+                state.put(s, state.TELEMETRY_CHARGES_KEY, _json.dumps([{
+                    "vin": vin,
+                    "start_ts": sync_mod.to_epoch(fragment_start),
+                    "end_ts": sync_mod.to_epoch(real_end),
+                    "start_time": fragment_start.isoformat(timespec="seconds"),
+                    "end_time": real_end.isoformat(timespec="seconds"),
+                    "duration_min": 18.2,
+                    # 2.22 against a recorded 17.48 — 13%, a fragment.
+                    "kwh_pack_meter": 2.22, "kwh_pack_level": 2.0,
+                    "kwh_wall": 2.237, "kwh_lifetime": None,
+                    "soc_start": 76.92, "soc_end": 79.0,
+                    "peak_kw": 7.6, "fast": False,
+                    "lat": 5.397018, "lon": 100.291249}]))
+                s.commit()
+
+            frag = client.get("/api/telemetry/promote-charges?days=7").json()
+            assert frag["would_correct"] == 0
+            assert frag["charges"][0]["action"] == "fragment"
+            assert frag["charges"][0]["saw_share_pct"] == pytest.approx(12.7, abs=0.5)
+
+            client.post("/api/telemetry/promote-charges?apply=true&days=7")
+            with SessionLocal() as s:
+                row = s.scalars(select(Charge).where(Charge.vehicle_id == vid)).one()
+                assert row.start_time == real_start - timedelta(minutes=22)
+                assert row.end_soc == 92.0
     finally:
         settings.app_passcode = old_pc
         with SessionLocal() as s:

@@ -3593,6 +3593,10 @@ def _promote_shadow_trips(session: Session, apply: bool = False,
 # Every promoted row still records which counter it used in
 # Charge.energy_source, so rows written under the old answer stay findable.
 CHARGE_ENERGY_SOURCE = "pack_meter"
+# How much of a matched charge's energy the stream must have measured before
+# its boundaries are believed. Below this the shadow watched a fragment, and a
+# fragment's start and end are not the session's — see _promote_shadow_charges.
+CHARGE_FRAGMENT_MIN_SHARE = 0.8
 _CHARGE_ENERGY_FIELD = {"pack_level": "kwh_pack_level",
                         "pack_meter": "kwh_pack_meter",
                         "wall": "kwh_wall",
@@ -3728,6 +3732,35 @@ def _promote_shadow_charges(session: Session, apply: bool = False,
             # the row was concerned, and the since-charge window — which
             # opens at exactly this timestamp — dropped it. A four-minute
             # error in a boundary made a whole journey invisible.
+            # Only if the shadow actually SAW the whole session.
+            #
+            # A shadow that joined a charge partway through looks exactly like
+            # one that watched it end to end — it opens on the first record
+            # arriving while the car is charging, and nothing in its shape
+            # says whether that was the plug going in or the machine being
+            # deployed mid-session. Its boundaries then describe a fragment.
+            #
+            # The energy tells them apart, because the row's own figure is the
+            # car's "Added" for the WHOLE session. Reported live, 11
+            # September: charge 82's shadow measured 17.42 against a recorded
+            # 17.48 — 99.7%, the same session. Charge 81's measured 2.22
+            # against 18.32 — 12%, eighteen minutes of a 159-minute charge,
+            # and correcting from it would have rewritten that session as
+            # eighteen minutes long and thrown away 24 points of its SoC
+            # range.
+            #
+            # Where the row has no energy to compare, there is nothing better
+            # on offer and the stream's boundaries are taken.
+            recorded = float(row.energy_added_kwh or 0.0)
+            covers = (kwh is not None and recorded > 0
+                      and kwh / recorded >= CHARGE_FRAGMENT_MIN_SHARE)
+            if recorded > 0 and not covers:
+                entry["action"] = "fragment"
+                entry["saw_share_pct"] = round((kwh or 0.0) / recorded * 100.0, 1)
+                entry["why"] = ("the stream saw only part of this session, so "
+                                "its boundaries describe a fragment")
+                changed.append(entry)
+                continue
             fixes = {}
             if abs((row.start_time - c_start).total_seconds()) >= 1.0:
                 fixes["start_time"] = c_start.replace(microsecond=0)
