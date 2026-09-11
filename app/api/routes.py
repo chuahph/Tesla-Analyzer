@@ -9327,112 +9327,32 @@ def backfill_start_locations(
     }
 
 
-# How close a field transition has to sit to a confirmed opening to count as
-# coinciding with it. Wide enough to cover a poll interval either side, narrow
-# enough that a car waking on its own schedule doesn't land inside it by luck.
-SENTRY_NEAR_MIN = 15.0
-
-
-@router.get("/sentry-check")
-def sentry_check(
-    days: int = Query(60, ge=1, le=730),
-    session: Session = Depends(get_session),
-):
-    """Evidence for one open question: does a Sentry trigger show in the API?
-
-    Tesla publishes no accelerometer, tilt or alarm-state field, so the only
-    candidates are indirect — ``dashcam_state`` (a clip being written) and
-    ``center_display_state`` (the screen waking). Both are logged on every
-    change, so their transitions are already on record; what was missing was
-    anything to line them up against.
-
-    This returns the two side by side: confirmed physical openings, and every
-    transition in those fields while the car sat parked. It deliberately draws
-    no conclusion. If the theory holds, transitions cluster around openings
-    and are rare otherwise; if they fire constantly, they are measuring
-    something else entirely (the car waking for its own reasons) and the idea
-    is dead. Both readings are useful; neither is the endpoint's to make.
-    """
-    vehicle = _first_vehicle(session)
-    if vehicle is None:
-        return {"available": False, "reason": "no vehicle linked"}
-    since = sync_mod.now_local() - timedelta(days=days)
-
-    events = session.scalars(
-        select(SecurityEvent)
-        .where(SecurityEvent.vehicle_id == vehicle.id, SecurityEvent.ts >= since)
-        .order_by(SecurityEvent.ts.desc())
-    ).all()
-
-    readings = session.scalars(
-        select(BatteryReading)
-        .where(BatteryReading.vehicle_id == vehicle.id, BatteryReading.ts >= since)
-        .order_by(BatteryReading.ts)
-    ).all()
-
-    # Only changes, and only while parked. A reading during a drive says
-    # nothing — the screen is on and the dashcam is recording because someone
-    # is sitting in the car.
-    drives = session.scalars(
-        select(Drive).where(Drive.vehicle_id == vehicle.id, Drive.end_time >= since)
-    ).all()
-    spans = [(d.start_time, d.end_time) for d in drives]
-
-    def driving_at(ts: datetime) -> bool:
-        return any(a <= ts <= b for a, b in spans)
-
-    transitions: list[dict[str, Any]] = []
-    prev_r = None
-    for r in readings:
-        if prev_r is not None and not driving_at(r.ts):
-            for field in ("dashcam_state", "center_display_state"):
-                was, now = getattr(prev_r, field), getattr(r, field)
-                if was != now and now is not None:
-                    transitions.append({
-                        "ts": r.ts.isoformat(timespec="minutes"),
-                        "field": field, "from": was, "to": now,
-                        "sentry_mode": r.sentry_mode, "soc": r.soc,
-                        # How close the nearest confirmed opening was. This is
-                        # the whole correlation, per row, so it can be read
-                        # without cross-referencing the two lists by eye.
-                        "minutes_from_opening": min(
-                            (round(abs((r.ts - e.ts).total_seconds()) / 60.0, 1)
-                             for e in events), default=None),
-                    })
-        prev_r = r
-
-    # `or` would be wrong here: a transition landing in the same minute as an
-    # opening has minutes_from_opening == 0.0, which is falsy, so it would be
-    # substituted away and counted as infinitely distant — losing exactly the
-    # coincidence this endpoint exists to detect.
-    near = [t for t in transitions
-            if t["minutes_from_opening"] is not None
-            and t["minutes_from_opening"] <= SENTRY_NEAR_MIN]
-    return {
-        "available": True,
-        "window_days": days,
-        "reported": bool(readings) and readings[-1].dashcam_state is not None,
-        "openings": [
-            {"ts": e.ts.isoformat(timespec="minutes"), "kind": e.kind,
-             "sentry_mode": e.sentry_mode, "locked": e.locked, "soc": e.soc,
-             "dashcam_state": e.dashcam_state,
-             "center_display_state": e.center_display_state}
-            for e in events
-        ],
-        "parked_transitions": transitions[-40:],
-        # The two numbers that decide it, stated plainly rather than judged.
-        # A signal worth using would be many transitions near openings and few
-        # away from them; a field that flips constantly while parked is
-        # tracking the car's own wake cycle, not an intruder.
-        "transitions_total": len(transitions),
-        "transitions_within_15min_of_an_opening": len(near),
-        "openings_total": len(events),
-        "note": (
-            "Openings are physical entries (a door, trunk or window opened "
-            "while parked, armed and unoccupied), not Sentry triggers — Tesla "
-            "exposes no alarm state. Nothing in the app acts on these fields."
-        ),
-    }
+# /api/sentry-check lived here, and telemetry retired it.
+#
+# The question it existed to answer: does a Sentry TRIGGER show anywhere in
+# the Fleet API? vehicle_data publishes no accelerometer, no tilt and no alarm
+# state, and its sentry_mode is a bare on/off boolean — so "armed" was
+# knowable and "just went off" was not. The endpoint looked for the trigger
+# indirectly, correlating transitions in dashcam_state (a clip being written)
+# and center_display_state (the screen waking) against confirmed physical
+# openings, and deliberately drew no conclusion either way.
+#
+# It never had to. SentryMode on the stream is a state machine, not a switch:
+# Off, Idle, Armed, Aware, Panic, Quiet. Aware means the car noticed
+# something and Panic means the alarm sounded — the exact fact the two proxies
+# were being asked to imply, reported outright, at ten seconds. _sentry_alert
+# acts on both as they arrive, which is something the correlation could never
+# have supported: a proxy good enough to study is not a proxy good enough to
+# wake someone at night.
+#
+# Removed rather than left in place. Its input was BatteryReading.dashcam_state,
+# which only the polling path writes and which no telemetry field can supply —
+# there is no dashcam field anywhere in Tesla's 494. As polling winds down it
+# would have reported "reported": false and found nothing, which reads as a
+# broken feature rather than a finished investigation.
+#
+# The columns stay. Polling still fills them while it runs, and a column is
+# cheap where a misleading endpoint is not.
 
 
 @router.get("/summary")
