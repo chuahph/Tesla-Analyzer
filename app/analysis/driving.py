@@ -23,6 +23,37 @@ VAMPIRE_MIN_GAP_HOURS = 1.0
 # boundary the app got wrong.
 CONTINUITY_TOLERANCE_KM = 0.15
 
+# How far the odometer may move across a "parked" gap before the gap was not a
+# park at all.
+#
+# Two rows being consecutive in the drive table does not make the time between
+# them still: a journey nobody recorded leaves no row, and the gap either side
+# of it closes over the top. Its SoC drop is then read as standby drain —
+# which is a car's whole consumption charged to sitting in a car park. This
+# app knows that happens and by how much: /api/telemetry/compare reported
+# 9.985 unaccounted kilometres across a fortnight.
+#
+# The odometer is what settles it, because it counts whether or not anything
+# was listening. The tolerance is a kilometre rather than the 0.15 above: an
+# arrival the stream lost can leave the closing trip several hundred metres
+# short (trip 535 lost 338 m, trip 731 lost 245 m), and that ground belongs
+# to the trip rather than to a journey nobody saw.
+PARKED_GAP_MAX_MOVE_KM = 1.0
+
+
+def _gap_moved_km(a: Any, b: Any) -> float | None:
+    """How far the odometer moved between two trips, or None if it cannot say.
+
+    Zero is treated as no reading rather than as a reading of zero: it is what
+    a row carries when the odometer was never recorded, and a pair of them
+    would otherwise prove every gap was a park.
+    """
+    end_odo = getattr(a, "end_odo_km", None)
+    start_odo = getattr(b, "start_odo_km", None)
+    if not end_odo or not start_odo:
+        return None
+    return float(start_odo) - float(end_odo)
+
 
 def odometer_continuity(drives: list[Any], readings: list[Any]) -> dict[str, Any]:
     """Check each trip's recorded stop against where the car was actually seen
@@ -259,6 +290,13 @@ def _gap_rate_kw(drives: list[Any], charges: list[Any] | None, capacity_kwh: flo
         # say nothing about drain. Scanned per gap rather than with a marching
         # index: the bands skip gaps, so a shared cursor would fall behind.
         if any(gap_start < c < gap_end for c in charge_starts):
+            continue
+        # And the car has to have stood still. A journey nobody recorded
+        # leaves no row for this loop to see, so the gap closes over it and
+        # its consumption is read as standby — which is how a rate fitted
+        # from parked cars ends up describing driving.
+        moved = _gap_moved_km(a, b)
+        if moved is not None and moved > PARKED_GAP_MAX_MOVE_KM:
             continue
         # ...and the charge log is not the only way to learn that. A gap whose
         # SoC came out HIGHER than it went in did not measure drain either,
@@ -784,6 +822,13 @@ def vampire_drain(
             ci += 1
         if ci < len(charge_starts) and charge_starts[ci] < gap_end:
             continue  # a charge happened in this gap — not a pure-drain measurement
+        # Nor is a gap the car drove through. Same reasoning as the charge
+        # above: the endpoints stop describing standby the moment something
+        # else moved the SoC between them, and an unrecorded journey moves it
+        # a great deal more than a night of standby does.
+        moved = _gap_moved_km(a, b)
+        if moved is not None and moved > PARKED_GAP_MAX_MOVE_KM:
+            continue
         # A charge-free gap counts as parked drain even if SoC happened to
         # read unchanged — SoC is only integer precision, so a real sub-1%
         # loss (very plausible over just a short stop) doesn't necessarily

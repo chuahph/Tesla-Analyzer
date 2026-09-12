@@ -1831,6 +1831,76 @@ def test_continuity_needs_odometer_anchors_and_readings():
     assert odometer_continuity(good, [])["available"] is False
 
 
+def test_a_gap_the_car_drove_through_is_not_parked_drain():
+    """Two rows being consecutive in the table does not make the time between
+    them still.
+
+    A journey nobody recorded leaves no row, so the gap either side of it
+    closes over the top and its SoC drop is read as standby — a car's whole
+    consumption charged to sitting in a car park. This is not hypothetical:
+    /api/telemetry/compare reported 9.985 unaccounted kilometres in a
+    fortnight, every one of them inside some gap.
+
+    The odometer settles it, because it counts whether or not anything was
+    listening.
+
+    Dropping the gap costs the real parked drain inside it, which is why the
+    total falls rather than staying level. That is the honest trade: a gap
+    that contains a journey cannot be separated into its parts from the
+    endpoints alone, and reporting three measured parks beats reporting four
+    where one of them is a drive.
+    """
+    from datetime import datetime, timedelta
+    from types import SimpleNamespace
+
+    from app.analysis.driving import parked_rate_kw, vampire_drain
+
+    cap = 69.5
+    base = datetime.fromisoformat("2026-08-13T08:00")
+
+    def drive(start, s_soc, e_soc, start_odo, dist=10.0):
+        return SimpleNamespace(
+            id=int(start_odo), start_time=start,
+            end_time=start + timedelta(minutes=20),
+            start_soc=s_soc, end_soc=e_soc, distance_km=dist, duration_min=20,
+            start_odo_km=start_odo, end_odo_km=start_odo + dist,
+            start_park_min=None, energy_used_kwh=1.4, avg_speed_kmh=30.0,
+            end_location="Home")
+
+    # Four parks of twenty hours, one SoC point each: about 0.035 kW.
+    chained, soc, odo = [], 90.0, 1000.0
+    for i in range(5):
+        chained.append(drive(base + timedelta(hours=20 * i), soc, soc - 2, odo))
+        odo += 10.0
+        soc -= 3.0
+    honest = vampire_drain(chained, [], cap)
+    assert honest["kwh"] > 0
+    honest_rate = parked_rate_kw(chained, [], cap)
+    assert honest_rate is not None
+
+    # The same history, except the car drove 40 km inside the second gap and
+    # nothing recorded it. Only the odometer shows it: the SoC drop across
+    # that gap is now a journey's worth, and it used to be read as standby.
+    driven = [SimpleNamespace(**vars(d)) for d in chained]
+    for d in driven[2:]:
+        d.start_odo_km += 40.0
+        d.end_odo_km += 40.0
+        d.start_soc -= 8.0
+        d.end_soc -= 8.0
+
+    got = vampire_drain(driven, [], cap)
+    # The gap is dropped whole: three of the four parks remain. Naively read,
+    # it would have added the journey's eight SoC points — 5.6 kWh, twice the
+    # entire honest total — and called it standby.
+    assert got["kwh"] == pytest.approx(honest["kwh"] * 3 / 4, rel=0.05), \
+        f"expected three gaps' worth, got {got['kwh']:.2f}"
+    assert got["kwh"] < honest["kwh"], \
+        "an unrecorded journey was charged to parked drain"
+    # And the rate fitted from these gaps describes a parked car, not a
+    # driving one — which is what every standby figure is scaled by.
+    assert parked_rate_kw(driven, [], cap) == pytest.approx(honest_rate, rel=0.01)
+
+
 def test_short_parked_gaps_are_modelled_not_read_off_integer_soc():
     """SoC is stored to whole percent, so one point is the smallest drain a gap
     can express — 0.7 kWh on a 69.5 kWh pack. A parked car draws about 0.04 kW,
@@ -1859,11 +1929,16 @@ def test_short_parked_gaps_are_modelled_not_read_off_integer_soc():
 
     # Long gaps to fit the parked rate from (STANDBY_MIN_TOTAL_HOURS), each
     # ~20 h apart losing 1 SoC point — about 0.035 kW.
+    #
+    # The odometer chains: each trip starts where the last one ended, which is
+    # what consecutive trips do and what proves the gaps between them were
+    # parks. A hole here would be a journey nobody recorded, and the fit now
+    # refuses those rather than reading a drive as standby.
     drives = []
     soc = 90.0
     for i in range(5):
         start = base + timedelta(hours=20 * i)
-        drives.append(drive(start, 20, soc, soc - 2, 1000.0 + 20 * i))
+        drives.append(drive(start, 20, soc, soc - 2, 1000.0 + 10 * i))
         soc -= 3.0                       # 2 driving + 1 parked over the gap
 
     long_only = vampire_drain(drives, [], cap)
@@ -1873,7 +1948,7 @@ def test_short_parked_gaps_are_modelled_not_read_off_integer_soc():
     # 1.7 hours reading a 2-point drop, which no 1.7-hour park can really be.
     short_start = drives[-1].end_time + timedelta(hours=1.7)
     drives.append(drive(short_start, 20, drives[-1].end_soc - 2.0,
-                        drives[-1].end_soc - 4.0, 1200.0))
+                        drives[-1].end_soc - 4.0, drives[-1].end_odo_km))
     got = vampire_drain(drives, [], cap)
 
     added = got["kwh"] - long_only["kwh"]
@@ -1887,7 +1962,7 @@ def test_short_parked_gaps_are_modelled_not_read_off_integer_soc():
     # preference for the fit.
     far = drives[-1].end_time + timedelta(hours=40)
     drives.append(drive(far, 20, drives[-1].end_soc - 3.0,
-                        drives[-1].end_soc - 5.0, 1300.0))
+                        drives[-1].end_soc - 5.0, drives[-1].end_odo_km))
     with_long = vampire_drain(drives, [], cap)
     added_long = with_long["kwh"] - got["kwh"]
     # Its measured 3 points, not the ~1.5 kWh the fitted rate would give over
