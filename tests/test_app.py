@@ -6056,6 +6056,57 @@ def test_a_trip_is_only_compared_against_its_own_car():
         settings.app_passcode = old_pc
 
 
+def test_sentry_idle_is_not_armed(session):
+    """Idle is Sentry enabled and not yet watching. It was counted as armed.
+
+    The boolean this table used to carry is true for every state but Off,
+    which is all vehicle_data could report. The stream gives the state
+    machine, and the transitions on 11 September say what it means: a park
+    goes Off to Idle at the moment it stops, Idle to Armed two and a half
+    minutes later, and Armed back to Idle when the driver returns.
+
+    Which makes Idle exactly where a car sits for the WHOLE of a park in an
+    excluded location — every park at home. So the gaps that should have
+    defined the unarmed rate were the ones being counted as armed, in the one
+    fit the parked-drain attribution rests on.
+    """
+    from datetime import timedelta as _td
+
+    from app.analysis.driving import SentryIndex, sentry_armed
+    from app.api.routes import _parked_readings
+    from app.models import BatteryReading, Vehicle
+
+    assert sentry_armed("SentryModeStateIdle", True) is False
+    assert sentry_armed("SentryModeStateArmed", True) is True
+    assert sentry_armed("SentryModeStateAware", True) is True    # noticed something
+    assert sentry_armed("SentryModeStatePanic", True) is True    # alarm going off
+    assert sentry_armed("SentryModeStateQuiet", True) is True    # armed, siren off
+    assert sentry_armed("SentryModeStateOff", True) is False
+    # No state: the flag is all there is, and all older rows have.
+    assert sentry_armed(None, True) is True
+    assert sentry_armed(None, False) is False
+    assert sentry_armed(None, None) is None
+
+    car = Vehicle(name="Mine", vin="IDLEVIN000000001")
+    session.add(car)
+    session.flush()
+    base = datetime(2026, 9, 1, 20, 0)
+    # A park at home: Sentry on, never arms. Every reading says Idle, and the
+    # boolean beside it says true — which is what the car reports and what
+    # the old reading of it got wrong.
+    for minute in (0, 20, 40, 60):
+        session.add(BatteryReading(
+            vehicle_id=car.id, ts=base + _td(minutes=minute), soc=70.0,
+            range_km=300.0, odo_km=1000.0,
+            sentry_mode=True, sentry_state="SentryModeStateIdle"))
+    session.commit()
+
+    gap = (base, base + _td(minutes=60))
+    assert _parked_readings(session, car.id).state(*gap) is False
+    # And the whole-row index agrees, so nothing depends on which one asks.
+    assert SentryIndex(session.query(BatteryReading).all()).state(*gap) is False
+
+
 def test_an_unreadable_trip_store_is_left_alone_rather_than_replaced():
     """A failed read here is not a read fallback. It is a write.
 

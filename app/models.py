@@ -268,6 +268,16 @@ class BatteryReading(Base):
     # meaningfully different from a confirmed off — see vampire_drain's
     # "likely inducer" lookup in routes.py.
     sentry_mode: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    # Sentry as the car actually reports it, which is a state machine and not
+    # a switch: Off, Idle, Armed, Aware, Panic, Quiet. sentry_mode above is
+    # true for any of them but Off — which is all vehicle_data could tell us,
+    # and is wrong for the question this table gets asked: whether a parked
+    # gap should be priced at the armed draw. Idle is Sentry ENABLED and not
+    # yet watching. The car passes through it for a few minutes after every
+    # park, and stays there wherever Sentry is excluded, which is every park
+    # at home. Null on rows written before the stream carried the state, and
+    # on anything polling wrote, where only the boolean ever existed.
+    sentry_state: Mapped[str | None] = mapped_column(String(28), nullable=True)
     climate_on: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     # Tri-state string ("Off"/"On"/"FanOnly"), not a bool — Tesla's own shape
     # for this field. None when unreported, same rule as the two above. This

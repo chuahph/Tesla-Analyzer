@@ -179,6 +179,7 @@ def init_db() -> None:
     # NULL default (not FALSE) — "unknown" (older reading, car didn't report
     # it) must stay distinguishable from a confirmed off.
     _ensure_column("battery_readings", "sentry_mode", "BOOLEAN", "NULL")
+    _ensure_column("battery_readings", "sentry_state", "VARCHAR(28)", "NULL")
     _ensure_column("battery_readings", "climate_on", "BOOLEAN", "NULL")
     _ensure_column("battery_readings", "cabin_overheat_protection", "VARCHAR(10)", "NULL")
     _ensure_column("battery_readings", "cabin_overheat_protection_actively_cooling", "BOOLEAN", "NULL")

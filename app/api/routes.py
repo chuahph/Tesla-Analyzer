@@ -11,7 +11,7 @@ from typing import Any
 import httpx
 from fastapi import APIRouter, Body, Depends, File, HTTPException, Query, Request, UploadFile
 from fastapi.responses import RedirectResponse
-from sqlalchemy import DateTime, func, select
+from sqlalchemy import DateTime, func, or_, select
 from sqlalchemy import inspect as sa_inspect
 from sqlalchemy import text as sa_text
 from sqlalchemy.orm import Session
@@ -1178,14 +1178,21 @@ def _parked_readings(session: Session, vehicle_id: int):
     summary asks three separate analyses about the same readings, and each of
     them sorted the whole history again to do it.
     """
-    return driving_analysis.SentryIndex.from_sorted(session.execute(
-        select(BatteryReading.ts, BatteryReading.sentry_mode)
+    rows = session.execute(
+        select(BatteryReading.ts, BatteryReading.sentry_state,
+               BatteryReading.sentry_mode)
         .where(BatteryReading.vehicle_id == vehicle_id,
-               # A reading with no sentry state answers nothing: the index
-               # skips them when it reads a gap, so carrying them only makes
-               # the list longer. Leaving them out cannot change an answer.
-               BatteryReading.sentry_mode.is_not(None))
-        .order_by(BatteryReading.ts)).all())
+               # A reading that knows nothing about Sentry answers nothing:
+               # the index skips them when it reads a gap, so carrying them
+               # only makes the list longer. Either column will do — a row
+               # written since the stream carried the state has both, an
+               # older one has only the flag.
+               or_(BatteryReading.sentry_state.is_not(None),
+                   BatteryReading.sentry_mode.is_not(None)))
+        .order_by(BatteryReading.ts)).all()
+    return driving_analysis.SentryIndex.from_sorted(
+        (ts, driving_analysis.sentry_armed(state, flag))
+        for ts, state, flag in rows)
 
 
 def _full_history(session: Session, vehicle_id: int) -> tuple[list, list]:
@@ -10325,6 +10332,7 @@ def _telemetry_battery_reading(session: Session, vin: str, snap: dict) -> bool:
         range_km=round(snap["range_km"], 1),
         odo_km=round(snap.get("odo_km") or 0.0, 1),
         sentry_mode=sentry_now,
+        sentry_state=snap.get("sentry_state"),
         climate_on=climate_now,
         cabin_overheat_protection=cop_now,
         cabin_overheat_protection_actively_cooling=cop_cooling_now,

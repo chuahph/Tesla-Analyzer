@@ -301,6 +301,41 @@ def standby_kw(drives: list[Any], charges: list[Any] | None,
                         STANDBY_MIN_GAP_HOURS, None, STANDBY_MIN_TOTAL_HOURS)
 
 
+# Sentry states in which the car is actually watching, and drawing for it.
+#
+# Read off this car's own transitions rather than assumed. A park goes
+# Off -> Idle at the moment it stops, Idle -> Armed about two and a half
+# minutes later, and back Armed -> Idle when the driver returns — so Idle is
+# Sentry enabled and NOT yet watching, and it is also where a car sits for the
+# whole of a park in an excluded location. Aware is the car having noticed
+# something and Panic is the alarm going off, both of which are Armed and then
+# some. Quiet is armed with the siren suppressed, which changes what the car
+# does about an intrusion and not what it spends watching for one.
+SENTRY_ARMED_STATES = frozenset({
+    "SentryModeStateArmed", "SentryModeStateAware",
+    "SentryModeStatePanic", "SentryModeStateQuiet",
+})
+
+
+def sentry_armed(state: Any, flag: Any) -> bool | None:
+    """Was Sentry actually watching, from whichever of the two a row carries.
+
+    The state wins where it exists, because the boolean cannot answer this:
+    it is true for every state but Off, so it calls a car in Idle armed. That
+    is not a rounding error in the parked-drain fit — Idle is precisely the
+    state a car sits in where Sentry is excluded, so the parks that should
+    define the UNARMED rate were the ones being counted as armed.
+
+    The boolean is the fallback, and has to be: it is all that exists on every
+    row written before the state was recorded, and on anything polling wrote.
+    A gap spanning the change is therefore mixed, and mixed in a known
+    direction — the older rows over-report armed.
+    """
+    if state:
+        return str(state) in SENTRY_ARMED_STATES
+    return flag
+
+
 class SentryIndex:
     """Sentry states sorted by timestamp, for asking about one gap at a time.
 
@@ -316,8 +351,9 @@ class SentryIndex:
 
     def __init__(self, readings: list[Any]):
         rows = sorted(
-            ((r.ts, r.sentry_mode) for r in readings
-             if getattr(r, "ts", None) is not None),
+            ((r.ts, sentry_armed(getattr(r, "sentry_state", None),
+                                 r.sentry_mode))
+             for r in readings if getattr(r, "ts", None) is not None),
             key=lambda pair: pair[0])
         self._ts = [ts for ts, _ in rows]
         self._state = [st for _, st in rows]
@@ -335,9 +371,15 @@ class SentryIndex:
         bisect below silently answers the wrong question, so this is only for
         a query that says ORDER BY.
         """
+        # Materialised first. Both comprehensions below walk it, so handed a
+        # generator the second one found it already spent: every timestamp
+        # present, every state gone, and an index that answers "nobody knows"
+        # to every question it is asked. Caught by the equivalence test rather
+        # than by anything going wrong.
+        rows = list(pairs)
         index = cls.__new__(cls)
-        index._ts = [pair[0] for pair in pairs]
-        index._state = [pair[1] for pair in pairs]
+        index._ts = [pair[0] for pair in rows]
+        index._state = [pair[1] for pair in rows]
         return index
 
     def __len__(self) -> int:

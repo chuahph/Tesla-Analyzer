@@ -396,6 +396,10 @@ def snapshot_from_vehicle_data(data: dict[str, Any]) -> dict[str, Any]:
         # slept. None (not False) when Tesla didn't report the field at all,
         # kept distinct from a confirmed off.
         "sentry_mode": vs.get("sentry_mode") if "sentry_mode" in vs else None,
+        # vehicle_data has no state to give: Sentry is a bare boolean there,
+        # which is exactly why the boolean above conflates Idle with Armed.
+        # Only the stream can fill this.
+        "sentry_state": None,
         # Physical-entry signals for the parked-intrusion alert. Unlike
         # Sentry's own alarm state, which vehicle_data cannot report — it
         # gives a bare boolean, where the stream gives Aware and Panic — an
@@ -2687,6 +2691,9 @@ def snapshot_from_telemetry(fields: dict[str, Any], ts: float) -> dict[str, Any]
         "lat": location.get("latitude") if isinstance(location, dict) else None,
         "lon": location.get("longitude") if isinstance(location, dict) else None,
         "sentry_mode": (sentry != "SentryModeStateOff") if sentry else None,
+        # And the state itself, because the boolean above cannot answer what
+        # the parked-drain fit asks of it. See BatteryReading.sentry_state.
+        "sentry_state": sentry or None,
         "doors_open": (any(bool(v) for v in doors.values())
                        if isinstance(doors, dict) and doors else None),
         # Not streamed by the configured field set. See the docstring: None is
