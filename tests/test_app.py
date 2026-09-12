@@ -5,6 +5,7 @@ from datetime import datetime, timedelta
 from types import SimpleNamespace
 from unittest import mock
 
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
 from sqlalchemy import select
 
@@ -6054,6 +6055,74 @@ def test_a_trip_is_only_compared_against_its_own_car():
         sess.commit()
         sess.close()
         settings.app_passcode = old_pc
+
+
+def test_the_climate_model_can_be_judged_against_the_cars_own_breakdown():
+    """driving_only_kwh subtracts the loads that run on a clock rather than on
+    distance, and until now nothing could check it.
+
+    It was fitted constants answering to nobody: the app reported trip 734 as
+    33% propulsion where the car's own Consumption panel said 41%, and there
+    was no way to tell which of the two rates was wrong, or whether three
+    trips of disagreement meant anything at all.
+
+    The car states the answer directly. What it bills to Driving is what this
+    model is trying to leave behind, so the reading carries that figure now
+    and the difference is reported as a rate — a kilowatt-hour of error on a
+    hundred-minute crawl and on a ten-minute hop are the same mistake at very
+    different sizes.
+    """
+    from app.api.routes import add_car_reading
+    from app.database import SessionLocal
+    from app.models import Drive, Vehicle
+    from app import state, sync as sync_mod
+
+    sess = SessionLocal()
+    prev = state.get(sess, state.CAR_READINGS_KEY)
+    try:
+        car = sess.query(Vehicle).first()
+        if car is None:
+            car = Vehicle(name="Mine", vin="SPLITVIN00000001")
+            sess.add(car); sess.commit()
+        start = sync_mod.now_local().replace(microsecond=0) - timedelta(hours=3)
+        d = Drive(vehicle_id=car.id, start_time=start,
+                  end_time=start + timedelta(minutes=100),
+                  distance_km=15.7, duration_min=100.0, start_soc=82, end_soc=75,
+                  energy_used_kwh=4.74, avg_speed_kmh=9, max_speed_kmh=77,
+                  outside_temp_c=34.0, source="telemetry")
+        sess.add(d); sess.commit()
+        state.put(sess, state.CAR_READINGS_KEY, "[]"); sess.commit()
+
+        # Four figures still work — the split is optional.
+        add_car_reading(readings=f"{d.id}:15.9:7.0:301.1", session=sess)
+        with SessionLocal() as s2:
+            import json as _json
+            row = _json.loads(state.get(s2, state.CAR_READINGS_KEY))[0]
+            assert "driving_pct" not in row
+
+        # Six carry the Consumption panel with them.
+        add_car_reading(readings=f"{d.id}:15.9:7.0:301.1:2.9:3.0", session=sess)
+        with SessionLocal() as s2:
+            import json as _json
+            row = _json.loads(state.get(s2, state.CAR_READINGS_KEY))[0]
+            assert row["driving_pct"] == 2.9 and row["climate_pct"] == 3.0
+
+        # Re-entering without the split keeps it: correcting a distance must
+        # not quietly discard a measurement of something else.
+        add_car_reading(readings=f"{d.id}:15.8:7.0:301.1", session=sess)
+        with SessionLocal() as s2:
+            import json as _json
+            row = _json.loads(state.get(s2, state.CAR_READINGS_KEY))[0]
+            assert row["km"] == 15.8 and row["driving_pct"] == 2.9
+
+        # A split that does not fit inside the drive is refused rather than
+        # averaged in.
+        with pytest.raises(HTTPException) as exc:
+            add_car_reading(readings=f"{d.id}:15.9:7.0:301.1:9.9:3.0", session=sess)
+        assert exc.value.status_code == 422
+    finally:
+        state.put(sess, state.CAR_READINGS_KEY, prev or "[]")
+        sess.commit(); sess.close()
 
 
 def test_the_accuracy_report_says_whether_its_error_is_real():

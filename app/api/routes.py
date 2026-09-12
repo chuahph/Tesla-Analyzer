@@ -6912,13 +6912,26 @@ def add_car_reading(
     added = []
     for chunk in readings.split(","):
         parts = [p.strip() for p in chunk.split(":") if p.strip() != ""]
-        if len(parts) != 4:
-            raise HTTPException(422, f"{chunk!r} is not drive_id:km:pct:wh_per_km")
+        if len(parts) not in (4, 6):
+            raise HTTPException(
+                422, f"{chunk!r} is not drive_id:km:pct:wh_per_km, "
+                     "optionally followed by :driving_pct:climate_pct")
         try:
             drive_id, km, pct, whkm = (int(parts[0]), float(parts[1]),
                                        float(parts[2]), float(parts[3]))
+            # The Consumption breakdown on the same panel, when it is to hand.
+            # Two figures, not five: Driving is the one the app models against,
+            # and Climate is the term it models. Battery Conditioning,
+            # Elevation and Everything Else are the remainder and need not be
+            # typed in — the app derives them as what is left.
+            split = ((float(parts[4]), float(parts[5])) if len(parts) == 6
+                     else None)
         except ValueError:
             raise HTTPException(422, f"{chunk!r} has a value that is not a number") from None
+        if split and not (0.0 <= split[0] <= pct and 0.0 <= split[1] <= pct):
+            raise HTTPException(
+                422, f"{chunk!r}: driving {split[0]}% and climate {split[1]}% "
+                     f"have to sit inside the {pct}% the drive consumed.")
         if session.get(Drive, drive_id) is None:
             raise HTTPException(404, f"No trip {drive_id}.")
         if km <= 0 or pct <= 0 or whkm <= 0:
@@ -6934,9 +6947,18 @@ def add_car_reading(
                      f"{whkm * km / 1000.0:.2f} kWh, which at {pct}% implies a "
                      f"{implied:.0f} kWh pack — those figures did not come from "
                      f"the same drive.")
-        by_id[drive_id] = {"drive_id": drive_id, "km": km, "pct": pct,
-                           "wh_per_km": whkm,
-                           "at": sync_mod.now_local().isoformat(timespec="minutes")}
+        row = {"drive_id": drive_id, "km": km, "pct": pct, "wh_per_km": whkm,
+               "at": sync_mod.now_local().isoformat(timespec="minutes")}
+        if split:
+            row["driving_pct"], row["climate_pct"] = split
+        elif drive_id in by_id:
+            # A reading re-entered without the split keeps the split it had:
+            # correcting a distance should not silently discard a measurement
+            # of something else.
+            for key in ("driving_pct", "climate_pct"):
+                if key in by_id[drive_id]:
+                    row[key] = by_id[drive_id][key]
+        by_id[drive_id] = row
         added.append(drive_id)
     state.put(session, state.CAR_READINGS_KEY,
               _json.dumps(sorted(by_id.values(), key=lambda r: r["drive_id"])))
@@ -7006,7 +7028,16 @@ def accuracy(
         return {"trips": 0,
                 "how": "Add pairs with /api/add-car-reading?readings=<id>:<km>:<pct>:<wh_per_km>"}
 
+    settings = get_settings()
     out, d_err, e_err = [], [], []
+    # The climate/accessory model, judged against the car's own breakdown.
+    #
+    # driving_only_kwh subtracts the loads that run on a clock rather than on
+    # distance, and until the Consumption panel was recorded there was nothing
+    # to check it against — it was fitted constants answering to nobody. The
+    # car states the answer directly: what it bills to Driving is what this
+    # model is trying to leave behind.
+    split_err = []
     for r in rows:
         d = session.get(Drive, int(r["drive_id"]))
         if d is None or not d.distance_km or not d.energy_used_kwh:
@@ -7035,6 +7066,41 @@ def accuracy(
             "blind_km": round(d.start_recovered_km or 0.0, 2),
             "within_target": abs((app_whkm - r["wh_per_km"]) / r["wh_per_km"] * 100.0) <= target_pct,
         })
+        if r.get("driving_pct") is not None and capacity_kwh and d.duration_min:
+            # Both sides as the non-propulsion kWh, because that is the
+            # quantity the model produces. The car's is everything it did not
+            # bill to Driving: climate, accessories, and the elevation credit
+            # this app has no way to see.
+            car_driving = float(r["driving_pct"]) / 100.0 * capacity_kwh
+            car_other = car_kwh - car_driving
+            app_driving = sync_mod.driving_only_kwh(
+                d.energy_used_kwh, d.duration_min, d.outside_temp_c,
+                d.climate_min, d.distance_km)
+            app_other = d.energy_used_kwh - app_driving
+            hours = max(d.duration_min, 1.0) / 60.0
+            out[-1]["non_propulsion_kwh"] = [round(app_other, 3), round(car_other, 3)]
+            out[-1]["non_propulsion_kw"] = [round(app_other / hours, 3),
+                                            round(car_other / hours, 3)]
+            # What the car's own display allows, expressed in the same units.
+            # Its Consumption lines are whole tenths of a percent, so on a
+            # short drive the rounding alone outweighs anything this model
+            # could be wrong by: the 12-minute trip of 11 September carries a
+            # 0.17 kW floor against an effect size near 0.25. Reported per
+            # reading, and kept out of the aggregate below, because averaging
+            # a measurement with its own noise does not make it one.
+            floor_kw = round(0.05 / 100.0 * capacity_kwh / hours, 3)
+            out[-1]["kw_floor"] = floor_kw
+            if r.get("climate_pct") is not None:
+                out[-1]["climate_kw"] = [
+                    round(sync_mod.climate_kwh(
+                        d.duration_min, d.outside_temp_c,
+                        1.0 if (d.climate_min is None or d.climate_min > 0) else 0.0)
+                        / hours, 3),
+                    round(float(r["climate_pct"]) / 100.0 * capacity_kwh / hours, 3)]
+            if floor_kw <= CLIMATE_JUDGE_MAX_FLOOR_KW:
+                split_err.append((app_other - car_other) / hours)
+            else:
+                out[-1]["kw_excluded"] = "the car's own rounding is larger than the effect"
     if not out:
         return {"trips": 0, "note": "None of the recorded readings match a trip with energy."}
 
@@ -7154,6 +7220,30 @@ def accuracy(
         "note": ("Battery % and Wh/km are the same energy figure over two "
                  "different constants — see this endpoint's docs. The two "
                  "independent errors are energy and distance."),
+        # The climate/accessory model against the car's own breakdown, in kW
+        # because that is the form both sides are actually a rate of — a
+        # kilowatt-hour error on a hundred-minute crawl and on a ten-minute
+        # hop are the same mistake at very different sizes.
+        #
+        # Positive means this app subtracts MORE than the car bills to
+        # everything-but-driving, which understates propulsion and drags
+        # driving_wh_per_km down with it.
+        "climate_model": ({
+            "trips": len(split_err),
+            "kw_err": round(sum(split_err) / len(split_err), 3),
+            **{k: v for k, v in _totals_significance(split_err).items()
+               if k != "kwh_err_verdict"},
+            "verdict": _totals_significance(split_err)["kwh_err_verdict"],
+            "how": ("Record the Consumption panel with the trip: "
+                    "/api/add-car-reading?readings=<id>:<km>:<pct>:<wh_per_km>"
+                    ":<driving_pct>:<climate_pct>"),
+        } if split_err else {
+            "trips": 0,
+            "how": ("Nothing to judge the climate model on yet. Add the "
+                    "Consumption panel's Driving and Climate percentages to a "
+                    "reading: /api/add-car-reading?readings=<id>:<km>:<pct>"
+                    ":<wh_per_km>:<driving_pct>:<climate_pct>"),
+        }),
         "readings": out,
     }
 
@@ -11123,6 +11213,14 @@ def fleet_token(session: Session = Depends(get_session)):
         "vin": state.active_vin(session),
         "base_url": state.active_base_url(session),
     }
+
+
+# The coarsest the car's Consumption panel may be and still judge the climate
+# model. Its lines are whole tenths of a percent of the pack, which on a short
+# drive is a larger number than anything the model could be wrong by — a
+# twelve-minute trip carries a 0.17 kW floor against an effect size near 0.25,
+# so including it adds noise dressed as evidence. Forty minutes or so clears it.
+CLIMATE_JUDGE_MAX_FLOOR_KW = 0.05
 
 
 def _totals_significance(diffs: list[float]) -> dict:
