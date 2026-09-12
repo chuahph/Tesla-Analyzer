@@ -11216,11 +11216,23 @@ def fleet_token(session: Session = Depends(get_session)):
 
 
 # The coarsest the car's Consumption panel may be and still judge the climate
-# model. Its lines are whole tenths of a percent of the pack, which on a short
-# drive is a larger number than anything the model could be wrong by — a
-# twelve-minute trip carries a 0.17 kW floor against an effect size near 0.25,
-# so including it adds noise dressed as evidence. Forty minutes or so clears it.
-CLIMATE_JUDGE_MAX_FLOOR_KW = 0.05
+# model. Its lines are whole tenths of a percent of the pack, so the rounding
+# alone is worth a rate — and on a short enough drive that rate is the whole
+# signal. Measured across the trips photographed so far:
+#
+#   12 min crawl    floor 0.169   measured -0.604   rounding IS the answer
+#   22 min highway  floor 0.094   measured +0.163
+#   53 min city     floor 0.039   measured +0.332
+#   100 min stop-go floor 0.021   measured +0.212
+#
+# A tenth of a kilowatt is where that stops: the floor then sits under half
+# the disagreement being measured, and its contribution to the aggregate
+# falls as more trips arrive while the signal does not. It keeps the
+# quarter-hour drives — where a highway run and a crawl differ most, which is
+# exactly what separates a rate error from a temperature one — and still
+# excludes the sub-quarter-hour ones where the car's display is the
+# measurement.
+CLIMATE_JUDGE_MAX_FLOOR_KW = 0.10
 
 
 def _totals_significance(diffs: list[float]) -> dict:
