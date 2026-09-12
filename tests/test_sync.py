@@ -3603,6 +3603,44 @@ def test_a_trip_measures_how_often_its_own_energy_readings_arrived():
     assert drive(10.0)["energy_sample_sec"] == pytest.approx(10.0)
 
 
+def test_a_trip_records_the_temperature_it_was_driven_in_not_the_one_it_ended_in():
+    """The climate model integrates a rate over the whole drive. Its input was
+    one sample, taken at the instant the drive finished.
+
+    That model costs 0.08 kW per degree, so a single degree of sampling error
+    is worth about half the disagreement it is currently being judged on — an
+    afternoon run that ends in an underground car park and an evening one that
+    ends in the open are not sampling the same thing. OutsideTemp streams
+    every five minutes throughout, so the mean is there for the taking.
+    """
+    shadow: dict = {}
+    energy, odo, ts = 30.0, 100.0, 0.0
+
+    # Thirty-six minutes of driving that cools from 36 to 30 as the sun goes
+    # down: mean 33, final reading 30.
+    for i in range(36):
+        temp = 36.0 - i * (6.0 / 35.0)
+        snap = _tel(ts, odo, round(energy, 3))
+        snap["out_temp"] = round(temp, 2)
+        advance_shadow(shadow, snap)
+        ts += 60.0; odo += 0.5; energy -= 0.03
+    stop = _tel(ts, odo, round(energy, 3), gear="ShiftStateP",
+                speed_mph=0.0, door=True)
+    stop["out_temp"] = 30.0
+    advance_shadow(shadow, stop)
+    final = _tel(ts + SHADOW_SETTLE_SEC + 10, odo, round(energy, 3),
+                 gear="ShiftStateP", speed_mph=0.0)
+    final["out_temp"] = 30.0
+    trip = advance_shadow(shadow, final)
+
+    assert trip is not None
+    assert trip["out_temp"] == pytest.approx(33.0, abs=0.3), \
+        f"recorded {trip['out_temp']} for a drive that averaged 33"
+    # The closing reading is kept, because "what was it like when I arrived"
+    # is a different question from "what should the model integrate".
+    assert trip["out_temp_end"] == pytest.approx(30.0)
+
+
 def test_a_trips_cadence_does_not_start_at_the_previous_trips_last_reading():
     """The tally is per trip. Its clock has to be too.
 
