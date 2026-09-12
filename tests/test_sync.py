@@ -3641,6 +3641,92 @@ def test_a_trip_records_the_temperature_it_was_driven_in_not_the_one_it_ended_in
     assert trip["out_temp_end"] == pytest.approx(30.0)
 
 
+def test_the_temperature_average_stops_when_the_car_does():
+    """A drive spent entirely at 40 C records 40, however cool where it parks.
+
+    The mean is accumulated as records arrive, but records keep arriving
+    through the settle window after the car has stopped — so a plain
+    accumulator integrates past the end of the journey, at whatever the
+    temperature is where the car came to rest. That is the endpoint-sampling
+    bias this averaging exists to remove, reintroduced inside a mean that
+    looks principled, which is worse than the original for being harder to
+    see.
+
+    Measured before the fix: 36.5 for this drive, the accumulator having run
+    to 1090 seconds against a 900-second trip. 3.5 C is 0.28 kW — larger than
+    the whole disagreement the climate model is being judged on.
+
+    The ramp test above could not catch it: on a smooth ramp the arrival
+    temperature is close to the last driving one, so the contamination hides
+    inside the rounding.
+    """
+    shadow: dict = {}
+    energy, odo, ts = 30.0, 100.0, 0.0
+    for _ in range(3):
+        snap = _tel(ts, odo, round(energy, 3))
+        snap["out_temp"] = 40.0
+        advance_shadow(shadow, snap)
+        ts += 300.0; odo += 3.0; energy -= 0.5
+
+    # Parked somewhere twenty degrees cooler — underground, in shade, at night.
+    stop = _tel(ts, odo, round(energy, 3), gear="ShiftStateP",
+                speed_mph=0.0, door=True)
+    stop["out_temp"] = 20.0
+    advance_shadow(shadow, stop)
+    final = _tel(ts + SHADOW_SETTLE_SEC + 10, odo, round(energy, 3),
+                 gear="ShiftStateP", speed_mph=0.0)
+    final["out_temp"] = 20.0
+    trip = advance_shadow(shadow, final)
+
+    assert trip is not None
+    assert trip["out_temp"] == pytest.approx(40.0, abs=0.1), \
+        f"recorded {trip['out_temp']} for a drive spent entirely at 40 C"
+    # The closing reading is still kept, and still says where it ended up.
+    assert trip["out_temp_end"] == pytest.approx(20.0)
+
+
+def test_a_stop_during_the_journey_still_counts_toward_its_temperature():
+    """Only the LAST stationary stretch is the arrival. A car sitting in
+    traffic is under the same climate load and still on its journey, so
+    dropping every stop would trade one bias for another — and a queue in the
+    sun is exactly when the climate load is highest.
+    """
+    shadow: dict = {}
+    energy, odo, ts = 30.0, 100.0, 0.0
+
+    def moving(temp):
+        nonlocal ts, odo, energy
+        snap = _tel(ts, odo, round(energy, 3))
+        snap["out_temp"] = temp
+        advance_shadow(shadow, snap)
+        ts += 300.0; odo += 3.0; energy -= 0.5
+
+    def halted(temp):
+        nonlocal ts, energy
+        snap = _tel(ts, odo, round(energy, 3), speed_mph=0.0)
+        snap["out_temp"] = temp
+        advance_shadow(shadow, snap)
+        ts += 300.0; energy -= 0.05
+
+    moving(40.0)          # 300 s at 40 while under way
+    halted(40.0)          # 300 s at 40, stopped in traffic — must count
+    moving(40.0)          # moving again: the held stretch commits
+    moving(40.0)
+
+    stop = _tel(ts, odo, round(energy, 3), gear="ShiftStateP",
+                speed_mph=0.0, door=True)
+    stop["out_temp"] = 20.0
+    advance_shadow(shadow, stop)
+    final = _tel(ts + SHADOW_SETTLE_SEC + 10, odo, round(energy, 3),
+                 gear="ShiftStateP", speed_mph=0.0)
+    final["out_temp"] = 20.0
+    trip = advance_shadow(shadow, final)
+
+    assert trip is not None
+    assert trip["out_temp"] == pytest.approx(40.0, abs=0.1), \
+        f"recorded {trip['out_temp']} — the traffic stop was dropped with the arrival"
+
+
 def test_a_trips_cadence_does_not_start_at_the_previous_trips_last_reading():
     """The tally is per trip. Its clock has to be too.
 

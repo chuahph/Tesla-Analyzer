@@ -3199,13 +3199,43 @@ def advance_shadow(shadow: dict[str, Any], snap: dict[str, Any]) -> dict[str, An
             # afternoon run that ends in an underground car park and an
             # evening one that ends in the open are not sampling the same
             # thing, and the stream sends this every five minutes throughout.
+            stopped = float(snap.get("speed_kmh") or 0.0) <= ZERO_SPEED_KMH
             if last.get("out_temp") is not None:
-                shadow["temp_sec"] = float(shadow.get("temp_sec") or 0.0) + gap
-                shadow["temp_sum"] = (float(shadow.get("temp_sum") or 0.0)
-                                      + float(last["out_temp"]) * gap)
+                # Held while stationary, committed only when the car moves
+                # again — the same shape as idle_run_since below, and for the
+                # same reason. A trip ends at the moment the car stopped, but
+                # records keep arriving through the settle window, so a plain
+                # accumulator keeps integrating after the journey is over.
+                #
+                # Measured: a 15-minute drive entirely at 40 C, parked
+                # somewhere 20 C, recorded 36.5. The accumulator had run to
+                # 1090 seconds against a 900-second trip, and the extra 190
+                # were the arrival weighted at the parked temperature — which
+                # is the endpoint-sampling bias this averaging exists to
+                # remove, quietly reintroduced inside a mean that looks
+                # principled. 3.5 C is 0.28 kW, larger than the whole
+                # disagreement being measured.
+                #
+                # A stop mid-journey is different and must still count: the
+                # car sits in traffic under the same climate load, and that
+                # stretch is part of the drive. Committing the hold on the
+                # next movement keeps those and drops only the last one, which
+                # is the arrival by definition — nothing followed it.
+                temp = float(last["out_temp"])
+                if stopped:
+                    shadow["temp_hold_sec"] = float(
+                        shadow.get("temp_hold_sec") or 0.0) + gap
+                    shadow["temp_hold_sum"] = float(
+                        shadow.get("temp_hold_sum") or 0.0) + temp * gap
+                else:
+                    shadow["temp_sec"] = (float(shadow.get("temp_sec") or 0.0)
+                                          + float(shadow.pop("temp_hold_sec", 0.0) or 0.0)
+                                          + gap)
+                    shadow["temp_sum"] = (float(shadow.get("temp_sum") or 0.0)
+                                          + float(shadow.pop("temp_hold_sum", 0.0) or 0.0)
+                                          + temp * gap)
             if last.get("climate_on"):
                 shadow["climate_sec"] = float(shadow.get("climate_sec") or 0.0) + gap
-            stopped = float(snap.get("speed_kmh") or 0.0) <= ZERO_SPEED_KMH
             run_since = shadow.get("idle_run_since")
             if stopped and run_since is None:
                 shadow["idle_run_since"] = float(last["ts"])
@@ -3256,6 +3286,8 @@ def advance_shadow(shadow: dict[str, Any], snap: dict[str, Any]) -> dict[str, An
             shadow.pop("e_val", None)
             shadow.pop("temp_sec", None)
             shadow.pop("temp_sum", None)
+            shadow.pop("temp_hold_sec", None)
+            shadow.pop("temp_hold_sum", None)
             open_at = shadow["open"]
         elif not open_at:
             # Nothing to open yet, and nothing to measure until there is.
@@ -3724,6 +3756,10 @@ def _shadow_close(shadow: dict[str, Any], end: dict[str, Any],
     climate_sec = float(shadow.pop("climate_sec", 0.0) or 0.0)
     temp_sec = float(shadow.pop("temp_sec", 0.0) or 0.0)
     temp_sum = float(shadow.pop("temp_sum", 0.0) or 0.0)
+    # Whatever is still held is the arrival: nothing moved after it. Dropped
+    # rather than counted, exactly as the trailing idle run above is.
+    shadow.pop("temp_hold_sec", None)
+    shadow.pop("temp_hold_sum", None)
     # An idle run still open at the close is the arrival itself — the trip
     # ends at the moment the car stopped, so that stretch comes after it, not
     # during it. Dropped rather than counted.
