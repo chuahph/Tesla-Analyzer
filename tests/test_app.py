@@ -5216,6 +5216,110 @@ def test_compare_reports_distance_no_trip_covers():
         settings.app_passcode = old_pc
 
 
+def test_compare_prices_the_old_temperature_sampling_through_the_real_model():
+    """The endpoint temperature's cost is not 0.08 kW per degree.
+
+    climate_kwh is CLIMATE_BASE_KW + 0.08 * abs(t - 22), clamped. So two
+    readings two degrees apart on opposite sides of 22 cost exactly nothing,
+    and two inside the clamp cost nothing either. Reporting 0.08 * delta would
+    invent a bias on precisely the mild trips where there is none — and this
+    figure exists to say how much the pre-12-September climate scores were
+    contaminated, so inventing one would defeat it.
+    """
+    import json as _json
+
+    from app.database import SessionLocal
+    from app import state, sync as sync_mod
+
+    settings = get_settings()
+    old_pc = settings.app_passcode
+    settings.app_passcode = ""
+    sess = SessionLocal()
+    prev = state.get(sess, state.TELEMETRY_TRIPS_KEY)
+    try:
+        now = sync_mod.now_local()
+
+        def trip(mins_ago, odo, mean_t, end_t):
+            at = now - timedelta(minutes=mins_ago)
+            end = at + timedelta(minutes=10)
+            return {"start_ts": at.timestamp(), "end_ts": end.timestamp(),
+                    "start_time": at.isoformat(timespec="seconds"),
+                    "end_time": end.isoformat(timespec="seconds"),
+                    "distance_km": 5.0, "duration_min": 10.0,
+                    "energy_kwh": 1.0, "wh_per_km": 200.0,
+                    "start_odo_km": odo, "end_odo_km": odo + 5.0,
+                    "out_temp": mean_t, "out_temp_end": end_t}
+
+        state.put(sess, state.TELEMETRY_TRIPS_KEY, _json.dumps([
+            trip(120, 31100.0, 33.0, 30.0),   # hot: 3 C apart, both above 22
+            trip(90, 31105.0, 21.0, 23.0),    # mild: 2 C apart, straddling 22
+            trip(60, 31110.0, 26.0, 26.0),    # no sampling error at all
+        ]))
+        sess.commit()
+
+        with TestClient(app) as client:
+            rows = client.get("/api/telemetry/compare").json()["trips"]
+
+        bias = [r["telemetry"]["out_temp_bias_kw"] for r in rows]
+        # 3 C apart and both the same side of neutral: the full 0.24 kW, which
+        # on its own exceeds the mean disagreement the model is judged on.
+        assert bias[0] == pytest.approx(0.240, abs=0.001), bias
+        # 2 C apart and straddling neutral: the naive 0.08 * delta would call
+        # this 0.16 kW. The model says zero, because it is zero.
+        assert bias[1] == pytest.approx(0.0, abs=0.001), bias
+        assert bias[2] == pytest.approx(0.0, abs=0.001), bias
+        # Both readings travel with it, so the number can be checked by hand.
+        assert rows[0]["telemetry"]["out_temp"] == 33.0
+        assert rows[0]["telemetry"]["out_temp_end"] == 30.0
+    finally:
+        state.put(sess, state.TELEMETRY_TRIPS_KEY, prev or "[]")
+        sess.commit()
+        sess.close()
+        settings.app_passcode = old_pc
+
+
+def test_a_trip_closed_before_the_mean_existed_is_not_given_a_fake_bias():
+    """Every trip before 12 September has no out_temp_end. Its sampling error
+    is unknown, and unknown must not read as zero — a null says "this trip
+    cannot tell you", which is the honest answer and keeps the contaminated
+    trips visibly distinct from the clean ones."""
+    import json as _json
+
+    from app.database import SessionLocal
+    from app import state, sync as sync_mod
+
+    settings = get_settings()
+    old_pc = settings.app_passcode
+    settings.app_passcode = ""
+    sess = SessionLocal()
+    prev = state.get(sess, state.TELEMETRY_TRIPS_KEY)
+    try:
+        now = sync_mod.now_local()
+        at = now - timedelta(minutes=90)
+        end = at + timedelta(minutes=10)
+        state.put(sess, state.TELEMETRY_TRIPS_KEY, _json.dumps([{
+            "start_ts": at.timestamp(), "end_ts": end.timestamp(),
+            "start_time": at.isoformat(timespec="seconds"),
+            "end_time": end.isoformat(timespec="seconds"),
+            "distance_km": 5.0, "duration_min": 10.0, "energy_kwh": 1.0,
+            "wh_per_km": 200.0, "start_odo_km": 31100.0, "end_odo_km": 31105.0,
+            "out_temp": 31.0,          # the old single sample, stored as out_temp
+        }]))
+        sess.commit()
+
+        with TestClient(app) as client:
+            row = client.get("/api/telemetry/compare").json()["trips"][0]
+
+        assert row["telemetry"]["out_temp"] == 31.0
+        assert row["telemetry"]["out_temp_end"] is None
+        assert row["telemetry"]["out_temp_bias_kw"] is None
+    finally:
+        state.put(sess, state.TELEMETRY_TRIPS_KEY, prev or "[]")
+        sess.commit()
+        sess.close()
+        settings.app_passcode = old_pc
+
+
 def test_second_field_set_is_recorded_but_not_yet_believed():
     """LifetimeEnergyUsed and BMSState are carried raw, and derived from later.
 

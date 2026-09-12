@@ -11367,6 +11367,27 @@ def _compare_row(t: dict, d, t_start, car_by_drive: dict, pct) -> dict:
             # decided, and so how much the final odometer is worth. See
             # _shadow_close.
             "ended_on": t.get("ended_on"),
+            # The temperature the climate model integrates, two ways: the mean
+            # across the drive (what it now gets) and the reading at the
+            # instant the trip ended (what it got until 12 September).
+            #
+            # Reported together because the gap between them IS the error the
+            # climate scores collected before that date were contaminated by,
+            # and it is measurable per trip rather than argued about. An
+            # afternoon run ending in a basement and an evening one ending in
+            # the open differ here by most of what separates their scores.
+            "out_temp": t.get("out_temp"),
+            "out_temp_end": t.get("out_temp_end"),
+            # What that difference was worth, in kW, to the model itself — not
+            # 0.08 per degree, which would be wrong. The model is
+            # abs(t - 22) and clamped at CLIMATE_MAX_KW, so two readings two
+            # degrees apart either side of 22 cost nothing, and two in the
+            # clamp cost nothing either. Evaluating the real function over one
+            # hour returns its kW directly and cannot drift from it.
+            "out_temp_bias_kw": (
+                None if t.get("out_temp") is None or t.get("out_temp_end") is None
+                else round(sync_mod.climate_kwh(60.0, t["out_temp"], 1.0)
+                           - sync_mod.climate_kwh(60.0, t["out_temp_end"], 1.0), 3)),
         },
         # The drive row this streamed trip became, named only so a finding
         # here can be looked up. Its figures are not reported: they ARE the
