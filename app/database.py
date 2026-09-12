@@ -63,6 +63,44 @@ def _ensure_column(table: str, column: str, ddl_type: str, default_sql: str) -> 
         conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {column} {ddl_type} DEFAULT {default_sql}"))
 
 
+def _ensure_unique_index(table: str, name: str, columns: tuple[str, ...]) -> None:
+    """Add a unique index, but only once the data can actually satisfy it.
+
+    The drives table has no database-level guard against the same journey
+    being written twice, and promotion runs from three places — the dashboard
+    read, the telemetry ingest, and the cron. Identity is a read-then-write
+    check, which two concurrent requests can both pass, and FastAPI runs these
+    endpoints in a threadpool so the concurrency is real. A unique index turns
+    that silent duplicate into a failed insert, which every automatic caller
+    already rolls back and retries on the next tick.
+
+    Checked before created, and never forced. A duplicate pair already in the
+    table would make CREATE fail, and failing the boot over it would be worse
+    than the duplicate: the app would be down instead of slightly wrong. So a
+    table that cannot take the index keeps its data and says so in the log,
+    and /api/data/duplicate-trips is the tool for clearing the way.
+    """
+    from sqlalchemy import inspect, text
+
+    inspector = inspect(engine)
+    if not inspector.has_table(table):
+        return
+    if any(ix["name"] == name for ix in inspector.get_indexes(table)):
+        return
+    cols = ", ".join(columns)
+    with engine.begin() as conn:
+        dupes = conn.execute(text(
+            f"SELECT COUNT(*) FROM (SELECT {cols} FROM {table} "
+            f"GROUP BY {cols} HAVING COUNT(*) > 1) d")).scalar() or 0
+        if dupes:
+            print(f"[schema] {table}: {dupes} duplicate {cols} groups — "
+                  f"{name} not created. Clear them with "
+                  f"/api/data/duplicate-trips?apply=true and restart.")
+            return
+        conn.execute(text(
+            f"CREATE UNIQUE INDEX IF NOT EXISTS {name} ON {table} ({cols})"))
+
+
 def _drop_column(table: str, column: str) -> None:
     """Remove a column that nothing maps any more.
 
@@ -183,6 +221,15 @@ def init_db() -> None:
     _ensure_column("battery_readings", "climate_on", "BOOLEAN", "NULL")
     _ensure_column("battery_readings", "cabin_overheat_protection", "VARCHAR(10)", "NULL")
     _ensure_column("battery_readings", "cabin_overheat_protection_actively_cooling", "BOOLEAN", "NULL")
+    # One journey, one row. Promotion decides whether a trip is already
+    # recorded by reading the table and then writing to it, which two
+    # concurrent requests can both get through — and it runs from the
+    # dashboard read, the telemetry ingest and the cron, so a page load
+    # landing while a batch arrives is all it takes. Two cars cannot start a
+    # trip in the same second, so this costs nothing and turns a silent
+    # duplicate into a failed insert the caller already retries after.
+    _ensure_unique_index("drives", "ux_drives_vehicle_start",
+                         ("vehicle_id", "start_time"))
     # dashcam_state existed to test one thing: whether Tesla leaked a Sentry
     # TRIGGER through the polled API indirectly, a clip being written standing
     # in for an alarm state the API does not publish. Telemetry answered it

@@ -1172,12 +1172,31 @@ def _place_parked_rates(session: Session) -> dict[str, float]:
             for p in session.scalars(select(Place)) if p.parked_draw_w}
 
 
+# How far back the Sentry index looks.
+#
+# It used to be "for ever", which is not a decision anyone made — it is what
+# a query with no bound does. The cost is real and grows on its own: this
+# loads on every dashboard read, and the bridge writes readings fast enough
+# to reach 40,000 in about three weeks.
+#
+# Ninety days is a deliberate trade, not a tuning knob. Absence in this index
+# means "the car was unreachable through that gap", and past the bound it
+# would quietly come to mean "we stopped looking" — so the bound has to be
+# far enough back that nothing is still being fitted from there. The parked
+# rates are fitted from gaps in the recent history and the car's own draw
+# changes with firmware and with what is left running; a reading from last
+# spring is not evidence about this month's standby.
+SENTRY_HISTORY_DAYS = 90
+
+
 def _parked_readings(session: Session, vehicle_id: int):
     """Every battery reading, for telling which parks had Sentry armed.
 
     A reading is written on any sentry_mode change, so this is enough to state
     each gap even where SoC never moved a whole point — see
-    driving.gap_sentry_state.
+    driving.gap_sentry_state. Bounded to SENTRY_HISTORY_DAYS: a gap older than
+    that reads as unknown, and is then excluded from both the armed and the
+    unarmed fit rather than guessed at.
 
     Two columns, not whole rows, and indexed here rather than by each caller.
     This is the car's ENTIRE reading history on every dashboard load and it
@@ -1195,6 +1214,8 @@ def _parked_readings(session: Session, vehicle_id: int):
         select(BatteryReading.ts, BatteryReading.sentry_state,
                BatteryReading.sentry_mode)
         .where(BatteryReading.vehicle_id == vehicle_id,
+               BatteryReading.ts >= (sync_mod.now_local()
+                                     - timedelta(days=SENTRY_HISTORY_DAYS)),
                # A reading that knows nothing about Sentry answers nothing:
                # the index skips them when it reads a gap, so carrying them
                # only makes the list longer. Either column will do — a row
@@ -4896,6 +4917,38 @@ def _csv_text(headers, rows) -> str:
     return buf.getvalue()
 
 
+def _battery_readings_csv(session: Session, vehicle_id: int) -> str:
+    """Every battery reading for one car, as its own sheet.
+
+    These are not derived and they are not recoverable. Tesla's own data
+    export has no such granularity, so if this table goes, the parked-drain
+    evidence, the Sentry history and the battery-health trend go with it — and
+    the fits that read them fall back to a whole-history average with nothing
+    to say which parks were armed.
+
+    Under analysis/ so the importer skips it (see importer._is_junk): this is
+    a record to keep, not rows to re-import, and the import path only knows
+    how to make drives and charges anyway.
+    """
+    rows = session.execute(
+        select(BatteryReading.ts, BatteryReading.soc, BatteryReading.range_km,
+               BatteryReading.odo_km, BatteryReading.sentry_mode,
+               BatteryReading.sentry_state, BatteryReading.climate_on,
+               BatteryReading.cabin_overheat_protection,
+               BatteryReading.cabin_overheat_protection_actively_cooling)
+        .where(BatteryReading.vehicle_id == vehicle_id)
+        .order_by(BatteryReading.ts)).all()
+    return _csv_text(
+        ["ts", "soc", "range_km", "odo_km", "sentry_mode", "sentry_state",
+         "climate_on", "cabin_overheat_protection",
+         "cabin_overheat_protection_actively_cooling"],
+        [[r.ts.isoformat(sep=" ", timespec="seconds") if r.ts else "",
+          r.soc, r.range_km, r.odo_km, r.sentry_mode, r.sentry_state or "",
+          r.climate_on, r.cabin_overheat_protection or "",
+          r.cabin_overheat_protection_actively_cooling]
+         for r in rows])
+
+
 def _build_export_zip(drives: list[Drive], charges: list[Charge],
                       extras: dict[str, str] | None = None) -> bytes:
     """The drives.csv + charges.csv ZIP bytes, shared by the download
@@ -5220,7 +5273,20 @@ def backup_now(session: Session = Depends(get_session)):
 
     vehicle = _first_vehicle(session)
     drives, charges = _window(session, vehicle.id, days=3650)
-    zip_bytes = _build_export_zip(drives, charges)
+    # Readings travel with it now. The lean pair was the right archive while
+    # polling wrote everything and these were a convenience; they are the
+    # parked-drain evidence and the Sentry history since, and nothing can
+    # regenerate them — so a backup without them restores a car that has
+    # forgotten how much it draws while it sits.
+    extras = {}
+    try:
+        readings_csv = _battery_readings_csv(session, vehicle.id)
+        if readings_csv:
+            extras["analysis/battery-readings.csv"] = readings_csv
+    except Exception:  # noqa: BLE001 — a backup missing one sheet beats no
+        # backup at all, which is what raising here would produce.
+        extras = {}
+    zip_bytes = _build_export_zip(drives, charges, extras)
     name = f"tesla-analyzer-{vehicle.vin[-6:]}-backup.zip"
 
     try:
@@ -9511,7 +9577,11 @@ def summary(
         if _settle_shadows(session):
             _promote_shadow_trips(session, apply=True, max_add=PROMOTE_AUTO_MAX_ADD)
     except Exception:  # noqa: BLE001
-        pass
+        # Rolled back rather than only swallowed: on Postgres the failed
+        # statement aborts the transaction, and every query the rest of this
+        # summary makes would fail behind it. The unique constraint on drives
+        # can raise here when a dashboard load races the ingest.
+        session.rollback()
     _mark("settle")
 
     settings = get_settings()
@@ -10753,6 +10823,12 @@ def telemetry_ingest(
                     session, apply=True, max_add=PROMOTE_AUTO_MAX_ADD)
                 if c.get("action") == "add")
         except Exception:  # noqa: BLE001 — never let this reject the batch
+            # Rolled back, not just swallowed. On Postgres a failed statement
+            # aborts the whole transaction, so everything after this in the
+            # request fails too unless the session is reset — and the drives
+            # table now has a unique constraint that can raise here when two
+            # promotions race.
+            session.rollback()
             charges_promoted = 0
     if closed:
         try:
@@ -10766,7 +10842,10 @@ def telemetry_ingest(
         except Exception:  # noqa: BLE001 — never let this reject the batch
             # The records are already stored. A promotion that fails costs a
             # late dashboard row, which the next sync tick will write; losing
-            # the batch would cost the journey itself.
+            # the batch would cost the journey itself. Rolled back so the rest
+            # of this request still has a usable session — a race against the
+            # drives unique constraint lands here.
+            session.rollback()
             promoted = 0
 
     try:
@@ -11043,6 +11122,38 @@ def fleet_token(session: Session = Depends(get_session)):
         "access_token": token,
         "vin": state.active_vin(session),
         "base_url": state.active_base_url(session),
+    }
+
+
+def _totals_significance(diffs: list[float]) -> dict:
+    """Whether a run of per-trip differences says anything, or just scatters.
+
+    Size and significance are different questions and the report only
+    answered the first. A total can be several percent out because every trip
+    is a little high, which is a finding, or because a dozen noisy trips
+    happened to land on one side, which is not — and the totals line reads
+    identically either way.
+
+    The per-trip differences carry the answer: the mean against its own
+    standard error. Under about two, the sum is noise. Reported alongside the
+    figures rather than instead of them, because a real 2% error and an
+    unproven one are both worth seeing; it is treating the second as the
+    first that costs a day.
+    """
+    n = len(diffs)
+    if n < 3:
+        return {"kwh_err_verdict": "too few judged trips to say"}
+    mean = sum(diffs) / n
+    var = sum((d - mean) ** 2 for d in diffs) / (n - 1)
+    se = math.sqrt(var / n)
+    t = (mean / se) if se else 0.0
+    return {
+        "kwh_bias_kwh_per_trip": round(mean, 3),
+        "kwh_bias_stderr": round(se, 3),
+        "kwh_bias_t": round(t, 2),
+        "kwh_err_verdict": (
+            "a real bias" if abs(t) >= 2.0
+            else "not distinguishable from noise"),
     }
 
 
@@ -11940,6 +12051,21 @@ def telemetry_compare(
                               for r in judged))  # recomputed, see _energy_unc_kwh
                 / sum(r["car"]["kwh"] for r in judged) * 100.0, 2)
             if sum(r["car"]["kwh"] for r in judged) else None,
+            # And whether that error is real, which is a different question
+            # from whether it is large. The per-trip differences are what
+            # carry the answer: their mean against its own standard error is
+            # a t, and under about two the total is a sum of noise that
+            # happened to land on one side.
+            #
+            # Worth stating outright because reading the percentage alone got
+            # it wrong. A 2.3% total against a 1.22% band looked like a
+            # systematic overstatement worth hunting; the per-trip mean was
+            # +0.032 kWh with a standard error of 0.027, t = 1.19, and the
+            # lead it produced — that LifetimeEnergyUsed was a cleaner
+            # traction measure — did not survive contact with the same trips.
+            **_totals_significance([
+                (r["telemetry"]["kwh"] or 0.0) - r["car"]["kwh"]
+                for r in judged]),
             "order": "telemetry, car",
         },
         "summary": {

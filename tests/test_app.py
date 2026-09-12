@@ -6056,6 +6056,91 @@ def test_a_trip_is_only_compared_against_its_own_car():
         settings.app_passcode = old_pc
 
 
+def test_the_accuracy_report_says_whether_its_error_is_real():
+    """Size and significance are different questions.
+
+    A total can be several percent out because every trip is a little high,
+    which is a finding, or because a dozen noisy trips landed on one side,
+    which is not — and the totals line read identically either way. It is
+    what made me read +2.3% as a systematic overstatement and go hunting: the
+    per-trip mean was +0.032 kWh with a standard error of 0.027, t = 1.19.
+    """
+    from app.api.routes import _totals_significance
+
+    # The real fortnight, to three decimals, from /api/telemetry/compare.
+    real = [0.090, 0.033, 0.047, 0.035, 0.097, -0.159, -0.010, 0.010,
+            -0.050, 0.190, 0.069]
+    out = _totals_significance(real)
+    assert out["kwh_bias_kwh_per_trip"] == pytest.approx(0.032, abs=0.001)
+    assert out["kwh_bias_t"] == pytest.approx(1.19, abs=0.02)
+    assert out["kwh_err_verdict"] == "not distinguishable from noise"
+
+    # The same mean, measured eleven times as tightly, is a finding.
+    tight = [0.032, 0.030, 0.034, 0.031, 0.033, 0.032, 0.035, 0.030,
+             0.033, 0.031, 0.034]
+    sharp = _totals_significance(tight)
+    assert sharp["kwh_bias_kwh_per_trip"] == pytest.approx(0.032, abs=0.001)
+    assert sharp["kwh_bias_t"] > 2.0
+    assert sharp["kwh_err_verdict"] == "a real bias"
+
+    # Too few to say anything is its own answer, not a t of zero.
+    assert _totals_significance([0.1, 0.2])["kwh_err_verdict"] == \
+        "too few judged trips to say"
+
+
+def test_one_journey_cannot_be_written_twice():
+    """Promotion reads the table to decide whether a trip is already there,
+    then writes to it. Two requests can both get through that.
+
+    It runs from the dashboard read, the telemetry ingest and the cron, and
+    FastAPI serves these in a threadpool — so a page load landing while a
+    batch arrives is all it takes, and the result is a journey counted twice
+    in every total. Two cars cannot start a trip in the same second, so the
+    database can simply refuse.
+    """
+    from sqlalchemy.exc import IntegrityError
+
+    from app.database import SessionLocal
+    from app.models import Drive, Vehicle
+    from app import sync as sync_mod
+
+    with SessionLocal() as s:
+        car = Vehicle(vin="RACEVIN000000001", name="Race", model="Model 3")
+        s.add(car)
+        s.commit()
+        start = sync_mod.now_local().replace(microsecond=0)
+
+        def row():
+            return Drive(vehicle_id=car.id, start_time=start,
+                         end_time=start + timedelta(minutes=20),
+                         distance_km=10.0, duration_min=20.0,
+                         start_soc=70, end_soc=68, energy_used_kwh=1.9,
+                         avg_speed_kmh=30, max_speed_kmh=60,
+                         outside_temp_c=30, source="telemetry")
+
+        s.add(row())
+        s.commit()
+        s.add(row())
+        with pytest.raises(IntegrityError):
+            s.commit()
+        s.rollback()
+
+        # The same second on a DIFFERENT car is a different journey.
+        other = Vehicle(vin="RACEVIN000000002", name="Other", model="Model 3")
+        s.add(other)
+        s.commit()
+        twin = row()
+        twin.vehicle_id = other.id
+        s.add(twin)
+        s.commit()
+        assert s.query(Drive).filter(Drive.start_time == start).count() == 2
+        for v in (car, other):
+            for d in s.query(Drive).filter(Drive.vehicle_id == v.id).all():
+                s.delete(d)
+            s.delete(v)
+        s.commit()
+
+
 def test_two_places_at_one_spot_always_resolve_to_the_same_name(session):
     """Duplicate Places are an ordinary state for this table to be in.
 
@@ -7358,8 +7443,15 @@ def test_duplicate_trips_keeps_the_copy_that_saw_the_whole_journey():
 
                 # The real pair: one journey, two rows. The polled copy is the
                 # LOWER id here so the test cannot pass by preferring newest.
+                #
+                # A minute apart at the start, as the real pair was — polling
+                # saw the journey from whenever its tick happened to land, not
+                # from where it began. Identical starts are a different fault
+                # and the drives unique index now refuses them outright; this
+                # is the one that index cannot see, which is why the dedupe
+                # still has a job.
                 s.add(drive(100, 80, 10.8, 0.432))                # polled
-                s.add(drive(100, 67, 10.794, 1.96, "telemetry"))  # stream
+                s.add(drive(99, 67, 10.794, 1.96, "telemetry"))   # stream
                 # And a genuinely separate trip that merely abuts the first —
                 # a close a moment late and an open a moment early must not
                 # read as a duplicate.
