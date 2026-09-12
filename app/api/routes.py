@@ -1472,24 +1472,87 @@ def _build_info() -> dict:
     return {"sha": sha, "time": time_str}
 
 
-# Render's free tier stops the service after this long with no inbound
-# request. Named because it is the threshold that makes a quiet cron matter:
-# below it the interval is a preference, above it the host is asleep and
-# nothing scheduled runs at all.
-HOST_SLEEP_MIN = 15.0
+# Never call a cron stopped on less than this, however tight its schedule.
+# A one-minute cron missing two beats is a blip; calling that an outage would
+# make the flag mean nothing within a day.
+SYNC_STALE_FLOOR_MIN = 15.0
+# How many of its own beats a cron may miss before it is considered stopped.
+# Two and a half rather than two: a provider that fires a little late must not
+# be able to trip this by itself, and the fault being caught here (a job that
+# has been disabled) does not come back on the third beat.
+SYNC_STALE_BEATS = 2.5
+
+
+def _observed_tick_gap_min(session: Session) -> float | None:
+    """The interval this deployment's /api/sync cron actually runs at.
+
+    Measured rather than configured, because the app is not told: the schedule
+    lives in an external cron service, the README's suggestion is only a
+    suggestion, and the right interval genuinely varies (see the README on the
+    two limits that pull against each other). Anything comparing against an
+    assumed cadence is really asserting the user chose the assumed one.
+
+    Read out of the sync log, which is run-length encoded as
+    ``{o, n, a, b}`` — outcome, count, first and last epoch. A run of n ticks
+    spans (b - a) with n - 1 gaps between them, and the seam between two runs
+    is one more gap. The median of all of them survives a provider firing late
+    and the odd missed beat, which a mean would not.
+    """
+    import json as _json
+
+    try:
+        runs = _json.loads(state.get(session, state.SYNC_LOG_KEY) or "[]") or []
+    except ValueError:
+        return None
+    # Weighted, because the healthy steady state is ONE run: every tick
+    # reports the same outcome, so they collapse into a single entry covering
+    # hours. That entry is evidence of n - 1 intervals, not of one, and
+    # counting it once made a perfectly regular cron look unmeasurable —
+    # rejecting exactly the case this is for.
+    gaps: list[tuple[float, int]] = []
+    prev_b = None
+    for run in runs:
+        try:
+            a, b, n = float(run["a"]), float(run["b"]), int(run.get("n") or 1)
+        except (KeyError, TypeError, ValueError):
+            continue
+        if prev_b is not None and a > prev_b:
+            gaps.append((a - prev_b, 1))
+        if n > 1 and b > a:
+            gaps.append(((b - a) / (n - 1), n - 1))
+        prev_b = b
+    total = sum(w for _, w in gaps)
+    # Two observed intervals is the least that can be called a rhythm. Below
+    # it, say so rather than calibrate the whole check against a single gap
+    # that might itself be the outage.
+    if total < 2:
+        return None
+    gaps.sort()
+    seen, median = 0, gaps[-1][0]
+    for gap, weight in gaps:
+        seen += weight
+        if seen * 2 >= total:
+            median = gap
+            break
+    return round(median / 60.0, 1) if median > 0 else None
 
 
 def _sync_liveness(session: Session) -> dict[str, object]:
-    """How long since an /api/sync tick ran to completion.
+    """How long since an /api/sync tick ran to completion, and whether that is
+    longer than this cron's own rhythm.
 
     Reported in minutes rather than as a timestamp because the question is
     always "is it still running", and a phone should not have to subtract two
     ISO strings to answer it.
 
-    ``stale`` is judged against the sleep threshold rather than the cron's
-    documented 1-2 minutes: the interval is the user's to choose (Neon's free
-    tier meters compute, so a longer one is a legitimate trade), but past the
-    point where the host sleeps, the cron has stopped being a heartbeat.
+    ``stale`` asks whether the cron has missed several of ITS OWN beats, not
+    whether it is slower than some fixed number. The first version of this
+    judged against the fifteen minutes Render sleeps at, which conflated two
+    separate questions — is the host awake, and is the watchdog running — and
+    those come apart the moment a keep-alive job holds the host up
+    independently. Against a fixed threshold a deliberate 30-minute watchdog
+    reads as broken on every other check, and a flag that cries wolf half the
+    time is worse than no flag, because it teaches the reader to skip it.
     """
     try:
         last = float(state.get(session, state.FULL_TICK_KEY) or 0.0)
@@ -1500,16 +1563,28 @@ def _sync_liveness(session: Session) -> dict[str, object]:
         # so does a cron that was never set up — which is why it says which
         # it cannot tell rather than reporting a reassuring zero.
         return {"last_tick_min_ago": None, "stale": None,
+                "every_min": None,
                 "why": "no /api/sync tick has completed yet"}
     mins = round((time.time() - last) / 60.0, 1)
-    stale = mins > HOST_SLEEP_MIN
+    every = _observed_tick_gap_min(session)
+    if every:
+        limit = max(every * SYNC_STALE_BEATS, SYNC_STALE_FLOOR_MIN)
+        overdue = f"it runs about every {every:g} min"
+    else:
+        # Not enough history to know the rhythm. SUSPEND_MAX_QUIET_MIN is the
+        # app's existing answer to "how long without a completed tick before
+        # something is wrong" — reused rather than invented, so there is one
+        # such number in the codebase and not two that can drift apart.
+        limit = SUSPEND_MAX_QUIET_MIN
+        overdue = "its usual interval is not known yet"
+    stale = mins > limit
     return {
         "last_tick_min_ago": mins,
+        "every_min": every,
         "stale": stale,
-        **({"why": f"no /api/sync tick for {mins} min — past the "
-                   f"{HOST_SLEEP_MIN:.0f} min the host sleeps at, so the "
-                   f"telemetry watchdog is not running either; check the "
-                   f"external cron"} if stale else {}),
+        **({"why": f"no /api/sync tick for {mins} min and {overdue} — the "
+                   f"telemetry watchdog runs only on that tick, so it is not "
+                   f"running either; check the external cron"} if stale else {}),
     }
 
 

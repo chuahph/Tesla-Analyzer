@@ -294,8 +294,10 @@ after fifteen minutes with no inbound request. A sleeping host runs nothing
 scheduled — including the telemetry watchdog — so a cron slower than that
 silences the alarm for the exact fault it exists to catch, and the only visible
 symptom is the "APPLICATION LOADING" splash on your next dashboard open, which
-looks like nothing. `/api/health` reports `sync.last_tick_min_ago` and flags
-`sync.stale` past that threshold, so this is checkable rather than guessed at.
+looks like nothing. `/api/health` reports `sync.last_tick_min_ago` alongside
+`sync.every_min` — the cadence it has actually observed, not one it assumes —
+and flags `sync.stale` once the cron has missed several of its own beats, so
+this is checkable rather than guessed at, at whatever interval you chose.
 
 **Above a few minutes, or you pay Tesla.** Every tick may read `vehicle_data`
 on an awake car, subject to `SYNC_POLL_INTERVAL_MIN`. Those reads are billed,

@@ -348,16 +348,20 @@ def test_health_reports_build_info():
         assert set(body["build"]) == {"sha", "time"}
 
 
-def test_health_says_when_the_cron_that_drives_everything_has_stopped():
-    """Everything scheduled hangs off the external /api/sync cron, including
-    the watchdog that reports a dead telemetry path.
+def test_health_judges_the_cron_against_its_own_rhythm_not_a_fixed_number():
+    """A deliberate 30-minute watchdog is not a broken 10-minute one.
 
-    So a stopped cron silences the alarm for the exact fault it exists to
-    catch, and until now the only evidence was the host cold-starting, which
-    looks like nothing. Render's free tier sleeps after 15 minutes with no
-    request, so a gap past that means the cron is not calling — whatever its
-    own dashboard says.
+    The first version of this flagged anything past the fifteen minutes Render
+    sleeps at, which conflated two questions that come apart the moment a
+    keep-alive job holds the host up on its own: is the host awake, and is the
+    watchdog running. Against a fixed threshold a 30-minute cron reads as
+    broken on every other check — and a flag that cries wolf half the time is
+    worse than no flag, because it teaches the reader to skip it.
+
+    So the cadence is measured off the sync log and the question becomes
+    whether this cron has missed several of ITS OWN beats.
     """
+    import json as _json
     import time as _time
 
     from app import state
@@ -367,24 +371,60 @@ def test_health_says_when_the_cron_that_drives_everything_has_stopped():
     old_pc = settings.app_passcode
     settings.app_passcode = ""
     sess = SessionLocal()
-    prev = state.get(sess, state.FULL_TICK_KEY)
-    try:
-        state.put(sess, state.FULL_TICK_KEY, str(_time.time() - 90.0))
-        sess.commit()
-        with TestClient(app) as client:
-            live = client.get("/api/health").json()["sync"]
-        assert live["stale"] is False
-        assert live["last_tick_min_ago"] == pytest.approx(1.5, abs=0.2)
+    prev_tick = state.get(sess, state.FULL_TICK_KEY)
+    prev_log = state.get(sess, state.SYNC_LOG_KEY)
+    now = _time.time()
 
-        # Twenty-two minutes: past the point the host sleeps at.
-        state.put(sess, state.FULL_TICK_KEY, str(_time.time() - 22 * 60.0))
+    def health_with(tick_ago_min: float) -> dict:
+        state.put(sess, state.FULL_TICK_KEY, str(now - tick_ago_min * 60.0))
         sess.commit()
         with TestClient(app) as client:
-            dead = client.get("/api/health").json()["sync"]
+            return client.get("/api/health").json()["sync"]
+
+    try:
+        # Six hours of a 30-minute cron, run-length encoded the way
+        # _log_tick writes it: one run of 12 ticks spanning 5.5 hours.
+        state.put(sess, state.SYNC_LOG_KEY, _json.dumps([
+            {"o": "ok", "n": 12, "a": now - 6 * 3600, "b": now - 0.5 * 3600},
+        ]))
+        sess.commit()
+
+        # 22 minutes on a 30-minute cron is not even one beat late. The old
+        # fixed threshold called this stale; it is the normal state of a
+        # deliberately sparse watchdog.
+        ok = health_with(22.0)
+        assert ok["every_min"] == pytest.approx(30.0, abs=1.0), ok
+        assert ok["stale"] is False, ok
+
+        # 40 minutes is late but inside the allowance a provider firing a
+        # little behind is entitled to.
+        assert health_with(40.0)["stale"] is False
+
+        # Two and a half hours is five missed beats. That is a stopped job.
+        dead = health_with(150.0)
         assert dead["stale"] is True
-        # The consequence travels with the finding, because the danger is not
-        # the cold start — it is the watchdog being off at the same time.
+        # The consequence travels with the finding: the danger is not the
+        # lateness, it is the watchdog being off while it lasts.
         assert "watchdog" in dead["why"]
+        assert "every 30 min" in dead["why"]
+
+        # A tight cron must not be called stopped for missing two beats.
+        state.put(sess, state.SYNC_LOG_KEY, _json.dumps([
+            {"o": "ok", "n": 60, "a": now - 3600, "b": now},
+        ]))
+        sess.commit()
+        tight = health_with(6.0)
+        assert tight["every_min"] == pytest.approx(1.0, abs=0.2), tight
+        assert tight["stale"] is False, "6 min on a 1-min cron is a blip, not an outage"
+
+        # No history to calibrate against: fall back to the app's existing
+        # answer for "too long without a completed tick", rather than a second
+        # number that can drift away from it.
+        state.put(sess, state.SYNC_LOG_KEY, "[]")
+        sess.commit()
+        assert health_with(30.0)["every_min"] is None
+        assert health_with(30.0)["stale"] is False
+        assert health_with(90.0)["stale"] is True
 
         # Never ticked at all is not the same as ticked long ago, and must not
         # read as a reassuring zero.
@@ -395,7 +435,8 @@ def test_health_says_when_the_cron_that_drives_everything_has_stopped():
         assert never["last_tick_min_ago"] is None
         assert never["stale"] is None
     finally:
-        state.put(sess, state.FULL_TICK_KEY, prev or "")
+        state.put(sess, state.FULL_TICK_KEY, prev_tick or "")
+        state.put(sess, state.SYNC_LOG_KEY, prev_log or "[]")
         sess.commit()
         sess.close()
         settings.app_passcode = old_pc
