@@ -7887,8 +7887,84 @@ def test_duplicate_trips_keeps_the_copy_that_saw_the_whole_journey():
             # Nothing left to find.
             assert client.get(
                 "/api/data/duplicate-trips?days=7").json()["would_remove"] == 0
+
+            # And it can be READ BACK. Asserting the key is non-empty only
+            # proves a backup was WRITTEN, which is what this test used to do
+            # — and for as long as it did, the rows were being saved into a
+            # drawer with no handle: nothing in the app read that key, so a
+            # dedupe was in practice irreversible while looking reversible.
+            back = client.post(
+                "/api/data/restore-deduped-drives?apply=true").json()
+            assert back["restored"] == 1, back
+            with SessionLocal() as s:
+                left = s.scalars(select(Drive).where(Drive.vehicle_id == vid)).all()
+                assert len(left) == 3
+                # Under its ORIGINAL id, so car readings and cost overrides
+                # that reference a drive still point at the same journey.
+                assert 0.432 in [d.energy_used_kwh for d in left]
+
+            # The restored row is the same journey, not an approximation of
+            # one: the deduper finds it again, for the same reason as before.
+            assert client.get(
+                "/api/data/duplicate-trips?days=7").json()["would_remove"] == 1
+
+            # Restoring twice must not duplicate what it just put back.
+            again = client.post(
+                "/api/data/restore-deduped-drives?apply=true").json()
+            assert again["restored"] == 0 and again["already_present"] == 1
     finally:
         settings.app_passcode = old_pc
+def test_a_second_dedupe_does_not_throw_away_the_first_ones_backup():
+    """The backup accumulates across runs, because the endpoint is re-runnable.
+
+    Duplicates appear whenever promotion races itself, so this gets run more
+    than once, and each run removes a different row. Writing the key blind
+    means run two discards what run one saved — which is precisely the failure
+    this key was split off from the purge's to avoid, reproduced inside the
+    key created to prevent it.
+    """
+    import json as _json
+
+    from app import state as state_mod
+    from app.api import routes
+    from app.database import SessionLocal
+
+    sess = SessionLocal()
+    prev = state_mod.get(sess, state_mod.DEDUPED_DRIVES_KEY)
+    try:
+        state_mod.put(sess, state_mod.DEDUPED_DRIVES_KEY, _json.dumps(
+            {"at": "2026-09-01T08:00:00", "rows": [{"id": 901, "distance_km": 5.0}]}))
+        sess.commit()
+
+        # What the endpoint does on a later run: fold the new rows in.
+        rows = {}
+        prior = _json.loads(state_mod.get(sess, state_mod.DEDUPED_DRIVES_KEY))
+        for row in prior["rows"]:
+            rows[row["id"]] = row
+        for row in ({"id": 902, "distance_km": 7.0},):
+            rows.setdefault(row["id"], row)
+        state_mod.put(sess, state_mod.DEDUPED_DRIVES_KEY,
+                      _json.dumps({"at": "x", "rows": list(rows.values())}))
+        sess.commit()
+
+        kept = _json.loads(state_mod.get(sess, state_mod.DEDUPED_DRIVES_KEY))
+        assert {r["id"] for r in kept["rows"]} == {901, 902}, \
+            "the earlier run's row was discarded"
+
+        # And an unreadable backup is never silently treated as empty: the
+        # restore says so, because "nothing to restore" and "the rows are gone
+        # and nothing can bring them back" must not look alike.
+        state_mod.put(sess, state_mod.DEDUPED_DRIVES_KEY, "{not json")
+        sess.commit()
+        out = routes._restore_drives_from(
+            sess, state_mod.DEDUPED_DRIVES_KEY, apply=False)
+        assert out.get("unreadable") is True and out["restored"] == 0, out
+    finally:
+        state_mod.put(sess, state_mod.DEDUPED_DRIVES_KEY, prev or "")
+        sess.commit()
+        sess.close()
+
+
 def test_a_gap_the_car_drove_through_is_marked_as_a_missed_journey():
     """A sleeping car and a dead receiver both produce silence, and every gap
     in this log reads alike — except one the car drove through.

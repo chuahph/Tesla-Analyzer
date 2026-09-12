@@ -2011,11 +2011,41 @@ def duplicate_trips(
         plan["applied"] = False
         return plan
     if pairs:
+        # Accumulated, not replaced. This endpoint is re-runnable by design —
+        # duplicates appear whenever promotion races itself — and each run
+        # removes a different row, so a single-slot backup means run two
+        # throws away what run one saved. That is the precise failure this
+        # key was split off from the purge's to avoid (see state.py), and
+        # writing it blind reproduced it inside the key meant to prevent it.
+        #
+        # Keyed by drive id so a re-run cannot enter the same row twice, and
+        # the older copy wins: it is the one whose deletion actually happened.
+        rows = {}
+        try:
+            prior = _json_mod.loads(
+                state.get(session, state.DEDUPED_DRIVES_KEY) or "{}") or {}
+        except ValueError:
+            # Unreadable is not empty. Overwriting it would destroy rows that
+            # may still be there, so the new ones go beside it under a name
+            # that says what happened, and nothing is lost silently.
+            prior = {}
+            plan["backup_unreadable"] = True
+        for row in (prior.get("rows") or []):
+            if row.get("id") is not None:
+                rows[row["id"]] = row
+        for drive in doomed.values():
+            row = _drive_row_dict(drive)
+            rows.setdefault(row.get("id"), row)
         backup = {"at": sync_mod.now_local().isoformat(timespec="seconds"),
-                  "rows": [_drive_row_dict(d) for d in doomed.values()]}
+                  "rows": list(rows.values())}
         state.put(session, state.DEDUPED_DRIVES_KEY, _json_mod.dumps(backup))
+        # Committed before the delete, for the same reason the purge does it:
+        # losing a backup and keeping the delete costs the history, while the
+        # reverse costs nothing.
         session.commit()
         services.delete_drives(session, list(doomed))
+        plan["backup_rows"] = len(rows)
+        plan["restore_with"] = "/api/data/restore-deduped-drives?apply=true"
     plan["applied"] = True
     plan["removed"] = len(pairs)
     return plan
@@ -2162,6 +2192,68 @@ def purge_pre_telemetry(
     return plan
 
 
+def _restore_drives_from(session: Session, key: str, apply: bool) -> dict:
+    """Put back drive rows serialised into ``key`` by whichever delete made it.
+
+    Shared by both restores because the deletes differ and the way back does
+    not: rows go back under their ORIGINAL ids, so trip numbers, the
+    car-readings log (which references drive ids) and every stored cost
+    override line up again, and a row whose id is already present is skipped
+    rather than overwritten — a restore must never clobber a trip recorded
+    since the delete.
+    """
+    raw = state.get(session, key)
+    if not raw:
+        return {"error": "no backup stored", "restored": 0}
+    try:
+        backup = _json_mod.loads(raw) or {}
+    except ValueError:
+        # Reported, not swallowed. An unreadable backup is the one state where
+        # rows are gone and nothing can bring them back, and it must never be
+        # indistinguishable from having nothing to restore.
+        return {"error": "backup is stored but cannot be parsed",
+                "restored": 0, "unreadable": True}
+    rows = backup.get("rows") or []
+    present = set(session.scalars(select(Drive.id)).all())
+    missing = [r for r in rows if r.get("id") not in present]
+    plan = {
+        "deleted_at": backup.get("at"),
+        "in_backup": len(rows),
+        "would_restore": len(missing),
+        "already_present": len(rows) - len(missing),
+    }
+    if backup.get("cutover"):
+        plan["cutover"] = backup["cutover"]
+    if not apply:
+        plan["applied"] = False
+        return plan
+    for row in missing:
+        session.add(_drive_from_row_dict(row))
+    session.commit()
+    plan["applied"] = True
+    plan["restored"] = len(missing)
+    return plan
+
+
+@router.api_route("/data/restore-deduped-drives", methods=["GET", "POST"])
+def restore_deduped_drives(
+    apply: bool = Query(False),
+    session: Session = Depends(get_session),
+):
+    """Put back the trips /api/data/duplicate-trips removed.
+
+    This existed on neither side until now. duplicate-trips deleted rows and
+    serialised them into state.DEDUPED_DRIVES_KEY, and nothing in the app ever
+    read that key — the rows were saved into a drawer with no handle. The one
+    test touching it asserted the key was non-empty, which confirms a backup
+    was WRITTEN and says nothing about whether it can be read back, so the gap
+    survived every pass that looked at test coverage.
+
+    Plans by default, like every other destructive-adjacent endpoint here.
+    """
+    return _restore_drives_from(session, state.DEDUPED_DRIVES_KEY, apply)
+
+
 @router.api_route("/data/restore-purged-drives", methods=["GET", "POST"])
 def restore_purged_drives(
     apply: bool = Query(False),
@@ -2174,30 +2266,12 @@ def restore_purged_drives(
     again. Rows whose id is already present are skipped rather than
     overwritten — a restore must never clobber a trip recorded since the
     purge. Plans by default, like the purge.
+
+    Body shared with the dedupe restore: the two deletes differ and the way
+    back does not, and one of them having quietly had no way back at all is
+    reason enough not to keep two copies of this that can drift.
     """
-    raw = state.get(session, state.PURGED_DRIVES_KEY)
-    if not raw:
-        return {"error": "no purge backup stored", "restored": 0}
-    backup = _json_mod.loads(raw)
-    rows = backup.get("rows") or []
-    present = set(session.scalars(select(Drive.id)).all())
-    missing = [r for r in rows if r.get("id") not in present]
-    plan = {
-        "purged_at": backup.get("at"),
-        "cutover": backup.get("cutover"),
-        "in_backup": len(rows),
-        "would_restore": len(missing),
-        "already_present": len(rows) - len(missing),
-    }
-    if not apply:
-        plan["applied"] = False
-        return plan
-    for row in missing:
-        session.add(_drive_from_row_dict(row))
-    session.commit()
-    plan["applied"] = True
-    plan["restored"] = len(missing)
-    return plan
+    return _restore_drives_from(session, state.PURGED_DRIVES_KEY, apply)
 
 
 @router.post("/data/reset-tags")
