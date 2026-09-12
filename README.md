@@ -5,6 +5,13 @@ It logs **drives** and **charging sessions**, analyses your **driving, usage and
 charging patterns**, and produces **concrete, prioritised recommendations** to
 improve efficiency, cut charging cost and protect long-term battery health.
 
+Journeys come from **Fleet Telemetry**: the car opens an mTLS connection to a
+receiver you run and streams what it is doing, rather than being asked. A trip
+is bounded by the gear change the car reports, and its energy is a subtraction
+of the car's own `EnergyRemaining` — so no battery-capacity constant enters the
+figure. Polling remains, reduced to a watchdog. See
+[Live data: Fleet Telemetry](#live-data-fleet-telemetry).
+
 It ships with a **demo mode** that generates realistic sample data, so you can
 explore the full dashboard immediately — no Tesla account or token required.
 
@@ -33,8 +40,21 @@ python scripts/build_site.py --out site   # → ./site (open site/index.html)
 ## Features
 
 **Data logging**
-- Lightweight collector that detects drive/charge sessions from Tesla API
-  snapshots and stores them in SQLite (any SQLAlchemy database URL works).
+- **Fleet Telemetry (primary).** The car streams to a receiver you host; a
+  shadow state machine in `app/sync.py` turns that stream into trips and
+  charges as they happen. Boundaries come from the car's own gear and speed
+  reports rather than being inferred between two distant polls, and trip
+  energy is a difference of `EnergyRemaining`, so it carries no capacity
+  assumption.
+- **Polling (watchdog).** Kept for the three things a one-way stream cannot
+  do: wake a car, prove it is reachable, and notice that the stream has
+  stopped. It no longer writes history — `/api/health` reports
+  `polling.writes_history: false`.
+- Streamed trips land in a staging area first and are promoted into the drive
+  history deliberately, because a wrong row in the real history is a repair
+  job and a wrong row in staging is a delete.
+- Stores to Postgres or SQLite (any SQLAlchemy URL). See
+  [Database](#database).
 - Demo mode generates ~4 months of realistic data with built-in seasonal and
   speed effects.
 
@@ -170,8 +190,11 @@ Once linked, run `python run.py collect` to log new drives/charges over time.
 
 ## Connecting your real Tesla (via .env)
 
-1. Obtain an access token for the **Owner API** or **Fleet API** (e.g. via
-   [Tesla Auth](https://github.com/adriankumpf/tesla_auth)).
+1. Obtain an access token for the **Fleet API** (e.g. via
+   [Tesla Auth](https://github.com/adriankumpf/tesla_auth)). The **Owner API**
+   still works for polling alone, and is what `TESLA_API_BASE_URL` defaults
+   to, but it cannot carry Fleet Telemetry — so choose the Fleet API unless
+   you have a reason not to.
 2. Copy `.env.example` to `.env` and set:
 
    ```env
@@ -215,12 +238,24 @@ Once linked, run `python run.py collect` to log new drives/charges over time.
    TARIFF_WEEKEND_OFFPEAK=true     # whole weekend at the off-peak rate (default)
    ```
 
-3. Run the collector to start logging sessions, and serve the dashboard:
+3. Serve the dashboard:
 
    ```bash
-   python run.py collect       # polls the API; leave running (e.g. in tmux/systemd)
-   python run.py serve         # in another shell
+   python run.py serve
    ```
+
+   `python run.py collect` also still exists — the original local collector,
+   polling the API in a loop and logging sessions from what it sees between
+   calls. It is the fallback for a setup **not** running
+   [Fleet Telemetry](#live-data-fleet-telemetry), and it is strictly worse at
+   the one thing that matters most: a boundary polled between two calls
+   minutes apart is inferred, where a streamed one is reported. Leave it
+   running under tmux/systemd if you use it.
+
+   **Fleet Telemetry needs the Fleet API**, not the Owner API — the virtual
+   key that signs the configuration has no Owner API equivalent. Note that
+   `TESLA_API_BASE_URL` still *defaults* to the Owner API host, so a telemetry
+   setup has to set it explicitly.
 
 When a token is present the app switches out of demo mode automatically and the
 dashboard badge shows **live**.
@@ -228,6 +263,121 @@ dashboard badge shows **live**.
 > Note: the live collector reads `vehicle_data` snapshots and reconstructs
 > sessions from state transitions (park ↔ drive, plug ↔ charge). It is
 > intentionally compact rather than a full-fidelity GPS logger.
+
+---
+
+## Live data: Fleet Telemetry
+
+The car connects outward to a receiver you run and pushes what it is doing.
+Nothing polls it for a journey, so a trip is bounded by the gear change the car
+itself reported rather than inferred between two snapshots minutes apart.
+
+```
+  Car ──mTLS WebSocket──▶ your VM ──ZMQ──▶ bridge.py ──HTTPS──▶ /api/telemetry
+                     (tesla/fleet-telemetry)                    (this app)
+```
+
+**The VM stores nothing.** It holds the keys and forwards records. The bridge
+keeps a small disk spool, and only for the one hop the car cannot re-send: the
+car buffers and replays what it could not deliver (measured — a 35-minute drive
+arrived 36 minutes late and rebuilt to within 0.4%), but once it has handed a
+record over it will never send it again, so a batch dropped between the bridge
+and the app is gone in a way no other failure here is.
+
+### Setting it up
+
+Two scripts, plus one step only a human with a phone can do. Both are
+re-runnable: every step checks for its own result first, so a failure halfway
+through is fixed by running it again.
+
+**1. Stand up the receiver** — a fresh Ubuntu 24.04 box (a free-tier GCP
+instance is enough):
+
+```bash
+curl -sL https://<your-app>/vm -o v.sh && sudo bash v.sh
+```
+
+Installs `tesla/fleet-telemetry`, generates the keypair into `/etc/tesla/keys`,
+and installs the bridge as a service. (`/vm` is a short redirect to the real
+script. Google's SSH-in-browser will not reliably paste on iOS, which makes a
+130-character raw URL a genuine obstacle rather than a cosmetic one — and the
+launcher downloads to a file and checks it before running, because an empty
+body from a deploy still in flight is a valid empty script that runs silently
+and reports success.)
+
+**2. Register the domain and pair the virtual key.** Needs a browser and the
+Tesla app; the setup script deliberately does not attempt it. The app serves
+the partner public key Tesla checks at its well-known path for you.
+
+**3. Tell the car to stream:**
+
+```bash
+curl -sL https://<your-app>/car -o c.sh && sudo bash c.sh
+```
+
+The configuration must be **signed by the virtual key paired to the vehicle**,
+and that key never leaves the VM — so the signing happens there, using Tesla's
+own vehicle-command proxy rather than anything hand-rolled. The access token
+travels the other way: fetched from the app for that one run, written to tmpfs,
+never to disk.
+
+### What streams, and the one thing to know about it
+
+About 40 fields, each with a minimum interval — `EnergyRemaining` every 10 s,
+`Soc` every 60 s, `SentryMode` every 10 s, `OutsideTemp` every 300 s.
+
+**Fields transmit only when they change.** A field that is configured but quiet
+is indistinguishable from one that was never configured, which is how a
+configuration re-run once took `BMSState` off the car and nothing looked wrong
+for days. This is why `/api/telemetry/fields` exists: it reports what has
+actually arrived, not what was requested.
+
+Configuration is also **queued, not applied**. Tesla stores it and hands it to
+the car the next time it connects, so `synced: false` on a sleeping car is
+normal — it is the car's own acknowledgement that is worth waiting for.
+
+### Checking it
+
+| what | url |
+| --- | --- |
+| is the receiver configured, and did the car acknowledge | `/api/telemetry/config` |
+| which fields have actually arrived | `/api/telemetry/fields` |
+| the raw records, newest last | `/api/telemetry/recent` |
+| streamed trips vs the recorded history | `/api/telemetry/compare` |
+| stretches the car said nothing | `/api/telemetry/gaps` |
+| carry staged trips into the history | `/api/telemetry/promote` |
+
+If the path breaks, the watchdog says so: an awake, reachable car that has
+streamed nothing for `BRIDGE_QUIET_ALERT_MIN` minutes raises an alert. That
+check runs in the polling tick, which is why the cron below still matters.
+
+---
+
+## Database
+
+Any SQLAlchemy URL works via `DATABASE_URL`; SQLite is the default and is fine
+locally. A hosted deployment wants Postgres, because Render's disk is
+ephemeral — the container is rebuilt on every deploy, and anything not in the
+database is gone.
+
+**Supabase** is the recommended free option: its free tier does not meter
+compute hours, so no cron cadence can run up a bill, and it pauses a project
+only after 7 days of zero activity — which any cron makes moot.
+
+**Neon** also works but meters compute with a 5-minute auto-suspend: a cron
+tighter than that keeps it active around the clock and spends the 100 CU-hour
+monthly cap in roughly half a month. If you are on Neon, use the split-job
+arrangement in [Choosing the interval](#choosing-the-interval) so the frequent
+job hits `/api/health` and `/api/sync` stays past the suspend window.
+
+Render's legacy `postgres://` scheme is normalised automatically, and hosted
+databases that drop idle connections are handled with pre-ping, so neither
+needs anything from you.
+
+Schema changes are applied at boot, additively. A guard the data cannot
+satisfy is declined rather than failed — a unique index that would conflict
+with existing duplicates leaves the app running and says so in
+`/api/health` under `schema`, rather than taking the deployment down.
 
 ---
 
@@ -624,9 +774,11 @@ tracking); logging it once starts the countdown. Purely what you enter here
 
 ## Adding a missed historical charge
 
-The sync loop only ever sees what it polls live — a charging session from
-before the car was linked, or one dropped by a bug that's since been fixed,
-has no snapshot data left for it to reconstruct. Tap **🔌 Add Historical
+Neither path can reconstruct a session it was not there for. Telemetry begins
+at the moment the car was configured to stream, and the poll only ever saw
+what it asked for while it was running — so a charge from before the car was
+linked, or one dropped by a bug since fixed, has nothing left to rebuild it
+from. Tap **🔌 Add Historical
 Charge** to log one by hand: start/end time, energy added, AC/DC, SoC, cost
 (auto-calculated from your configured tariff if left blank). Purely
 additive — it inserts one charge and leaves everything else untouched,
@@ -698,14 +850,35 @@ python run.py reset                            Drop & recreate schema
 
 ```
 app/
-  config.py         Settings (.env)            tesla_client.py  Tesla API client
-  database.py       Engine/session            collector.py     Logger + demo seeder
-  models.py         Vehicle / Drive / Charge  sample_data.py   Realistic data generator
-  schemas.py        API response models       main.py          FastAPI app
-  api/routes.py     REST endpoints            static/          Dashboard (HTML/CSS/JS)
+  sync.py           The shadow state machine: turns the telemetry stream into
+                    trips and charges. The largest module here, and where a
+                    journey's boundaries and energy are actually decided.
+  api/routes.py     REST endpoints, promotion, the telemetry ingest
+  state.py          Runtime state in the settings table (shadows, staged
+                    trips, tick history) — Render's disk is ephemeral, so
+                    anything that must survive a deploy lives in Postgres
+  models.py         Vehicle / Drive / Charge / BatteryReading / Place / ...
+  database.py       Engine, session, additive boot migrations
+  config.py         Settings (.env)          tesla_client.py  Fleet API client
+  collector.py      Demo seeder              sample_data.py   Data generator
+  schemas.py        API response models      main.py          FastAPI app
+  alerts.py         The four trend alerts    notifications.py Push / webhook
+  tariff.py         Pricing                  pricing_prefs.py Rate preferences
+  importer.py       Bring your own data      vin.py           VIN decoding
+  auth.py           Passcode + OAuth         services.py      Shared DB ops
+  static/           Dashboard (HTML/CSS/JS)
   analysis/
-    driving.py  charging.py  efficiency.py  recommendations.py  __init__.py (stats)
-tests/              pytest suite for the analytics engine
+    driving.py  charging.py  efficiency.py  battery.py  service.py
+    narrative.py  recommendations.py  __init__.py (stats helpers)
+scripts/telemetry/
+  01-vm-setup.sh    Stand up the receiver on a fresh Ubuntu box
+  02-configure-vehicle.sh  Sign and send the field config to the car
+  bridge.py         ZMQ -> /api/telemetry, with a disk spool. Deliberately
+                    dumb: it interprets nothing, so no wrong judgement can
+                    hide on a box nobody looks at.
+vm.sh, car.sh       Short launchers for the two scripts above, served at
+                    /vm and /car so they can be typed into a phone SSH window
+tests/              pytest suite (587 tests)
 ```
 
 ## Tests
