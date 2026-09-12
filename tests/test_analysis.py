@@ -1831,6 +1831,59 @@ def test_continuity_needs_odometer_anchors_and_readings():
     assert odometer_continuity(good, [])["available"] is False
 
 
+def test_a_habit_covering_almost_everything_has_nothing_to_compare_against():
+    """The penalty is a difference of two means, so a lopsided split measures
+    the smaller sample rather than the habit.
+
+    Measured live: stop-go traffic over 86% of the kilometres came out 96
+    Wh/km CHEAPER than "the rest" — reported in a field called penalty. That
+    is not a finding about stop-go traffic, it is three drives.
+    """
+    from datetime import datetime, timedelta
+    from types import SimpleNamespace
+
+    from app.analysis.driving import analyze
+
+    base = datetime(2026, 9, 1, 8, 0)
+
+    def drive(did, km, kwh, mins, odo, mx):
+        return SimpleNamespace(
+            id=did, start_time=base + timedelta(hours=did),
+            end_time=base + timedelta(hours=did, minutes=mins),
+            distance_km=km, energy_used_kwh=kwh, duration_min=mins,
+            wh_per_km=kwh * 1000.0 / km, start_soc=80, end_soc=76,
+            avg_speed_kmh=km / (mins / 60.0), max_speed_kmh=mx,
+            outside_temp_c=30.0, start_location="A", end_location="B",
+            start_area="A", end_area="B", idle_min=0.0, idle_tracked=True,
+            climate_min=None, start_odo_km=odo, end_odo_km=odo + km,
+            energy_estimated=False, cost=None, cost_override=None, tag=None,
+            start_coords="", end_coords="", start_lost_km=None,
+            end_lost_km=None, end_est_km=None, end_est_verified=None,
+            start_recovered_km=None, start_park_min=None, start_gap_sec=None,
+            end_gap_sec=None, tail_trim_sec=None, distance_flag=None,
+            polled_km=None, polled_kwh=None, source="telemetry")
+
+    # Twenty stop-go drives and two that are not: the comparison group is too
+    # small to average, whatever the difference happens to look like.
+    drives = [drive(i, 10.0, 1.8, 40, 1000.0 + i * 20, 70.0) for i in range(20)]
+    drives += [drive(50 + i, 30.0, 4.2, 25, 3000.0 + i * 40, 100.0)
+               for i in range(2)]
+    beh = analyze(drives, 150.0, 68.6)["behaviour"]
+    assert beh["available"] is True
+    assert beh["stopgo_penalty_wh"] == 0.0, \
+        f"reported a penalty from a 20-against-2 split: {beh['stopgo_penalty_wh']}"
+    assert beh["stopgo_saving_kwh"] == 0.0
+    # The share is still reported — how much of the driving it covers is a
+    # fact about the window, not a comparison.
+    assert beh["stopgo_share_pct"] > 0
+
+    # Give the other side enough drives and the comparison comes back.
+    drives += [drive(60 + i, 30.0, 4.2, 25, 5000.0 + i * 40, 100.0)
+               for i in range(2)]
+    beh = analyze(drives, 150.0, 68.6)["behaviour"]
+    assert beh["stopgo_penalty_wh"] != 0.0
+
+
 def test_a_trips_score_is_graded_on_the_same_figure_as_the_window():
     """A grade that is always full marks grades nothing.
 

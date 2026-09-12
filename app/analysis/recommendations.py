@@ -66,8 +66,11 @@ def build(
                     "Battery health",
                     "high",
                     f"Estimated battery degradation is {deg:.0f}%",
-                    "The pack's projected full range has dropped noticeably from its "
-                    "best observed value. Some loss is normal with age and mileage, "
+                    "The pack's projected full range has dropped noticeably from "
+                    + ("the factory figure for this variant. "
+                       if (battery or {}).get("reference") == "factory spec"
+                       else "its best observed value. ")
+                    + "Some loss is normal with age and mileage, "
                     "but you can slow it down: avoid sitting at very high or very low "
                     "charge for long periods, prefer AC charging, and minimise DC "
                     "fast-charging in hot conditions.",
@@ -80,9 +83,19 @@ def build(
                     "Battery health",
                     "low",
                     f"Mild battery degradation (~{deg:.0f}%)",
-                    "Projected full range is slightly below the best this pack has "
-                    "shown — well within normal ageing. Current charging habits are "
-                    "worth keeping an eye on but no action is needed.",
+                    # Named, because the two references give very different
+                    # numbers and the text used to assert one while the figure
+                    # came from the other: 7.8% against the factory spec on a
+                    # pack that is 1.3% below its own best-seen range. A reader
+                    # told "slightly below the best this pack has shown" and
+                    # shown 8% cannot reconcile the two, and the one that is
+                    # wrong is the sentence.
+                    f"Projected full range is {deg:.0f}% below "
+                    + ("the factory figure for this variant"
+                       if (battery or {}).get("reference") == "factory spec"
+                       else "the best this pack has shown")
+                    + " — well within normal ageing. Current charging habits "
+                      "are worth keeping an eye on but no action is needed.",
                     None,
                 )
             )

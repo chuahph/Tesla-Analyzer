@@ -216,6 +216,11 @@ def odometer_continuity(drives: list[Any], readings: list[Any]) -> dict[str, Any
 # probably mostly drift. Do not "improve" the off figure by collecting more
 # gaps. What would settle it is the car's Park screen read at both ends of ONE
 # overnight park, which measures the same quantity at 0.1% instead of 1%.
+# Drives needed on BOTH sides before a habit's cost is worth reporting. The
+# penalty is a difference of two means, so a lopsided split measures the
+# smaller sample rather than the habit.
+FACTOR_MIN_DRIVES = 3
+
 STANDBY_MIN_GAP_HOURS = 6.0
 # Two overnight parks. Raised with the floor: at 6 h a 12 h total could be a
 # single gap, and one gap has never been a rate anywhere else in this module.
@@ -949,9 +954,18 @@ def _behaviour(drives: list[Drive], total_distance: float, total_energy: float,
         return 100.0 * sum(d.distance_km for d in sub) / total_distance
 
     def factor(sub, rest):
-        """(share of km, measured Wh/km penalty, kWh it cost in this window)."""
-        if not sub or not rest:
-            return 0.0, 0.0, 0.0
+        """(share of km, measured Wh/km penalty, kWh it cost in this window).
+
+        Both sides need enough drives to average, which is the same bar
+        _insights already applies to every comparison it reports. A habit
+        covering 86% of the window leaves a handful of drives to compare it
+        against, and the difference of two means is then mostly the smaller
+        sample: measured live, stop-go traffic over 86% of the kilometres came
+        out 96 Wh/km CHEAPER than "the rest", which is not a finding about
+        stop-go traffic, it is three drives.
+        """
+        if len(sub) < FACTOR_MIN_DRIVES or len(rest) < FACTOR_MIN_DRIVES:
+            return round(km_share(sub), 1) if sub else 0.0, 0.0, 0.0
         pen = eff(sub) - eff(rest)
         kwh = sum(d.distance_km for d in sub) * max(pen, 0.0) / 1000.0
         return round(km_share(sub), 1), round(pen, 1), round(kwh, 2)
