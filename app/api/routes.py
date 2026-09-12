@@ -370,6 +370,20 @@ def _mark_full_tick(session: Session, now_ts: float) -> None:
     condition it exists to break out of.
     """
     state.put(session, state.FULL_TICK_KEY, str(now_ts))
+    # And the same moment onto a short history, which is what "how often does
+    # this cron run" is answered from. Trimmed to the last SYNC_TICKS_KEEP, so
+    # a schedule change is reflected within that many ticks rather than being
+    # averaged against however long the old one ran for.
+    import json as _json
+
+    try:
+        ticks = _json.loads(state.get(session, state.SYNC_TICKS_KEY) or "[]") or []
+        ticks = [float(t) for t in ticks if isinstance(t, (int, float))]
+    except (ValueError, TypeError):
+        ticks = []
+    ticks.append(round(now_ts))
+    state.put(session, state.SYNC_TICKS_KEY,
+              _json.dumps(ticks[-SYNC_TICKS_KEEP:]))
 
 
 def _log_tick_isolated(detail: str, session: Session | None = None) -> None:
@@ -1481,6 +1495,11 @@ SYNC_STALE_FLOOR_MIN = 15.0
 # be able to trip this by itself, and the fault being caught here (a job that
 # has been disabled) does not come back on the third beat.
 SYNC_STALE_BEATS = 2.5
+# How many tick times to keep. Twelve is six hours at a thirty-minute cron —
+# long enough that one late firing cannot move the median, short enough that
+# changing the schedule is reflected within half a day rather than being
+# averaged against however long the previous one ran for.
+SYNC_TICKS_KEEP = 12
 
 
 def _observed_tick_gap_min(session: Session) -> float | None:
@@ -1492,48 +1511,36 @@ def _observed_tick_gap_min(session: Session) -> float | None:
     two limits that pull against each other). Anything comparing against an
     assumed cadence is really asserting the user chose the assumed one.
 
-    Read out of the sync log, which is run-length encoded as
-    ``{o, n, a, b}`` — outcome, count, first and last epoch. A run of n ticks
-    spans (b - a) with n - 1 gaps between them, and the seam between two runs
-    is one more gap. The median of all of them survives a provider firing late
-    and the odd missed beat, which a mean would not.
+    Read from a short list of tick times rather than from SYNC_LOG_KEY. The
+    log looked like it could answer this and cannot: it is run-length encoded,
+    so a stretch of identical outcomes collapses into one ``{o, n, a, b}``
+    entry, and a single entry can span a schedule change. Its average gap is
+    then a blend of every era it covers, weighted by how long each ran —
+    measured live, a deployment whose cron had moved to 30 minutes still
+    reported 1.0, because the log still held the months it spent at one
+    minute. A dozen plain timestamps cannot blend two schedules.
+
+    The median, not the mean, so a provider firing late or a missed beat moves
+    it by nothing.
     """
     import json as _json
 
     try:
-        runs = _json.loads(state.get(session, state.SYNC_LOG_KEY) or "[]") or []
-    except ValueError:
+        ticks = sorted(
+            float(t) for t in
+            (_json.loads(state.get(session, state.SYNC_TICKS_KEY) or "[]") or [])
+            if isinstance(t, (int, float)))
+    except (ValueError, TypeError):
         return None
-    # Weighted, because the healthy steady state is ONE run: every tick
-    # reports the same outcome, so they collapse into a single entry covering
-    # hours. That entry is evidence of n - 1 intervals, not of one, and
-    # counting it once made a perfectly regular cron look unmeasurable —
-    # rejecting exactly the case this is for.
-    gaps: list[tuple[float, int]] = []
-    prev_b = None
-    for run in runs:
-        try:
-            a, b, n = float(run["a"]), float(run["b"]), int(run.get("n") or 1)
-        except (KeyError, TypeError, ValueError):
-            continue
-        if prev_b is not None and a > prev_b:
-            gaps.append((a - prev_b, 1))
-        if n > 1 and b > a:
-            gaps.append(((b - a) / (n - 1), n - 1))
-        prev_b = b
-    total = sum(w for _, w in gaps)
-    # Two observed intervals is the least that can be called a rhythm. Below
-    # it, say so rather than calibrate the whole check against a single gap
-    # that might itself be the outage.
-    if total < 2:
+    gaps = [b - a for a, b in zip(ticks, ticks[1:]) if b > a]
+    # Two intervals is the least that can be called a rhythm. Below it, say so
+    # rather than calibrate the whole check against a single gap that might
+    # itself be the outage.
+    if len(gaps) < 2:
         return None
     gaps.sort()
-    seen, median = 0, gaps[-1][0]
-    for gap, weight in gaps:
-        seen += weight
-        if seen * 2 >= total:
-            median = gap
-            break
+    mid = len(gaps) // 2
+    median = gaps[mid] if len(gaps) % 2 else (gaps[mid - 1] + gaps[mid]) / 2.0
     return round(median / 60.0, 1) if median > 0 else None
 
 

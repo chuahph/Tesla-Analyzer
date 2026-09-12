@@ -106,6 +106,13 @@ TELEMETRY_CHARGES_KEY = "telemetry_charges"  # JSON list of finished shadow
 SYNC_LOG_KEY = "sync_log"  # JSON: run-length record of what each /api/sync tick did —
 # the only place a blackout can be told from a quiet car after the fact, since
 # LAST_STATUS_KEY is overwritten every tick and keeps no history
+SYNC_TICKS_KEY = "sync_tick_history"  # JSON [epoch, ...]: when the last few
+# /api/sync ticks completed, newest last. Exists because the cadence cannot be
+# recovered from SYNC_LOG_KEY: that log is run-length encoded, so a stretch of
+# identical outcomes collapses into one entry, and a single entry can span a
+# schedule change — which makes its average gap a blend of two eras rather
+# than the interval this cron runs at now. A dozen plain timestamps answer it
+# exactly and cost a few bytes a tick.
 FULL_TICK_KEY = "last_full_tick_ts"  # epoch of the last /api/sync tick that ran
 # to completion. The sleep back-off is only allowed to suppress work while this
 # is recent: a tick that crashes after re-arming the window leaves the re-arm

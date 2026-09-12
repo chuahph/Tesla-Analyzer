@@ -351,15 +351,12 @@ def test_health_reports_build_info():
 def test_health_judges_the_cron_against_its_own_rhythm_not_a_fixed_number():
     """A deliberate 30-minute watchdog is not a broken 10-minute one.
 
-    The first version of this flagged anything past the fifteen minutes Render
-    sleeps at, which conflated two questions that come apart the moment a
-    keep-alive job holds the host up on its own: is the host awake, and is the
-    watchdog running. Against a fixed threshold a 30-minute cron reads as
-    broken on every other check — and a flag that cries wolf half the time is
-    worse than no flag, because it teaches the reader to skip it.
-
-    So the cadence is measured off the sync log and the question becomes
-    whether this cron has missed several of ITS OWN beats.
+    The first version flagged anything past the fifteen minutes Render sleeps
+    at, which conflated two questions that come apart the moment a keep-alive
+    job holds the host up on its own: is the host awake, and is the watchdog
+    running. Against a fixed threshold a 30-minute cron reads as broken on
+    every other check — and a flag that cries wolf half the time is worse than
+    no flag, because it teaches the reader to skip it.
     """
     import json as _json
     import time as _time
@@ -372,7 +369,7 @@ def test_health_judges_the_cron_against_its_own_rhythm_not_a_fixed_number():
     settings.app_passcode = ""
     sess = SessionLocal()
     prev_tick = state.get(sess, state.FULL_TICK_KEY)
-    prev_log = state.get(sess, state.SYNC_LOG_KEY)
+    prev_ticks = state.get(sess, state.SYNC_TICKS_KEY)
     now = _time.time()
 
     def health_with(tick_ago_min: float) -> dict:
@@ -382,11 +379,9 @@ def test_health_judges_the_cron_against_its_own_rhythm_not_a_fixed_number():
             return client.get("/api/health").json()["sync"]
 
     try:
-        # Six hours of a 30-minute cron, run-length encoded the way
-        # _log_tick writes it: one run of 12 ticks spanning 5.5 hours.
-        state.put(sess, state.SYNC_LOG_KEY, _json.dumps([
-            {"o": "ok", "n": 12, "a": now - 6 * 3600, "b": now - 0.5 * 3600},
-        ]))
+        # Six hours of a 30-minute cron.
+        state.put(sess, state.SYNC_TICKS_KEY, _json.dumps(
+            [now - i * 1800.0 for i in range(12, 0, -1)]))
         sess.commit()
 
         # 22 minutes on a 30-minute cron is not even one beat late. The old
@@ -396,8 +391,7 @@ def test_health_judges_the_cron_against_its_own_rhythm_not_a_fixed_number():
         assert ok["every_min"] == pytest.approx(30.0, abs=1.0), ok
         assert ok["stale"] is False, ok
 
-        # 40 minutes is late but inside the allowance a provider firing a
-        # little behind is entitled to.
+        # Late, but inside what a provider firing behind is entitled to.
         assert health_with(40.0)["stale"] is False
 
         # Two and a half hours is five missed beats. That is a stopped job.
@@ -409,9 +403,8 @@ def test_health_judges_the_cron_against_its_own_rhythm_not_a_fixed_number():
         assert "every 30 min" in dead["why"]
 
         # A tight cron must not be called stopped for missing two beats.
-        state.put(sess, state.SYNC_LOG_KEY, _json.dumps([
-            {"o": "ok", "n": 60, "a": now - 3600, "b": now},
-        ]))
+        state.put(sess, state.SYNC_TICKS_KEY, _json.dumps(
+            [now - i * 60.0 for i in range(12, 0, -1)]))
         sess.commit()
         tight = health_with(6.0)
         assert tight["every_min"] == pytest.approx(1.0, abs=0.2), tight
@@ -420,7 +413,7 @@ def test_health_judges_the_cron_against_its_own_rhythm_not_a_fixed_number():
         # No history to calibrate against: fall back to the app's existing
         # answer for "too long without a completed tick", rather than a second
         # number that can drift away from it.
-        state.put(sess, state.SYNC_LOG_KEY, "[]")
+        state.put(sess, state.SYNC_TICKS_KEY, "[]")
         sess.commit()
         assert health_with(30.0)["every_min"] is None
         assert health_with(30.0)["stale"] is False
@@ -436,6 +429,116 @@ def test_health_judges_the_cron_against_its_own_rhythm_not_a_fixed_number():
         assert never["stale"] is None
     finally:
         state.put(sess, state.FULL_TICK_KEY, prev_tick or "")
+        state.put(sess, state.SYNC_TICKS_KEY, prev_ticks or "[]")
+        sess.commit()
+        sess.close()
+        settings.app_passcode = old_pc
+
+
+def test_the_tick_history_records_and_trims():
+    """The read path is only half of it: something has to write these.
+
+    Trimming is the point — a list that grew without bound would re-acquire
+    the fault it was built to avoid, averaging a new schedule against however
+    long the old one ran for.
+    """
+    import json as _json
+
+    from app import state
+    from app.api import routes
+    from app.database import SessionLocal
+
+    sess = SessionLocal()
+    prev = state.get(sess, state.SYNC_TICKS_KEY)
+    try:
+        state.put(sess, state.SYNC_TICKS_KEY, "[]")
+        sess.commit()
+        base = 1_800_000_000.0
+        for i in range(routes.SYNC_TICKS_KEEP + 5):
+            routes._mark_full_tick(sess, base + i * 1800.0)
+        sess.commit()
+        ticks = _json.loads(state.get(sess, state.SYNC_TICKS_KEY))
+
+        assert len(ticks) == routes.SYNC_TICKS_KEEP
+        # The NEWEST are kept, not the first ones seen.
+        assert ticks[-1] == pytest.approx(base + (routes.SYNC_TICKS_KEEP + 4) * 1800.0)
+        assert routes._observed_tick_gap_min(sess) == pytest.approx(30.0, abs=0.1)
+
+        # A schedule change walks the old one out within SYNC_TICKS_KEEP ticks.
+        after = base + 100 * 1800.0
+        for i in range(routes.SYNC_TICKS_KEEP):
+            routes._mark_full_tick(sess, after + i * 600.0)
+        sess.commit()
+        assert routes._observed_tick_gap_min(sess) == pytest.approx(10.0, abs=0.1), \
+            "the previous schedule is still being counted"
+
+        # Garbage in the key must not take the endpoint down with it.
+        state.put(sess, state.SYNC_TICKS_KEY, "{not json")
+        sess.commit()
+        assert routes._observed_tick_gap_min(sess) is None
+        routes._mark_full_tick(sess, after + 99_999.0)
+        sess.commit()
+        assert _json.loads(state.get(sess, state.SYNC_TICKS_KEY)) == [
+            round(after + 99_999.0)]
+    finally:
+        state.put(sess, state.SYNC_TICKS_KEY, prev or "[]")
+        sess.commit()
+        sess.close()
+
+
+def test_the_cadence_is_not_read_from_a_log_that_blends_two_schedules():
+    """Measured on the live deployment: every_min came back 1.0 while the last
+    tick was 6.9 minutes old — a cadence nothing was running at.
+
+    The estimator read SYNC_LOG_KEY, which is run-length encoded. Months at a
+    one-minute cron collapse into a single {o, n, a, b} entry whose implied
+    gap is one minute, and it outweighs everything since by the sheer count it
+    carries. Worse, one entry can SPAN the schedule change, so no amount of
+    preferring recent entries separates the eras.
+
+    The tick list cannot do this: a schedule change walks out of it within
+    SYNC_TICKS_KEEP ticks, because it holds moments rather than summaries.
+    """
+    import json as _json
+    import time as _time
+
+    from app import state
+    from app.database import SessionLocal
+
+    settings = get_settings()
+    old_pc = settings.app_passcode
+    settings.app_passcode = ""
+    sess = SessionLocal()
+    prev_tick = state.get(sess, state.FULL_TICK_KEY)
+    prev_ticks = state.get(sess, state.SYNC_TICKS_KEY)
+    prev_log = state.get(sess, state.SYNC_LOG_KEY)
+    now = _time.time()
+    try:
+        # The log a long-lived deployment actually has: two months of
+        # one-minute ticks, run-length encoded into one entry, then the
+        # thirty-minute era it moved to.
+        state.put(sess, state.SYNC_LOG_KEY, _json.dumps([
+            {"o": "ok", "n": 86400, "a": now - 60 * 86400, "b": now - 5 * 86400},
+            {"o": "ok", "n": 240, "a": now - 5 * 86400, "b": now - 1800},
+        ]))
+        # What the cron is doing now: every 30 minutes.
+        state.put(sess, state.SYNC_TICKS_KEY, _json.dumps(
+            [now - i * 1800.0 for i in range(12, 0, -1)]))
+        state.put(sess, state.FULL_TICK_KEY, str(now - 22 * 60.0))
+        sess.commit()
+
+        with TestClient(app) as client:
+            sync = client.get("/api/health").json()["sync"]
+
+        assert sync["every_min"] == pytest.approx(30.0, abs=1.0), \
+            f"read {sync['every_min']} — the old one-minute era is still being counted"
+        # And the consequence that made it worth fixing: at every_min 1.0 the
+        # allowance floors at 15 minutes, so a healthy 30-minute cron would
+        # have been called stopped on every other check.
+        assert sync["stale"] is False
+    finally:
+        state.put(sess, state.FULL_TICK_KEY, prev_tick or "")
+        state.put(sess, state.SYNC_TICKS_KEY, prev_ticks or "[]")
         state.put(sess, state.SYNC_LOG_KEY, prev_log or "[]")
         sess.commit()
         sess.close()
