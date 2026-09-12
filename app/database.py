@@ -15,6 +15,18 @@ class Base(DeclarativeBase):
     pass
 
 
+# Guards the schema migration declined to install, recorded at boot.
+#
+# _ensure_unique_index refuses rather than fails the boot when the data cannot
+# satisfy an index, and said so with print() — which lands in the host's log
+# and nowhere a phone can reach. A protection that is silently absent is the
+# exact failure shape this app keeps finding in itself, so the refusal is kept
+# here and reported by /api/health. Populated per process at init_db, and a
+# note is only cleared by a restart, which is also what installing the index
+# requires.
+SCHEMA_DECLINED: list[dict[str, object]] = []
+
+
 def _make_engine():
     settings = get_settings()
     url = settings.database_url
@@ -93,9 +105,11 @@ def _ensure_unique_index(table: str, name: str, columns: tuple[str, ...]) -> Non
             f"SELECT COUNT(*) FROM (SELECT {cols} FROM {table} "
             f"GROUP BY {cols} HAVING COUNT(*) > 1) d")).scalar() or 0
         if dupes:
-            print(f"[schema] {table}: {dupes} duplicate {cols} groups — "
-                  f"{name} not created. Clear them with "
-                  f"/api/data/duplicate-trips?apply=true and restart.")
+            why = (f"{dupes} duplicate {cols} groups — clear them with "
+                   f"/api/data/duplicate-trips?apply=true and restart")
+            print(f"[schema] {table}: {name} not created. {why}.")
+            SCHEMA_DECLINED.append(
+                {"table": table, "index": name, "why": why})
             return
         conn.execute(text(
             f"CREATE UNIQUE INDEX IF NOT EXISTS {name} ON {table} ({cols})"))
@@ -162,6 +176,10 @@ def init_db() -> None:
     """Create all tables. Models must be imported before calling this."""
     from . import models  # noqa: F401  (registers models on Base.metadata)
 
+    # This run's findings replace the last one's. init_db is idempotent and
+    # gets called again after the duplicates are cleared, and a note that
+    # outlived its cause would send the reader to fix something already fixed.
+    SCHEMA_DECLINED.clear()
     Base.metadata.create_all(bind=engine)
     # Runtime state values outgrew their original 2048-char bound (see
     # models.Setting.value) — and the failure mode was a 500 on every sync,

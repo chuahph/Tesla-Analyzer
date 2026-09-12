@@ -348,6 +348,37 @@ def test_health_reports_build_info():
         assert set(body["build"]) == {"sha", "time"}
 
 
+def test_health_says_when_the_boot_declined_a_schema_guard():
+    """A protection that is silently absent is the failure shape this app keeps
+    finding in itself.
+
+    _ensure_unique_index refuses rather than failing the boot when the drives
+    table already holds duplicate (vehicle_id, start_time) pairs — the right
+    trade — but it announced the refusal only with print(), which reaches the
+    host's log and nothing a phone can open. So the one database-level guard
+    against a journey being recorded twice could be missing, indefinitely,
+    with the app reporting status ok and no way to tell.
+    """
+    from app import database as db
+
+    with TestClient(app) as client:
+        assert client.get("/api/health").json()["schema"] == {"ok": True}
+
+        db.SCHEMA_DECLINED.append(
+            {"table": "drives", "index": "ux_drives_vehicle_start",
+             "why": "2 duplicate vehicle_id, start_time groups"})
+        try:
+            schema = client.get("/api/health").json()["schema"]
+        finally:
+            db.SCHEMA_DECLINED.clear()
+
+    assert schema["ok"] is False
+    assert schema["declined"][0]["index"] == "ux_drives_vehicle_start"
+    # The remedy travels with the finding: the reader is on a phone and should
+    # not have to know which endpoint clears the way.
+    assert "duplicate" in schema["declined"][0]["why"]
+
+
 def test_summary_since_charge_window():
     settings = get_settings()
     old = settings.app_passcode

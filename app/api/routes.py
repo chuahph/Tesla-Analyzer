@@ -31,6 +31,7 @@ from ..analysis import efficiency as efficiency_analysis
 from ..analysis import recommendations as recommendations_engine
 from ..analysis import service as service_analysis
 from ..config import get_settings
+from .. import database as db
 from ..database import engine, get_session
 from ..importer import ImportError_, parse_upload
 from ..models import (ArrivalTailSample, BatteryReading, Charge, Drive, Place,
@@ -1492,6 +1493,14 @@ def health(session: Session = Depends(get_session)):
                 getattr(settings, "bridge_quiet_alert_min", 0.0) or 0.0),
             "role": "watchdog only — wake, reachability, stream silence",
         },
+        # Schema guards the boot declined to install. _ensure_unique_index
+        # refuses rather than failing the boot when the data cannot satisfy an
+        # index — the right trade, but it reported the refusal only to the
+        # host's log, so the one protection against duplicate trips could be
+        # absent with nothing readable saying so. Absent from this payload used
+        # to mean "no way to tell"; now it means installed.
+        "schema": ({"ok": True} if not db.SCHEMA_DECLINED
+                   else {"ok": False, "declined": list(db.SCHEMA_DECLINED)}),
     }
 
 
