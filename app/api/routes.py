@@ -11227,6 +11227,14 @@ def _compare_row(t: dict, d, t_start, car_by_drive: dict, pct) -> dict:
             # is comparable regardless of which version of this app closed
             # it, and the next change to the formula reaches the history for
             # free.
+            # The interval that figure was computed from, measured off this
+            # trip's own readings when it closed. Reported because the
+            # uncertainty alone cannot show the tightening worked: once the
+            # sampling term falls under EnergyRemaining's 0.02 kWh step, the
+            # step is what gets reported, and 10 seconds and 21 seconds
+            # produce the same 0.02. Null on a trip closed before this was
+            # measured, which is every trip before 12 September.
+            "energy_sample_sec": t.get("energy_sample_sec"),
             "energy_unc_kwh": _energy_unc_kwh(t),
             "energy_unc_pct": None if not t.get("energy_kwh") else round(
                 _energy_unc_kwh(t) * 100.0 / abs(t["energy_kwh"]), 1),
