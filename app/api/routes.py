@@ -1091,14 +1091,27 @@ def _geofence_name(
     driveway/office never needs a lookup at all.
 
     ``places`` lets a bulk caller (auto-tag sweeping every trip) load the
-    table once and reuse it, instead of one query per coordinate."""
+    table once and reuse it, instead of one query per coordinate.
+
+    Ties break on the lowest id, which is not decoration. Two rows for the
+    same physical place is an ordinary state for this table to be in — this
+    car has a pair at Padang Brown and another at Queens Waterfront — and
+    with equal distances the winner was whichever the database happened to
+    return first. That is not fixed across queries, so one car park could
+    label itself two different ways on two page loads, and the per-place
+    parked rate is fitted from trips grouped BY that label: the same place
+    would split its own evidence in half and each half would be short of the
+    hours the fit needs."""
     if not session or not coords or "," not in coords:
         return None
-    best_name, best_km = None, None
+    best_name, best_key = None, None
     for p in (places if places is not None else session.query(Place).all()):
         d = haversine_km(coords, f"{p.lat}, {p.lon}")
-        if d is not None and d <= p.radius_km and (best_km is None or d < best_km):
-            best_name, best_km = p.name, d
+        if d is None or d > p.radius_km:
+            continue
+        key = (d, p.id if p.id is not None else 0)
+        if best_key is None or key < best_key:
+            best_name, best_key = p.name, key
     return best_name
 
 

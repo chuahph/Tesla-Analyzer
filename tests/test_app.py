@@ -6056,6 +6056,44 @@ def test_a_trip_is_only_compared_against_its_own_car():
         settings.app_passcode = old_pc
 
 
+def test_two_places_at_one_spot_always_resolve_to_the_same_name(session):
+    """Duplicate Places are an ordinary state for this table to be in.
+
+    This car has a pair at Padang Brown and another at Queens Waterfront. With
+    equal distances the winner used to be whichever row the database returned
+    first, which is not fixed across queries — so one car park could label
+    itself two ways on two page loads. The per-place parked rate is fitted
+    from trips grouped BY that label, so the same place would split its own
+    evidence in half and each half would fall short of the hours the fit
+    needs.
+    """
+    from app.api.routes import _geofence_name
+    from app.models import Place
+
+    now = datetime(2026, 9, 1, 12, 0)
+    a = Place(name="Padang Brown 22", lat=5.41, lon=100.32, radius_km=0.2,
+              created_at=now)
+    b = Place(name="Padang Brown 23", lat=5.41, lon=100.32, radius_km=0.2,
+              created_at=now)
+    session.add_all([a, b])
+    session.commit()
+    here = "5.41, 100.32"
+
+    # Same answer whichever order the rows arrive in, which is the thing the
+    # database does not promise.
+    assert _geofence_name(here, session, [a, b]) == "Padang Brown 22"
+    assert _geofence_name(here, session, [b, a]) == "Padang Brown 22"
+    assert _geofence_name(here, session) == "Padang Brown 22"
+
+    # And distance still wins over id, so the tie-break only breaks ties.
+    nearer = Place(name="Padang Brown bay", lat=5.4101, lon=100.32,
+                   radius_km=0.2, created_at=now)
+    session.add(nearer)
+    session.commit()
+    assert _geofence_name("5.4101, 100.32", session,
+                          [a, b, nearer]) == "Padang Brown bay"
+
+
 def test_sentry_idle_is_not_armed(session):
     """Idle is Sentry enabled and not yet watching. It was counted as armed.
 
