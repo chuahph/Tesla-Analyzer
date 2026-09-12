@@ -302,20 +302,31 @@ on an awake car, subject to `SYNC_POLL_INTERVAL_MIN`. Those reads are billed,
 and each one is itself an activity signal that resets Tesla's sleep countdown
 — so a tight cron keeps the car awake, which costs real battery.
 
-**Ten minutes satisfies both.** It is inside the sleep threshold, and it is
-sparse enough that an idle car is read six times an hour rather than sixty.
+**No single interval satisfies both, so run two jobs.** There is no number
+that is under fifteen minutes and also sparse enough to let a car sleep: the
+two limits overlap only where the car is being read more often than it should
+be. Splitting them costs nothing, because only the watchdog needs `/api/sync`
+— keeping the host warm needs nothing but a request.
 
-**If you want the cron sparser than that, split the two jobs.** Only the
-watchdog needs `/api/sync`; keeping the host warm needs nothing but a request.
-`/api/health` is an open path — no passcode, no Tesla call, no write — so a
-second cron job on:
+`/api/health` is an open path: no passcode, no Tesla call, and no write (it
+resolves `data_source` through `active_token`, which reads settings and
+returns). So:
 
-```
-https://<your-app>.onrender.com/api/health
-```
+| job | url | interval |
+| --- | --- | --- |
+| keep-alive | `https://<your-app>.onrender.com/api/health` | 10 min |
+| watchdog | `https://<your-app>.onrender.com/api/sync?key=<SYNC_KEY>` | 20-30 min |
 
-every 10 minutes keeps the service awake for free, and `/api/sync` can then run
-as sparsely as you like. This is the better arrangement on any plan that sleeps.
+The keep-alive holds the host awake for free at any `/api/sync` cadence, and
+`/api/sync` is then free to be as sparse as the car wants. With the watchdog at
+30 minutes and `BRIDGE_QUIET_ALERT_MIN` at 20, a dead telemetry path is
+reported 20-50 minutes after it dies — the right resolution for a fault whose
+remedy is a trip to the VM, and no reason to read the car more often.
+
+**Running only `/api/sync`, tightened, is the tempting mistake.** It looks like
+one job instead of two and it keeps the host warm, but it buys that by reading
+an awake car every ten minutes forever, which is the one thing the interval was
+supposed to avoid.
 
 **Your database choice used to constrain this and mostly no longer does.**
 Every tick touches the database, so the interval decides how continuously that
