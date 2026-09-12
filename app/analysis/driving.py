@@ -1589,7 +1589,21 @@ def analyze(drives: list[Drive], rated_wh_per_km: float = 150.0,
                     if has_valid_energy(d) and driving_wh_val else
                     (round(d.energy_used_kwh, 2) if has_valid_energy(d) else None)
                 ),
-                "eco_score": eco_score(driving_wh_val, rated_wh_per_km) if has_valid_energy(d) and driving_wh_val else None,
+                # Scored on the GROSS figure, like the window score above and
+                # like the car's own "X% more than Rated". It was scored on
+                # the propulsion-only figure against the same rated baseline —
+                # two different quantities against one yardstick — and since
+                # that figure has climate and accessories stripped out of it,
+                # it sits 30-50% under rated on an ordinary drive and the
+                # score clamped to 100 on essentially every trip. A grade that
+                # is always full marks grades nothing.
+                #
+                # The conditions line beside it is what keeps a low score
+                # honest: 302 Wh/km in stop-go traffic at 34 degrees is a real
+                # efficiency, and reporting it as an A because the climate it
+                # spent on was subtracted first would be flattery.
+                "eco_score": (eco_score(d.wh_per_km, rated_wh_per_km)
+                              if has_valid_energy(d) else None),
                 # What this trip's energy cost — its own charge-layer figure
                 # (or a manual override) when trip_costs was given, else the
                 # flat/ToU tariff at its own start_time. None when the charge

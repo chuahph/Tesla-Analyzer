@@ -1831,6 +1831,55 @@ def test_continuity_needs_odometer_anchors_and_readings():
     assert odometer_continuity(good, [])["available"] is False
 
 
+def test_a_trips_score_is_graded_on_the_same_figure_as_the_window():
+    """A grade that is always full marks grades nothing.
+
+    The window score is the gross Wh/km against the car's rated figure, which
+    is also what the car's own screen compares ("4.2% more than Rated"). The
+    per-trip score was the PROPULSION-ONLY figure against that same baseline —
+    two different quantities and one yardstick. Climate and accessories are
+    stripped out of that figure, so it sits well under rated on an ordinary
+    drive and the score clamped to 100 on essentially every trip: ten real
+    trips spanning 121 to 302 Wh/km all scored 100.
+    """
+    from datetime import datetime, timedelta
+    from types import SimpleNamespace
+
+    from app.analysis.driving import analyze, eco_score
+
+    base = datetime(2026, 9, 12, 8, 0)
+    rated = 150.0
+
+    def drive(did, km, kwh, mins, odo):
+        return SimpleNamespace(
+            id=did, start_time=base + timedelta(hours=did),
+            end_time=base + timedelta(hours=did, minutes=mins),
+            distance_km=km, energy_used_kwh=kwh, duration_min=mins,
+            wh_per_km=kwh * 1000.0 / km, start_soc=80, end_soc=76,
+            avg_speed_kmh=km / (mins / 60.0), max_speed_kmh=80.0,
+            outside_temp_c=32.0, start_location="A", end_location="B",
+            start_area="A", end_area="B", idle_min=0.0, idle_tracked=True,
+            climate_min=None, start_odo_km=odo, end_odo_km=odo + km,
+            energy_estimated=False, cost=None, cost_override=None, tag=None,
+            start_coords="", end_coords="", start_lost_km=None,
+            end_lost_km=None, end_est_km=None, end_est_verified=None,
+            start_recovered_km=None, start_park_min=None, start_gap_sec=None,
+            end_gap_sec=None, tail_trim_sec=None, distance_flag=None,
+            polled_km=None, polled_kwh=None, source="telemetry")
+
+    # An efficient run and the 100-minute crawl of 12 September, which the car
+    # itself rated 4.2% worse than its own baseline.
+    good = drive(1, 11.855, 1.44, 14.2, 1000.0)      # 121 Wh/km
+    bad = drive(2, 15.7, 4.74, 100.0, 1100.0)        # 302 Wh/km
+    out = analyze([good, bad], rated, 68.6)
+    scores = {t["id"]: t["eco_score"] for t in out["recent_trips"]}
+    assert scores[good.id] == eco_score(good.wh_per_km, rated)
+    assert scores[bad.id] == eco_score(bad.wh_per_km, rated)
+    assert scores[good.id] > scores[bad.id], \
+        f"both trips scored the same: {scores}"
+    assert scores[bad.id] < 50, "a 302 Wh/km crawl graded as an ordinary drive"
+
+
 def test_the_running_cost_prices_the_charging_that_happened_while_driving():
     """RM/100km is a ratio between two measured quantities, and it means
     nothing unless both describe the same period.
