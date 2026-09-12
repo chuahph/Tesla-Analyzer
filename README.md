@@ -234,7 +234,17 @@ dashboard badge shows **live**.
 ## Keeping it in sync (cron)
 
 For the hosted deployment (Render), something needs to hit `/api/sync` on a
-timer so drives/charges get logged without you opening the dashboard. The repo
+timer. **What that tick is for changed with Fleet Telemetry**: the car now
+streams its own trips and charges to the bridge, so the cron no longer logs
+driving — `/api/health` reports `"writes_history": false` and the role as
+`watchdog only`. What still depends on it is the part a one-way stream cannot
+do for itself: waking a car, proving reachability, and `_check_bridge_quiet`,
+which raises the alarm when the telemetry path has died. Reaching the car is
+the only thing that proves it is awake, so a stream that has gone silent can
+only be distinguished from a sleeping car by a poll.
+
+That inverts the old advice. A tick that is late no longer costs a trip; a
+tick that never comes costs the alarm for a dead stream. The repo
 ships `.github/workflows/sync-car.yml` for this, but **its schedule trigger is
 disabled by default** — use an external cron service instead (below). It stays
 in the workflow only as a manual `workflow_dispatch` button (Actions tab → Sync
@@ -244,13 +254,16 @@ car from Tesla → Run workflow) for on-demand testing.
 [documents](https://docs.github.com/en/actions/using-workflows/events-that-trigger-workflows#schedule)
 its `schedule` trigger as best-effort — runs can be delayed by several minutes,
 worse at the top of every hour, and can be skipped outright under load. A
-5-minute nominal interval can easily become 10-15 minutes in practice. That's
-long enough to miss a short trip's entire "driving" window, so the sync never
-sees the car in gear at all — it only catches up once the car is parked again,
-and if it fell straight asleep after locking, that catch-up read can be an hour
-or more late. The result: a real trip logged with the right distance but the
-wrong clock time. A dedicated external cron service is simply more reliable
-than GitHub's for a job that needs to fire close to on-time, every time.
+5-minute nominal interval can easily become 10-15 minutes in practice.
+
+Under telemetry that no longer costs a trip: the car streams its own journey
+and the stream does not care whether anything is polling. What it costs is the
+two things that still depend on the tick. A skipped run drifts past the fifteen
+minutes the host sleeps at, which stops the watchdog — and a watchdog that runs
+"usually" is not one, because the failure it catches is itself silent, so the
+one run that gets skipped is indistinguishable from the all-clear. A dedicated
+external cron service is simply more reliable than GitHub's for a job whose
+whole value is that it fires when nothing else would notice it hadn't.
 
 ### Set up an external cron (required)
 
@@ -264,25 +277,55 @@ is free and reliable enough for this:
    ```
    (`SYNC_KEY` is whatever you set in Render's environment variables — see the
    Render blueprint section above.)
-3. Set the schedule to **every 1-2 minutes** — see the battery-safety note below
-   for why this doesn't drain the car.
+3. Set the schedule to **every 10 minutes** — see "choosing the interval"
+   below, and the battery-safety note for why this doesn't drain the car.
 4. Save. That's it; no repository secrets or GitHub Actions involved.
 
 Any similar service works the same way — UptimeRobot (as an "HTTP(s)" monitor,
 which incidentally also gets you uptime alerts for free), EasyCron, or your
 own always-on machine's system `cron` calling `curl`.
 
-**A tight cron interval interacts with your database choice.** Every
-`/api/sync` tick touches the database — even a "car's asleep" tick writes a
-status row — so a 1-2 minute cron keeps the DB compute continuously active,
-never idle long enough to suspend. Supabase's free tier doesn't meter compute
-hours (it only pauses a project after 7 days of zero activity, which a cron
-this frequent makes moot), so this cadence is free indefinitely there. Neon's
-free tier *does* meter compute hours with a 5-minute auto-suspend — a cron
-tighter than that keeps it active ~24/7, which burns through Neon's 100
-CU-hour/month cap in roughly half a month regardless of how much the car
-itself sleeps. If you're on Neon, either raise the interval past 5 minutes or
-move to Supabase (see the in-app setup guide's database step).
+### Choosing the interval
+
+Two limits pull in opposite directions, and they are not the same limit.
+
+**Below 15 minutes, or the host sleeps.** Render's free tier stops the service
+after fifteen minutes with no inbound request. A sleeping host runs nothing
+scheduled — including the telemetry watchdog — so a cron slower than that
+silences the alarm for the exact fault it exists to catch, and the only visible
+symptom is the "APPLICATION LOADING" splash on your next dashboard open, which
+looks like nothing. `/api/health` reports `sync.last_tick_min_ago` and flags
+`sync.stale` past that threshold, so this is checkable rather than guessed at.
+
+**Above a few minutes, or you pay Tesla.** Every tick may read `vehicle_data`
+on an awake car, subject to `SYNC_POLL_INTERVAL_MIN`. Those reads are billed,
+and each one is itself an activity signal that resets Tesla's sleep countdown
+— so a tight cron keeps the car awake, which costs real battery.
+
+**Ten minutes satisfies both.** It is inside the sleep threshold, and it is
+sparse enough that an idle car is read six times an hour rather than sixty.
+
+**If you want the cron sparser than that, split the two jobs.** Only the
+watchdog needs `/api/sync`; keeping the host warm needs nothing but a request.
+`/api/health` is an open path — no passcode, no Tesla call, no write — so a
+second cron job on:
+
+```
+https://<your-app>.onrender.com/api/health
+```
+
+every 10 minutes keeps the service awake for free, and `/api/sync` can then run
+as sparsely as you like. This is the better arrangement on any plan that sleeps.
+
+**Your database choice used to constrain this and mostly no longer does.**
+Every tick touches the database, so the interval decides how continuously that
+compute stays active. Supabase's free tier does not meter compute hours (it
+pauses a project only after 7 days of zero activity, which any cron makes
+moot), so the cadence is free indefinitely there. Neon's free tier *does*
+meter, with a 5-minute auto-suspend: a cron tighter than that keeps it active
+~24/7 and spends the 100 CU-hour monthly cap in roughly half a month. On Neon,
+the split-job arrangement above is the way to have both — point the frequent
+job at `/api/health` and let `/api/sync` run past the suspend window.
 
 **How often you call this doesn't force how often the car is read.** The
 endpoint decides that for itself: it never reads a car that's asleep, and
