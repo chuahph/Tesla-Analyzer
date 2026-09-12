@@ -111,12 +111,30 @@ def analyze(charges: list[Charge], drives: list[Drive] | None = None) -> dict[st
     # figure still describe the window as asked for — a charge that happened
     # in the window happened, whether or not this app kept the trips it paid
     # for.
+    #
+    # Bounded at BOTH ends, which it was not. Cutting only the start kept
+    # exactly the wrong charges: a session that ended just before the first
+    # drive — the one that actually put that energy in the pack, and the
+    # normal shape of the since-last-charge view — was excluded, while a
+    # session after the last drive, which paid for nothing in the window, was
+    # counted in full. Measured on the fixture: the charge that paid for the
+    # driving gave 0.00/100km, and a charge after all of it gave 36.00.
+    #
+    # None, not zero, when no session falls inside the span. A ratio with
+    # nothing in its numerator is not a running cost of zero; it is the
+    # absence of one, and the dashboard already omits the figure when this is
+    # null rather than printing free driving.
+    ratio_cost = None
     if drives and charges:
         first_drive = min(d.start_time for d in drives)
-        ratio_cost = sum(c.cost for c in charges if c.end_time >= first_drive)
-    else:
+        last_drive = max(d.end_time for d in drives)
+        in_span = [c.cost for c in charges
+                   if first_drive <= c.end_time <= last_drive]
+        ratio_cost = sum(in_span) if in_span else None
+    elif not drives:
         ratio_cost = total_cost
-    cost_per_100km = round(safe_div(ratio_cost, drive_km) * 100.0, 2) if drive_km else None
+    cost_per_100km = (round(safe_div(ratio_cost, drive_km) * 100.0, 2)
+                      if drive_km and ratio_cost is not None else None)
 
     # Most recent first, so the session someone's most likely trying to fix
     # (the one they just noticed a wrong cost on) is right at the top.

@@ -1831,6 +1831,65 @@ def test_continuity_needs_odometer_anchors_and_readings():
     assert odometer_continuity(good, [])["available"] is False
 
 
+def test_the_running_cost_prices_the_charging_that_happened_while_driving():
+    """RM/100km is a ratio between two measured quantities, and it means
+    nothing unless both describe the same period.
+
+    It was bounded at one end only, and kept exactly the wrong sessions: a
+    charge that ended just before the first drive — the one that actually put
+    that energy in the pack, and the ordinary shape of the since-last-charge
+    view — fell outside, while a charge after the last drive, which paid for
+    nothing in the window, counted in full.
+
+    And an empty numerator is not a running cost of zero. Free driving is a
+    claim; "nothing charged during this window" is the truth, and the
+    dashboard already omits the figure rather than print either.
+    """
+    from datetime import datetime, timedelta
+    from types import SimpleNamespace
+
+    from app.analysis.charging import analyze
+
+    base = datetime(2026, 9, 11, 6, 0)
+
+    def charge(cid, start_h, end_h):
+        return SimpleNamespace(
+            id=cid, start_time=base + timedelta(hours=start_h),
+            end_time=base + timedelta(hours=end_h), energy_added_kwh=20.0,
+            cost=18.0, location="Home", charge_type="AC", max_power_kw=7.0,
+            is_free=False, duration_min=(end_h - start_h) * 60,
+            start_soc=50, end_soc=80, price_source="home",
+            energy_source="pack_meter")
+
+    def drive(did, start_h, km, kwh):
+        return SimpleNamespace(
+            id=did, start_time=base + timedelta(hours=start_h),
+            end_time=base + timedelta(hours=start_h, minutes=30),
+            distance_km=km, energy_used_kwh=kwh, wh_per_km=kwh * 1000 / km,
+            duration_min=30)
+
+    drives = [drive(101, 1, 30.0, 5.0), drive(102, 5, 20.0, 3.5)]   # 50 km
+
+    # Inside the span: 18.00 over 50 km.
+    inside = analyze([charge(1, 2, 4)], drives)
+    assert inside["cost_per_100km"] == pytest.approx(36.0)
+
+    # Before it, and after it: neither describes this driving.
+    for label, when in (("before", (-3, -1)), ("after", (8, 10))):
+        out = analyze([charge(2, *when)], drives)
+        assert out["cost_per_100km"] is None, (
+            f"a charge {label} the driving priced it at "
+            f"{out['cost_per_100km']}")
+        # The session itself is still reported — it happened, and only the
+        # ratio is narrowed.
+        assert out["total_cost"] == pytest.approx(18.0)
+
+    # A trailing session does not inflate a window that has its own.
+    both = analyze([charge(1, 2, 4), charge(2, 8, 10)], drives)
+    assert both["cost_per_100km"] == pytest.approx(36.0)
+    assert both["total_cost"] == pytest.approx(36.0)
+
+
 def test_a_gap_the_car_drove_through_is_not_parked_drain():
     """Two rows being consecutive in the table does not make the time between
     them still.
