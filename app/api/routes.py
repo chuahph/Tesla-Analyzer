@@ -1472,6 +1472,47 @@ def _build_info() -> dict:
     return {"sha": sha, "time": time_str}
 
 
+# Render's free tier stops the service after this long with no inbound
+# request. Named because it is the threshold that makes a quiet cron matter:
+# below it the interval is a preference, above it the host is asleep and
+# nothing scheduled runs at all.
+HOST_SLEEP_MIN = 15.0
+
+
+def _sync_liveness(session: Session) -> dict[str, object]:
+    """How long since an /api/sync tick ran to completion.
+
+    Reported in minutes rather than as a timestamp because the question is
+    always "is it still running", and a phone should not have to subtract two
+    ISO strings to answer it.
+
+    ``stale`` is judged against the sleep threshold rather than the cron's
+    documented 1-2 minutes: the interval is the user's to choose (Neon's free
+    tier meters compute, so a longer one is a legitimate trade), but past the
+    point where the host sleeps, the cron has stopped being a heartbeat.
+    """
+    try:
+        last = float(state.get(session, state.FULL_TICK_KEY) or 0.0)
+    except (TypeError, ValueError):
+        last = 0.0
+    if not last:
+        # No tick has ever completed. A fresh deployment looks like this, and
+        # so does a cron that was never set up — which is why it says which
+        # it cannot tell rather than reporting a reassuring zero.
+        return {"last_tick_min_ago": None, "stale": None,
+                "why": "no /api/sync tick has completed yet"}
+    mins = round((time.time() - last) / 60.0, 1)
+    stale = mins > HOST_SLEEP_MIN
+    return {
+        "last_tick_min_ago": mins,
+        "stale": stale,
+        **({"why": f"no /api/sync tick for {mins} min — past the "
+                   f"{HOST_SLEEP_MIN:.0f} min the host sleeps at, so the "
+                   f"telemetry watchdog is not running either; check the "
+                   f"external cron"} if stale else {}),
+    }
+
+
 @router.get("/health")
 def health(session: Session = Depends(get_session)):
     source = state.data_source(session)
@@ -1493,6 +1534,21 @@ def health(session: Session = Depends(get_session)):
                 getattr(settings, "bridge_quiet_alert_min", 0.0) or 0.0),
             "role": "watchdog only — wake, reachability, stream silence",
         },
+        # Is the cron that drives everything still calling?
+        #
+        # /api/sync is an external cron (see the README: it is required, and
+        # the in-app scheduler is off by default). Everything scheduled hangs
+        # off it, including _check_bridge_quiet — the watchdog that reports a
+        # dead telemetry path. So a stopped cron silences the alarm for the
+        # fault it was built to catch, and nothing anywhere said so: the
+        # timestamp was recorded and read only by the sleep back-off.
+        #
+        # It is also the single cheapest explanation for finding this service
+        # cold-starting at all. Render's free tier sleeps after 15 minutes
+        # with no request, and a cron on the documented 1-2 minute schedule
+        # makes that unreachable — so a service found asleep has not been
+        # called, whatever the cron's dashboard claims.
+        "sync": _sync_liveness(session),
         # Schema guards the boot declined to install. _ensure_unique_index
         # refuses rather than failing the boot when the data cannot satisfy an
         # index — the right trade, but it reported the refusal only to the

@@ -348,6 +348,59 @@ def test_health_reports_build_info():
         assert set(body["build"]) == {"sha", "time"}
 
 
+def test_health_says_when_the_cron_that_drives_everything_has_stopped():
+    """Everything scheduled hangs off the external /api/sync cron, including
+    the watchdog that reports a dead telemetry path.
+
+    So a stopped cron silences the alarm for the exact fault it exists to
+    catch, and until now the only evidence was the host cold-starting, which
+    looks like nothing. Render's free tier sleeps after 15 minutes with no
+    request, so a gap past that means the cron is not calling — whatever its
+    own dashboard says.
+    """
+    import time as _time
+
+    from app import state
+    from app.database import SessionLocal
+
+    settings = get_settings()
+    old_pc = settings.app_passcode
+    settings.app_passcode = ""
+    sess = SessionLocal()
+    prev = state.get(sess, state.FULL_TICK_KEY)
+    try:
+        state.put(sess, state.FULL_TICK_KEY, str(_time.time() - 90.0))
+        sess.commit()
+        with TestClient(app) as client:
+            live = client.get("/api/health").json()["sync"]
+        assert live["stale"] is False
+        assert live["last_tick_min_ago"] == pytest.approx(1.5, abs=0.2)
+
+        # Twenty-two minutes: past the point the host sleeps at.
+        state.put(sess, state.FULL_TICK_KEY, str(_time.time() - 22 * 60.0))
+        sess.commit()
+        with TestClient(app) as client:
+            dead = client.get("/api/health").json()["sync"]
+        assert dead["stale"] is True
+        # The consequence travels with the finding, because the danger is not
+        # the cold start — it is the watchdog being off at the same time.
+        assert "watchdog" in dead["why"]
+
+        # Never ticked at all is not the same as ticked long ago, and must not
+        # read as a reassuring zero.
+        state.put(sess, state.FULL_TICK_KEY, "")
+        sess.commit()
+        with TestClient(app) as client:
+            never = client.get("/api/health").json()["sync"]
+        assert never["last_tick_min_ago"] is None
+        assert never["stale"] is None
+    finally:
+        state.put(sess, state.FULL_TICK_KEY, prev or "")
+        sess.commit()
+        sess.close()
+        settings.app_passcode = old_pc
+
+
 def test_health_says_when_the_boot_declined_a_schema_guard():
     """A protection that is silently absent is the failure shape this app keeps
     finding in itself.
