@@ -464,7 +464,11 @@ def test_a_trip_carries_its_temperatures_and_ending_into_the_dashboard():
     try:
         vin = sess.scalars(select(Vehicle.vin)).first()
         now = sync_mod.now_local()
-        at = now - timedelta(hours=2)
+        # Its own hour, and cleaned up below. Tests share one database, and a
+        # Drive left at a timestamp another test stages makes that test's
+        # insert a match instead of an add — which is how this first ran
+        # green alone and red beside its neighbour.
+        at = now - timedelta(hours=6)
         end = at + timedelta(minutes=22)
         state.put(sess, state.TELEMETRY_TRIPS_KEY, _json.dumps([{
             "vin": vin, "start_ts": at.timestamp(), "end_ts": end.timestamp(),
@@ -502,6 +506,9 @@ def test_a_trip_carries_its_temperatures_and_ending_into_the_dashboard():
     finally:
         state.put(sess, state.TELEMETRY_TRIPS_KEY, prev or "[]")
         sess.commit()
+        with SessionLocal() as s:
+            s.query(Drive).filter(Drive.ended_on == "stream_lost").delete()
+            s.commit()
         sess.close()
         settings.app_passcode = old_pc
 
