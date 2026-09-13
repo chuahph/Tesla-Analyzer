@@ -435,6 +435,68 @@ def test_health_judges_the_cron_against_its_own_rhythm_not_a_fixed_number():
         settings.app_passcode = old_pc
 
 
+def test_repromoting_a_settled_history_reports_nothing_changed():
+    """Running promotion twice must not claim it wrote everything twice.
+
+    "action" was decided on whether a matching row EXISTED, never on whether
+    anything about it moved — so every run over a settled fortnight announced
+    25 corrections while emitting no UPDATE at all. Measured: 24 INSERTs on
+    the first run, zero writes on the second, "changed: 25" both times.
+
+    That is the same defect an earlier fix here aimed at ("only the rows
+    actually written", when len() was counting a refusal as a promotion); it
+    just left the no-op case behind.
+    """
+    import json as _json
+
+    from app import state, sync as sync_mod
+    from app.database import SessionLocal
+    from app.models import Vehicle
+
+    settings = get_settings()
+    old_pc = settings.app_passcode
+    settings.app_passcode = ""
+    sess = SessionLocal()
+    prev = state.get(sess, state.TELEMETRY_TRIPS_KEY)
+    try:
+        vin = sess.scalars(select(Vehicle.vin)).first()
+        now = sync_mod.now_local()
+        staged, odo = [], 95000.0
+        for i in range(3):
+            at = now - timedelta(hours=30 - i)
+            end = at + timedelta(minutes=25)
+            staged.append({
+                "vin": vin,
+                "start_ts": at.timestamp(), "end_ts": end.timestamp(),
+                "start_time": at.isoformat(timespec="seconds"),
+                "end_time": end.isoformat(timespec="seconds"),
+                "distance_km": 10.0 + i, "duration_min": 25.0,
+                "energy_kwh": 1.5, "wh_per_km": 150.0,
+                "start_odo_km": odo, "end_odo_km": odo + 10.0 + i,
+                "soc_start": 80.0, "soc_end": 78.0, "out_temp": 28.0,
+            })
+            odo += 11.0 + i
+        state.put(sess, state.TELEMETRY_TRIPS_KEY, _json.dumps(staged))
+        sess.commit()
+
+        with TestClient(app) as client:
+            first = client.post("/api/telemetry/promote?apply=true").json()
+            assert first["changed"] == 3, first
+            assert first.get("unchanged", 0) == 0
+
+            again = client.post("/api/telemetry/promote?apply=true").json()
+
+        assert again["changed"] == 0, \
+            f"claimed {again['changed']} changed on a run that wrote nothing"
+        assert again["unchanged"] == 3
+        assert {t["action"] for t in again["trips"]} == {"unchanged"}
+    finally:
+        state.put(sess, state.TELEMETRY_TRIPS_KEY, prev or "[]")
+        sess.commit()
+        sess.close()
+        settings.app_passcode = old_pc
+
+
 def test_a_trip_settled_by_the_diagnostic_still_reaches_the_dashboard():
     """Looking for a missing trip must not be what keeps it missing.
 

@@ -3545,7 +3545,9 @@ def _promote_shadow_trips(session: Session, apply: bool = False,
                         "read /api/telemetry/promote and apply it by hand"}]
     _clear_promote_refused(session)
 
-    for row, t, vehicle_id, t_start, t_end in plan:
+    # Zipped with `changed` because the two are built side by side and the
+    # apply step is what learns whether a row actually moved.
+    for (row, t, vehicle_id, t_start, t_end), entry_for_row in zip(plan, changed):
         if row is None:
             row = Drive(vehicle_id=vehicle_id, start_time=t_start,
                         end_time=t_end, start_soc=0.0, end_soc=0.0,
@@ -3561,6 +3563,19 @@ def _promote_shadow_trips(session: Session, apply: bool = False,
         added = row.id is None
         _apply_shadow_to_drive(row, t)
         _geocode_shadow_drive(session, row, t)
+        if not added and not session.is_modified(row, include_collections=False):
+            # Re-promoting a row that was already correct. Reported as what it
+            # is, because the caller's "changed" count is otherwise the number
+            # of trips CONSIDERED, and every run of this over a settled
+            # fortnight announced 25 corrections having written nothing.
+            #
+            # Asked of the session rather than by comparing km and kwh. Those
+            # two matching does not mean the row is unchanged — a trip
+            # promoted before the outside-temperature averaging landed has the
+            # same distance and energy and a different out_temp — and calling
+            # that unchanged would be a new lie in place of the old one. The
+            # unit of work already knows exactly which attributes moved.
+            entry_for_row["action"] = "unchanged"
         if added:
             # Only for a trip the stream ADDED. A correction to a row polling
             # already announced would fire a second time for one journey, and
@@ -11780,7 +11795,12 @@ def telemetry_promote(
                 "trips": changed,
                 "note": "Nothing written. Add &apply=true to carry these across.",
                 "how": "Add &apply=true to this URL to apply them."}
-    return {"changed": len(changed), "trips": changed}
+    # "changed" now means changed. It used to be the number of trips
+    # CONSIDERED: a run over a settled fortnight reported 25 corrections
+    # having written nothing at all.
+    unchanged = sum(1 for c in changed if c.get("action") == "unchanged")
+    return {"changed": len(changed) - unchanged, "unchanged": unchanged,
+            "trips": changed}
 
 
 @router.api_route("/db-maintenance", methods=["GET", "POST"])
