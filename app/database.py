@@ -200,6 +200,11 @@ def init_db() -> None:
     _ensure_column("drives", "start_recovered_km", "FLOAT", "NULL")
     _ensure_column("drives", "start_park_min", "FLOAT", "NULL")
     _ensure_column("drives", "climate_min", "FLOAT", "NULL")
+    # NULL, not the mean: a trip closed before the outside-temperature
+    # averaging landed has no second reading, and copying out_temp into it
+    # would manufacture a zero bias for trips whose bias is unknown.
+    _ensure_column("drives", "out_temp_end_c", "FLOAT", "NULL")
+    _ensure_column("drives", "ended_on", "VARCHAR(12)", "NULL")
     _ensure_column("drives", "start_gap_sec", "FLOAT", "NULL")
     _ensure_column("drives", "end_gap_sec", "FLOAT", "NULL")
     _ensure_column("drives", "end_est_km", "FLOAT", "NULL")

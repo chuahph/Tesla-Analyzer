@@ -62,6 +62,19 @@ class Drive(Base):
     max_speed_kmh: Mapped[float] = mapped_column(Float, default=0.0)
 
     outside_temp_c: Mapped[float] = mapped_column(Float, default=20.0)
+    # The temperature the trip ENDED at, beside the mean it was driven in.
+    # The two answer different questions — "what was it like when I arrived"
+    # against "what should the climate model integrate" — and the gap between
+    # them is what the model's input used to be wrong by, per trip. Nullable
+    # because every trip closed before 13 September has no second reading, and
+    # unknown must not read as equal.
+    out_temp_end_c: Mapped[float | None] = mapped_column(Float, nullable=True)
+    # bms / exit / timeout / stream_lost — how the car's last word arrived,
+    # and so how much the final odometer is worth. A trip reading short
+    # against the car's own screen is usually explained entirely by this
+    # (738: stream_lost underground, -1.3% distance), and without it the
+    # explanation has to be re-derived from the odometer every time.
+    ended_on: Mapped[str | None] = mapped_column(String(12), nullable=True)
     # The specific spot (POI/street/address) for per-trip display.
     start_location: Mapped[str] = mapped_column(String(120), default="")
     end_location: Mapped[str] = mapped_column(String(120), default="")

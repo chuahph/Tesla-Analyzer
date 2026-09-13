@@ -1556,6 +1556,14 @@ function tripDiagnostics(t, ctx) {
       // The parked gap before this trip: a 0.0 kWh reading over a long park
       // is itself a symptom (drain that moved into the drive).
       vampire_before: t.vampire_before,
+      // What the trip was driven in, and what it ended in. The climate model
+      // integrates the first; the gap between them is what its input used to
+      // be wrong by. Null end temperature means a trip closed before the
+      // averaging landed — unknown, not equal.
+      out_temp: t.out_temp, out_temp_end: t.out_temp_end,
+      // bms / exit / timeout / stream_lost. Usually the entire explanation
+      // for a trip reading short against the car's own screen.
+      ended_on: t.ended_on,
       conditions: t.conditions,
       cost: t.cost, cost_parts: t.cost_parts, cost_source: t.cost_source,
       start_coords: t.start_coords, end_coords: t.end_coords,

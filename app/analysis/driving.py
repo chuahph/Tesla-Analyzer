@@ -1633,6 +1633,18 @@ def analyze(drives: list[Drive], rated_wh_per_km: float = 150.0,
                     if trip_costs is not None and has_valid_energy(d) and _trip_cost(d) is not None
                     else None
                 ),
+                # The temperature this trip was DRIVEN in, and the one it
+                # ended at. Both, because the climate model integrates the
+                # first while a reader recognises the second — and the gap
+                # between them is what the model's input was wrong by before
+                # 13 September, which is only visible if both travel together.
+                # out_temp_end is null on every trip closed before that, and
+                # must stay null: unknown is not zero.
+                "out_temp": d.outside_temp_c,
+                "out_temp_end": getattr(d, "out_temp_end_c", None),
+                # bms / exit / timeout / stream_lost. Usually the whole
+                # explanation for a trip that reads short against the car.
+                "ended_on": getattr(d, "ended_on", None),
                 "conditions": _trip_conditions(d),
                 # "measured" (real tracked idle) / "estimated" (heuristic
                 # fallback) / "incomplete" (no valid energy) — how much to

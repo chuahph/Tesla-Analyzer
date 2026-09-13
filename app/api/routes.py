@@ -3976,10 +3976,17 @@ def _apply_shadow_to_drive(row, t: dict) -> None:
                        ("avg_speed_kmh", "avg_speed_kmh"),
                        ("start_odo_km", "start_odo_km"),
                        ("end_odo_km", "end_odo_km"),
-                       ("outside_temp_c", "out_temp")):
+                       ("outside_temp_c", "out_temp"),
+                       ("out_temp_end_c", "out_temp_end")):
         value = t.get(key)
         if value is not None:
             setattr(row, field, float(value))
+    # Not a float, so it sits outside the loop above. Carried because it is
+    # what explains a trip reading short against the car's own screen, and
+    # re-deriving that from the odometer every time is work the stream already
+    # did.
+    if t.get("ended_on"):
+        row.ended_on = str(t["ended_on"])[:12]
 
 
 # The sweep that catches anything the prompt path missed. Daily, because it

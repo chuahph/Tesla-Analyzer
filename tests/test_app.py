@@ -435,6 +435,77 @@ def test_health_judges_the_cron_against_its_own_rhythm_not_a_fixed_number():
         settings.app_passcode = old_pc
 
 
+def test_a_trip_carries_its_temperatures_and_ending_into_the_dashboard():
+    """One tap on a trip should answer the questions we actually ask of it.
+
+    The per-trip copy button gives the promoted Drive row, which was complete
+    for distance and energy and silent about the two things that explain the
+    rest: the temperature the trip was DRIVEN in against the one it ended at
+    (the gap is what the climate model's input used to be wrong by), and how
+    the car's last word arrived. Trip 738 read 1.3% short and ended_on
+    "stream_lost" was the entire explanation — parked underground, signal gone
+    before the final odometer — but that field lived only in the shadow store,
+    so the explanation had to be re-derived from the odometer by hand.
+
+    Neither reached the Drive table at all, so no amount of copying could
+    include them.
+    """
+    import json as _json
+
+    from app import state, sync as sync_mod
+    from app.database import SessionLocal
+    from app.models import Drive, Vehicle
+
+    settings = get_settings()
+    old_pc = settings.app_passcode
+    settings.app_passcode = ""
+    sess = SessionLocal()
+    prev = state.get(sess, state.TELEMETRY_TRIPS_KEY)
+    try:
+        vin = sess.scalars(select(Vehicle.vin)).first()
+        now = sync_mod.now_local()
+        at = now - timedelta(hours=2)
+        end = at + timedelta(minutes=22)
+        state.put(sess, state.TELEMETRY_TRIPS_KEY, _json.dumps([{
+            "vin": vin, "start_ts": at.timestamp(), "end_ts": end.timestamp(),
+            "start_time": at.isoformat(timespec="seconds"),
+            "end_time": end.isoformat(timespec="seconds"),
+            "distance_km": 9.078, "duration_min": 22.2, "energy_kwh": 1.3,
+            "wh_per_km": 143.2, "start_odo_km": 80000.0,
+            "end_odo_km": 80009.078, "soc_start": 56.0, "soc_end": 54.0,
+            "out_temp": 27.5, "out_temp_end": 28.0, "ended_on": "stream_lost",
+        }]))
+        sess.commit()
+
+        with TestClient(app) as client:
+            client.post("/api/telemetry/promote?apply=true")
+            body = client.get("/api/summary?days=30").json()
+
+        # Persisted, so they survive the trip leaving the shadow store.
+        with SessionLocal() as s:
+            row = s.scalars(select(Drive).order_by(Drive.id.desc()).limit(1)).first()
+            assert row.out_temp_end_c == pytest.approx(28.0)
+            assert row.ended_on == "stream_lost"
+
+        # And served to the dashboard, which is what the copy button reads.
+        trip = next(t for t in body["driving"]["recent_trips"]
+                    if t.get("ended_on") == "stream_lost")
+        assert trip["out_temp"] == pytest.approx(27.5)
+        assert trip["out_temp_end"] == pytest.approx(28.0)
+
+        # A trip closed before the averaging landed has no second reading, and
+        # unknown must not arrive as equal — a null bias, never a zero one.
+        older = [t for t in body["driving"]["recent_trips"]
+                 if t.get("ended_on") is None]
+        assert older, "expected pre-fix trips in the demo history"
+        assert all(t.get("out_temp_end") is None for t in older)
+    finally:
+        state.put(sess, state.TELEMETRY_TRIPS_KEY, prev or "[]")
+        sess.commit()
+        sess.close()
+        settings.app_passcode = old_pc
+
+
 def test_a_lost_tail_is_reclaimed_when_the_next_trip_bounds_it():
     """Not a day later. The moment the evidence becomes safe to act on.
 
