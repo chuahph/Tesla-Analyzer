@@ -2327,6 +2327,11 @@ function setupMatrixModal() {
     Object.entries(fields).forEach(([k, el]) => {
       if (el && t[k] != null) el.value = t[k];
     });
+    // Show the boundary that is actually in force, so a narrowed report is
+    // never a mystery — and so widening it back does not need remembering.
+    const b = (d.window || {}).boundary;
+    if (winTrips) winTrips.value = b && b.kind === "last_trips" ? winTrips.value : "";
+    if (winFrom) winFrom.value = b && b.kind === "from" ? b.at.slice(0, 10) : "";
   }
 
   function draw() {
@@ -2358,6 +2363,58 @@ function setupMatrixModal() {
         "Couldn't load the matrix. Try again in a moment.";
     }
   });
+
+  // How far back the report reaches. Its own form because it is a different
+  // kind of change from the cut-points: those re-sort the same trips, this
+  // changes which trips there are.
+  const winForm = document.getElementById("matrix-window-form");
+  const winMsg = document.getElementById("matrix-window-msg");
+  const winTrips = document.getElementById("mw-trips");
+  const winFrom = document.getElementById("mw-from");
+  async function setWindow(body) {
+    if (winMsg) winMsg.textContent = "Redrawing…";
+    try {
+      const r = await fetch("/api/driving-matrix/window", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      const d = await r.json();
+      if (!r.ok) {
+        if (winMsg) winMsg.textContent = (d && d.detail) || "That didn't apply.";
+        return;
+      }
+      show(d);
+      const w = d.window || {};
+      // Said plainly, because a narrow window is what takes the parked rows
+      // blank and that should not look like a bug.
+      const park = (d.parked || []).some((p) => p.kw != null)
+        ? ""
+        : " The parked rows need 24 h of 6 h-plus parks, which this window may not carry.";
+      if (winMsg) {
+        winMsg.textContent = `Showing ${w.days} days, from ${(w.from || "").replace("T", " ")}.${park}`;
+      }
+    } catch (err) {
+      if (winMsg) winMsg.textContent = "That didn't apply. Try again in a moment.";
+    }
+  }
+  if (winForm) {
+    winForm.addEventListener("submit", (e) => {
+      e.preventDefault();
+      const body = {};
+      if (winTrips && winTrips.value !== "") body.last_trips = Number(winTrips.value);
+      else if (winFrom && winFrom.value !== "") body.from = winFrom.value;
+      setWindow(body);
+    });
+  }
+  const winClear = document.getElementById("mw-clear");
+  if (winClear) {
+    winClear.addEventListener("click", () => {
+      if (winTrips) winTrips.value = "";
+      if (winFrom) winFrom.value = "";
+      setWindow({});
+    });
+  }
 
   form.addEventListener("submit", async (e) => {
     e.preventDefault();

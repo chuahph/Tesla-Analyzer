@@ -712,6 +712,26 @@
         <div id="matrix-body">Loading…</div>
         <div id="matrix-glossary"></div>
       <details class="matrix-tune">
+        <summary>How far back this report reaches</summary>
+        <p class="modal-sub">
+          The report already starts where streamed history does — polled trips are
+          left out, because their boundaries are the ones the telemetry work spent
+          months correcting. Narrow it further if you only want trips from after the
+          last round of fixes. Nothing is deleted, so you can widen it straight back:
+          the trips stay in the history every other page is built on, and only this
+          report's averages change.
+        </p>
+        <form id="matrix-window-form" class="matrix-form">
+          <label>Start at the last N trips (blank for all)
+            <input id="mw-trips" type="number" step="1" min="1" max="2000"></label>
+          <label>…or start at a date
+            <input id="mw-from" type="date"></label>
+          <button type="submit" class="btn">Apply</button>
+          <button type="button" id="mw-clear" class="btn">All telemetry</button>
+        </form>
+        <p id="matrix-window-msg" class="modal-sub"></p>
+      </details>
+      <details class="matrix-tune">
         <summary>Where the conditions are cut</summary>
         <p class="modal-sub">
           A trip is sorted by how close it stayed to its own peak speed — average

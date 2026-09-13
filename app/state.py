@@ -113,6 +113,13 @@ MODE_THRESHOLDS_KEY = "drive_mode_thresholds"  # JSON {constant_idle_share_max,
 # right boundary between "slow city" and "heavy city" is a local fact, and
 # tuning it should not need a deploy. Absent means the defaults in
 # analysis.driving apply.
+MATRIX_SINCE_KEY = "matrix_since"  # JSON {last_trips} or {from}: where the
+# driving matrix should START, when the telemetry cutover is not narrow enough.
+# The point of it is that a report can be confined to trips the CURRENT logic
+# produced without deleting the older ones — the rows do not record which code
+# version wrote them, so the only honest boundary is one a person draws, and
+# drawing it here is reversible where deleting the rows is not. Absent means the
+# report starts at the telemetry cutover (see driving_matrix).
 ARRIVAL_REPAIR_AT_KEY = "arrival_repair_at"  # epoch of the last automatic
 # run of /api/repair-arrivals. That job reclaims the last few hundred metres of
 # a trip whose stream died before the car finished parking — underground, most

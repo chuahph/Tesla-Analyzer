@@ -8050,6 +8050,105 @@ def set_mode_thresholds(payload: dict = Body(...),
     return driving_matrix(days=30, session=session)
 
 
+def _matrix_boundary(session: Session, vehicle_id: int):
+    """An explicit "start the report here", set by hand. (datetime, kind) or None.
+
+    Exists because the rows do not record WHICH CODE VERSION produced them.
+    The telemetry cutover separates streamed trips from polled ones, and that
+    is a real boundary the rows can answer; "trips written since the last round
+    of fixes" is not — every telemetry-era row looks alike, and the fields the
+    newest logic adds (out_temp_end_c, ended_on) are also absent from a perfectly
+    current trip whose stream never reported them. So the boundary is one a
+    person draws, and it is stored rather than compiled in.
+
+    Drawn here and not by deleting the older trips, which is what was asked
+    for. Deleting is irreversible against a history no API can re-serve, it
+    takes the parked-drain fits down with it — purge_pre_telemetry measured 74
+    gaps becoming 3 — and it would throw away the totals, costs and odometer
+    continuity that every other page is built on, to change what ONE report
+    averages. A boundary gets the same report and keeps all of that.
+
+    ``last_trips`` resolves against telemetry-sourced trips only, so "the last
+    9" cannot silently reach back into the polled era, and it resolves to the
+    EARLIEST of those trips' start times — asking for more trips than exist
+    gives the whole telemetry history rather than an error.
+    """
+    import json as _json
+
+    try:
+        raw = _json.loads(state.get(session, state.MATRIX_SINCE_KEY) or "{}")
+    except ValueError:
+        return None
+    if not isinstance(raw, dict):
+        return None
+    n = raw.get("last_trips")
+    if n:
+        starts = session.scalars(
+            select(Drive.start_time)
+            .where(Drive.vehicle_id == vehicle_id, Drive.source == "telemetry")
+            .order_by(Drive.start_time.desc()).limit(int(n))
+        ).all()
+        return (starts[-1], "last_trips") if starts else None
+    since = raw.get("from")
+    if since:
+        try:
+            return datetime.fromisoformat(str(since)), "from"
+        except ValueError:
+            return None
+    return None
+
+
+@router.post("/driving-matrix/window")
+def set_matrix_window(payload: dict = Body(...),
+                      session: Session = Depends(get_session)):
+    """Confine the matrix to recent trips, and re-read it underneath.
+
+    ``{"last_trips": 9}`` starts the report at the 9th-most-recent streamed
+    trip; ``{"from": "2026-09-12"}`` starts it at a date; ``{}`` clears the
+    boundary and goes back to the telemetry cutover. Reversible in every
+    direction, which is the whole reason it exists rather than a delete.
+
+    Answers with the matrix rather than an acknowledgement, for the same reason
+    the threshold endpoint does: the cost of a narrow window is visible only in
+    the report it produces. Watch ``parked_evidence`` in particular — the
+    parked rows need 24 hours of 6-hour-plus parks per class, and nine trips is
+    very unlikely to carry that, so narrowing the window is what takes PK, ID
+    and SE blank.
+    """
+    import json as _json
+
+    if payload.get("last_trips") is not None and payload.get("from") is not None:
+        raise HTTPException(422, "give last_trips or from, not both — they are "
+                                 "two ways of naming one boundary")
+    keep: dict[str, Any] = {}
+    if payload.get("last_trips") is not None:
+        try:
+            n = int(payload["last_trips"])
+        except (TypeError, ValueError):
+            raise HTTPException(422, "last_trips must be a whole number of trips")
+        if not 1 <= n <= 2000:
+            raise HTTPException(422, "last_trips must be between 1 and 2000")
+        keep["last_trips"] = n
+    elif payload.get("from") is not None:
+        try:
+            when = datetime.fromisoformat(str(payload["from"]))
+        except ValueError:
+            raise HTTPException(
+                422, "from must be an ISO date or datetime, e.g. 2026-09-12 "
+                     "or 2026-09-12T08:30")
+        # Naive MYT wall-clock, like every stored timestamp — see sync.now_local.
+        # A boundary in the future would empty the report rather than narrow it.
+        if when.tzinfo is not None:
+            when = when.replace(tzinfo=None)
+        if when > sync_mod.now_local():
+            raise HTTPException(422, "from is in the future — that empties the "
+                                     "report rather than narrowing it")
+        keep["from"] = when.isoformat(timespec="minutes")
+    state.put(session, state.MATRIX_SINCE_KEY, _json.dumps(keep))
+    session.commit()
+    return driving_matrix(days=730, session=session)
+
+
 @router.get("/driving-matrix")
 def driving_matrix(days: int = Query(30, ge=1, le=730),
                    session: Session = Depends(get_session)):
@@ -8090,7 +8189,17 @@ def driving_matrix(days: int = Query(30, ge=1, le=730),
     cutover = session.scalar(
         select(func.min(Drive.start_time)).where(
             Drive.vehicle_id == vehicle.id, Drive.source == "telemetry"))
-    since = max(asked_since, cutover) if cutover else asked_since
+    # Three boundaries, and the LATEST wins: the days asked for, where streamed
+    # history begins, and an explicit "start here" if one is set. Taking the
+    # latest is what makes them compose — a boundary cannot drag the report back
+    # into the polled era, and the cutover cannot widen one a person narrowed.
+    bounds = [(asked_since, "days")]
+    if cutover:
+        bounds.append((cutover, "telemetry"))
+    drawn = _matrix_boundary(session, vehicle.id)
+    if drawn:
+        bounds.append((drawn[0], "boundary"))
+    since, limited_by = max(bounds, key=lambda pair: pair[0])
     drives, charges = _window(session, vehicle.id, days, since=since)
     # The yardstick every row is measured against: what this pack is worth at
     # the car's own rated consumption. Derived rather than configured, so it
@@ -8183,7 +8292,13 @@ def driving_matrix(days: int = Query(30, ge=1, le=730),
         "days": round((now - since).total_seconds() / 86400.0, 1),
         "days_asked": days,
         "telemetry_from": cutover.isoformat(timespec="minutes") if cutover else None,
-        "limited_by": "telemetry" if cutover and cutover > asked_since else "days",
+        "limited_by": limited_by,
+        # What was asked for, so a narrow report can be widened again without
+        # guessing what it was narrowed by. Deleting the trips would have left
+        # nothing to read here.
+        "boundary": ({"kind": drawn[1],
+                      "at": drawn[0].isoformat(timespec="minutes")}
+                     if drawn else None),
     }
     out["capacity_kwh"] = capacity_kwh
     # Carried with the numbers rather than left in someone's head: a matrix

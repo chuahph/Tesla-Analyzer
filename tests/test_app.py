@@ -8933,3 +8933,115 @@ def test_a_polled_charge_keeps_its_energy_and_gets_its_boundaries_fixed():
                 s.delete(v)
             state.put(s, state.TELEMETRY_CHARGES_KEY, "[]")
             s.commit()
+
+
+def test_the_matrix_window_can_be_drawn_by_hand_and_widened_back():
+    """The ask was to DELETE the trips older than the last round of fixes, so
+    the matrix would only average trips the current logic produced. The rows do
+    not record which code version wrote them, so no query can find them — and
+    deleting is irreversible against a history no API can re-serve, takes the
+    parked-drain fits down with it, and would cost the totals, costs and
+    odometer continuity every other page is built on to change what one report
+    averages.
+
+    A stored boundary gets the same report and keeps all of it, in both
+    directions: this narrows the window to the last two trips and then widens it
+    straight back.
+    """
+    from datetime import datetime as _dt
+    from datetime import timedelta as _td
+
+    from app import state
+    from app.database import SessionLocal
+    from app.models import Drive, Vehicle
+
+    settings = get_settings()
+    old_pc = settings.app_passcode
+    settings.app_passcode = ""
+    made = []
+    with TestClient(app) as client:
+        sess = SessionLocal()
+        prev = state.get(sess, state.MATRIX_SINCE_KEY)
+        try:
+            vid = sess.scalar(select(Vehicle.id))
+            # Four streamed trips an hour apart, each its own hour so nothing
+            # collides with another test's fixtures.
+            base = _dt(2026, 9, 10, 3, 0, 0)
+            for i in range(4):
+                at = base + _td(hours=i)
+                row = Drive(vehicle_id=vid, start_time=at,
+                            end_time=at + _td(minutes=20),
+                            distance_km=10.0 + i, energy_used_kwh=1.5,
+                            start_soc=80.0 - i, end_soc=78.0 - i,
+                            avg_speed_kmh=30.0, max_speed_kmh=60.0,
+                            idle_min=0.0, idle_tracked=True,
+                            source="telemetry")
+                sess.add(row); made.append(row)
+            sess.commit()
+
+            def newest(n):
+                """The n newest streamed starts, oldest of them first.
+
+                Queried rather than taken from the rows seeded above: other
+                tests in this suite stage telemetry drives of their own at
+                today's date, which are NEWER than these, so "the last two
+                trips" is not necessarily two of mine. The rule under test is
+                that the boundary lands on the nth-newest streamed start —
+                hard-coding a timestamp tests the fixture instead, and passed
+                alone while failing in the suite.
+                """
+                got = sess.scalars(
+                    select(Drive.start_time)
+                    .where(Drive.vehicle_id == vid, Drive.source == "telemetry")
+                    .order_by(Drive.start_time.desc()).limit(n)).all()
+                return list(reversed(got))
+
+            state.put(sess, state.MATRIX_SINCE_KEY, "")
+            sess.commit()
+            wide = client.get("/api/driving-matrix?days=730").json()["window"]
+            assert wide["boundary"] is None
+
+            # The last two trips: the boundary lands on the SECOND-newest start,
+            # so both of them are inside it.
+            narrow = client.post("/api/driving-matrix/window",
+                                 json={"last_trips": 2}).json()
+            w = narrow["window"]
+            second_newest = newest(2)[0].isoformat(timespec="minutes")
+            assert w["boundary"] == {"kind": "last_trips", "at": second_newest}
+            assert w["limited_by"] == "boundary"
+            assert w["from"] == second_newest
+            # Narrower than it was, which is the point.
+            assert w["days"] < wide["days"]
+
+            # A boundary EARLIER than the telemetry cutover cannot drag the
+            # report back into the polled era — the latest of the three wins.
+            back = client.post("/api/driving-matrix/window",
+                               json={"from": "2019-01-01"}).json()["window"]
+            assert back["boundary"]["kind"] == "from"
+            assert back["limited_by"] in ("telemetry", "days")
+            assert back["from"] >= (back["telemetry_from"] or back["from"])
+
+            # And it clears, which a delete could never do.
+            again = client.post("/api/driving-matrix/window", json={}).json()
+            assert again["window"]["boundary"] is None
+            assert again["window"]["from"] == wide["from"]
+
+            # Two ways of naming one boundary is a mistake, not a merge.
+            assert client.post("/api/driving-matrix/window",
+                               json={"last_trips": 2, "from": "2026-09-10"}
+                               ).status_code == 422
+            assert client.post("/api/driving-matrix/window",
+                               json={"last_trips": 0}).status_code == 422
+            assert client.post("/api/driving-matrix/window",
+                               json={"from": "whenever"}).status_code == 422
+            # A boundary past the last trip empties the report instead of
+            # narrowing it, so it is refused at the door.
+            assert client.post("/api/driving-matrix/window",
+                               json={"from": "2099-01-01"}).status_code == 422
+        finally:
+            for row in made:
+                sess.delete(row)
+            state.put(sess, state.MATRIX_SINCE_KEY, prev or "")
+            sess.commit()
+            sess.close()
+            settings.app_passcode = old_pc
