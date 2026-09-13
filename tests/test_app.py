@@ -435,6 +435,65 @@ def test_health_judges_the_cron_against_its_own_rhythm_not_a_fixed_number():
         settings.app_passcode = old_pc
 
 
+def test_a_lost_tail_is_reclaimed_when_the_next_trip_bounds_it():
+    """Not a day later. The moment the evidence becomes safe to act on.
+
+    A trip whose stream died before the car finished parking is short by the
+    metres it covered unseen. The parked readings between it and whatever came
+    next can say how many — but attributing them is only safe once a following
+    trip exists to bound that end, because until then the car might still be
+    moving. That moment is when a new trip is promoted, so that is when this
+    runs; a daily sweep would leave a wrong distance on the dashboard for up
+    to 24 hours after everything needed to fix it had arrived.
+
+    Scanning only the last couple of days, because nothing older can have
+    changed and reading a month of parked readings to fix yesterday is most of
+    the cost for none of the benefit.
+    """
+    from app.api import routes
+    from app.database import SessionLocal
+
+    sess = SessionLocal()
+    calls = []
+    real = routes.repair_arrivals
+
+    def spy(**kw):
+        calls.append(kw)
+        return {"reclaimed_km": 0.123}
+
+    routes.repair_arrivals = spy
+    try:
+        # A promotion that added a journey: its predecessor's end is now
+        # bounded, so the tail is measurable and attributable.
+        got = routes._repair_after_new_trips(
+            sess, [{"action": "correct"}, {"action": "add"}])
+        assert got == 123
+        assert len(calls) == 1
+        assert calls[0]["apply"] is True
+        assert calls[0]["days"] == routes.ARRIVAL_REPAIR_RECENT_DAYS <= 7, calls
+
+        # A promotion that changed nothing has not moved any boundary, so
+        # there is nothing new to find and the scan must not run. This fires
+        # on every dashboard load; running a continuity scan each time would
+        # undo the page's load time for no finding.
+        calls.clear()
+        assert routes._repair_after_new_trips(
+            sess, [{"action": "unchanged"}, {"action": "correct"}]) == 0
+        assert calls == []
+        assert routes._repair_after_new_trips(sess, []) == 0
+        assert routes._repair_after_new_trips(sess, None) == 0
+
+        # And a repair that raises cannot take the caller with it.
+        def boom(**kw):
+            raise RuntimeError("continuity scan failed")
+
+        routes.repair_arrivals = boom
+        assert routes._repair_after_new_trips(sess, [{"action": "add"}]) == 0
+    finally:
+        routes.repair_arrivals = real
+        sess.close()
+
+
 def test_the_arrival_repair_runs_by_itself_but_only_once_a_day():
     """The job that reclaims a lost arrival tail had no automatic caller.
 

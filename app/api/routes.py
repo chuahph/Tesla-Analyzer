@@ -3982,10 +3982,40 @@ def _apply_shadow_to_drive(row, t: dict) -> None:
             setattr(row, field, float(value))
 
 
-# How often the arrival repair runs by itself. Daily: it reads a month of
-# drives against a month of parked readings, and a missed tail is not urgent —
-# it is a tenth of a kilometre on a trip already recorded.
+# The sweep that catches anything the prompt path missed. Daily, because it
+# reads a MONTH of drives against a month of parked readings — too much to run
+# on every tick, and nothing it finds at that age is urgent.
 ARRIVAL_REPAIR_EVERY_SEC = 24 * 3600.0
+# How far back to look when a new trip has just landed. A trip's end becomes
+# measurable the moment the next one bounds it, so that is when the repair
+# should happen rather than up to a day later — but only the last couple of
+# days can have changed, and scanning a month to fix yesterday is most of the
+# cost for none of the benefit.
+ARRIVAL_REPAIR_RECENT_DAYS = 2
+
+
+def _repair_after_new_trips(session: Session, changed: list) -> int:
+    """Reclaim a lost arrival tail as soon as the next trip bounds it.
+
+    A trip whose stream died before the car finished parking is short by the
+    metres it covered unseen, and nothing in the ingest can fix that after
+    SHADOW_TAIL_SEC. What CAN is the parked readings between it and whatever
+    came next — and the moment those become safe to attribute is the moment a
+    following trip exists to bound them, which is now.
+
+    Only when a trip was actually added. A promotion that corrected nothing
+    has not changed which ground belongs to whom, so there is nothing new to
+    find and this costs a list comprehension.
+    """
+    if not any(c.get("action") == "add" for c in (changed or [])):
+        return 0
+    try:
+        out = repair_arrivals(days=ARRIVAL_REPAIR_RECENT_DAYS, apply=True,
+                              session=session)
+        return int(round(float(out.get("reclaimed_km") or 0.0) * 1000))
+    except Exception:  # noqa: BLE001 — never let this break the caller
+        session.rollback()
+        return 0
 
 
 def _auto_repair_arrivals(session: Session) -> int:
@@ -4132,7 +4162,10 @@ def sync_now(wake: bool = Query(False), session: Session = Depends(get_session))
     # history into a run that does nothing and says so, which is the only
     # acceptable shape for an unattended write to real records.
     try:
-        _promote_shadow_trips(session, apply=True, max_add=PROMOTE_AUTO_MAX_ADD)
+        _repair_after_new_trips(
+            session,
+            _promote_shadow_trips(session, apply=True,
+                                  max_add=PROMOTE_AUTO_MAX_ADD))
     except Exception:  # noqa: BLE001 — never let this break the sync
         # A correction that cannot be made is a stale figure on the
         # dashboard. A sync that dies here is no figures at all, plus no
@@ -9971,7 +10004,10 @@ def summary(
         # Costs one state read when there is nothing staged:
         # _promote_shadow_trips returns immediately on an empty staging area.
         _settle_shadows(session)
-        _promote_shadow_trips(session, apply=True, max_add=PROMOTE_AUTO_MAX_ADD)
+        _repair_after_new_trips(
+            session,
+            _promote_shadow_trips(session, apply=True,
+                                  max_add=PROMOTE_AUTO_MAX_ADD))
     except Exception:  # noqa: BLE001
         # Rolled back rather than only swallowed: on Postgres the failed
         # statement aborts the transaction, and every query the rest of this
