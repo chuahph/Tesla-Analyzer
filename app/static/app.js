@@ -2199,7 +2199,13 @@ function renderMatrix(d) {
   if (!box) return;
   const modes = d.modes || [];
   const parked = d.parked || [];
-  if (!modes.length && !parked.some((p) => p.kw != null)) {
+  // Gated on whether there is ANYTHING to say, which since the parked rows
+  // became a measured sum is no longer the same as whether a rate was fitted.
+  // Checking p.kw here would blank the whole table on a window that has a
+  // perfectly good parked percentage and no rate yet — which is every short
+  // window, and exactly the state a new install is in.
+  const anyParked = parked.some((p) => p.kw != null || p.pct != null);
+  if (!modes.length && !anyParked) {
     box.innerHTML =
       `<p class="modal-sub">Nothing to show yet. A trip can only be sorted once its
        idle time was tracked live, and ${d.unclassified_trips || 0} trip(s) in this
@@ -3330,6 +3336,21 @@ function tickClock() {
   if (el) { const n = new Date(); el.textContent = `${dateFmt.format(n)} ${hhmm(n)} MYT`; }
 }
 
+// The build this PAGE's code was served with — not the one the server is on
+// now. The two are different questions and conflating them is a trap: this
+// stamp reads the SERVER's build out of /api/health, so a phone that has kept
+// the app open across a deploy shows the new SHA in the header while still
+// running the JavaScript it loaded hours ago. The header says "updated", the
+// screen does not change, and nothing anywhere says why.
+//
+// A service worker cannot fix that. app.js is fetched network-first, so a
+// RELOAD picks up new code — but a page already running never re-fetches its
+// own script, and an installed PWA on a phone may not be reloaded for days.
+//
+// So: remember the build seen when this page started, and say plainly when the
+// server has moved past it.
+let pageBuildSha = null;
+
 // Build stamp in the header: run #/SHA + build time (MYT), so it's obvious
 // which deployed version the phone is showing.
 function setBuildInfo(info) {
@@ -3340,6 +3361,18 @@ function setBuildInfo(info) {
   if (info.sha) parts.push(info.sha);
   if (info.time) parts.push(`${info.time} MYT`);
   el.textContent = parts.length ? `⚙ ${parts.join(" · ")}` : "";
+  if (info.sha && pageBuildSha === null) pageBuildSha = info.sha;
+  if (info.sha && pageBuildSha && info.sha !== pageBuildSha) {
+    // Deliberately a button and not an automatic reload: a reload mid-edit
+    // loses whatever was half-typed, and this can fire while the user is doing
+    // something. Saying so and letting them choose is the whole point.
+    const b = document.createElement("button");
+    b.className = "btn build-stale";
+    b.textContent = `↻ New version ${info.sha} — tap to load it`;
+    b.addEventListener("click", () => location.reload());
+    el.textContent = `⚙ ${pageBuildSha} (this page) `;
+    el.appendChild(b);
+  }
 }
 if (window.BUILD_INFO) setBuildInfo(window.BUILD_INFO);
 tickClock();

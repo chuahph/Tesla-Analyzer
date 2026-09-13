@@ -1463,3 +1463,14 @@ footer { padding: 18px 28px; color: var(--muted); font-size: 12px; border-top: 1
 .mx-defs dt { font-weight: 600; margin-top: 8px; }
 .mx-defs dt .mx-code { opacity: .7; margin-right: 4px; }
 .mx-defs dd { margin: 2px 0 0; opacity: .75; }
+
+/* "A new build is live but this page is still the old one" — see setBuildInfo.
+   Loud on purpose: it means the screen is not showing what the server has. */
+.build-stale {
+  margin-left: .5rem;
+  padding: .15rem .5rem;
+  font-size: .78rem;
+  background: var(--amber, #b45309);
+  color: #fff;
+  border-color: transparent;
+}
