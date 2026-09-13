@@ -1450,3 +1450,16 @@ footer { padding: 18px 28px; color: var(--muted); font-size: 12px; border-top: 1
 }
 .matrix-form label { display: flex; flex-direction: column; gap: 4px; font-size: 12.5px; }
 .matrix-form input { padding: 6px 8px; }
+
+
+/* Day tabs: a segmented control, not three loose buttons — they are one
+   choice, so they read as one object. */
+.matrix-tabs { display: flex; gap: 6px; margin: 0 0 12px; flex-wrap: wrap; }
+.matrix-tabs .mx-tab { flex: 0 1 auto; padding: 5px 12px; font-size: 12.5px; opacity: .6; }
+.matrix-tabs .mx-tab.is-on { opacity: 1; font-weight: 600; }
+.matrix-gloss { margin-top: 14px; }
+.matrix-gloss summary { cursor: pointer; font-weight: 600; font-size: 13.5px; }
+.mx-defs { margin: 10px 0 0; font-size: 12.5px; line-height: 1.55; }
+.mx-defs dt { font-weight: 600; margin-top: 8px; }
+.mx-defs dt .mx-code { opacity: .7; margin-right: 4px; }
+.mx-defs dd { margin: 2px 0 0; opacity: .75; }

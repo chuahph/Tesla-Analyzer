@@ -7977,6 +7977,13 @@ def self_check(days: int = Query(30, ge=1, le=730),
     }
 
 
+# The thresholds the matrix can be tuned on. Defined once and read by both the
+# writer and the reader, because two copies of a key list is how a saved value
+# disappears.
+MODE_CUT_KEYS = ("constant_ratio_min", "slow_ratio_min", "heavy_idle_share_max",
+                 "highway_max_kmh", "highway_avg_kmh")
+
+
 def _mode_cuts(session: Session) -> dict[str, float]:
     """Where the driving conditions are cut from one another.
 
@@ -7993,8 +8000,11 @@ def _mode_cuts(session: Session) -> dict[str, float]:
     except ValueError:
         return {}
     out = {}
-    for k in ("constant_idle_share_max", "slow_idle_share_max",
-              "highway_max_kmh", "highway_avg_kmh"):
+    # One list, named once. Keeping a second copy of these names in the reader
+    # is what let a threshold save and then vanish: the writer accepted the new
+    # keys while this still filtered for the old ones, so the value was stored
+    # and silently dropped on the way back out.
+    for k in MODE_CUT_KEYS:
         try:
             if raw.get(k) is not None:
                 out[k] = float(raw[k])
@@ -8015,25 +8025,26 @@ def set_mode_thresholds(payload: dict = Body(...),
     import json as _json
 
     cuts = _mode_cuts(session)
-    for k in ("constant_idle_share_max", "slow_idle_share_max",
-              "highway_max_kmh", "highway_avg_kmh"):
+    for k in MODE_CUT_KEYS:
         if payload.get(k) is None:
             continue
         try:
             v = float(payload[k])
         except (TypeError, ValueError):
             raise HTTPException(422, f"{k} must be a number")
-        if k.endswith("_share_max") and not 0.0 < v <= 1.0:
+        if (k.endswith("_ratio_min") or k.endswith("_share_max")) and not 0.0 < v <= 1.0:
             raise HTTPException(
-                422, f"{k} is a share of the trip, so it must be between 0 and 1")
+                422, f"{k} is a share, so it must be between 0 and 1")
         if k.endswith("_kmh") and not 0.0 < v <= 300.0:
             raise HTTPException(422, f"{k} must be a plausible speed")
         cuts[k] = v
-    if cuts.get("constant_idle_share_max", 0) >= cuts.get("slow_idle_share_max", 1):
+    con = cuts.get("constant_ratio_min", driving_analysis.MODE_CONSTANT_RATIO)
+    slo = cuts.get("slow_ratio_min", driving_analysis.MODE_SLOW_RATIO)
+    if con <= slo:
         raise HTTPException(
-            422, "constant_idle_share_max must be below slow_idle_share_max — "
-                 "the first is where constant driving ends and the second "
-                 "where slow driving does")
+            422, "constant_ratio_min must be above slow_ratio_min — a trip "
+                 "holding MORE of its peak speed is the more constant one, so "
+                 "the constant cut is the higher number")
     state.put(session, state.MODE_THRESHOLDS_KEY, _json.dumps(cuts))
     session.commit()
     return driving_matrix(days=30, session=session)
@@ -8070,9 +8081,15 @@ def driving_matrix(days: int = Query(30, ge=1, le=730),
     # cannot drift away from the rated figure the eco score already uses.
     baseline = (capacity_kwh * 1000.0 / settings.rated_wh_per_km
                 if settings.rated_wh_per_km else None)
-    out = driving_analysis.condition_matrix(
-        list(drives), capacity_kwh, baseline_range_km=baseline,
-        cuts=_mode_cuts(session))
+    cuts = _mode_cuts(session)
+    split = driving_analysis.split_matrices(
+        list(drives), capacity_kwh, baseline_range_km=baseline, cuts=cuts)
+    # The overall figures stay at the top level, where they were, and the two
+    # splits sit beside them. A reader who wants the whole picture should not
+    # have to know the word "overall" to find it.
+    out = dict(split["overall"])
+    out["weekday"] = split["weekday"]
+    out["weekend"] = split["weekend"]
 
     readings = _parked_readings(session, vehicle.id)
     def parked(armed: bool) -> dict[str, Any]:
@@ -8104,6 +8121,10 @@ def driving_matrix(days: int = Query(30, ge=1, le=730),
     }
     out["days"] = days
     out["capacity_kwh"] = capacity_kwh
+    # Carried with the numbers rather than left in someone's head: a matrix
+    # whose labels are undefined stops being readable the first time it is
+    # shared, or reread months later.
+    out["definitions"] = driving_analysis.MATRIX_DEFINITIONS
     out["note"] = ("Every condition is priced two ways. wh_per_km answers how "
                    "far a charge goes; kw answers what an hour costs, and is "
                    "the unit the parked rows are also in, so the whole table "

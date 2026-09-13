@@ -458,30 +458,33 @@ def test_the_condition_cuts_are_stored_and_re_sort_the_same_trips():
         sess.commit()
         with TestClient(app) as client:
             base = client.get("/api/driving-matrix?days=30").json()
-            assert base["thresholds"]["slow_idle_share_max"] == pytest.approx(0.30)
+            assert base["thresholds"]["slow_ratio_min"] == pytest.approx(0.35)
             assert "context" in base and base["context"]["region"] == "Malaysia"
+            # The report carries its own glossary, and both splits.
+            assert base["definitions"]["modes"][0]["code"] == "CH"
+            assert "weekday" in base and "weekend" in base
 
             moved = client.post("/api/driving-matrix/thresholds",
-                                json={"slow_idle_share_max": 0.45}).json()
-            assert moved["thresholds"]["slow_idle_share_max"] == pytest.approx(0.45)
+                                json={"slow_ratio_min": 0.40}).json()
+            assert moved["thresholds"]["slow_ratio_min"] == pytest.approx(0.40)
             # Answered with the matrix, not an OK.
             assert "modes" in moved and "parked" in moved
 
             # It survives the request that set it.
             again = client.get("/api/driving-matrix?days=30").json()
-            assert again["thresholds"]["slow_idle_share_max"] == pytest.approx(0.45)
+            assert again["thresholds"]["slow_ratio_min"] == pytest.approx(0.40)
 
-            # A cut that would put "constant" above "slow" is refused with the
-            # reason, because the two are an ordered pair and silently
-            # swapping them would invert every row.
+            # An ordered pair, refused with the reason: a trip holding MORE of
+            # its peak is the more constant one, so the constant cut has to be
+            # the higher number. Swapping them would invert every row.
             bad = client.post("/api/driving-matrix/thresholds",
-                              json={"constant_idle_share_max": 0.60})
+                              json={"constant_ratio_min": 0.20})
             assert bad.status_code == 422
-            assert "below" in bad.json()["detail"]
+            assert "above" in bad.json()["detail"]
 
             # A share is a share: 40 is not 40%.
             assert client.post("/api/driving-matrix/thresholds",
-                               json={"slow_idle_share_max": 40}).status_code == 422
+                               json={"slow_ratio_min": 40}).status_code == 422
     finally:
         state.put(sess, state.MODE_THRESHOLDS_KEY, prev or "")
         sess.commit()

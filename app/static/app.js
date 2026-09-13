@@ -2235,6 +2235,26 @@ function renderMatrix(d) {
     </p>`;
 }
 
+// The glossary the report carries with it. Rendered from the payload rather
+// than written into the page, so a code and its meaning cannot drift apart.
+function renderGlossary(defs) {
+  const box = document.getElementById("matrix-glossary");
+  if (!box) return;
+  if (!defs) { box.innerHTML = ""; return; }
+  const modes = (defs.modes || []).map((m) => `
+      <dt><span class="mx-code">${m.code}</span> ${m.name}</dt>
+      <dd>${m.means}</dd>`).join("");
+  const cols = (defs.columns || []).map((c) => `
+      <dt>${c.name}</dt><dd>${c.means}</dd>`).join("");
+  box.innerHTML = `
+    <details class="matrix-gloss">
+      <summary>What these names mean</summary>
+      <p class="modal-sub">${defs.how_sorted || ""}</p>
+      <dl class="mx-defs">${modes}</dl>
+      <dl class="mx-defs">${cols}</dl>
+    </details>`;
+}
+
 function setupMatrixModal() {
   const btn = document.getElementById("btn-matrix");
   const form = document.getElementById("matrix-form");
@@ -2242,19 +2262,44 @@ function setupMatrixModal() {
   btn.classList.remove("hidden");
   const msg = document.getElementById("matrix-msg");
   const fields = {
-    constant_idle_share_max: document.getElementById("cut-constant"),
-    slow_idle_share_max: document.getElementById("cut-slow"),
+    constant_ratio_min: document.getElementById("cut-constant"),
+    slow_ratio_min: document.getElementById("cut-slow"),
+    heavy_idle_share_max: document.getElementById("cut-heavyidle"),
     highway_max_kmh: document.getElementById("cut-hwmax"),
     highway_avg_kmh: document.getElementById("cut-hwavg"),
   };
+  // Which days the table is showing. Held here rather than re-fetched per tab:
+  // all three splits arrive in one payload, computed against one set of
+  // thresholds, which is the point of computing them together.
+  let latest = null;
+  let split = "overall";
 
   function show(d) {
-    renderMatrix(d);
+    latest = d;
+    draw();
+    renderGlossary(d.definitions);
     const t = d.thresholds || {};
     Object.entries(fields).forEach(([k, el]) => {
       if (el && t[k] != null) el.value = t[k];
     });
   }
+
+  function draw() {
+    if (!latest) return;
+    // The splits carry only their own modes; everything else — thresholds,
+    // baseline, parked rates, context — belongs to the whole report.
+    const part = split === "overall" ? latest : (latest[split] || {});
+    renderMatrix({ ...latest, ...part });
+  }
+
+  document.querySelectorAll(".mx-tab").forEach((tab) => {
+    tab.addEventListener("click", () => {
+      split = tab.dataset.split;
+      document.querySelectorAll(".mx-tab").forEach(
+        (t) => t.classList.toggle("is-on", t === tab));
+      draw();
+    });
+  });
 
   btn.addEventListener("click", async () => {
     openModal("matrix-modal");

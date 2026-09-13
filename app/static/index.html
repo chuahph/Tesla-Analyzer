@@ -704,19 +704,28 @@
         car can be quoted in too, so driving and standing still sit on one scale.
         Nothing here is modelled; it is all measured.
       </p>
-      <div id="matrix-body">Loading…</div>
+      <div class="matrix-tabs" role="group" aria-label="Which days to include">
+          <button type="button" class="btn mx-tab is-on" data-split="overall">All days</button>
+          <button type="button" class="btn mx-tab" data-split="weekday">Weekdays</button>
+          <button type="button" class="btn mx-tab" data-split="weekend">Weekends</button>
+        </div>
+        <div id="matrix-body">Loading…</div>
+        <div id="matrix-glossary"></div>
       <details class="matrix-tune">
         <summary>Where the conditions are cut</summary>
         <p class="modal-sub">
-          A trip is sorted by how much of it was spent stopped, and only then by speed.
-          These boundaries describe your roads rather than the car, so they are yours to
-          move — the table below redraws from the same trips.
+          A trip is sorted by how close it stayed to its own peak speed — average
+          divided by maximum — and only then by how fast that was. These boundaries
+          describe your roads rather than the car, so they are yours to move; the table
+          above redraws from the same trips.
         </p>
         <form id="matrix-form" class="matrix-form">
-          <label>Constant driving, idle share under
+          <label>Constant: held at least this share of its peak speed
             <input id="cut-constant" type="number" step="0.01" min="0.01" max="1" required></label>
-          <label>Slow driving, idle share under
+          <label>Slow: held at least this share (below it, heavy)
             <input id="cut-slow" type="number" step="0.01" min="0.01" max="1" required></label>
+          <label>Heavy: or this much of the trip spent waiting
+            <input id="cut-heavyidle" type="number" step="0.01" min="0.01" max="1" required></label>
           <label>Highway needs a peak of at least (km/h)
             <input id="cut-hwmax" type="number" step="1" min="1" max="300" required></label>
           <label>…and an average of at least (km/h)

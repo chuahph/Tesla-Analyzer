@@ -1754,8 +1754,25 @@ def analyze(drives: list[Drive], rated_wh_per_km: float = 150.0,
 # What separates them is in the owner's own labels: "Constant" against
 # "Intermittent Idling" against "Repeated Idling". So idling decides the pair
 # first, and speed only separates within it.
-MODE_IDLE_CONSTANT = 0.10     # under this share of the trip stopped: constant
-MODE_IDLE_SLOW = 0.30         # under this: intermittent. over: repeated
+# How close a trip stayed to its own peak speed. This, not idle_min, is what
+# separates constant driving from stop-go — and getting that wrong the first
+# time is worth recording, because the mistake was reading a field's name
+# instead of its definition.
+#
+# idle_min counts only stopped streaks of IDLE_STREAK_MIN (five minutes) or
+# more, and sync.py says why in as many words: a stop-go commute chaining a
+# long light, queue creep and the next light into three or four continuous
+# near-stationary minutes "is driving, not idling". So idle_min measures
+# WAITING — a pickup, a drive-through — and deliberately excludes traffic.
+# Keyed on it, 24 real trips averaging 25.7 km/h were sorted as constant city
+# cruising at 0% idle, and the mode came out 6% WORSE than the rated baseline
+# when it should be the best condition there is.
+#
+# avg / max has none of that problem. A cruise holds most of its peak; a crawl
+# through lights does not, whatever its stops were too short to register as.
+MODE_CONSTANT_RATIO = 0.55    # at or above: the trip largely held one speed
+MODE_SLOW_RATIO = 0.35        # between: intermittent. below: repeatedly stopped
+MODE_IDLE_HEAVY = 0.30        # or this much of it spent genuinely waiting
 MODE_HIGHWAY_MAX_KMH = 100.0  # "110 km/h +/- 10%" needs a peak up there
 MODE_HIGHWAY_AVG_KMH = 70.0   # and an average that says it stayed there
 
@@ -1778,23 +1795,24 @@ def drive_mode(d: Any, cuts: dict[str, float] | None = None) -> str | None:
     """
     dur = float(getattr(d, "duration_min", 0.0) or 0.0)
     dist = float(getattr(d, "distance_km", 0.0) or 0.0)
-    if dur <= 0 or dist <= 0:
-        return None
-    if not getattr(d, "idle_tracked", False):
+    mx = float(getattr(d, "max_speed_kmh", 0.0) or 0.0)
+    if dur <= 0 or dist <= 0 or mx <= 0:
         return None
     c = cuts or {}
-    constant = float(c.get("constant_idle_share_max", MODE_IDLE_CONSTANT))
-    slow = float(c.get("slow_idle_share_max", MODE_IDLE_SLOW))
+    constant = float(c.get("constant_ratio_min", MODE_CONSTANT_RATIO))
+    slow = float(c.get("slow_ratio_min", MODE_SLOW_RATIO))
+    heavy_idle = float(c.get("heavy_idle_share_max", MODE_IDLE_HEAVY))
     hw_max = float(c.get("highway_max_kmh", MODE_HIGHWAY_MAX_KMH))
     hw_avg = float(c.get("highway_avg_kmh", MODE_HIGHWAY_AVG_KMH))
-    idle_share = float(getattr(d, "idle_min", 0.0) or 0.0) / dur
     avg = dist / (dur / 60.0)
-    mx = float(getattr(d, "max_speed_kmh", 0.0) or 0.0)
-    if idle_share < constant:
-        if mx >= hw_max and avg >= hw_avg:
-            return "CH"
-        return "CC"
-    return "SC" if idle_share < slow else "HC"
+    ratio = avg / mx
+    # Genuine waiting outranks the ratio: a trip that spent a third of itself
+    # stopped is heavy whatever the moving part looked like.
+    if (float(getattr(d, "idle_min", 0.0) or 0.0) / dur) >= heavy_idle:
+        return "HC"
+    if ratio >= constant:
+        return "CH" if (mx >= hw_max and avg >= hw_avg) else "CC"
+    return "SC" if ratio >= slow else "HC"
 
 
 def condition_matrix(drives: list[Any], capacity_kwh: float,
@@ -1882,13 +1900,87 @@ def condition_matrix(drives: list[Any], capacity_kwh: float,
         # from every row above rather than distributed among them.
         "unclassified_trips": unclassified,
         "thresholds": {
-            "constant_idle_share_max": float((cuts or {}).get(
-                "constant_idle_share_max", MODE_IDLE_CONSTANT)),
-            "slow_idle_share_max": float((cuts or {}).get(
-                "slow_idle_share_max", MODE_IDLE_SLOW)),
+            "constant_ratio_min": float((cuts or {}).get(
+                "constant_ratio_min", MODE_CONSTANT_RATIO)),
+            "slow_ratio_min": float((cuts or {}).get(
+                "slow_ratio_min", MODE_SLOW_RATIO)),
+            "heavy_idle_share_max": float((cuts or {}).get(
+                "heavy_idle_share_max", MODE_IDLE_HEAVY)),
             "highway_max_kmh": float((cuts or {}).get(
                 "highway_max_kmh", MODE_HIGHWAY_MAX_KMH)),
             "highway_avg_kmh": float((cuts or {}).get(
                 "highway_avg_kmh", MODE_HIGHWAY_AVG_KMH)),
         },
+    }
+
+
+# What every code and column on the report means, carried with the numbers.
+# A matrix whose labels live only in someone's head stops being readable the
+# first time it is shared, or reread six months later.
+MATRIX_DEFINITIONS = {
+    "modes": [
+        {"code": "CH", "name": "Constant Highway",
+         "means": "Held most of its peak speed, and that peak was motorway pace. "
+                  "Fastest per kilometre in theory, most expensive per hour: drag "
+                  "rises faster than the speed saves."},
+        {"code": "CC", "name": "Constant City",
+         "means": "Held most of its peak speed below motorway pace — open roads, "
+                  "few interruptions. Usually the cheapest kilometres a car does."},
+        {"code": "SC", "name": "Slow City",
+         "means": "Spent a fair part of the trip well under its own peak. Lights "
+                  "and moderate traffic, but still moving."},
+        {"code": "HC", "name": "Heavy City",
+         "means": "Repeatedly stopped, or a third of the trip spent genuinely "
+                  "waiting. Worst per kilometre, cheapest per hour — the car "
+                  "burns little because it covers little."},
+        {"code": "PK", "name": "Parked, Sentry off",
+         "means": "Standing still with nothing watching. The floor of what this "
+                  "car costs to own."},
+        {"code": "SE", "name": "Parked, Sentry armed",
+         "means": "Standing still with the cameras running. Fitted separately "
+                  "from parks where Sentry was off, not assumed from where the "
+                  "car was."},
+    ],
+    "columns": [
+        {"name": "Wh/km", "means": "Energy per kilometre, weighted by distance "
+                                   "rather than averaged across trips — a 2 km "
+                                   "crawl should not move it as far as a 40 km run."},
+        {"name": "kW", "means": "Energy per hour. The unit a parked car can also "
+                                "be quoted in, so driving and standing still "
+                                "compare on one scale."},
+        {"name": "Range", "means": "What a full battery is worth driven entirely "
+                                   "in this condition."},
+        {"name": "km/1%", "means": "What one percent of the battery buys here."},
+        {"name": "Rank", "means": "Position among the driving modes. The per-km "
+                                  "and per-hour rankings are reverses of each "
+                                  "other, which is the point of showing both."},
+    ],
+    "how_sorted": (
+        "A trip is sorted by how close it stayed to its own peak speed — average "
+        "divided by maximum — and only then by how fast that was. Not by idle "
+        "time: this app counts a stop as idle only past five minutes, so a "
+        "commute through a dozen lights registers none at all."
+    ),
+}
+
+
+def split_matrices(drives: list[Any], capacity_kwh: float,
+                   baseline_range_km: float | None = None,
+                   cuts: dict[str, float] | None = None) -> dict[str, Any]:
+    """The matrix whole, and split into weekdays and weekends.
+
+    Kept as one call because the three share every threshold and baseline, and
+    computing them apart is how two of them drift. A split with no trips in it
+    is returned as an empty set of modes rather than omitted, so a reader can
+    tell "no weekend driving in this window" from "this report forgot".
+    """
+    def weekday(d: Any) -> bool:
+        return d.start_time.weekday() < 5
+
+    return {
+        "overall": condition_matrix(drives, capacity_kwh, baseline_range_km, cuts),
+        "weekday": condition_matrix([d for d in drives if weekday(d)],
+                                    capacity_kwh, baseline_range_km, cuts),
+        "weekend": condition_matrix([d for d in drives if not weekday(d)],
+                                    capacity_kwh, baseline_range_km, cuts),
     }

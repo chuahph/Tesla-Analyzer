@@ -2571,19 +2571,20 @@ def test_cost_per_100km_ignores_charges_older_than_the_drive_history():
     assert out["total_cost"] == pytest.approx(108.0)
 
 
-def test_the_condition_matrix_sorts_on_idling_before_speed():
-    """The owner's own measured ranges are not monotonic in speed:
+def test_the_condition_matrix_sorts_on_constancy_not_on_idle_time():
+    """How close a trip stayed to its own peak decides the condition.
 
-        CC 553 km  >  CH 494  >  SC 460  >  HC 345
+    The first version of this sorted on idle_min, and real data showed why
+    that cannot work: 24 trips averaging 25.7 km/h were classed as constant
+    city cruising at 0% idle, and the mode came out 6% WORSE than the rated
+    baseline when it should be the best condition there is. idle_min counts
+    only stopped streaks past five minutes — sync.py says a stop-go commute
+    chaining lights "is driving, not idling" — so it measures waiting and
+    deliberately excludes traffic. The field's name and its definition are
+    different things.
 
-    A 60-80 km/h cruise beats a 110 km/h one, because drag costs more than the
-    extra speed saves. Any classifier keyed on average speed collapses those
-    two into one bucket and cannot reproduce the ordering — which is exactly
-    what the existing _trip_conditions does, and why this needed its own.
-
-    What separates them is in the labels themselves: Constant against
-    Intermittent Idling against Repeated Idling. So idling decides the pair,
-    and speed only separates within it.
+    Average over maximum has no such problem, and it still reproduces the
+    ordering that made this worth building: the two rankings are reverses.
     """
     from app.analysis.driving import condition_matrix, drive_mode
 
@@ -2594,56 +2595,86 @@ def test_the_condition_matrix_sorts_on_idling_before_speed():
             self.energy_used_kwh = kwh; self.idle_tracked = tracked
             self.energy_estimated = False
             self.wh_per_km = round(kwh * 1000.0 / km) if km else 0
+            self.outside_temp_c = 31.0
 
-    # 110 km/h cruise: fast, barely stopped, and WORSE per km than the city
-    # cruise below — the whole point of the ordering.
-    ch = D(80.0, 48.0, 1.0, 118.0, 80.0 * 0.139)
-    # 60-80 km/h, minimal traffic: the efficiency sweet spot.
-    cc = D(30.0, 26.0, 1.0, 84.0, 30.0 * 0.124)
-    # Intermittent idling, moderate traffic.
-    sc = D(20.0, 40.0, 8.0, 70.0, 20.0 * 0.149)
-    # Repeated idling, congested.
-    hc = D(10.0, 45.0, 20.0, 60.0, 10.0 * 0.199)
+    ch = D(80.0, 48.0, 1.0, 118.0, 80.0 * 0.139)   # 100 km/h held, peak 118
+    cc = D(30.0, 26.0, 1.0, 84.0, 30.0 * 0.124)    # 69 km/h held, peak 84
+    sc = D(20.0, 40.0, 2.0, 70.0, 20.0 * 0.149)    # 30 against a peak of 70
+    hc = D(10.0, 45.0, 2.0, 60.0, 10.0 * 0.199)    # 13 against a peak of 60
 
     assert drive_mode(ch) == "CH"
     assert drive_mode(cc) == "CC"
     assert drive_mode(sc) == "SC"
     assert drive_mode(hc) == "HC"
 
+    # A trip that spent a third of itself genuinely waiting is heavy whatever
+    # the moving part looked like — real idle outranks the ratio.
+    waited = D(30.0, 60.0, 25.0, 40.0, 30.0 * 0.200)
+    assert drive_mode(waited) == "HC"
+
     m = condition_matrix([ch, cc, sc, hc], capacity_kwh=68.6,
                          baseline_range_km=461.0)
     by = {r["code"]: r for r in m["modes"]}
     assert set(by) == {"CH", "CC", "SC", "HC"}
-    # The ordering survives the round trip, which a speed-sorted classifier
-    # could not produce at all.
     assert by["CC"]["range_km"] > by["CH"]["range_km"] > by["SC"]["range_km"] \
         > by["HC"]["range_km"]
     assert by["CC"]["vs_baseline_pct"] > 0 > by["HC"]["vs_baseline_pct"]
-    # One percent of the pack, the form the reference table is written in.
     assert by["CC"]["km_per_pct"] == pytest.approx(5.5, abs=0.2)
 
-    # And the finding that only the per-hour axis can show: the orderings are
-    # exact reverses. Heavy city is the WORST condition per kilometre and the
-    # BEST per hour, because the car covers so little ground in it. A table
-    # quoted only as range can show one of those and not the other.
+    # The finding only the per-hour axis can show: the orderings are exact
+    # reverses. Heavy city is worst per kilometre and best per hour, because
+    # the car covers so little ground in it.
     assert by["HC"]["rank_per_km"] == 4 and by["HC"]["rank_per_hour"] == 1
     assert by["CH"]["rank_per_km"] == 2 and by["CH"]["rank_per_hour"] == 4
     assert by["CC"]["rank_per_km"] == 1
     assert by["HC"]["kw"] < by["SC"]["kw"] < by["CC"]["kw"] < by["CH"]["kw"]
 
     # Distance-weighted, not a mean of means: a 2 km crawl must not move the
-    # figure as far as a 40 km run.
-    far = D(40.0, 30.0, 1.0, 84.0, 40.0 * 0.120)
-    near = D(2.0, 4.0, 0.1, 60.0, 2.0 * 0.300)
+    # figure as far as a 40 km run. Both of these are constant trips.
+    far = D(40.0, 30.0, 0.0, 84.0, 40.0 * 0.120)
+    near = D(2.0, 4.0, 0.0, 34.0, 2.0 * 0.300)
     w = {r["code"]: r for r in condition_matrix(
         [far, near], capacity_kwh=68.6)["modes"]}["CC"]
     assert w["wh_per_km"] == pytest.approx(
         (40 * 120 + 2 * 300) / 42, abs=0.5), w["wh_per_km"]
 
-    # A trip whose idle was never tracked cannot be sorted on speed alone, so
-    # it is left out entirely rather than placed in a mode on a guess.
-    blind = D(20.0, 30.0, 0.0, 90.0, 3.0, tracked=False)
-    assert drive_mode(blind) is None
-    out = condition_matrix([cc, blind], capacity_kwh=68.6)
+    # A trip with no peak speed recorded cannot be placed at all, and is left
+    # out rather than guessed into a row.
+    nopeak = D(20.0, 30.0, 0.0, 0.0, 3.0)
+    assert drive_mode(nopeak) is None
+    out = condition_matrix([cc, nopeak], capacity_kwh=68.6)
     assert out["unclassified_trips"] == 1
     assert sum(r["trips"] for r in out["modes"]) == 1
+
+
+def test_the_matrix_splits_into_weekdays_and_weekends():
+    """Asked for as overall or split. Computed together because the three
+    share every threshold and baseline, and computing them apart is how two of
+    them drift.
+    """
+    from datetime import datetime as _dt
+
+    from app.analysis.driving import split_matrices
+
+    class D:
+        def __init__(self, when, km, mins, mx, kwh):
+            self.start_time = when
+            self.distance_km = km; self.duration_min = mins
+            self.idle_min = 0.0; self.max_speed_kmh = mx
+            self.energy_used_kwh = kwh; self.idle_tracked = True
+            self.energy_estimated = False
+            self.wh_per_km = round(kwh * 1000.0 / km)
+            self.outside_temp_c = 31.0
+
+    # 14 Sep 2026 is a Monday; 19 Sep is a Saturday.
+    week = [D(_dt(2026, 9, 14, 8), 30.0, 26.0, 84.0, 30 * 0.124)]
+    end = [D(_dt(2026, 9, 19, 10), 10.0, 45.0, 60.0, 10 * 0.199)]
+    out = split_matrices(week + end, capacity_kwh=68.6, baseline_range_km=461.0)
+
+    assert {r["code"] for r in out["weekday"]["modes"]} == {"CC"}
+    assert {r["code"] for r in out["weekend"]["modes"]} == {"HC"}
+    assert {r["code"] for r in out["overall"]["modes"]} == {"CC", "HC"}
+    # An empty split is an empty set of modes, not a missing key — "no weekend
+    # driving in this window" has to be tellable from "this report forgot".
+    only = split_matrices(week, capacity_kwh=68.6)
+    assert only["weekend"]["modes"] == []
