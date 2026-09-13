@@ -464,15 +464,25 @@ def test_the_condition_cuts_are_stored_and_re_sort_the_same_trips():
             assert base["definitions"]["modes"][0]["code"] == "CH"
             assert "weekday" in base and "weekend" in base
 
-            # The parked pair: a total and a part of it, in that order, each
+            # The parked trio: a bill and its two parts, in that order, each
             # saying which it is. A "5% lasts" figure is a property of a total
-            # draw, so the increment must never carry one — read off an
-            # increment it would be a lifetime for a habit, which is nonsense.
+            # draw, so the residual must never carry one — read off a
+            # difference it would be a lifetime for a habit, which is nonsense.
             park = {row["code"]: row for row in base["parked"]}
-            assert [r["code"] for r in base["parked"]] == ["PK", "SE"]
-            assert park["PK"]["basis"] == "total"
-            assert park["SE"]["basis"] == "increment"
+            assert [r["code"] for r in base["parked"]] == ["PK", "ID", "SE"]
+            assert park["PK"]["basis"] == park["ID"]["basis"] == "total"
+            assert park["SE"]["basis"] == "residual"
             assert park["SE"]["days_to_5pct"] is None
+            # The split says what it could see, so a blank row can be read.
+            ev = base["parked_evidence"]
+            assert ev["min_gap_hours"] == pytest.approx(6.0)
+            assert set(ev["hours"]) == {"total", "sentry_off", "sentry_on", "unknown"}
+
+            # The window is the one used, not the one asked for: this report
+            # starts where streamed history does.
+            assert base["window"]["days_asked"] == 30
+            assert base["window"]["limited_by"] in ("days", "telemetry")
+            assert base["window"]["days"] <= 30
 
             moved = client.post("/api/driving-matrix/thresholds",
                                 json={"slow_ratio_min": 0.40}).json()

@@ -257,26 +257,29 @@ SOC_RISE_TOLERANCE_PCT = 1.0
 # caller. Bring it back when a finer SoC source exists to fit it from.
 
 
-def _gap_rate_kw(drives: list[Any], charges: list[Any] | None, capacity_kwh: float,
-                 min_gap_h: float, max_gap_h: float | None,
-                 min_total_h: float, place: str | None = None,
-                 keep: Any = None) -> float | None:
-    """Average draw (kW) across the parked gaps falling in a duration band.
+def _gap_totals(drives: list[Any], charges: list[Any] | None,
+                min_gap_h: float, max_gap_h: float | None,
+                place: str | None = None,
+                keep: Any = None) -> tuple[float, float, int]:
+    """SoC points drained, hours parked and gaps counted, over one gap set.
 
-    Shared by the two rates that matter — the deep-sleep average and the
-    just-parked one — because they differ only in which gaps they look at, and
-    letting them drift apart in method would make them incomparable.
+    Split out from _gap_rate_kw so that a rate and the evidence behind it come
+    from ONE definition of "a qualifying parked gap". The decomposition below
+    needs the hours as well as the rate — to say why a row is blank, and to
+    weigh armed parks against unarmed ones — and a second loop applying the
+    same seven predicates by hand is exactly how two fits drift apart while
+    both look right.
 
-    ``place`` restricts the fit to gaps that began where a trip ENDED there,
-    which turns out to matter more than the duration band does — see
-    place_standby_kw.
+    Points rather than kWh: the pack's quantum is the unit every comment in
+    this module reasons in, and capacity is a scale factor the caller applies.
     """
     ordered = sorted(drives, key=lambda d: d.start_time)
-    if len(ordered) < 2 or not capacity_kwh:
-        return None
+    if len(ordered) < 2:
+        return 0.0, 0.0, 0
     charge_starts = sorted(c.start_time for c in (charges or []))
-    total_kwh = 0.0
+    total_points = 0.0
     total_hours = 0.0
+    total_gaps = 0
     for a, b in zip(ordered, ordered[1:]):
         if place is not None and getattr(a, "end_location", None) != place:
             continue
@@ -319,13 +322,47 @@ def _gap_rate_kw(drives: list[Any], charges: list[Any] | None, capacity_kwh: flo
         # of magnitude, so nothing is riding on where exactly it sits.
         if b.start_soc - a.end_soc > SOC_RISE_TOLERANCE_PCT:
             continue
-        total_kwh += max(a.end_soc - b.start_soc, 0.0) / 100.0 * capacity_kwh
+        total_points += max(a.end_soc - b.start_soc, 0.0)
         total_hours += gap_hours
-    if total_hours < min_total_h or total_kwh <= 0:
+        total_gaps += 1
+    return total_points, total_hours, total_gaps
+
+
+def _rate_kw(points: float, hours: float, capacity_kwh: float,
+             min_total_h: float) -> float | None:
+    """Points and hours into a kW rate, with the minimum and the band applied.
+
+    The one place those two refusals live. Both the fits and the decomposition
+    that explains them go through here, so a rate either module reports has
+    passed the same tests — and neither can start reporting one that has not.
+    """
+    if not capacity_kwh or hours < min_total_h:
         return None
-    rate = total_kwh / total_hours
+    total_kwh = points / 100.0 * capacity_kwh
+    if total_kwh <= 0:
+        return None
+    rate = total_kwh / hours
     lo, hi = STANDBY_PLAUSIBLE_KW
     return round(rate, 3) if lo <= rate <= hi else None
+
+
+def _gap_rate_kw(drives: list[Any], charges: list[Any] | None, capacity_kwh: float,
+                 min_gap_h: float, max_gap_h: float | None,
+                 min_total_h: float, place: str | None = None,
+                 keep: Any = None) -> float | None:
+    """Average draw (kW) across the parked gaps falling in a duration band.
+
+    Shared by the two rates that matter — the deep-sleep average and the
+    just-parked one — because they differ only in which gaps they look at, and
+    letting them drift apart in method would make them incomparable.
+
+    ``place`` restricts the fit to gaps that began where a trip ENDED there,
+    which turns out to matter more than the duration band does — see
+    place_standby_kw.
+    """
+    points, hours, _ = _gap_totals(drives, charges, min_gap_h, max_gap_h,
+                                   place=place, keep=keep)
+    return _rate_kw(points, hours, capacity_kwh, min_total_h)
 
 
 def standby_kw(drives: list[Any], charges: list[Any] | None,
@@ -485,42 +522,87 @@ def sentry_standby_kw(drives: list[Any], charges: list[Any] | None,
         keep=lambda a, b: index.state(a.end_time, b.start_time) is armed)
 
 
-def sentry_increment_kw(drives: list[Any], charges: list[Any] | None,
-                        capacity_kwh: float,
-                        readings: list[Any]) -> float | None:
-    """What ARMING Sentry adds to a parked car's draw, in kW. None if unknown.
+def parked_decomposition(drives: list[Any], charges: list[Any] | None,
+                         capacity_kwh: float,
+                         readings: list[Any]) -> dict[str, Any]:
+    """The parked bill split into bare idling and what Sentry adds: PK = ID + SE.
 
-    Not the armed rate — the difference between the armed and unarmed fits. The
-    armed rate answers "what does a watched car cost", which is already what
-    the whole-history standby fit reports for a car that is sometimes watched;
-    this answers the question an owner can act on, which is what the habit
-    itself costs on top of standing still.
+    Three figures over one gap set, so they are arithmetic rather than three
+    opinions:
 
-    A difference of two fits needs BOTH of them, so None comes back whenever
-    either half is missing rather than the half that exists. That is the same
-    rule FACTOR_MIN_DRIVES states for any other penalty measured as a
-    difference of means: a lopsided split measures the smaller sample, not the
-    habit.
+        PK  every qualifying parked gap in the window, whatever Sentry did.
+            The bill — what the car actually cost standing still.
+        ID  the gaps Sentry was measurably OFF for. The floor: what leaving
+            the car somewhere costs when nothing is watching.
+        SE  PK minus ID. Everything in the bill that bare idling does not
+            explain.
 
-    It can come out negative, and that is reported rather than clamped. A
-    negative increment does not mean Sentry gives energy back; it means these
-    two fits cannot separate in the expected direction yet, and the honest
-    reading of a rate is not improved by hiding its sign. See
-    sentry_standby_kw for why the unarmed half is the shakier of the two — it
-    is an upper bound sitting close to the SoC quantum, so it is the half that
-    moves an increment around.
+    SE is a RESIDUAL, and that is the honest description of it. It is not the
+    Sentry-armed fit — that figure is reported beside it as ``armed_kw`` for
+    corroboration, and the two answer different questions. armed_kw is what an
+    armed hour costs; SE is what arming it cost *this window*, which depends on
+    how much of the window was armed. An owner who never arms Sentry has an
+    armed_kw and an SE of zero, and only the second of those is the truth
+    about their month.
 
-    One index for both halves, because building it is the expensive part and
-    the two fits ask about the same gaps.
+    Being a residual also means SE carries the window's unknown-state parks:
+    gaps where no reading said either way land in PK and in neither ID nor the
+    armed fit, so their excess over ID shows up here. ``hours`` reports them
+    rather than burying them, and the direction is knowable — an unreachable
+    car is usually an underground car park away from home, which is where
+    Sentry is armed. Read a large unknown share as "SE is an upper bound".
+
+    SE can come out negative, and is reported that way. It does not mean
+    Sentry gives energy back; it means the unarmed gaps in this window drained
+    faster than the window as a whole, so the split has not separated yet. The
+    unarmed half is the shakier one — see sentry_standby_kw, where a night's
+    drain sits a fifth of the way to one SoC point and the pack's own estimate
+    wanders about that far on its own.
+
+    Every rate here passes the same minimum and plausibility band as any other
+    fit in this module, so any of the three can come back None independently:
+    with no unarmed parks yet, PK stands and ID and SE do not.
     """
-    if not readings:
-        return None
-    index = _sentry_index(readings)
-    on = sentry_standby_kw(drives, charges, capacity_kwh, index, True)
-    off = sentry_standby_kw(drives, charges, capacity_kwh, index, False)
-    if on is None or off is None:
-        return None
-    return round(on - off, 3)
+    index = _sentry_index(readings) if readings else None
+
+    def armed_is(want: bool | None):
+        """A gap-keeper for one Sentry verdict, or None to take every gap."""
+        if want is None or index is None:
+            return None
+        return lambda a, b: index.state(a.end_time, b.start_time) is want
+
+    def totals(want: bool | None):
+        return _gap_totals(drives, charges, STANDBY_MIN_GAP_HOURS, None,
+                           keep=armed_is(want))
+
+    all_points, all_hours, all_gaps = totals(None)
+    off_points, off_hours, off_gaps = totals(False) if index else (0.0, 0.0, 0)
+    on_points, on_hours, on_gaps = totals(True) if index else (0.0, 0.0, 0)
+
+    def rate(points: float, hours: float) -> float | None:
+        return _rate_kw(points, hours, capacity_kwh, STANDBY_MIN_TOTAL_HOURS)
+
+    pk = rate(all_points, all_hours)
+    idle = rate(off_points, off_hours)
+    armed = rate(on_points, on_hours)
+    return {
+        "pk_kw": pk,
+        "id_kw": idle,
+        # Rounded from the two rounded figures on purpose: the row shows
+        # PK and ID to the same three places, and a residual that does not
+        # subtract to what the reader can see would be read as a third fit.
+        "se_kw": None if pk is None or idle is None else round(pk - idle, 3),
+        "armed_kw": armed,
+        "gaps": {"total": all_gaps, "sentry_off": off_gaps,
+                 "sentry_on": on_gaps,
+                 "unknown": all_gaps - off_gaps - on_gaps},
+        "hours": {"total": round(all_hours, 1),
+                  "sentry_off": round(off_hours, 1),
+                  "sentry_on": round(on_hours, 1),
+                  "unknown": round(all_hours - off_hours - on_hours, 1)},
+        "min_gap_hours": STANDBY_MIN_GAP_HOURS,
+        "min_total_hours": STANDBY_MIN_TOTAL_HOURS,
+    }
 
 
 def place_standby_kw(drives: list[Any], charges: list[Any] | None,
@@ -1971,15 +2053,19 @@ MATRIX_DEFINITIONS = {
          "means": "Repeatedly stopped, or a third of the trip spent genuinely "
                   "waiting. Worst per kilometre, cheapest per hour — the car "
                   "burns little because it covers little."},
-        {"code": "PK", "name": "Parked, all states",
-         "means": "Every parked hour in the window, Sentry on or off. What the "
-                  "car costs to leave standing, all in — not a Sentry-off "
-                  "best case."},
-        {"code": "SE", "name": "Sentry, added cost",
-         "means": "The share of PK that arming Sentry accounts for: the armed "
-                  "fit minus the unarmed one, not the armed rate itself. It is "
-                  "inside PK, not on top of it, and it needs both halves — "
-                  "blank means one of them has too little history."},
+        {"code": "PK", "name": "Park Overall",
+         "means": "Every qualifying parked hour in the window, Sentry on or "
+                  "off. The bill — what the car cost to leave standing, all "
+                  "in, not a Sentry-off best case. PK = ID + SE."},
+        {"code": "ID", "name": "Idling, Sentry off",
+         "means": "The parks Sentry was measurably OFF for. The floor of what "
+                  "this car costs to own: doors locked, nothing watching."},
+        {"code": "SE", "name": "Sentry impact",
+         "means": "PK minus ID — everything in the bill that bare idling does "
+                  "not explain. What arming Sentry cost THIS window, so it "
+                  "depends on how often it was armed, unlike the per-armed-hour "
+                  "rate carried beside it. Parks where no reading said either "
+                  "way land here too, which makes it an upper bound."},
     ],
     "columns": [
         {"name": "Wh/km", "means": "Energy per kilometre, weighted by distance "

@@ -8078,7 +8078,20 @@ def driving_matrix(days: int = Query(30, ge=1, le=730),
     vehicle = _first_vehicle(session)
     settings = get_settings()
     capacity_kwh, _ = _usable_capacity(session, vehicle, settings)
-    drives, charges = _window(session, vehicle.id, days)
+    # ``days`` is a CAP, not the window. The report starts where streamed
+    # history does, because a matrix is only as good as the trips in it and the
+    # polled era's trips are the ones whose boundaries the telemetry work spent
+    # months correcting — mixing them in dilutes every row with figures that
+    # were already known to be wrong. Same boundary purge_pre_telemetry uses,
+    # and for the same reason: only the rows know where telemetry began, so it
+    # is read off them rather than typed in as a date.
+    now = sync_mod.now_local()
+    asked_since = now - timedelta(days=days)
+    cutover = session.scalar(
+        select(func.min(Drive.start_time)).where(
+            Drive.vehicle_id == vehicle.id, Drive.source == "telemetry"))
+    since = max(asked_since, cutover) if cutover else asked_since
+    drives, charges = _window(session, vehicle.id, days, since=since)
     # The yardstick every row is measured against: what this pack is worth at
     # the car's own rated consumption. Derived rather than configured, so it
     # cannot drift away from the rated figure the eco score already uses.
@@ -8123,21 +8136,34 @@ def driving_matrix(days: int = Query(30, ge=1, le=730),
             row["days_to_5pct"] = round(5.0 / (per_hour * 24.0), 1)
         return row
 
-    # PK is every parked hour in the window, whatever Sentry was doing — the
-    # whole cost of the car standing still, which is the figure an owner is
-    # actually charged for. SE is then not a second total but the part of PK
-    # that arming Sentry is responsible for, so the second row nests inside the
-    # first instead of competing with it: previously PK was the Sentry-OFF fit
-    # and SE the Sentry-ON one, two alternative worlds and neither of them this
-    # car's actual month. Do not add them together.
+    # PK = ID + SE, exactly, because all three come off one gap set: PK is
+    # every qualifying parked hour in the window whatever Sentry did, ID is the
+    # hours Sentry was measurably off, and SE is the arithmetic remainder.
+    # Previously PK was the Sentry-OFF fit and SE the Sentry-ON one — two
+    # alternative worlds, neither of them this car's actual month, and the
+    # smaller was not a part of the larger.
+    park = driving_analysis.parked_decomposition(
+        list(drives), list(charges), capacity_kwh, readings)
     out["parked"] = [
-        {"code": "PK", "name": "Parked, all states",
-         **parked(driving_analysis.standby_kw(
-             list(drives), list(charges), capacity_kwh), "total")},
-        {"code": "SE", "name": "Sentry, added cost",
-         **parked(driving_analysis.sentry_increment_kw(
-             list(drives), list(charges), capacity_kwh, readings), "increment")},
+        {"code": "PK", "name": "Park Overall",
+         "gaps": park["gaps"]["total"], "hours": park["hours"]["total"],
+         **parked(park["pk_kw"], "total")},
+        {"code": "ID", "name": "Idling, Sentry off",
+         "gaps": park["gaps"]["sentry_off"], "hours": park["hours"]["sentry_off"],
+         **parked(park["id_kw"], "total")},
+        # Evidence for SE is the ARMED parks, not the residual's own hours:
+        # what makes "Sentry costs something" measurable is having parked with
+        # it on. armed_kw is the direct fit on those same hours, carried so the
+        # residual can be checked against something rather than believed.
+        {"code": "SE", "name": "Sentry impact",
+         "gaps": park["gaps"]["sentry_on"], "hours": park["hours"]["sentry_on"],
+         "armed_kw": park["armed_kw"],
+         **parked(park["se_kw"], "residual")},
     ]
+    # What the split could not see. Parks with no Sentry reading either way sit
+    # in PK and in neither ID nor the armed fit, so their excess over ID lands
+    # in SE — which makes SE an upper bound whenever this is a large share.
+    out["parked_evidence"] = park
     # The context every row shares, stated once rather than prefixed onto each
     # code. Air conditioning is not a variable in this climate — it is on. The
     # variable is what it is working against, which is why out_temp_c is a
@@ -8147,6 +8173,18 @@ def driving_matrix(days: int = Query(30, ge=1, le=730),
         "region": "Malaysia",
     }
     out["days"] = days
+    # The window actually used, because it is no longer the one that was asked
+    # for. A reader comparing two reports needs to know which of the two
+    # boundaries bit — a 90-day request answered with 24 days of telemetry is
+    # not a 90-day answer.
+    out["window"] = {
+        "from": since.isoformat(timespec="minutes"),
+        "to": now.isoformat(timespec="minutes"),
+        "days": round((now - since).total_seconds() / 86400.0, 1),
+        "days_asked": days,
+        "telemetry_from": cutover.isoformat(timespec="minutes") if cutover else None,
+        "limited_by": "telemetry" if cutover and cutover > asked_since else "days",
+    }
     out["capacity_kwh"] = capacity_kwh
     # Carried with the numbers rather than left in someone's head: a matrix
     # whose labels are undefined stops being readable the first time it is
@@ -8155,8 +8193,8 @@ def driving_matrix(days: int = Query(30, ge=1, le=730),
     out["note"] = ("Every condition is priced two ways. wh_per_km answers how "
                    "far a charge goes; kw answers what an hour costs, and is "
                    "the unit the parked rows are also in, so the whole table "
-                   "sits on one axis — though SE is a share of PK rather "
-                   "than a row beside it, so those two are never added. "
+                   "sits on one axis. PK = ID + SE: the parked rows are one "
+                   "bill and its two parts, so they are never added together. "
                    "The two orderings are not the same — "
                    "see rank_per_km against rank_per_hour. Wh/km is weighted "
                    "by distance, not averaged across trips, and a trip whose "

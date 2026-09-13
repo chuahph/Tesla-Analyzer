@@ -2214,22 +2214,29 @@ function renderMatrix(d) {
   // so rather than leaving this to guess from the sign: a total gets the "5%
   // lasts" form, an increment cannot have one — it is a share of the total
   // above it, so what it owes the reader is its share, not a lifetime.
-  const pkKw = (parked.find((p) => p.basis === "total") || {}).kw || 0;
+  // PK = ID + SE, so the sub-lines say what each row IS rather than repeating
+  // a rate three times. basis comes from the server: a total gets the "5%
+  // lasts" form, a residual cannot have one — it is a part of the row above it,
+  // so what it owes the reader is its share and the hours behind it.
+  const pkKw = (parked.find((p) => p.code === "PK") || {}).kw || 0;
+  const hrs = (p) => (p.hours ? ` · ${num(p.hours, 0)} h over ${p.gaps} park${p.gaps === 1 ? "" : "s"}` : "");
   const parkSub = (p) => {
     if (p.kw == null) {
-      return p.basis === "increment"
+      const why = p.basis === "residual"
         ? "needs parks both with and without Sentry to separate"
         : "not enough parked history to fit";
+      return `${why}${hrs(p)}`;
     }
-    if (p.basis !== "increment") {
-      return `${num(p.pct_per_day, 2)}%/day · 5% lasts ${p.days_to_5pct} days`;
+    if (p.basis !== "residual") {
+      return `${num(p.pct_per_day, 2)}%/day · 5% lasts ${p.days_to_5pct} days${hrs(p)}`;
     }
-    // An increment can come out at or below zero, and the row still shows the
-    // number — but calling that "x% of the parked total" would dress a failed
-    // separation up as a finding.
-    if (p.kw <= 0) return "armed and unarmed parks don't separate yet";
-    if (!pkKw) return `${num(p.pct_per_day, 2)}%/day added`;
-    return `${num(p.pct_per_day, 2)}%/day · ${num((p.kw / pkKw) * 100, 0)}% of PK`;
+    // A residual can come out at or below zero, and the row still shows the
+    // number — but calling that "x% of PK" would dress a failed separation up
+    // as a finding.
+    if (p.kw <= 0) return `armed and unarmed parks don't separate yet${hrs(p)}`;
+    const share = pkKw ? ` · ${num((p.kw / pkKw) * 100, 0)}% of PK` : "";
+    const armed = p.armed_kw ? ` · ${num(p.armed_kw, 3)} kW per armed hour` : "";
+    return `${num(p.pct_per_day, 2)}%/day${share}${armed}${hrs(p)}`;
   };
   const park = parked.map((p) => `
       <tr class="mx-parked">
@@ -2240,6 +2247,21 @@ function renderMatrix(d) {
         <td>—</td>
         <td>—</td>
       </tr>`).join("");
+  // The window this answers for, which is no longer the one the page asked
+  // for: the report starts where streamed history does, so a reader comparing
+  // two of these needs to see which boundary bit.
+  const w = d.window;
+  const win = w
+    ? `${w.from.replace("T", " ")} to ${w.to.replace("T", " ")} — ${w.days} days of
+       ${w.limited_by === "telemetry" ? "streamed history (all there is)" : `the ${w.days_asked} requested`}.`
+    : "";
+  // Parked hours nothing could state a Sentry verdict for. They are in PK and
+  // in neither ID nor the armed fit, so SE carries them — which makes SE an
+  // upper bound, and that has to be visible rather than inferred.
+  const ev = d.parked_evidence;
+  const unknown = ev && ev.hours && ev.hours.unknown > 0
+    ? `${num(ev.hours.unknown, 0)} parked h had no Sentry reading either way — counted in PK, and in SE by subtraction, so SE reads high.`
+    : "";
   box.innerHTML = `
     <div class="mx-scroll">
       <table class="mx-table">
@@ -2250,9 +2272,11 @@ function renderMatrix(d) {
       </table>
     </div>
     <p class="modal-sub mx-foot">
+      ${win}
       Baseline ${d.baseline_range_km ?? "—"} km at the car's rated consumption.
       ${d.unclassified_trips ? `${d.unclassified_trips} trip(s) left out — idle never tracked.` : ""}
       ${d.context ? `${d.context.climate}, ${d.context.region}.` : ""}
+      ${unknown}
     </p>`;
 }
 

@@ -2680,16 +2680,14 @@ def test_the_matrix_splits_into_weekdays_and_weekends():
     assert only["weekend"]["modes"] == []
 
 
-def test_pk_is_every_parked_hour_and_se_is_only_what_sentry_adds():
-    """The matrix's two parked rows used to be two alternative cars: PK fitted
-    from Sentry-OFF parks only, SE from Sentry-ON parks only. Neither described
-    the month the owner was actually charged for, and the pair could not be
-    added up or compared — the smaller number was not a part of the bigger one,
-    it was a different world.
+def test_the_parked_bill_splits_into_idling_plus_sentry_and_adds_back_up():
+    """The matrix's parked rows used to be two alternative cars: PK fitted from
+    Sentry-OFF parks only, SE from Sentry-ON parks only. Neither described the
+    month the owner was charged for, and the pair could be neither added nor
+    compared — the smaller number was not a part of the bigger one.
 
-    So PK is now every parked hour whatever Sentry was doing, and SE is the
-    share of it arming Sentry accounts for: the armed fit MINUS the unarmed
-    one, not the armed fit itself.
+    Now PK is the bill, ID is the Sentry-off floor, and SE is the remainder, so
+    the three are arithmetic rather than three opinions.
     """
     from datetime import timedelta
     from types import SimpleNamespace
@@ -2712,28 +2710,128 @@ def test_pk_is_every_parked_hour_and_se_is_only_what_sentry_adds():
                                 sentry_mode=(i >= 3))
                 for i, d in enumerate(history[:-1])]
 
-    quiet = driving_analysis.sentry_standby_kw(history, [], cap, readings, False)
-    watched = driving_analysis.sentry_standby_kw(history, [], cap, readings, True)
-    blended = driving_analysis.standby_kw(history, [], cap)
-    assert quiet is not None and watched is not None and blended is not None
+    got = driving_analysis.parked_decomposition(history, [], cap, readings)
+    pk, idle, se = got["pk_kw"], got["id_kw"], got["se_kw"]
+    assert pk is not None and idle is not None and se is not None
 
-    # PK is the blend, and a blend of two rates lies between them — which is
-    # exactly why it is the honest bill and neither half was.
-    assert quiet < blended < watched
+    # The identity the report is built on. Not approximately: the row shows PK
+    # and ID to three places and SE has to subtract to what a reader can see.
+    assert se == round(pk - idle, 3)
+    assert idle < pk                     # the bill is above the quiet floor
+    assert se > 0                         # and Sentry is what lifted it
 
-    # SE is the difference, not the armed rate. Both matter: a reader who took
-    # SE for the armed rate would think turning Sentry off saved all of it.
-    added = driving_analysis.sentry_increment_kw(history, [], cap, readings)
-    assert added == pytest.approx(round(watched - quiet, 3), abs=0.001)
-    assert added < watched                       # the habit costs less than the park
+    # PK is the blend, so it sits between the two regimes rather than at either
+    # — which is exactly why neither half was ever the bill.
+    assert idle < pk < got["armed_kw"]
+    # And SE is NOT the armed rate. A reader who confused them would think
+    # switching Sentry off saved the whole of an armed hour.
+    assert se < got["armed_kw"]
 
-    # And it is inside PK rather than on top of it.
-    assert 0 < added < blended + watched
+    # Evidence, so a blank row can be read rather than guessed at.
+    assert got["gaps"] == {"total": 6, "sentry_off": 3, "sentry_on": 3,
+                           "unknown": 0}
+    assert got["hours"]["total"] == pytest.approx(66.0)
+    assert got["hours"]["unknown"] == pytest.approx(0.0)
 
-    # A difference of two fits needs both. With nothing unarmed to compare
-    # against, the answer is "unknown" — not the armed rate standing in for it.
-    all_armed = [SimpleNamespace(ts=r.ts, sentry_mode=True) for r in readings]
-    assert driving_analysis.sentry_standby_kw(
-        history, [], cap, all_armed, True) is not None
-    assert driving_analysis.sentry_increment_kw(history, [], cap, all_armed) is None
-    assert driving_analysis.sentry_increment_kw(history, [], cap, []) is None
+
+def test_a_park_nobody_could_read_lands_in_the_sentry_residual_not_in_idling():
+    """An unreachable car — an underground car park, no signal — leaves no
+    reading either way. That gap is real parked drain, so it belongs in the
+    bill; it is not evidence about Sentry, so it must not join the Sentry-off
+    floor. It ends up inside the residual, which is what makes SE an upper
+    bound and why the hours say how much of it is unknown."""
+    from datetime import timedelta
+    from types import SimpleNamespace
+
+    cap = 68.6
+    history = _chain([
+        ("Home",   100.0, 99.0),   # quiet gap:    1 point
+        ("Home",    98.0, 97.0),   # quiet gap:    1 point
+        ("Home",    96.0, 95.0),   # quiet gap:    1 point
+        ("Basement", 94.0, 93.0),  # unknown gap:  4 points
+        ("Basement", 89.0, 88.0),  # unknown gap:  4 points
+        ("Basement", 84.0, 83.0),  # unknown gap:  4 points
+        ("Home",     79.0, 78.0),
+    ], gap_hours=11.0)
+    # Readings for the quiet parks only. The basement ones are simply absent.
+    readings = [SimpleNamespace(ts=d.end_time + timedelta(hours=1),
+                                sentry_mode=False)
+                for d in history[:3]]
+
+    got = driving_analysis.parked_decomposition(history, [], cap, readings)
+    assert got["gaps"] == {"total": 6, "sentry_off": 3, "sentry_on": 0,
+                           "unknown": 3}
+    # Nothing was ever seen armed, so there is no armed rate to report...
+    assert got["armed_kw"] is None
+    # ...but the bill still stands, and still exceeds the floor.
+    assert got["pk_kw"] is not None and got["id_kw"] is not None
+    assert got["se_kw"] == round(got["pk_kw"] - got["id_kw"], 3)
+    assert got["se_kw"] > 0
+    # Which is the warning: SE is positive on zero armed hours, so here it is
+    # entirely unknown-state drain and the report must say so.
+    assert got["hours"]["unknown"] == pytest.approx(33.0)
+
+
+def test_the_parked_floor_refuses_alone_without_taking_the_bill_down_with_it():
+    """The three rates are fitted independently, so each can refuse on its own.
+    With no unarmed park long enough to measure, ID and therefore SE are
+    unknown — and PK, which does not depend on either, still stands. Reporting
+    the bill as unknown because the split is would throw away the one figure
+    that was measured."""
+    from datetime import timedelta
+    from types import SimpleNamespace
+
+    cap = 68.6
+    history = _chain([
+        ("Resort", 100.0, 99.0),
+        ("Resort",  94.0, 93.0),
+        ("Resort",  88.0, 87.0),
+        ("Resort",  82.0, 81.0),
+    ], gap_hours=11.0)
+    readings = [SimpleNamespace(ts=d.end_time + timedelta(hours=1),
+                                sentry_mode=True)
+                for d in history[:-1]]
+
+    got = driving_analysis.parked_decomposition(history, [], cap, readings)
+    assert got["pk_kw"] is not None
+    assert got["armed_kw"] == got["pk_kw"]      # every park was armed
+    assert got["id_kw"] is None                 # nothing quiet to fit
+    assert got["se_kw"] is None                 # a residual needs both halves
+    assert got["hours"]["sentry_off"] == pytest.approx(0.0)
+
+    # And with no readings at all the bill is still measurable while the split
+    # is not: Sentry state is what is missing, not parked hours.
+    blind = driving_analysis.parked_decomposition(history, [], cap, [])
+    assert blind["pk_kw"] == got["pk_kw"]
+    assert blind["id_kw"] is None and blind["se_kw"] is None
+    assert blind["hours"]["unknown"] == blind["hours"]["total"] > 0
+
+
+def test_splitting_the_gap_loop_out_did_not_change_any_fit():
+    """_gap_totals was extracted from _gap_rate_kw so the decomposition could
+    report the hours behind a rate without applying the seven gap predicates a
+    second time by hand. The extraction has to be inert: same gaps, same
+    points, same rate."""
+    cap = 68.6
+    history = _chain([
+        ("Home",   100.0, 99.0),
+        ("Resort",  98.0, 97.0),
+        ("Home",    93.0, 92.0),
+        ("Home",    91.0, 90.0),
+    ], gap_hours=11.0)
+
+    points, hours, gaps = driving_analysis._gap_totals(
+        history, [], driving_analysis.STANDBY_MIN_GAP_HOURS, None)
+    assert gaps == 3 and hours == pytest.approx(33.0)
+    # 99->98, 97->93, 92->91: one, four and one point.
+    assert points == pytest.approx(6.0)
+
+    # The rate the wrapper reports is that, and nothing else.
+    assert driving_analysis.standby_kw(history, [], cap) == pytest.approx(
+        round(points / 100.0 * cap / hours, 3))
+
+    # A place filter reaches _gap_totals unchanged: only the Resort gap.
+    resort = driving_analysis._gap_totals(
+        history, [], driving_analysis.STANDBY_MIN_GAP_HOURS, None,
+        place="Resort")
+    assert resort[2] == 1 and resort[0] == pytest.approx(4.0)
