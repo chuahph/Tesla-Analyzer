@@ -435,6 +435,70 @@ def test_health_judges_the_cron_against_its_own_rhythm_not_a_fixed_number():
         settings.app_passcode = old_pc
 
 
+def test_a_trip_settled_by_the_diagnostic_still_reaches_the_dashboard():
+    """Looking for a missing trip must not be what keeps it missing.
+
+    Promotion used to run from the dashboard only when that same request had
+    just settled something. /api/telemetry/compare settles without promoting,
+    so checking the diagnostic consumed the settle the dashboard needed and
+    left the journey staged — visible in compare, absent from recent trips,
+    until the next /api/sync tick up to half an hour later.
+
+    Observed on the real deployment: an 08:35 arrival sat with drive_id null
+    while compare listed it perfectly.
+    """
+    import json as _json
+
+    from app import state, sync as sync_mod
+    from app.database import SessionLocal
+    from app.models import Drive, Vehicle
+
+    settings = get_settings()
+    old_pc = settings.app_passcode
+    settings.app_passcode = ""
+    sess = SessionLocal()
+    prev = state.get(sess, state.TELEMETRY_TRIPS_KEY)
+    try:
+        vin = sess.scalars(select(Vehicle.vin)).first()
+        now = sync_mod.now_local()
+        at = now - timedelta(hours=2)
+        end = at + timedelta(minutes=22)
+        odo = 90000.0
+        # A trip already CLOSED and staged — settled by an earlier request,
+        # exactly as compare would have left it.
+        state.put(sess, state.TELEMETRY_TRIPS_KEY, _json.dumps([{
+            "vin": vin,
+            "start_ts": at.timestamp(), "end_ts": end.timestamp(),
+            "start_time": at.isoformat(timespec="seconds"),
+            "end_time": end.isoformat(timespec="seconds"),
+            "distance_km": 9.078, "duration_min": 22.2, "energy_kwh": 1.3,
+            "wh_per_km": 143.2, "start_odo_km": odo, "end_odo_km": odo + 9.078,
+            "soc_start": 56.0, "soc_end": 54.0, "out_temp": 27.5,
+        }]))
+        sess.commit()
+
+        with TestClient(app) as client:
+            # Counted inside the client, because startup seeds the demo data
+            # and a count taken before it is counting an empty database.
+            with SessionLocal() as s:
+                before = s.query(Drive).count()
+
+            # A plain dashboard read. It settles nothing — there is no open
+            # shadow — so the old code skipped promotion entirely.
+            assert client.get("/api/summary?days=30").status_code == 200
+
+            with SessionLocal() as s:
+                after = s.query(Drive).count()
+
+        assert after == before + 1, \
+            f"staged trip never reached the drive history ({before} -> {after})"
+    finally:
+        state.put(sess, state.TELEMETRY_TRIPS_KEY, prev or "[]")
+        sess.commit()
+        sess.close()
+        settings.app_passcode = old_pc
+
+
 def test_the_tick_history_records_and_trims():
     """The read path is only half of it: something has to write these.
 

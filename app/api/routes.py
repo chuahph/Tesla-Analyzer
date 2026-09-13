@@ -9885,8 +9885,21 @@ def summary(
     # Swallowed entirely. A settle that fails costs one late trip; a summary
     # that raises costs the whole page.
     try:
-        if _settle_shadows(session):
-            _promote_shadow_trips(session, apply=True, max_add=PROMOTE_AUTO_MAX_ADD)
+        # Settle first, then promote REGARDLESS of whether this call is what
+        # closed anything.
+        #
+        # Promoting only when this call did the settling made whichever
+        # request settled a trip the only one allowed to promote it — and
+        # /api/telemetry/compare settles without promoting, so running the
+        # diagnostic consumed the settle the dashboard needed and left the
+        # journey staged and invisible until the next /api/sync tick. Looking
+        # for a missing trip could therefore delay it, which is the worst
+        # property a diagnostic can have.
+        #
+        # Costs one state read when there is nothing staged:
+        # _promote_shadow_trips returns immediately on an empty staging area.
+        _settle_shadows(session)
+        _promote_shadow_trips(session, apply=True, max_add=PROMOTE_AUTO_MAX_ADD)
     except Exception:  # noqa: BLE001
         # Rolled back rather than only swallowed: on Postgres the failed
         # statement aborts the transaction, and every query the rest of this
