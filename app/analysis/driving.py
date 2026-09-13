@@ -2503,24 +2503,29 @@ def condition_matrix(drives: list[Any], capacity_kwh: float,
 MATRIX_DEFINITIONS = {
     "modes": [
         {"code": "CH", "name": "Constant Highway",
-         "means": "Held most of its peak speed, and that peak was motorway pace. "
-                  "Fastest per kilometre in theory, most expensive per hour: drag "
-                  "rises faster than the speed saves."},
+         "means": "Constancy 0.55 or above, with a peak of at least 100 km/h AND "
+                  "an average of at least 70 — fast, and it stayed fast. Fastest "
+                  "per kilometre in theory, most expensive per hour: drag rises "
+                  "faster than the speed saves."},
         {"code": "CC", "name": "Constant City",
-         "means": "Held most of its peak speed below motorway pace — open roads, "
-                  "few interruptions. Usually the cheapest kilometres a car does."},
+         "means": "Constancy 0.55 or above but not at motorway pace — open roads, "
+                  "few interruptions, typically 60-80 km/h. Usually the cheapest "
+                  "kilometres a car does, and cheaper per kilometre than CH."},
         {"code": "SC", "name": "Slow City",
-         "means": "Spent a fair part of the trip well under its own peak. Lights "
-                  "and moderate traffic, but still moving."},
+         "means": "Constancy between 0.35 and 0.55. Spent a fair part of the trip "
+                  "well under its own peak — lights and moderate traffic, but "
+                  "still moving."},
         {"code": "HC", "name": "Heavy City",
-         "means": "Repeatedly stopped, or a third of the trip spent genuinely "
-                  "waiting. Worst per kilometre, cheapest per hour — the car "
-                  "burns little because it covers little."},
+         "means": "Constancy under 0.35, or a third of the trip spent genuinely "
+                  "waiting (stops of five minutes or more). Worst per kilometre, "
+                  "cheapest per hour — the car burns little because it covers "
+                  "little."},
         {"code": "PK", "name": "Park Overall",
          "means": "What the window's parking cost, as a percentage of the "
                   "battery: add up what the gauge lost across every parked "
                   "gap. A measurement, not a model, so it is always there. "
-                  "PK = ID + SE + ??, exactly."},
+                  "PK = ID + SE, with the parks nothing recorded a state for "
+                  "widening both rather than sitting in a third."},
         {"code": "ID", "name": "Idling, Sentry off",
          "means": "The share of PK lost across parks Sentry was measurably OFF "
                   "for. The floor of what this car costs to own: doors locked, "
@@ -2582,6 +2587,15 @@ MATRIX_DEFINITIONS = {
         "different populations: previously the driving rows counted every trip "
         "while the parked rows were a rate fitted from long parks only, and a "
         "normal day's errand stops appeared in neither."
+    ),
+    "constancy": (
+        "Every driving mode turns on one number: CONSTANCY, the trip's average "
+        "speed divided by its maximum. It asks how much of its own peak the trip "
+        "held — 1.0 would be a trip at exactly one speed throughout, and 0.16 is "
+        "a crawl that briefly touched 74 km/h. Speed alone cannot sort these: a "
+        "60-80 km/h cruise is CHEAPER per kilometre than a 110 one, because drag "
+        "rises faster than the speed saves, so an ordering by speed would put "
+        "them the wrong way round."
     ),
     "how_sorted": (
         "A trip is sorted by how close it stayed to its own peak speed — average "

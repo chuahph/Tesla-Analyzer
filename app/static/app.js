@@ -2437,6 +2437,7 @@ function renderGlossary(defs) {
   box.innerHTML = `
     <details class="matrix-gloss">
       <summary>What these names mean</summary>
+      ${defs.constancy ? `<p class="modal-sub">${defs.constancy}</p>` : ""}
       <p class="modal-sub">${defs.how_sorted || ""}</p>
       <dl class="mx-defs">${modes}</dl>
       <dl class="mx-defs">${cols}</dl>
