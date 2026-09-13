@@ -3659,7 +3659,8 @@ def _charge_close(shadow: dict[str, Any], end: dict[str, Any]) -> dict[str, Any]
     }
 
 
-def recover_sleep_gap(prev: dict[str, Any], nxt: dict[str, Any]) -> bool:
+def recover_sleep_gap(prev: dict[str, Any], nxt: dict[str, Any],
+                      rested_odo_km: float | None = None) -> bool:
     """Give a trip back the metres it drove after its last transmission.
 
     The mechanism, measured rather than assumed. A car out of coverage
@@ -3699,16 +3700,42 @@ def recover_sleep_gap(prev: dict[str, Any], nxt: dict[str, Any]) -> bool:
     start_odo = prev.get("start_odo_km")
     if end_odo is None or next_start is None or start_odo is None:
         return False
-    gain = round(float(next_start) - float(end_odo), 3)
+    # Where the car was actually SEEN resting, when anything saw it, bounds
+    # this. The next trip's starting odometer is not evidence of where the
+    # previous one stopped — it is evidence of where the next one was first
+    # noticed, and those differ by however much ground the departure covered
+    # before its first record arrived. Crediting that to the arriving trip
+    # moves one trip's distance onto another.
+    #
+    # Measured, 13 September: trip 740 closed at 31405.714, and a continuity
+    # scan ten minutes later confirmed the car resting at exactly that
+    # odometer. Three hours later trip 741 began at 31405.922. A parked car's
+    # odometer cannot creep, so those 208 metres were driven at 741's
+    # departure — and this function gave every one of them to 740, taking it
+    # from 0.55% short of the car's own figure to 1.2% long.
+    #
+    # Across the judged history the pattern holds: trips whose arrival was
+    # reconstructed read +0.80% against the car and 7 of 8 long, while trips
+    # left alone read -0.46% and 2 of 14 long. That is 1.26 points of
+    # difference at t = 4.5, and it all points one way.
+    #
+    # So a reading takes precedence over the next trip's anchor, and no
+    # reading at all leaves the old behaviour intact — without evidence there
+    # is nothing better to do than assume the gap was the arrival, which is
+    # still likelier than losing it.
+    boundary = float(next_start)
+    if rested_odo_km is not None:
+        boundary = min(boundary, float(rested_odo_km))
+    gain = round(boundary - float(end_odo), 3)
     if gain <= 0.0 or gain > SHADOW_TAIL_MAX_KM:
         return False
 
     whkm = prev.get("wh_per_km")
-    distance = round(float(next_start) - float(start_odo), 3)
+    distance = round(boundary - float(start_odo), 3)
     # Recomputed from the bracket, never adjusted by a delta — so if this
     # ever runs twice on the same pair the second call finds no gap and
     # refuses, rather than counting the same metres again.
-    prev["end_odo_km"] = round(float(next_start), 3)
+    prev["end_odo_km"] = round(boundary, 3)
     prev["distance_km"] = distance
     prev["recovered_km"] = round(
         float(prev.get("recovered_km") or 0.0) + gain, 3)

@@ -3311,7 +3311,47 @@ def _process_vehicle(
     return vehicle, snap, len(drives), len(charges), open_trip
 
 
-def _append_trip(trips: list, finished: dict) -> bool:
+# A reading taken in the last moments before a trip is noticed may have been
+# taken while the car was already rolling, which would make it evidence of the
+# departure rather than of the park. Excluded, because the whole point of
+# consulting readings here is to stop departure ground being read as arrival
+# ground, and a three-hour park has hundreds of readings to spare.
+DEPARTURE_ROLL_SEC = 60.0
+
+
+def _rested_odo_between(session: Session, vin: str,
+                        prev_end_ts, next_start_ts) -> float | None:
+    """The highest odometer the car was SEEN at while parked between two trips.
+
+    A parked car's odometer cannot creep, so this is where the earlier trip
+    actually came to rest. It is the same evidence /api/repair-arrivals reads
+    and the same evidence recover_sleep_gap never had — which is why that one
+    has been crediting arriving trips with the next departure's blind head.
+
+    None when nothing was seen in the window, which is the ordinary case for a
+    car that parks underground and sleeps. The caller then falls back to the
+    behaviour it always had.
+    """
+    try:
+        a, b = float(prev_end_ts or 0.0), float(next_start_ts or 0.0)
+    except (TypeError, ValueError):
+        return None
+    b -= DEPARTURE_ROLL_SEC
+    if not a or b <= a:
+        return None
+    vehicle_id = session.scalar(select(Vehicle.id).where(Vehicle.vin == vin))
+    if vehicle_id is None:
+        return None
+    return session.scalar(
+        select(func.max(BatteryReading.odo_km)).where(
+            BatteryReading.vehicle_id == vehicle_id,
+            BatteryReading.odo_km.is_not(None),
+            BatteryReading.ts >= sync_mod._dt(a),
+            BatteryReading.ts <= sync_mod._dt(b)))
+
+
+def _append_trip(trips: list, finished: dict,
+                 session: Session | None = None) -> bool:
     """Add a finished trip to the store, paying back the one before it.
 
     Both paths that close a trip come through here — the live one in
@@ -3325,7 +3365,13 @@ def _append_trip(trips: list, finished: dict) -> bool:
     """
     previous = next((t for t in reversed(trips)
                      if t.get("vin") == finished.get("vin")), None)
-    paid = previous is not None and sync_mod.recover_sleep_gap(previous, finished)
+    rested = None
+    if session is not None and previous is not None:
+        rested = _rested_odo_between(session, finished.get("vin"),
+                                     previous.get("end_ts"),
+                                     finished.get("start_ts"))
+    paid = previous is not None and sync_mod.recover_sleep_gap(
+        previous, finished, rested_odo_km=rested)
     trips.append(finished)
     return bool(paid)
 
@@ -4137,7 +4183,7 @@ def _settle_shadows(session: Session) -> int:
     except ValueError:
         trips = []
     for done in finished:
-        _append_trip(trips, done)
+        _append_trip(trips, done, session=session)
     state.put(session, state.TELEMETRY_TRIPS_KEY,
               _json.dumps(trips[-TELEMETRY_TRIPS_MAX:]))
     state.put(session, state.TELEMETRY_SHADOW_KEY, _json.dumps(shadows))
@@ -11109,7 +11155,7 @@ def telemetry_ingest(
                 # short by whatever the car drove after its last record. This
                 # trip's opening odometer is the first reading taken since,
                 # so it measures that ground.
-                if _append_trip(trips, finished):
+                if _append_trip(trips, finished, session=session):
                     recovered += 1
                 closed += 1
             # And again the moment a trip OPENS, not only when it closes.

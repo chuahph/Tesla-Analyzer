@@ -3641,6 +3641,44 @@ def test_a_trip_records_the_temperature_it_was_driven_in_not_the_one_it_ended_in
     assert trip["out_temp_end"] == pytest.approx(30.0)
 
 
+def test_a_departure_head_is_not_paid_to_the_arriving_trip():
+    """Trip 740, 13 September, and the reason this guard exists.
+
+    740 closed at 31405.714 with its stream lost. A continuity scan ten
+    minutes later confirmed the car resting at exactly that odometer. Three
+    hours later 741 began at 31405.922 — and a parked car's odometer cannot
+    creep, so those 208 metres were driven at 741's DEPARTURE, before its
+    first record arrived.
+
+    recover_sleep_gap gave all of them to 740 anyway, because it read the next
+    trip's starting odometer as evidence of where the previous one stopped.
+    Those are different things, and the difference is exactly the ground the
+    departure covered unseen. 740 went from 0.55% short of the car's own
+    figure to 1.2% long.
+    """
+    prev = {"start_odo_km": 31393.680, "end_odo_km": 31405.714,
+            "distance_km": 12.034, "energy_kwh": 1.640, "wh_per_km": 136.3,
+            "ended_on": "stream_lost"}
+    nxt = {"start_odo_km": 31405.922}
+
+    # Seen resting at its own recorded stop: there is nothing to pay back.
+    assert recover_sleep_gap(dict(prev), nxt, rested_odo_km=31405.714) is False
+
+    # Seen resting PART of the way along: pay back only as far as the evidence
+    # goes, never all the way to where the next trip was first noticed.
+    half = dict(prev)
+    assert recover_sleep_gap(half, nxt, rested_odo_km=31405.800) is True
+    assert half["end_odo_km"] == pytest.approx(31405.800)
+    assert half["distance_km"] == pytest.approx(12.120, abs=0.001)
+
+    # No reading at all — a car that parks underground and sleeps — keeps the
+    # behaviour it always had. Without evidence, assuming the gap was the
+    # arrival still beats losing it.
+    blind = dict(prev)
+    assert recover_sleep_gap(blind, nxt) is True
+    assert blind["end_odo_km"] == pytest.approx(31405.922)
+
+
 def test_the_temperature_average_stops_when_the_car_does():
     """A drive spent entirely at 40 C records 40, however cool where it parks.
 

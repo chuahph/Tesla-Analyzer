@@ -435,6 +435,67 @@ def test_health_judges_the_cron_against_its_own_rhythm_not_a_fixed_number():
         settings.app_passcode = old_pc
 
 
+def test_the_parked_readings_reach_the_sleep_gap_recovery():
+    """The guard is only worth having if the evidence actually gets to it.
+
+    recover_sleep_gap runs on two plain dicts in the shadow store and has no
+    database of its own, so the readings have to be looked up by the caller
+    and handed in. This exercises that path rather than the arithmetic: real
+    BatteryReading rows, the real funnel both close paths come through, and a
+    trip that must NOT be paid ground the next one drove.
+    """
+    from datetime import datetime as _dt
+
+    from app import sync as sync_mod
+    from app.api import routes
+    from app.database import SessionLocal
+    from app.models import BatteryReading, Vehicle
+
+    made = []
+    # Inside the client, because startup is what seeds the vehicle these
+    # readings hang off.
+    with TestClient(app):
+        sess = SessionLocal()
+        vin = sess.scalars(select(Vehicle.vin)).first()
+        vid = sess.scalar(select(Vehicle.id).where(Vehicle.vin == vin))
+        assert vid is not None
+        # A park from 11:29 to 14:39, the car resting where the trip closed.
+        end_ts = _dt(2026, 9, 13, 11, 29, 28).timestamp()
+        start_ts = _dt(2026, 9, 13, 14, 39, 25).timestamp()
+        for mins in (5, 40, 120, 185):
+            r = BatteryReading(vehicle_id=vid, ts=sync_mod._dt(end_ts + mins * 60),
+                               soc=49.0, range_km=250.0, odo_km=31405.714)
+            sess.add(r); made.append(r)
+        sess.commit()
+
+        seen = routes._rested_odo_between(sess, vin, end_ts, start_ts)
+        assert seen == pytest.approx(31405.714), seen
+
+        prev = {"vin": vin, "start_odo_km": 31393.680, "end_odo_km": 31405.714,
+                "distance_km": 12.034, "energy_kwh": 1.640, "wh_per_km": 136.3,
+                "ended_on": "stream_lost", "end_ts": end_ts}
+        nxt = {"vin": vin, "start_odo_km": 31405.922, "start_ts": start_ts}
+        trips = [prev]
+
+        paid = routes._append_trip(trips, nxt, session=sess)
+        assert paid is False, "paid the arriving trip for the departure's head"
+        assert prev["end_odo_km"] == pytest.approx(31405.714)
+        assert prev["distance_km"] == pytest.approx(12.034)
+
+        # A reading taken inside the last minute before the trip was noticed is
+        # not evidence of the park — the car may already have been rolling.
+        late = BatteryReading(vehicle_id=vid,
+                              ts=sync_mod._dt(start_ts - 20),
+                              soc=49.0, range_km=250.0, odo_km=31405.900)
+        sess.add(late); made.append(late); sess.commit()
+        assert routes._rested_odo_between(sess, vin, end_ts, start_ts) == \
+            pytest.approx(31405.714), "a departure-roll reading was counted as rest"
+        for r in made:
+            sess.delete(r)
+        sess.commit()
+        sess.close()
+
+
 def test_a_trip_carries_its_temperatures_and_ending_into_the_dashboard():
     """One tap on a trip should answer the questions we actually ask of it.
 
