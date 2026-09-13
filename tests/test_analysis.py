@@ -2835,3 +2835,141 @@ def test_splitting_the_gap_loop_out_did_not_change_any_fit():
         history, [], driving_analysis.STANDBY_MIN_GAP_HOURS, None,
         place="Resort")
     assert resort[2] == 1 and resort[0] == pytest.approx(4.0)
+
+
+def test_the_window_accounting_places_every_hour_exactly_once():
+    """The driving rows and the parked rows described different populations,
+    which is what stopped the table summing: every trip in the window became a
+    driving row, while the parked rows were a rate fitted from gaps of six hours
+    and up. A normal day's errand stops appeared in neither.
+
+    This walk places every hour between the window's ends in exactly one bucket
+    — driving, parked, charging, excluded, or the unbounded edges — so the
+    report can say where the time went and the totals close.
+    """
+    from datetime import datetime as _dt
+    from datetime import timedelta as _td
+    from types import SimpleNamespace
+
+    # Five drives: 30 min each, with 11 h, 0.5 h, 11 h and 11 h between them.
+    history = _chain([
+        ("Home", 100.0, 99.0),
+        ("Home",  98.0, 97.0),
+        ("Home",  96.0, 95.0),
+        ("Home",  94.0, 93.0),
+        ("Home",  92.0, 91.0),
+    ], gap_hours=11.0)
+    for d in history:
+        d.duration_min = 30.0
+        d.energy_used_kwh = 2.0
+    readings = [SimpleNamespace(ts=d.end_time + _td(hours=1), sentry_mode=False)
+                for d in history[:-1]]
+
+    since = history[0].start_time - _td(hours=2)
+    until = history[-1].end_time + _td(hours=3)
+    acc = driving_analysis.window_accounting(history, [], readings, since, until)
+
+    # Everything placed, nothing counted twice: the buckets add to the span.
+    placed = (acc["driving"]["hours"] + acc["parked"]["hours"]
+              + acc["charging"]["hours"] + acc["excluded"]["hours"]
+              + acc["unbounded"]["hours"])
+    assert placed == pytest.approx(acc["span_hours"], abs=0.15)
+    # The two window edges, which no pair of trips brackets.
+    assert acc["unbounded"]["hours"] == pytest.approx(5.0, abs=0.1)
+    assert acc["driving"]["hours"] == pytest.approx(2.5)
+    assert acc["driving"]["kwh"] == pytest.approx(10.0)
+    # Four gaps of 11 h, all of them Sentry-off.
+    assert acc["parked"]["gaps"] == 4
+    assert acc["parked"]["hours"] == pytest.approx(44.0)
+    assert acc["parked"]["by_state"]["sentry_off"] == pytest.approx(44.0)
+
+    # A charge inside a gap is stationary time but not drain, so it is its own
+    # bucket rather than quietly leaving the accounting.
+    mid = history[1].end_time + _td(hours=2)
+    charged = driving_analysis.window_accounting(
+        history, [SimpleNamespace(start_time=mid)], readings, since, until)
+    assert charged["charging"]["gaps"] == 1
+    assert charged["charging"]["hours"] == pytest.approx(11.0)
+    assert charged["parked"]["hours"] == pytest.approx(33.0)
+    # Still closes.
+    assert (charged["driving"]["hours"] + charged["parked"]["hours"]
+            + charged["charging"]["hours"] + charged["excluded"]["hours"]
+            + charged["unbounded"]["hours"]) == pytest.approx(
+                charged["span_hours"], abs=0.15)
+
+
+def test_an_unrecorded_journey_is_excluded_from_the_accounting_not_dropped():
+    """_gap_totals skips a gap the odometer says the car moved through, because
+    a rate fitted over it would read driving as standby. The accounting must not
+    skip it — an hour a fit ignores still happened — so it lands in its own
+    bucket and the totals still close. This is the one place where copying the
+    fit's rules would have been wrong."""
+    from datetime import timedelta as _td
+
+    history = _chain([
+        ("Home", 100.0, 99.0),
+        ("Home",  98.0, 97.0),
+        ("Home",  96.0, 95.0),
+    ], gap_hours=11.0)
+    for d in history:
+        d.duration_min = 30.0
+        d.energy_used_kwh = 2.0
+    # The odometer moved 40 km across the first gap with no trip to explain it.
+    history[0].end_odo_km = 1000.0
+    history[1].start_odo_km = 1040.0
+    history[1].end_odo_km = 1050.0
+    history[2].start_odo_km = 1050.0
+
+    since, until = history[0].start_time, history[-1].end_time
+    acc = driving_analysis.window_accounting(history, [], [], since, until)
+    assert acc["excluded"]["gaps"] == 1
+    assert acc["excluded"]["hours"] == pytest.approx(11.0)
+    assert acc["parked"]["gaps"] == 1
+    # And the hours are all still there rather than one gap having vanished.
+    assert (acc["driving"]["hours"] + acc["parked"]["hours"]
+            + acc["charging"]["hours"] + acc["excluded"]["hours"]
+            + acc["unbounded"]["hours"]) == pytest.approx(acc["span_hours"], abs=0.15)
+
+
+def test_pk_equals_id_plus_se_in_energy_not_only_in_rate():
+    """PK = ID + SE has to survive the move from a rate to a cost, or the energy
+    column quietly tells a different story from the kW column.
+
+    It survives because all three rows are priced over the SAME hours — every
+    parked hour in the window, not each row's own fitted subset. Pricing ID over
+    only the Sentry-off hours would read as an accounting ("what the quiet parks
+    cost") and break the identity; pricing it over all of them reads as the
+    counterfactual it is ("what the window would have cost with nothing
+    watching"), and the difference from PK is then exactly what Sentry added.
+    """
+    from datetime import timedelta
+    from types import SimpleNamespace
+
+    cap = 68.6
+    history = _chain([
+        ("Home", 100.0, 99.0), ("Home", 98.0, 97.0), ("Home", 96.0, 95.0),
+        ("Home", 94.0, 93.0), ("Home", 89.0, 88.0), ("Home", 84.0, 83.0),
+        ("Home", 79.0, 78.0),
+    ], gap_hours=11.0)
+    for d in history:
+        d.duration_min = 30.0
+        d.energy_used_kwh = 2.0
+    readings = [SimpleNamespace(ts=d.end_time + timedelta(hours=1),
+                                sentry_mode=(i >= 3))
+                for i, d in enumerate(history[:-1])]
+
+    got = driving_analysis.parked_decomposition(history, [], cap, readings)
+    acc = driving_analysis.window_accounting(
+        history, [], readings, history[0].start_time, history[-1].end_time)
+    hours = acc["parked"]["hours"]
+    pk, idle, se = (round(got[k] * hours, 2) for k in ("pk_kw", "id_kw", "se_kw"))
+
+    assert idle + se == pytest.approx(pk, abs=0.02)
+    assert 0 < idle < pk and 0 < se < pk
+
+    # And the share the table exists to report: standing still is most of the
+    # hours and a large minority of the energy, which no column could say while
+    # the parked rows were a rate fitted from a different population.
+    total_kwh = acc["driving"]["kwh"] + pk
+    assert pk / total_kwh == pytest.approx(0.424, abs=0.01)
+    assert hours / (hours + acc["driving"]["hours"]) == pytest.approx(0.95, abs=0.01)

@@ -522,6 +522,90 @@ def sentry_standby_kw(drives: list[Any], charges: list[Any] | None,
         keep=lambda a, b: index.state(a.end_time, b.start_time) is armed)
 
 
+def window_accounting(drives: list[Any], charges: list[Any] | None,
+                      readings: list[Any], since: Any, until: Any) -> dict[str, Any]:
+    """Where the window's hours went, so the matrix adds up to something.
+
+    The driving rows and the parked rows have always described DIFFERENT
+    POPULATIONS, and that is what stopped the table summing. Every trip in the
+    window becomes a driving row, while the parked rows are rates fitted from
+    gaps of six hours and up needing twenty-four in total — so the parked rows
+    were never "what standing still cost this window", they were the asymptotic
+    deep-sleep rate, and the majority of a normal day's parked time (errand
+    stops of a quarter-hour to three hours) appeared in neither.
+
+    This walk places EVERY hour between ``since`` and ``until`` in exactly one
+    bucket, so the report can say where the time went:
+
+        driving      the trips themselves
+        parked       stationary, no charge inside, bounded by two trips
+        charging     a gap with a charge in it — stationary, but not drain
+        excluded     a gap no rate may be applied to: the odometer says the car
+                     moved (a journey nobody recorded), or SoC came out higher
+                     than it went in. Real hours, not attributable ones.
+        unbounded    the window's two edges — before the first trip and after
+                     the last. Real time with no pair of trips bracketing it,
+                     so nothing measured it.
+
+    Its rules are deliberately NOT _gap_totals's. That helper's exclusions
+    exist to protect a RATE, and silently dropping hours is the right thing for
+    a fit and the wrong thing for an accounting — an hour a fit ignores still
+    happened. So the same conditions appear here as buckets rather than as
+    skips, and the totals close.
+    """
+    ordered = sorted(drives, key=lambda d: d.start_time)
+    index = _sentry_index(readings) if readings else None
+    charge_starts = sorted(c.start_time for c in (charges or []))
+
+    drive_hours = sum(float(getattr(d, "duration_min", 0.0) or 0.0) / 60.0
+                      for d in ordered)
+    drive_kwh = sum(float(getattr(d, "energy_used_kwh", 0.0) or 0.0)
+                    for d in ordered)
+    by_state = {"sentry_off": 0.0, "sentry_on": 0.0, "unknown": 0.0}
+    gaps_by_state = {"sentry_off": 0, "sentry_on": 0, "unknown": 0}
+    parked_hours = charging_hours = excluded_hours = 0.0
+    parked_gaps = charging_gaps = excluded_gaps = 0
+
+    for a, b in zip(ordered, ordered[1:]):
+        hours = (b.start_time - a.end_time).total_seconds() / 3600.0
+        if hours <= 0:
+            continue
+        if any(a.end_time < c < b.start_time for c in charge_starts):
+            charging_hours += hours
+            charging_gaps += 1
+            continue
+        moved = _gap_moved_km(a, b)
+        if (moved is not None and moved > PARKED_GAP_MAX_MOVE_KM) or (
+                b.start_soc - a.end_soc > SOC_RISE_TOLERANCE_PCT):
+            excluded_hours += hours
+            excluded_gaps += 1
+            continue
+        parked_hours += hours
+        parked_gaps += 1
+        armed = index.state(a.end_time, b.start_time) if index else None
+        key = ("sentry_on" if armed else
+               "sentry_off" if armed is False else "unknown")
+        by_state[key] += hours
+        gaps_by_state[key] += 1
+
+    span_hours = (until - since).total_seconds() / 3600.0 if since and until else 0.0
+    # The edges, by subtraction rather than by measuring them: everything
+    # between the first trip's start and the last one's end is already placed
+    # above, so whatever the span has left over is the two ends.
+    placed = drive_hours + parked_hours + charging_hours + excluded_hours
+    return {
+        "span_hours": round(span_hours, 1),
+        "driving": {"hours": round(drive_hours, 1), "kwh": round(drive_kwh, 2),
+                    "trips": len(ordered)},
+        "parked": {"hours": round(parked_hours, 1), "gaps": parked_gaps,
+                   "by_state": {k: round(v, 1) for k, v in by_state.items()},
+                   "gaps_by_state": dict(gaps_by_state)},
+        "charging": {"hours": round(charging_hours, 1), "gaps": charging_gaps},
+        "excluded": {"hours": round(excluded_hours, 1), "gaps": excluded_gaps},
+        "unbounded": {"hours": round(max(span_hours - placed, 0.0), 1)},
+    }
+
+
 def parked_decomposition(drives: list[Any], charges: list[Any] | None,
                          capacity_kwh: float,
                          readings: list[Any]) -> dict[str, Any]:
@@ -2004,6 +2088,11 @@ def condition_matrix(drives: list[Any], capacity_kwh: float,
                                 if rng and baseline_range_km else None),
             "avg_trip_min": round(mins / len(got), 1),
             "idle_share_pct": round(idle / mins * 100.0, 1) if mins else None,
+            # What this condition actually cost, as opposed to what it costs per
+            # kilometre or per hour. Measured, not projected — these are the
+            # trips' own summed energy — which is the difference between this
+            # column here and the same column on a parked row.
+            "kwh": round(kwh, 2),
         })
     # Ranked both ways, because the ordering IS the finding and reading it off
     # two unsorted columns is work the table can do for the reader.
@@ -2074,6 +2163,15 @@ MATRIX_DEFINITIONS = {
         {"name": "kW", "means": "Energy per hour. The unit a parked car can also "
                                 "be quoted in, so driving and standing still "
                                 "compare on one scale."},
+        {"name": "kWh", "means": "What this condition actually cost over the "
+                                 "window, and the share of hours and energy "
+                                 "beside it. Measured on a driving row — the "
+                                 "trips' own summed energy. PROJECTED on a "
+                                 "parked row: the rate is fitted from parks of "
+                                 "six hours and up, then applied to every "
+                                 "parked hour, and a short stop draws more than "
+                                 "that because the car is still awake. So a "
+                                 "parked kWh understates, in a known direction."},
         {"name": "Range", "means": "What a full battery is worth driven entirely "
                                    "in this condition."},
         {"name": "km/1%", "means": "What one percent of the battery buys here."},
@@ -2081,6 +2179,15 @@ MATRIX_DEFINITIONS = {
                                   "and per-hour rankings are reverses of each "
                                   "other, which is the point of showing both."},
     ],
+    "adds_up": (
+        "Every hour of the window lands in exactly one bucket — driving, parked, "
+        "charging, excluded (a gap the odometer says the car moved through, or "
+        "where SoC rose), or the two unmeasured edges before the first trip and "
+        "after the last. So the table sums to the window rather than to two "
+        "different populations: previously the driving rows counted every trip "
+        "while the parked rows were a rate fitted from long parks only, and a "
+        "normal day's errand stops appeared in neither."
+    ),
     "how_sorted": (
         "A trip is sorted by how close it stayed to its own peak speed — average "
         "divided by maximum — and only then by how fast that was. Not by idle "

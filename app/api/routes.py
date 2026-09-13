@@ -8352,6 +8352,16 @@ def driving_matrix(days: int = Query(30, ge=1, le=730),
 
     readings = _parked_readings(session, vehicle.id)
 
+    # Where the window's hours actually went. The parked rows are priced from
+    # this rather than from the gaps their rate was fitted on, because those two
+    # are different populations and using the fit's population is what stopped
+    # the table summing to anything — see driving.window_accounting.
+    acc = driving_analysis.window_accounting(
+        list(drives), list(charges), readings, since, now)
+    out["accounting"] = acc
+    parked_hours = acc["parked"]["hours"]
+    drive_kwh = acc["driving"]["kwh"]
+
     def parked(kw: float | None, basis: str) -> dict[str, Any]:
         """One parked row's figures, from a rate in kW.
 
@@ -8365,6 +8375,11 @@ def driving_matrix(days: int = Query(30, ge=1, le=730),
         row: dict[str, Any] = {
             "kw": None, "pct_per_hour": None, "pct_per_day": None,
             "days_to_5pct": None, "basis": basis,
+            # Set before the rate is even looked at. The parked hours are known
+            # whether or not a rate could be fitted from them, and they are
+            # precisely what makes a blank row readable — "9.9 h over 1 park"
+            # says the window is too thin, where a bare dash says nothing.
+            "hours": parked_hours, "kwh": None, "kwh_basis": None,
         }
         if kw is None or not capacity_kwh:
             return row
@@ -8377,6 +8392,19 @@ def driving_matrix(days: int = Query(30, ge=1, le=730),
         # not a duration, and divided by a negative it is a date in the past.
         if basis == "total" and per_hour > 0:
             row["days_to_5pct"] = round(5.0 / (per_hour * 24.0), 1)
+        # Priced over EVERY parked hour in the window, which is what puts this
+        # row on the same footing as a driving row: a condition's kWh is what it
+        # cost, not what a subset of it cost. All three parked rows use the same
+        # hours, so PK = ID + SE survives into the energy column.
+        #
+        # It is a projection and says so. The rate is measured on parks of six
+        # hours and up, and a fifteen-minute stop draws more than that — the car
+        # is still awake, screens up, Sentry arming — so applying the deep-sleep
+        # rate to every parked hour UNDERSTATES, and by a known direction rather
+        # than an unknown one. parked_awake_kw was deleted for trying to measure
+        # the difference from data that cannot carry it.
+        row["kwh"] = round(kw * parked_hours, 2)
+        row["kwh_basis"] = "projected"
         return row
 
     # PK = ID + SE, exactly, because all three come off one gap set: PK is
@@ -8389,20 +8417,56 @@ def driving_matrix(days: int = Query(30, ge=1, le=730),
         list(drives), list(charges), capacity_kwh, readings)
     out["parked"] = [
         {"code": "PK", "name": "Park Overall",
-         "gaps": park["gaps"]["total"], "hours": park["hours"]["total"],
+         "gaps": acc["parked"]["gaps"],
+         "hours_fitted": park["hours"]["total"],
          **parked(park["pk_kw"], "total")},
+        # gaps matches hours — the TOTAL parked gaps, not this state's. All
+        # three rows are priced over every parked hour (that is what keeps
+        # PK = ID + SE true in the energy column), so counting this row's own
+        # state's gaps beside all of the hours read "1182 h over 0 parks".
+        # The per-state evidence is hours_fitted, and parked_evidence carries
+        # the full split.
         {"code": "ID", "name": "Idling, Sentry off",
-         "gaps": park["gaps"]["sentry_off"], "hours": park["hours"]["sentry_off"],
+         "gaps": acc["parked"]["gaps"],
+         "hours_fitted": park["hours"]["sentry_off"],
+         "hours_state": acc["parked"]["by_state"]["sentry_off"],
          **parked(park["id_kw"], "total")},
         # Evidence for SE is the ARMED parks, not the residual's own hours:
         # what makes "Sentry costs something" measurable is having parked with
         # it on. armed_kw is the direct fit on those same hours, carried so the
         # residual can be checked against something rather than believed.
         {"code": "SE", "name": "Sentry impact",
-         "gaps": park["gaps"]["sentry_on"], "hours": park["hours"]["sentry_on"],
+         "gaps": acc["parked"]["gaps"],
+         "hours_fitted": park["hours"]["sentry_on"],
+         "hours_state": acc["parked"]["by_state"]["sentry_on"],
          "armed_kw": park["armed_kw"],
          **parked(park["se_kw"], "residual")},
     ]
+    # Every row's share of the window, driving and parked on one denominator.
+    # PK is the parked total and ID and SE are its parts, so only PK counts
+    # toward it — adding all three would bill the parked hours twice.
+    pk_kwh = out["parked"][0].get("kwh") or 0.0
+    total_kwh = drive_kwh + pk_kwh
+    total_hours = acc["driving"]["hours"] + parked_hours
+    def share(rows: list[dict[str, Any]]) -> None:
+        for row in rows:
+            hrs, kwh = row.get("hours"), row.get("kwh")
+            row["share_hours_pct"] = (round(hrs / total_hours * 100.0, 1)
+                                      if hrs and total_hours else None)
+            row["share_kwh_pct"] = (round(kwh / total_kwh * 100.0, 1)
+                                    if kwh and total_kwh else None)
+    share(out["parked"])
+    for key in ("modes", "weekday", "weekend"):
+        rows = out[key] if key == "modes" else (out[key] or {}).get("modes") or []
+        share(rows)
+    out["totals"] = {
+        "hours": round(total_hours, 1),
+        "kwh": round(total_kwh, 2),
+        "driving_kwh": drive_kwh,
+        "parked_kwh": round(pk_kwh, 2),
+        "parked_share_kwh_pct": (round(pk_kwh / total_kwh * 100.0, 1)
+                                 if total_kwh else None),
+    }
     # What the split could not see. Parks with no Sentry reading either way sit
     # in PK and in neither ID nor the armed fit, so their excess over ID lands
     # in SE — which makes SE an upper bound whenever this is a large share.

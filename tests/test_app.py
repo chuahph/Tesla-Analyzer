@@ -478,6 +478,30 @@ def test_the_condition_cuts_are_stored_and_re_sort_the_same_trips():
             assert ev["min_gap_hours"] == pytest.approx(6.0)
             assert set(ev["hours"]) == {"total", "sentry_off", "sentry_on", "unknown"}
 
+            # Every row is now priced in energy as well as per unit, on one
+            # denominator, so the table sums to the window rather than to two
+            # different populations. PK carries the parked total; ID and SE are
+            # its parts, so only PK counts toward the share — billing all three
+            # would charge the parked hours twice.
+            assert base["totals"]["kwh"] == pytest.approx(
+                base["totals"]["driving_kwh"] + base["totals"]["parked_kwh"],
+                abs=0.02)
+            # The accounting closes: every hour in exactly one bucket.
+            a = base["accounting"]
+            placed = (a["driving"]["hours"] + a["parked"]["hours"]
+                      + a["charging"]["hours"] + a["excluded"]["hours"]
+                      + a["unbounded"]["hours"])
+            assert placed == pytest.approx(a["span_hours"], abs=0.2)
+            # A parked row reports its hours whether or not a rate was fitted —
+            # that is what makes a blank rate readable instead of a bare dash.
+            assert all(r["hours"] == a["parked"]["hours"] for r in base["parked"])
+            # Driving energy is measured; parked energy is the deep-sleep rate
+            # projected onto every parked hour, and says so rather than passing
+            # itself off as a measurement.
+            assert all(r.get("kwh_basis") in (None, "projected")
+                       for r in base["parked"])
+            assert all("kwh" in r for r in base["modes"])
+
             # The window is the one used, not the one asked for: this report
             # starts where streamed history does.
             assert base["window"]["days_asked"] == 30

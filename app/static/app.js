@@ -2201,12 +2201,22 @@ function renderMatrix(d) {
     return;
   }
   const num = (v, dp) => (v == null ? "—" : Number(v).toFixed(dp));
+  // Share of the window, on every row. This is what puts driving and parked on
+  // one footing: not "what does an hour of this cost" but "how much of my month
+  // was this, and how much of my energy went to it".
+  const share = (r) => {
+    const bits = [];
+    if (r.share_hours_pct != null) bits.push(`${num(r.share_hours_pct, 1)}% of hours`);
+    if (r.share_kwh_pct != null) bits.push(`${num(r.share_kwh_pct, 1)}% of kWh`);
+    return bits.length ? ` · ${bits.join(" · ")}` : "";
+  };
   const rows = modes.map((m) => `
       <tr>
         <td class="mx-code">${m.code}</td>
-        <td class="mx-name">${m.name}<span class="mx-sub">${m.trips} trip${m.trips === 1 ? "" : "s"} · ${num(m.km, 1)} km · ${num(m.idle_share_pct, 0)}% idle · ${num(m.out_temp_c, 1)}°C</span></td>
+        <td class="mx-name">${m.name}<span class="mx-sub">${m.trips} trip${m.trips === 1 ? "" : "s"} · ${num(m.km, 1)} km · ${num(m.hours, 1)} h · ${num(m.idle_share_pct, 0)}% idle · ${num(m.out_temp_c, 1)}°C${share(m)}</span></td>
         <td>${num(m.wh_per_km, 1)}<span class="mx-rank">#${m.rank_per_km ?? "—"}</span></td>
         <td>${num(m.kw, 2)}<span class="mx-rank">#${m.rank_per_hour ?? "—"}</span></td>
+        <td>${num(m.kwh, 2)}</td>
         <td>${m.range_km ?? "—"}</td>
         <td>${num(m.km_per_pct, 1)}</td>
       </tr>`).join("");
@@ -2220,23 +2230,37 @@ function renderMatrix(d) {
   // so what it owes the reader is its share and the hours behind it.
   const pkKw = (parked.find((p) => p.code === "PK") || {}).kw || 0;
   const hrs = (p) => (p.hours ? ` · ${num(p.hours, 0)} h over ${p.gaps} park${p.gaps === 1 ? "" : "s"}` : "");
+  // Parked energy is the deep-sleep rate projected onto every parked hour, and
+  // the fitted hours are a subset of those. Saying so on the row is the
+  // difference between a measurement and an estimate that looks like one.
+  const proj = (p) => (p.kwh != null && p.hours_fitted != null && p.hours
+    ? ` · projected from ${num(p.hours_fitted, 0)} h of long parks`
+    : "");
   const parkSub = (p) => {
     if (p.kw == null) {
       const why = p.basis === "residual"
         ? "needs parks both with and without Sentry to separate"
         : "not enough parked history to fit";
-      return `${why}${hrs(p)}`;
+      // Which hours were ELIGIBLE, not just how many there were. A row with
+      // 1182 parked hours and none of them in a long park of the right Sentry
+      // state looks like a bug until it says that is what happened.
+      const state = p.hours_state != null && p.hours_state !== p.hours
+        ? ` · ${num(p.hours_state, 0)} h in this state, ${num(p.hours_fitted, 0)} h of it in parks long enough to fit`
+        : (p.hours_fitted != null
+            ? ` · ${num(p.hours_fitted, 0)} h of it in parks long enough to fit`
+            : "");
+      return `${why}${hrs(p)}${state}`;
     }
     if (p.basis !== "residual") {
-      return `${num(p.pct_per_day, 2)}%/day · 5% lasts ${p.days_to_5pct} days${hrs(p)}`;
+      return `${num(p.pct_per_day, 2)}%/day · 5% lasts ${p.days_to_5pct} days${hrs(p)}${share(p)}${proj(p)}`;
     }
     // A residual can come out at or below zero, and the row still shows the
     // number — but calling that "x% of PK" would dress a failed separation up
     // as a finding.
     if (p.kw <= 0) return `armed and unarmed parks don't separate yet${hrs(p)}`;
-    const share = pkKw ? ` · ${num((p.kw / pkKw) * 100, 0)}% of PK` : "";
+    const ofPk = pkKw ? ` · ${num((p.kw / pkKw) * 100, 0)}% of PK` : "";
     const armed = p.armed_kw ? ` · ${num(p.armed_kw, 3)} kW per armed hour` : "";
-    return `${num(p.pct_per_day, 2)}%/day${share}${armed}${hrs(p)}`;
+    return `${num(p.pct_per_day, 2)}%/day${ofPk}${armed}${hrs(p)}${proj(p)}`;
   };
   const park = parked.map((p) => `
       <tr class="mx-parked">
@@ -2244,6 +2268,7 @@ function renderMatrix(d) {
         <td class="mx-name">${p.name}<span class="mx-sub">${parkSub(p)}</span></td>
         <td>—</td>
         <td>${num(p.kw, 3)}</td>
+        <td>${num(p.kwh, 2)}</td>
         <td>—</td>
         <td>—</td>
       </tr>`).join("");
@@ -2258,6 +2283,25 @@ function renderMatrix(d) {
   // Parked hours nothing could state a Sentry verdict for. They are in PK and
   // in neither ID nor the armed fit, so SE carries them — which makes SE an
   // upper bound, and that has to be visible rather than inferred.
+  // Where the window went, stated once. The point of the kWh column is this
+  // line: standing still is a share of the bill, and until now the table could
+  // not say what share.
+  const t = d.totals;
+  const a = d.accounting;
+  // The denominator is named, not left to be assumed: shares are of driving
+  // plus parked, the two kinds of row in the table, so they sum to 100%.
+  // Charging and the unmeasured edges are real hours and are reported apart
+  // rather than diluted into a percentage nobody asked for.
+  const aside = [];
+  if (a && a.charging.hours) aside.push(`${num(a.charging.hours, 0)} h charging`);
+  if (a && a.excluded.hours) aside.push(`${num(a.excluded.hours, 0)} h the odometer says the car moved through`);
+  if (a && a.unbounded.hours) aside.push(`${num(a.unbounded.hours, 0)} h at the window's edges, unmeasured`);
+  const tot = t && t.kwh
+    ? `${num(t.hours, 0)} h driving + parked, ${num(t.kwh, 1)} kWh —
+       ${num(t.driving_kwh, 1)} moving, ${num(t.parked_kwh, 1)} standing still
+       (${num(t.parked_share_kwh_pct, 1)}% of the energy). Shares below are of
+       those hours.${aside.length ? ` Outside them: ${aside.join(", ")}.` : ""}`
+    : "";
   const ev = d.parked_evidence;
   const unknown = ev && ev.hours && ev.hours.unknown > 0
     ? `${num(ev.hours.unknown, 0)} parked h had no Sentry reading either way — counted in PK, and in SE by subtraction, so SE reads high.`
@@ -2266,12 +2310,13 @@ function renderMatrix(d) {
     <div class="mx-scroll">
       <table class="mx-table">
         <thead><tr>
-          <th></th><th>Condition</th><th>Wh/km</th><th>kW</th><th>Range</th><th>km/1%</th>
+          <th></th><th>Condition</th><th>Wh/km</th><th>kW</th><th>kWh</th><th>Range</th><th>km/1%</th>
         </tr></thead>
         <tbody>${rows}${park}</tbody>
       </table>
     </div>
     <p class="modal-sub mx-foot">
+      ${tot}
       ${win}
       Baseline ${d.baseline_range_km ?? "—"} km at the car's rated consumption.
       ${d.unclassified_trips ? `${d.unclassified_trips} trip(s) left out — idle never tracked.` : ""}
@@ -2297,6 +2342,7 @@ function renderGlossary(defs) {
       <p class="modal-sub">${defs.how_sorted || ""}</p>
       <dl class="mx-defs">${modes}</dl>
       <dl class="mx-defs">${cols}</dl>
+      ${defs.adds_up ? `<p class="modal-sub">${defs.adds_up}</p>` : ""}
     </details>`;
 }
 
