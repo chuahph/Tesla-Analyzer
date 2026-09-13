@@ -626,6 +626,9 @@ def window_accounting(drives: list[Any], charges: list[Any] | None,
     gaps_by_state = {"sentry_off": 0, "sentry_on": 0, "unknown": 0}
     parked_hours = charging_hours = excluded_hours = 0.0
     parked_gaps = charging_gaps = excluded_gaps = 0
+    short_hours = 0.0
+    short_gaps = 0
+    short_by_state = {"sentry_off": 0.0, "sentry_on": 0.0, "unknown": 0.0}
 
     for a, b in zip(ordered, ordered[1:]):
         hours = (b.start_time - a.end_time).total_seconds() / 3600.0
@@ -648,6 +651,20 @@ def window_accounting(drives: list[Any], charges: list[Any] | None,
                "sentry_off" if armed is False else "unknown")
         by_state[key] += hours
         gaps_by_state[key] += 1
+        # The hours the old six-hour rule could never see, kept apart so the
+        # effect of admitting them is measurable rather than assumed.
+        #
+        # The question this exists to answer: a Sentry state is read from the
+        # readings falling INSIDE a gap, and a short gap is less likely to
+        # contain one — so pooling short parks may grow the unknown bucket
+        # faster than it grows ID. Unknown hours sit in PK and, by subtraction,
+        # in SE, which would push ID down and SE up for a reason that is about
+        # observation rather than about the car. If that is happening it will
+        # show here as short hours concentrated in "unknown".
+        if hours < STANDBY_MIN_GAP_HOURS:
+            short_hours += hours
+            short_gaps += 1
+            short_by_state[key] += hours
 
     span_hours = (until - since).total_seconds() / 3600.0 if since and until else 0.0
     # The edges, by subtraction rather than by measuring them: everything
@@ -660,7 +677,11 @@ def window_accounting(drives: list[Any], charges: list[Any] | None,
                     "trips": len(ordered)},
         "parked": {"hours": round(parked_hours, 1), "gaps": parked_gaps,
                    "by_state": {k: round(v, 1) for k, v in by_state.items()},
-                   "gaps_by_state": dict(gaps_by_state)},
+                   "gaps_by_state": dict(gaps_by_state),
+                   "short": {"hours": round(short_hours, 1), "gaps": short_gaps,
+                             "under_hours": STANDBY_MIN_GAP_HOURS,
+                             "by_state": {k: round(v, 1)
+                                          for k, v in short_by_state.items()}}},
         "charging": {"hours": round(charging_hours, 1), "gaps": charging_gaps},
         "excluded": {"hours": round(excluded_hours, 1), "gaps": excluded_gaps},
         "unbounded": {"hours": round(max(span_hours - placed, 0.0), 1)},

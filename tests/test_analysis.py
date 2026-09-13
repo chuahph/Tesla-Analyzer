@@ -3148,3 +3148,49 @@ def test_a_blank_parked_rate_says_which_of_its_three_causes_it_was():
     assert got["pk_kw"] is None
     assert "no net drain" in got["pk_why"]
     assert got["hours"]["total"] > floor
+
+
+def test_the_short_parks_are_counted_apart_so_their_effect_is_measurable():
+    """Admitting short parks may grow the UNKNOWN bucket faster than it grows ID.
+
+    A gap's Sentry state is read from the readings falling inside it, and a
+    short gap is less likely to contain one. Unknown hours sit in PK and, by
+    subtraction, in SE — so if short parks arrive mostly unclassified they push
+    ID down and SE up for a reason that is about observation rather than about
+    the car.
+
+    That is a claim about a particular history, not something to assume, so the
+    hours the old six-hour rule could never see are counted apart and can be
+    read off the report.
+    """
+    from datetime import datetime, timedelta
+    from types import SimpleNamespace
+
+    base = datetime(2026, 6, 1)
+    drives, at = [], base
+    # Alternating long and short parks: the long ones carry a Sentry reading,
+    # the short ones do not — which is the shape the concern describes.
+    plan = [11.0, 1.0, 11.0, 0.5, 11.0, 2.0]
+    for i, gap in enumerate(plan + [0.0]):
+        drives.append(SimpleNamespace(
+            id=i, start_time=at, end_time=at + timedelta(minutes=30),
+            start_soc=90.0 - i, end_soc=89.0 - i, end_location="Home",
+            duration_min=30.0, energy_used_kwh=1.0))
+        at = drives[-1].end_time + timedelta(hours=gap)
+    readings = [SimpleNamespace(ts=d.end_time + timedelta(minutes=30),
+                                sentry_mode=False)
+                for i, d in enumerate(drives[:-1]) if plan[i] >= 6.0]
+
+    acc = driving_analysis.window_accounting(
+        drives, [], readings, drives[0].start_time, drives[-1].end_time)
+    short = acc["parked"]["short"]
+    assert short["under_hours"] == pytest.approx(6.0)
+    assert short["gaps"] == 3
+    assert short["hours"] == pytest.approx(3.5)
+    # Every short park here is unclassified, and every long one is Sentry-off.
+    assert short["by_state"]["unknown"] == pytest.approx(3.5)
+    assert short["by_state"]["sentry_off"] == pytest.approx(0.0)
+    assert acc["parked"]["by_state"]["sentry_off"] == pytest.approx(33.0)
+    assert acc["parked"]["by_state"]["unknown"] == pytest.approx(3.5)
+    # So the short hours are real parked time PK counts and ID cannot.
+    assert acc["parked"]["hours"] == pytest.approx(36.5)

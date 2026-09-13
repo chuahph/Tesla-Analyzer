@@ -2319,8 +2319,10 @@ function renderMatrix(d) {
          aside.length ? ` Not priced at all: ${aside.join(", ")}.` : ""}`
     : "";
   const ev = d.parked_evidence;
+  const sh = a && a.parked && a.parked.short;
   const unknown = ev && ev.hours && ev.hours.unknown > 0
-    ? `${num(ev.hours.unknown, 0)} parked h had no Sentry reading either way — counted in PK, and in SE by subtraction, so SE reads high.`
+    ? `${num(ev.hours.unknown, 0)} parked h had no Sentry reading either way — counted in PK, and in SE by subtraction, so SE reads high.${
+        sh && sh.hours ? ` ${num(sh.hours, 0)} h of the parked time is in stops under ${num(sh.under_hours, 0)} h, and ${num(sh.by_state.unknown, 0)} h of those are the unclassified ones — a short stop is less likely to contain a Sentry reading, which is about what was observed, not about the car.` : ""}`
     : "";
   box.innerHTML = `
     <div class="mx-scroll">
