@@ -31,6 +31,13 @@ QUIET_SEEN_KEY = "quiet_seen_ts"  # epoch a tick last CONFIRMED every car not on
 CAR_READINGS_KEY = "car_readings"  # JSON list of {drive_id, km, pct, wh_per_km}:
 # what the car's own Energy screen said about a trip this app also logged. The
 # only way to study accuracy rather than argue about it — see /api/accuracy.
+PARK_READINGS_KEY = "park_readings"  # JSON list of {at, since_charge_h,
+# total_pct, sentry_pct, standby_pct, screen_pct}: the car's own Park tab,
+# typed in from the screen. This is PK, ID and SE measured rather than fitted —
+# the car attributes parked consumption BY CAUSE and to 0.1%, where this app
+# infers it from a 1% gauge across whole gaps. It is the ground truth the
+# parked rows are trying to reconstruct, and the only thing that can tell a
+# good fit from a plausible one.
 SCREEN_CAPACITY_KEY = "screen_capacity"  # JSON list of {kwh, pct, at}: the
 # car's own Since-Charge readings, typed in from the screen. The ONLY
 # independent check on the capacity constant — see _screen_capacity — because

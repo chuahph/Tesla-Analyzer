@@ -7401,6 +7401,105 @@ def repair_missing_energy(
                  "Dry run. Add &apply=1 to write these." if not apply else None),
     }
 
+@router.api_route("/add-park-reading", methods=["GET", "POST"])
+def add_park_reading(
+    readings: str = Query(..., description="total:sentry:standby:screen[:hours]"),
+    session: Session = Depends(get_session),
+):
+    """Record the car's own Park tab — parked consumption, split by cause.
+
+    This is PK, ID and SE measured instead of fitted, and it is better evidence
+    than anything this app can derive. The car attributes parked drain by CAUSE
+    and reports it to 0.1%: Sentry Mode, Vehicle Standby, Screen Time,
+    Preconditioning, Cabin Overheat Protection, Mobile App, Summon Standby. The
+    app infers the same quantity from a 1% gauge read at the two ends of whole
+    gaps, which is an order of magnitude coarser and cannot separate what was
+    drawing.
+
+    It is also a BETTER DEFINITION of SE. The gap method charges everything
+    that happened during an armed park to Sentry, standby included, because all
+    it can see is the total drop. The car charges Sentry with what Sentry
+    actually drew. "Sentry impact saja" is the car's definition, not the gap
+    method's, and where they disagree the car is right.
+
+    Read off Energy -> Park with the window set to Since Last Charge:
+
+        total    the "N% consumed" headline
+        sentry   the Sentry Mode line
+        standby  the Vehicle Standby line
+        screen   the Screen Time line
+        hours    optional, the Since Charge panel's elapsed time
+
+    Everything else on that tab (Preconditioning, Cabin Overheat Protection,
+    Mobile App, Summon Standby) is derived as the remainder rather than typed
+    in, the same rule add_car_reading uses for the terms it does not model.
+    """
+    import json as _json
+
+    try:
+        rows = _json.loads(state.get(session, state.PARK_READINGS_KEY) or "[]")
+    except ValueError:
+        rows = []
+    parts = [p.strip() for p in readings.split(":") if p.strip() != ""]
+    if len(parts) not in (4, 5):
+        raise HTTPException(
+            422, f"{readings!r} is not total:sentry:standby:screen, "
+                 "optionally followed by :hours")
+    try:
+        total, sentry, standby, screen = (float(parts[0]), float(parts[1]),
+                                          float(parts[2]), float(parts[3]))
+        hours = float(parts[4]) if len(parts) == 5 else None
+    except ValueError:
+        raise HTTPException(422, f"{readings!r} has a value that is not a number") from None
+    if total <= 0:
+        raise HTTPException(422, "total must be positive — that is the headline "
+                                 "percentage off the Park tab")
+    for name, value in (("sentry", sentry), ("standby", standby),
+                        ("screen", screen)):
+        if value < 0:
+            raise HTTPException(422, f"{name} cannot be negative")
+    named = sentry + standby + screen
+    # The parts have to fit inside the whole, or they were read off two
+    # different windows — the same check add_car_reading makes, and for the
+    # same reason: a mismatched pair would enter the study as evidence.
+    if named > total + 0.05:
+        raise HTTPException(
+            422, f"sentry {sentry}% + standby {standby}% + screen {screen}% is "
+                 f"{named}%, more than the {total}% the tab says was consumed — "
+                 f"those did not come from the same window")
+    row = {
+        "at": sync_mod.now_local().isoformat(timespec="minutes"),
+        "total_pct": total, "sentry_pct": sentry,
+        "standby_pct": standby, "screen_pct": screen,
+        # What the tab lists but this does not ask for, as the remainder.
+        "other_pct": round(total - named, 2),
+    }
+    if hours is not None:
+        row["since_charge_h"] = hours
+        # The rate the car's own figures imply, which is the number the fitted
+        # rows are trying to land on.
+        row["implied_kw"] = round(
+            total / 100.0 * _usable_capacity(
+                session, _first_vehicle(session), get_settings())[0] / hours, 4
+        ) if hours > 0 else None
+    rows.append(row)
+    # Newest last, and capped: this is typed in by hand, so it grows slowly and
+    # the old ones stay interesting — a Sentry habit that changed shows up as a
+    # change across them.
+    state.put(session, state.PARK_READINGS_KEY, _json.dumps(rows[-60:]))
+    return {
+        "stored": row,
+        "readings": len(rows[-60:]),
+        # Said back, because this is the decomposition the matrix reports and
+        # seeing it restated is how a typo gets caught at the door.
+        "means": {
+            "PK": f"{total}% parked in total",
+            "SE": f"{sentry}% of the battery went to Sentry",
+            "ID": f"{round(total - sentry, 2)}% went to everything else parked",
+        },
+    }
+
+
 @router.api_route("/add-car-reading", methods=["GET", "POST"])
 def add_car_reading(
     readings: str = Query(..., description="drive_id:km:pct:wh_per_km, comma-separated"),
@@ -8468,6 +8567,29 @@ def driving_matrix(days: int = Query(30, ge=1, le=730),
                      "neither ID nor SE — a short stop often has none"),
              **parked(None, "total", share_of["unknown"])})
     out["parked_share"] = share_of
+    # The car's own Park tab, where one has been typed in. It attributes parked
+    # drain BY CAUSE and to 0.1%, so it outranks anything fitted here — and it
+    # defines SE differently and better: what Sentry itself drew, rather than
+    # everything that happened during an armed park. Carried beside the rows
+    # rather than replacing them, because it covers "since last charge" and the
+    # matrix covers a window the reader chose.
+    try:
+        park_rows = _json_mod.loads(
+            state.get(session, state.PARK_READINGS_KEY) or "[]")
+    except ValueError:
+        park_rows = []
+    if park_rows:
+        latest = park_rows[-1]
+        out["car_park_screen"] = {
+            **latest,
+            "pk_pct": latest["total_pct"],
+            "se_pct": latest["sentry_pct"],
+            "id_pct": round(latest["total_pct"] - latest["sentry_pct"], 2),
+            "readings": len(park_rows),
+            "note": ("the car's own Park tab, since its last charge — measured "
+                     "by cause at 0.1%, where the rows above infer it from a 1% "
+                     "gauge across whole gaps"),
+        }
     # Every row's share of the window, driving and parked on one denominator.
     # PK is the parked total and ID and SE are its parts, so only PK counts
     # toward it — adding all three would bill the parked hours twice.

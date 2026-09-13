@@ -1535,6 +1535,12 @@ function tripDiagnostics(t, ctx) {
       add_car_reading: t.id
         ? `${base}/api/add-car-reading?readings=${t.id}:<km>:<pct>:<wh_per_km>:<driving_pct>:<climate_pct>`
         : null,
+      // The Park tab on the same screen, which is PK/ID/SE measured by cause
+      // at 0.1% instead of inferred from a 1% gauge. Worth grabbing whenever
+      // the Energy screen is already open — it is the only thing that can tell
+      // a good parked fit from a merely plausible one.
+      add_park_reading:
+        `${base}/api/add-park-reading?readings=<total_pct>:<sentry_pct>:<standby_pct>:<screen_pct>:<since_charge_h>`,
       // Cross-trip statistics only: the energy bias and its significance, the
       // window totals, per-trip uncertainty. Those cannot live on one trip.
       compare: `${base}/api/telemetry/compare`,

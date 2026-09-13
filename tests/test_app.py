@@ -9288,3 +9288,74 @@ def test_a_park_that_arms_sentry_writes_a_reading_saying_so():
                 sess.delete(row)
             sess.commit()
             sess.close()
+
+
+def test_the_car_park_screen_is_recorded_as_pk_id_and_se():
+    """The car already does the decomposition, better than this app can.
+
+    Energy -> Park attributes parked drain BY CAUSE and to 0.1%: Sentry Mode,
+    Vehicle Standby, Screen Time and the rest. The app infers the same quantity
+    from a 1% gauge read at the two ends of whole gaps, which is an order of
+    magnitude coarser and cannot separate what was drawing.
+
+    It is also the better definition of SE. The gap method charges everything
+    that happened during an armed park to Sentry, standby included, because the
+    total drop is all it can see. The car charges Sentry with what Sentry drew.
+
+    Figures here are the ones off the screen: 2.7% consumed, Sentry 1.6%,
+    Vehicle Standby 1.0%, Screen Time 0.1%, 8.35 h since the last charge.
+    """
+    from app import state
+    from app.database import SessionLocal
+
+    settings = get_settings()
+    old_pc = settings.app_passcode
+    settings.app_passcode = ""
+    sess = SessionLocal()
+    prev = state.get(sess, state.PARK_READINGS_KEY)
+    try:
+        state.put(sess, state.PARK_READINGS_KEY, "")
+        sess.commit()
+        with TestClient(app) as client:
+            r = client.get("/api/add-park-reading?readings=2.7:1.6:1.0:0.1:8.35")
+            assert r.status_code == 200, r.text
+            got = r.json()
+            assert got["stored"]["total_pct"] == pytest.approx(2.7)
+            assert got["stored"]["sentry_pct"] == pytest.approx(1.6)
+            # Everything the tab lists but this does not ask for is the
+            # remainder, not a field to type in.
+            assert got["stored"]["other_pct"] == pytest.approx(0.0, abs=0.01)
+            # Said back in the report's own terms, so a typo is caught at the
+            # door rather than a month later in a chart.
+            assert "1.6%" in got["means"]["SE"]
+            assert "1.1" in got["means"]["ID"]
+
+            # The parts must fit inside the whole, or they came off two
+            # different windows — the same check the trip readings make.
+            bad = client.get("/api/add-park-reading?readings=1.0:1.6:1.0:0.1")
+            assert bad.status_code == 422
+            assert "did not come from the same window" in bad.json()["detail"]
+            assert client.get(
+                "/api/add-park-reading?readings=2.7:1.6:1.0").status_code == 422
+            assert client.get(
+                "/api/add-park-reading?readings=0:0:0:0").status_code == 422
+
+            # And it reaches the matrix as the ground truth beside the fitted
+            # rows, decomposed the way the codes are defined.
+            mx = client.get("/api/driving-matrix?days=30").json()
+            car = mx["car_park_screen"]
+            assert car["pk_pct"] == pytest.approx(2.7)
+            assert car["se_pct"] == pytest.approx(1.6)
+            assert car["id_pct"] == pytest.approx(1.1)
+            assert car["pk_pct"] == pytest.approx(car["id_pct"] + car["se_pct"])
+            # The rate the car's own figures imply, against THIS database's
+            # fitted capacity rather than a pack size typed into the test —
+            # the capacity is measured from screen readings and moves.
+            cap = mx["capacity_kwh"]
+            assert car["implied_kw"] == pytest.approx(
+                2.7 / 100.0 * cap / 8.35, abs=0.001)
+    finally:
+        state.put(sess, state.PARK_READINGS_KEY, prev or "")
+        sess.commit()
+        sess.close()
+        settings.app_passcode = old_pc
