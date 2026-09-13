@@ -113,6 +113,13 @@ MODE_THRESHOLDS_KEY = "drive_mode_thresholds"  # JSON {constant_idle_share_max,
 # right boundary between "slow city" and "heavy city" is a local fact, and
 # tuning it should not need a deploy. Absent means the defaults in
 # analysis.driving apply.
+PURGED_STALE_DRIVES_KEY = "purged_stale_drives"  # JSON {at, cutover, rows:
+# [...]}: every drive row deleted by /api/data/purge-stale-drives, the purge
+# that clears trips an earlier version of the logic produced. Its OWN slot
+# rather than sharing PURGED_DRIVES_KEY — two single-slot backups under one key
+# overwrite each other, which is how the dedupe backup came to have no way back.
+# /api/data/restore-stale-drives puts them back.
+
 MATRIX_SINCE_KEY = "matrix_since"  # JSON {last_trips} or {from}: where the
 # driving matrix should START, when the telemetry cutover is not narrow enough.
 # The point of it is that a report can be confined to trips the CURRENT logic

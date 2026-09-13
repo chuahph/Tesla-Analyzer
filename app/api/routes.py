@@ -2051,6 +2051,140 @@ def duplicate_trips(
     return plan
 
 
+def _purge_drives_before(session: Session, vehicle, cutover: datetime,
+                         apply: bool, freeze: bool, backup_key: str,
+                         restore_path: str) -> dict:
+    """Delete every trip starting before ``cutover``, reversibly.
+
+    Extracted so the two purges — everything before telemetry, and everything
+    before a boundary drawn by hand — share one body. They differ only in where
+    the cutover comes from and which slot the backup lands in; the ordering that
+    makes the delete survivable is the part that must not be written twice.
+
+    That ordering, in the order it matters:
+
+    - the plan is the default, and it prices the deletion in the fits that will
+      actually change rather than in the abstract;
+    - the parked rates are frozen first, because deleting the gaps they stand
+      on is what takes them null, and a purge without the freeze recreates by
+      deletion the very bug place_standby_kw was written to fix;
+    - the backup is written AND COMMITTED before the delete. Sharing one
+      transaction would make a failure between them cost nothing, but a failure
+      that commits the delete and loses the backup costs the history — so they
+      are ordered to leave only the harmless outcome available;
+    - nothing to delete means nothing may be WRITTEN. Measured live on the
+      pre-telemetry purge: a second apply=true against an already-purged
+      database re-froze the rates from the emptied history and wrote a zero-row
+      backup over the one holding all 268 deleted trips. Both destinations are
+      single slots, so a no-op run destroyed the two things the endpoint exists
+      to protect.
+
+    ``backup_key`` is a parameter and never a default for the same reason: two
+    single-slot backups sharing one key overwrite each other, which is how the
+    dedupe backup was lost.
+    """
+    doomed = session.scalars(
+        select(Drive).where(Drive.vehicle_id == vehicle.id, Drive.start_time < cutover)
+        .order_by(Drive.start_time)
+    ).all()
+    kept = session.scalars(
+        select(Drive).where(Drive.vehicle_id == vehicle.id, Drive.start_time >= cutover)
+        .order_by(Drive.start_time)
+    ).all()
+    all_drives = list(doomed) + list(kept)
+    charges = list(session.scalars(select(Charge).where(Charge.vehicle_id == vehicle.id)))
+    readings = _parked_readings(session, vehicle.id)
+    settings = get_settings()
+    capacity_kwh, _ = _usable_capacity(session, vehicle, settings)
+
+    plan = {
+        "cutover": cutover.isoformat(timespec="minutes"),
+        "would_delete": len(doomed),
+        "would_keep": len(kept),
+        "oldest": doomed[0].start_time.isoformat(timespec="minutes") if doomed else None,
+        "newest": doomed[-1].start_time.isoformat(timespec="minutes") if doomed else None,
+        "distance_km": round(sum(d.distance_km for d in doomed), 1),
+        "energy_kwh": round(sum(d.energy_used_kwh for d in doomed), 1),
+        # Untouched by this operation, and named so because "delete my old
+        # trips" reads like it might take them too. Battery health is fitted
+        # from readings and usable capacity from charges; neither moves.
+        "charges_kept": len(charges),
+        # Counted, not len(readings): the index deliberately holds only the
+        # readings that carry a sentry state, and this line is reporting how
+        # much of the car's record survives the purge.
+        "readings_kept": session.scalar(select(func.count()).select_from(
+            BatteryReading).where(BatteryReading.vehicle_id == vehicle.id)),
+        "standby_fits": {
+            "before": _standby_picture(all_drives, charges, capacity_kwh, readings),
+            "after": _standby_picture(list(kept), charges, capacity_kwh, readings),
+        },
+        # What applying would carry across the deletion. Read this against the
+        # "after" column: every rate listed here is one that goes null under
+        # "after" and keeps working anyway.
+        "would_freeze": _freeze_parked_rates(session, vehicle, capacity_kwh) if freeze else None,
+        # The driving matrix fits PK, ID and SE LIVE and never consults the
+        # frozen rates — those are a floor under vampire_drain alone. So these
+        # rows go blank on a purge that leaves under 24 hours of 6-hour-plus
+        # parks behind, and the freeze does not save them. Computed rather than
+        # warned about, because the plan is where the cost of the delete is
+        # supposed to be legible and this is the cost most easily mistaken
+        # afterwards for a bug.
+        "matrix_parked": {
+            "before": driving_analysis.parked_decomposition(
+                all_drives, charges, capacity_kwh, readings),
+            "after": driving_analysis.parked_decomposition(
+                list(kept), charges, capacity_kwh, readings),
+        },
+    }
+    if not apply:
+        plan["applied"] = False
+        return plan
+
+    if not doomed:
+        plan["applied"] = True
+        plan["deleted"] = 0
+        plan["note"] = ("nothing older than the cutover — no rows deleted, "
+                        "and the stored backup and frozen rates were left alone")
+        return plan
+
+    if freeze:
+        frozen = _freeze_parked_rates(session, vehicle, capacity_kwh)
+        state.put(session, state.FROZEN_RATES_KEY, _json_mod.dumps(frozen))
+        plan["froze"] = {
+            "places": len(frozen["places"]),
+            "sentry_armed_kw": frozen["sentry_armed_kw"],
+            "whole_history_kw": frozen["whole_history_kw"],
+            "from_gaps": frozen["from_gaps"],
+        }
+
+    backup = {
+        "at": sync_mod.now_local().isoformat(timespec="seconds"),
+        "cutover": cutover.isoformat(),
+        "rows": [_drive_row_dict(d) for d in doomed],
+    }
+    existing_raw = state.get(session, backup_key)
+    existing = _json_mod.loads(existing_raw) if existing_raw else {}
+    if existing.get("rows") and not backup["rows"]:
+        # Belt and braces behind the early return above: whatever else is
+        # true, a backup holding rows is never replaced by one holding none.
+        plan["backup_kept"] = len(existing["rows"])
+    else:
+        # A backup that already holds rows is being replaced, and the rows it
+        # held are about to stop being restorable. That is reported rather than
+        # done quietly: the previous purge's history is not this purge's to
+        # discard without saying so.
+        if existing.get("rows"):
+            plan["backup_replaced"] = len(existing["rows"])
+        state.put(session, backup_key, _json_mod.dumps(backup))
+    session.commit()
+    deleted = services.delete_drives(session, [d.id for d in doomed])
+    plan["applied"] = True
+    plan["deleted"] = deleted
+    plan["backup_rows"] = len(backup["rows"])
+    plan["restore_with"] = restore_path
+    return plan
+
+
 @router.api_route("/data/purge-pre-telemetry", methods=["GET", "POST"])
 def purge_pre_telemetry(
     apply: bool = Query(False),
@@ -2097,99 +2231,99 @@ def purge_pre_telemetry(
         return {"error": "no telemetry-sourced trips yet — nothing defines the cutover",
                 "deleted": 0}
 
-    doomed = session.scalars(
-        select(Drive).where(Drive.vehicle_id == vehicle.id, Drive.start_time < cutover)
-        .order_by(Drive.start_time)
-    ).all()
-    kept = session.scalars(
-        select(Drive).where(Drive.vehicle_id == vehicle.id, Drive.start_time >= cutover)
-        .order_by(Drive.start_time)
-    ).all()
-    all_drives = list(doomed) + list(kept)
-    charges = list(session.scalars(select(Charge).where(Charge.vehicle_id == vehicle.id)))
-    readings = _parked_readings(session, vehicle.id)
-    settings = get_settings()
-    capacity_kwh, _ = _usable_capacity(session, vehicle, settings)
+    return _purge_drives_before(
+        session, vehicle, cutover, apply, freeze,
+        state.PURGED_DRIVES_KEY, "/api/data/restore-purged-drives?apply=true")
 
-    plan = {
-        "cutover": cutover.isoformat(timespec="minutes"),
-        "would_delete": len(doomed),
-        "would_keep": len(kept),
-        "oldest": doomed[0].start_time.isoformat(timespec="minutes") if doomed else None,
-        "newest": doomed[-1].start_time.isoformat(timespec="minutes") if doomed else None,
-        "distance_km": round(sum(d.distance_km for d in doomed), 1),
-        "energy_kwh": round(sum(d.energy_used_kwh for d in doomed), 1),
-        # Untouched by this operation, and named so because "delete my old
-        # trips" reads like it might take them too. Battery health is fitted
-        # from readings and usable capacity from charges; neither moves.
-        "charges_kept": len(charges),
-        # Counted, not len(readings): the index deliberately holds only the
-        # readings that carry a sentry state, and this line is reporting how
-        # much of the car's record survives the purge.
-        "readings_kept": session.scalar(select(func.count()).select_from(
-            BatteryReading).where(BatteryReading.vehicle_id == vehicle.id)),
-        "standby_fits": {
-            "before": _standby_picture(all_drives, charges, capacity_kwh, readings),
-            "after": _standby_picture(list(kept), charges, capacity_kwh, readings),
-        },
-        # What applying would carry across the deletion. Read this against the
-        # "after" column: every rate listed here is one that goes null under
-        # "after" and keeps working anyway.
-        "would_freeze": _freeze_parked_rates(session, vehicle, capacity_kwh) if freeze else None,
-    }
-    if not apply:
-        plan["applied"] = False
-        return plan
 
-    if not doomed:
-        # Nothing to delete, so nothing may be written. Reported live: a second
-        # apply=true against an already-purged database re-froze the rates from
-        # the emptied history (overwriting Home 0.032, Office 0.030 and the
-        # 0.233 armed rate with an empty set) and wrote a zero-row backup over
-        # the one holding all 268 deleted trips. Both destinations are
-        # single-slot, so a no-op run was able to destroy the two things this
-        # endpoint exists to protect.
-        plan["applied"] = True
-        plan["deleted"] = 0
-        plan["note"] = ("nothing older than the cutover — no rows deleted, "
-                        "and the stored backup and frozen rates were left alone")
-        return plan
+@router.api_route("/data/purge-stale-drives", methods=["GET", "POST"])
+def purge_stale_drives(
+    keep_last: int = Query(0, ge=0, le=2000),
+    before: str = Query(""),
+    apply: bool = Query(False),
+    freeze: bool = Query(True),
+    session: Session = Depends(get_session),
+):
+    """Delete the trips older than a boundary you name, keeping the newest.
 
-    if freeze:
-        frozen = _freeze_parked_rates(session, vehicle, capacity_kwh)
-        state.put(session, state.FROZEN_RATES_KEY, _json_mod.dumps(frozen))
-        plan["froze"] = {
-            "places": len(frozen["places"]),
-            "sentry_armed_kw": frozen["sentry_armed_kw"],
-            "whole_history_kw": frozen["whole_history_kw"],
-            "from_gaps": frozen["from_gaps"],
-        }
+    For clearing out trips an earlier version of the logic produced. ``keep_last``
+    keeps the newest N and deletes everything before them; ``before`` takes an
+    ISO date instead. One or the other, never both — they are two ways of naming
+    one boundary and accepting both invites a disagreement between them.
 
-    backup = {
-        "at": sync_mod.now_local().isoformat(timespec="seconds"),
-        "cutover": cutover.isoformat(),
-        "rows": [_drive_row_dict(d) for d in doomed],
-    }
-    existing_raw = state.get(session, state.PURGED_DRIVES_KEY)
-    existing = _json_mod.loads(existing_raw) if existing_raw else {}
-    if existing.get("rows") and not backup["rows"]:
-        # Belt and braces behind the early return above: whatever else is
-        # true, a backup holding rows is never replaced by one holding none.
-        plan["backup_kept"] = len(existing["rows"])
+    The boundary has to be given. It cannot be derived, because THE ROWS DO NOT
+    RECORD WHICH CODE VERSION WROTE THEM: the fields the newest logic adds
+    (out_temp_end_c, ended_on) are also absent from a perfectly current trip
+    whose stream never reported them, so any query for "trips from before the
+    fixes" also condemns good rows. Nor is it inherited from the matrix window,
+    deliberately — that boundary is reversible and this one is not, and a delete
+    should never inherit its extent from a display setting.
+
+    Plans by default; ``apply=true`` carries it out. Same body as the
+    pre-telemetry purge, so the same protections hold: the rows are serialised
+    and committed before anything is deleted, the parked rates are frozen first,
+    and a run with nothing to delete writes nothing at all.
+
+    Its backup lives in its OWN slot, not the pre-telemetry purge's. Two
+    single-slot backups sharing a key overwrite each other, which is exactly how
+    the dedupe backup came to have no way back.
+
+    One cost the freeze does not cover: the driving matrix fits PK, ID and SE
+    live and never reads the frozen rates, so a purge that leaves under 24 hours
+    of 6-hour-plus parks behind blanks those rows until new parks accumulate.
+    Restore with /api/data/restore-stale-drives?apply=true.
+    """
+    vehicle = _first_vehicle(session)
+    if vehicle is None:
+        return {"error": "no vehicle"}
+    if keep_last and before:
+        raise HTTPException(422, "give keep_last or before, not both — they are "
+                                 "two ways of naming one boundary")
+    if before:
+        try:
+            cutover = datetime.fromisoformat(before)
+        except ValueError:
+            raise HTTPException(422, "before must be an ISO date or datetime, "
+                                     "e.g. 2026-09-12 or 2026-09-12T08:30")
+        if cutover.tzinfo is not None:
+            cutover = cutover.replace(tzinfo=None)
+    elif keep_last:
+        starts = session.scalars(
+            select(Drive.start_time).where(Drive.vehicle_id == vehicle.id)
+            .order_by(Drive.start_time.desc()).limit(keep_last)
+        ).all()
+        if len(starts) < keep_last:
+            # Fewer trips than asked to keep, so there is nothing older to
+            # delete. Refused rather than answered with a no-op, because
+            # "keep the last 9" against 4 trips is a mistaken assumption about
+            # the history and worth hearing about before apply=true is added.
+            raise HTTPException(
+                422, f"only {len(starts)} trips exist, so keeping the last "
+                     f"{keep_last} would delete nothing")
+        cutover = starts[-1]
     else:
-        state.put(session, state.PURGED_DRIVES_KEY, _json_mod.dumps(backup))
-    session.commit()
-    # Committed before the delete, deliberately. If the write of the backup and
-    # the delete shared one transaction, a failure between them would roll back
-    # both and cost nothing — but a failure that commits the delete and loses
-    # the backup costs the history. Ordering them makes the harmless outcome
-    # (a backup of rows that still exist) the only one available.
-    deleted = services.delete_drives(session, [d.id for d in doomed])
-    plan["applied"] = True
-    plan["deleted"] = deleted
-    plan["backup_rows"] = len(backup["rows"])
-    plan["restore_with"] = "/api/data/restore-purged-drives?apply=true"
-    return plan
+        raise HTTPException(
+            422, "name a boundary: keep_last=N to keep the newest N trips, or "
+                 "before=YYYY-MM-DD. It cannot be derived — the rows do not "
+                 "record which code version wrote them")
+    return _purge_drives_before(
+        session, vehicle, cutover, apply, freeze,
+        state.PURGED_STALE_DRIVES_KEY,
+        "/api/data/restore-stale-drives?apply=true")
+
+
+@router.api_route("/data/restore-stale-drives", methods=["GET", "POST"])
+def restore_stale_drives(
+    apply: bool = Query(False),
+    session: Session = Depends(get_session),
+):
+    """Put back the trips /api/data/purge-stale-drives deleted.
+
+    Same body as the other two restores — the deletes differ and the way back
+    does not, and one of them having quietly had no way back at all is reason
+    enough not to keep copies of this that can drift.
+    """
+    return _restore_drives_from(session, state.PURGED_STALE_DRIVES_KEY, apply)
 
 
 def _restore_drives_from(session: Session, key: str, apply: bool) -> dict:

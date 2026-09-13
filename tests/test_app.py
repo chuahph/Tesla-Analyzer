@@ -9045,3 +9045,116 @@ def test_the_matrix_window_can_be_drawn_by_hand_and_widened_back():
             sess.commit()
             sess.close()
             settings.app_passcode = old_pc
+
+
+def test_the_stale_purge_backs_up_to_its_own_slot_and_comes_back():
+    """Deleting the trips an earlier version of the logic produced, reversibly.
+
+    The boundary is given rather than derived, because the rows do not record
+    which code version wrote them. What this pins is the part that makes the
+    delete survivable: the rows are recoverable afterwards, and the backup lands
+    in its OWN slot rather than overwriting the pre-telemetry purge's — two
+    single-slot backups under one key overwriting each other is how the dedupe
+    backup came to have no way back.
+
+    Purges by date rather than by keep_last on purpose: keep_last against the
+    shared test database would delete every other test's fixtures. The rows here
+    live in 2019, where nothing else does.
+    """
+    from datetime import datetime as _dt
+    from datetime import timedelta as _td
+
+    from app import state
+    from app.database import SessionLocal
+    from app.models import Drive, Vehicle
+
+    settings = get_settings()
+    old_pc = settings.app_passcode
+    settings.app_passcode = ""
+    with TestClient(app) as client:
+        sess = SessionLocal()
+        prev_stale = state.get(sess, state.PURGED_STALE_DRIVES_KEY)
+        prev_purged = state.get(sess, state.PURGED_DRIVES_KEY)
+        ids = []
+        try:
+            vid = sess.scalar(select(Vehicle.id))
+            for i in range(4):
+                at = _dt(2019, 1, 1) + _td(days=30 * i)
+                row = Drive(vehicle_id=vid, start_time=at,
+                            end_time=at + _td(minutes=30),
+                            distance_km=20.0, energy_used_kwh=3.0,
+                            start_soc=90.0, end_soc=86.0,
+                            avg_speed_kmh=40.0, max_speed_kmh=80.0,
+                            source="telemetry")
+                sess.add(row)
+            sess.commit()
+            ids = list(sess.scalars(
+                select(Drive.id).where(Drive.start_time < _dt(2020, 1, 1))
+                .order_by(Drive.start_time)))
+            assert len(ids) == 4
+
+            # A boundary must be named — it cannot be guessed at.
+            assert client.get("/api/data/purge-stale-drives").status_code == 422
+            assert client.get("/api/data/purge-stale-drives"
+                              "?keep_last=2&before=2019-03-01").status_code == 422
+
+            # The plan changes nothing, and prices the delete in the fits and
+            # the matrix rows that will actually move.
+            plan = client.get("/api/data/purge-stale-drives"
+                              "?before=2019-03-01&freeze=false").json()
+            assert plan["applied"] is False
+            assert plan["would_delete"] == 2
+            assert plan["would_freeze"] is None
+            assert "before" in plan["matrix_parked"] and "after" in plan["matrix_parked"]
+            assert len(list(sess.scalars(
+                select(Drive.id).where(Drive.start_time < _dt(2020, 1, 1))))) == 4
+
+            # Planning with the freeze on still writes nothing, but says what it
+            # would carry across — the rates that go null under "after".
+            assert client.get("/api/data/purge-stale-drives?before=2019-03-01"
+                              ).json()["would_freeze"] is not None
+            # An absent key reads as "", so both sides are normalised — this
+            # is asserting "still untouched", not "still None".
+            def slot(key):
+                return state.get(sess, key) or ""
+            assert slot(state.PURGED_STALE_DRIVES_KEY) == (prev_stale or "")
+
+            done = client.get("/api/data/purge-stale-drives"
+                              "?before=2019-03-01&freeze=false&apply=true").json()
+            assert done["applied"] is True and done["deleted"] == 2
+            assert done["backup_rows"] == 2
+            sess.expire_all()
+            left = list(sess.scalars(
+                select(Drive.id).where(Drive.start_time < _dt(2020, 1, 1))
+                .order_by(Drive.start_time)))
+            assert left == ids[2:]
+
+            # Its own slot. The other purge's backup is exactly as it was.
+            assert state.get(sess, state.PURGED_STALE_DRIVES_KEY)
+            assert slot(state.PURGED_DRIVES_KEY) == (prev_purged or "")
+
+            # A second apply has nothing to delete, so it must write NOTHING —
+            # the failure that cost the pre-telemetry purge its 268-row backup.
+            held = slot(state.PURGED_STALE_DRIVES_KEY)
+            again = client.get("/api/data/purge-stale-drives"
+                               "?before=2019-01-01&freeze=false&apply=true").json()
+            assert again["deleted"] == 0 and "left alone" in again["note"]
+            assert slot(state.PURGED_STALE_DRIVES_KEY) == held
+
+            # And the way back, under the original ids so trip numbers, the
+            # car-readings log and every cost override line up again.
+            back = client.get("/api/data/restore-stale-drives?apply=true").json()
+            assert back["restored"] == 2
+            sess.expire_all()
+            assert list(sess.scalars(
+                select(Drive.id).where(Drive.start_time < _dt(2020, 1, 1))
+                .order_by(Drive.start_time))) == ids
+        finally:
+            for row in sess.scalars(select(Drive).where(
+                    Drive.start_time < _dt(2020, 1, 1))):
+                sess.delete(row)
+            state.put(sess, state.PURGED_STALE_DRIVES_KEY, prev_stale or "")
+            state.put(sess, state.PURGED_DRIVES_KEY, prev_purged or "")
+            sess.commit()
+            sess.close()
+            settings.app_passcode = old_pc
