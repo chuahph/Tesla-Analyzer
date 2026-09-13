@@ -1474,3 +1474,16 @@ footer { padding: 18px 28px; color: var(--muted); font-size: 12px; border-top: 1
   color: #fff;
   border-color: transparent;
 }
+
+/* The car's own Park screen, beside the fitted rows. Set apart because it is
+   evidence of a different KIND — measured by cause at 0.1% — not another row. */
+.mx-carpark {
+  margin-top: .9rem;
+  padding: .7rem .8rem;
+  border: 1px solid var(--line, #2a3340);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, .02);
+}
+.mx-carpark > strong { display: block; }
+.mx-carpark .mx-table { margin: .4rem 0; }
+.mx-carpark .mx-table td { padding: .2rem .4rem; }

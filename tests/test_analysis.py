@@ -3325,3 +3325,65 @@ def test_the_parked_share_is_a_measured_sum_and_the_three_states_add_up():
     assert fitted["pk_kw"] is not None
     residual_se_pct = (fitted["pk_kw"] - (fitted["id_kw"] or 0.0)) * 55.0 / cap * 100.0
     assert got["sentry_on"]["pct"] < residual_se_pct
+
+
+def test_a_short_park_reports_its_percent_but_not_a_rate():
+    """Straight off the screen: SE read "0.14% of the battery over 0 h in 1
+    park" and 0.870 kW — four times what a parked car draws with Sentry armed.
+
+    Two faults, and the arithmetic separates them. The park was 6.6 minutes,
+    not zero; it printed as "0 h" only because hours were formatted to whole
+    numbers. And 0.14 of a gauge step divided by a tenth of an hour MULTIPLIES
+    the rounding by ten rather than averaging it away — the percent there is a
+    measurement of something small, but the rate is mostly quantisation.
+
+    So the percent stays and the rate does not, which is the same rule the
+    fitted rows follow: a total is worth reporting with its error beside it, a
+    rate is a claim about what an hour costs and has to earn it.
+    """
+    from datetime import datetime, timedelta
+    from types import SimpleNamespace
+
+    from app import sync as sync_mod
+
+    cap = 68.6
+    # The two floors are one decision and must not drift apart.
+    assert driving_analysis.PARKED_MIN_GAP_HOURS == pytest.approx(
+        sync_mod.SHADOW_SETTLE_SEC / 3600.0)
+    # What the screen showed, confirmed as arithmetic rather than a mystery.
+    assert 0.14 / 100.0 * cap / (6.6 / 60.0) == pytest.approx(0.87, abs=0.01)
+
+    def leg(i, at, mins, soc_start, soc_end):
+        return SimpleNamespace(
+            id=i, start_time=at, end_time=at + timedelta(minutes=mins),
+            start_soc=soc_start, end_soc=soc_end, end_location="Home",
+            duration_min=float(mins), energy_used_kwh=1.0)
+
+    base = datetime(2026, 9, 12, 18, 14)
+    a = leg(1, base, 20, 90.0, 88.0)
+    b = leg(2, a.end_time + timedelta(minutes=6.6), 20, 87.86, 86.0)
+    got = driving_analysis.parked_share([a, b], [], cap, [])
+
+    # The measurement is kept: it is what the gauge actually did.
+    assert got["total"]["gaps"] == 1
+    assert got["total"]["pct"] == pytest.approx(0.14, abs=0.01)
+    assert got["total"]["hours"] == pytest.approx(0.11, abs=0.01)
+    # The rate is refused, because it is mostly the gauge.
+    assert got["total"]["kw"] is None
+    assert got["total"]["kw_noise"] > 0.87
+
+    # A gap too short to END a trip is not parked time between two either —
+    # SHADOW_SETTLE_SEC decides both, so a 2-minute seam is not a park at all.
+    seam = leg(3, a.end_time + timedelta(minutes=2), 20, 87.86, 86.0)
+    assert driving_analysis.parked_share([a, seam], [], cap, [])["total"]["gaps"] == 0
+    acc = driving_analysis.window_accounting(
+        [a, seam], [], [], a.start_time, seam.end_time)
+    assert acc["parked"]["gaps"] == 0
+
+    # And a real park still reports both, because there the hours carry a rate.
+    c = leg(4, a.end_time + timedelta(hours=9), 20, 86.0, 84.0)
+    real = driving_analysis.parked_share([a, c], [], cap, [])
+    assert real["total"]["hours"] == pytest.approx(9.0)
+    assert real["total"]["pct"] == pytest.approx(2.0)
+    assert real["total"]["kw"] == pytest.approx(2.0 / 100.0 * cap / 9.0, abs=0.001)
+    assert real["total"]["kw"] < 0.2

@@ -2241,7 +2241,12 @@ function renderMatrix(d) {
   // lasts" form, a residual cannot have one — it is a part of the row above it,
   // so what it owes the reader is its share and the hours behind it.
   const pkKw = (parked.find((p) => p.code === "PK") || {}).kw || 0;
-  const hrs = (p) => (p.hours ? ` · ${num(p.hours, 0)} h over ${p.gaps} park${p.gaps === 1 ? "" : "s"}` : "");
+  // Hours to whatever precision they actually have. A 6.6-minute park printed
+  // as "0 h" was how a nonsense rate got to look like a reading of nothing.
+  const dur = (h) => (h >= 10 ? `${num(h, 0)} h`
+    : h >= 1 ? `${num(h, 1)} h`
+    : `${Math.round(h * 60)} min`);
+  const hrs = (p) => (p.hours ? ` · ${dur(p.hours)} over ${p.gaps} park${p.gaps === 1 ? "" : "s"}` : "");
   // Parked energy is the deep-sleep rate projected onto every parked hour, and
   // the fitted hours are a subset of those. Saying so on the row is the
   // difference between a measurement and an estimate that looks like one.
@@ -2260,9 +2265,10 @@ function renderMatrix(d) {
     // measured. The old version led with why the RATE was missing, which read
     // as "nothing to report" when the actual answer was sitting right there.
     if (p.pct != null) {
-      const bits = [`${num(p.pct, 2)}% of the battery over ${num(p.hours, 0)} h in ${p.gaps} park${p.gaps === 1 ? "" : "s"}`];
+      const bits = [`${num(p.pct, 2)}% of the battery over ${dur(p.hours)} in ${p.gaps} park${p.gaps === 1 ? "" : "s"}`];
       if (p.pct_noise) bits.push(`±${num(p.pct_noise, 2)}% of that is 1% gauge steps`);
       if (p.kw == null && p.measured_kw) bits.push(`${num(p.measured_kw, 3)} kW across those hours`);
+      else if (p.kw == null && p.kw_noise) bits.push(`too few hours for a rate — 1% steps alone would show ±${num(p.kw_noise, 3)} kW here`);
       if (p.why && p.kw == null && p.code !== "??") bits.push(`no general rate yet — ${p.why}`);
       else if (p.why && p.code === "??") bits.push(p.why);
       if (p.deep_sleep_kw) bits.push(`${num(p.deep_sleep_kw, 3)} kW once properly asleep`);
@@ -2355,6 +2361,24 @@ function renderMatrix(d) {
   const unknown = sh && sh.by_state && sh.by_state.unknown > 0
     ? `${num(sh.by_state.unknown, 0)} of the ${num(sh.hours, 0)} h spent in stops under ${num(sh.under_hours, 0)} h have no Sentry reading — a short stop often contains none, which is why the ?? row exists.`
     : "";
+  // The car's own Park tab, where one has been filed. It measures the same
+  // three quantities by CAUSE and to 0.1%, so where it and the rows above
+  // disagree it is the one to believe — and it was being stored with nowhere
+  // to appear, which is its own kind of missing.
+  const cp = d.car_park_screen;
+  const carPark = cp ? `
+    <div class="mx-carpark">
+      <strong>The car's own Park screen</strong>
+      <span class="mx-sub">since its last charge${cp.since_charge_h ? `, ${num(cp.since_charge_h, 1)} h` : ""} · read ${(cp.at || "").replace("T", " ")}</span>
+      <table class="mx-table">
+        <tbody>
+          <tr><td class="mx-code">PK</td><td class="mx-name">Parked, all of it</td><td>${num(cp.pk_pct, 2)}%</td></tr>
+          <tr><td class="mx-code">SE</td><td class="mx-name">Sentry Mode</td><td>${num(cp.se_pct, 2)}%</td></tr>
+          <tr><td class="mx-code">ID</td><td class="mx-name">Everything else parked</td><td>${num(cp.id_pct, 2)}%</td></tr>
+        </tbody>
+      </table>
+      <span class="mx-sub">${cp.implied_kw ? `${num(cp.implied_kw, 3)} kW across those hours. ` : ""}Measured by cause at 0.1%, where the rows above infer it from a 1% gauge across whole gaps — so this is the one to believe where they differ. It also splits SE better: the car charges Sentry with what Sentry drew, while a gap can only show the total drop.</span>
+    </div>` : "";
   box.innerHTML = `
     <div class="mx-scroll">
       <table class="mx-table">
@@ -2364,6 +2388,7 @@ function renderMatrix(d) {
         <tbody>${rows}${park}</tbody>
       </table>
     </div>
+    ${carPark}
     <p class="modal-sub mx-foot">
       ${tot}
       ${win}

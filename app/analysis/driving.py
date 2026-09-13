@@ -221,6 +221,25 @@ def odometer_continuity(drives: list[Any], readings: list[Any]) -> dict[str, Any
 # smaller sample rather than the habit.
 FACTOR_MIN_DRIVES = 3
 
+# Below this a gap between two trips is not a park at all.
+#
+# Mirrors sync.SHADOW_SETTLE_SEC, which is how long the car must sit in P
+# before the trip machine will call a journey finished: a three-point turn's
+# P-R-D, a drive-through window, dropping someone at the door. If that is not
+# long enough to END a trip, it is not long enough to be parked time between
+# two of them, and the same number should decide both.
+#
+# Not a cosmetic floor. Measured live: a gap of under three minutes carried a
+# whole 0.14% gauge step and came out at 0.870 kW — four times what a parked
+# car draws with Sentry on — because the percentage is quantised and the hours
+# are not. One such gap put SE at "0.14% of the battery over 0 h in 1 park",
+# a rate built entirely from where a rounding step happened to land.
+#
+# Kept as a local constant rather than imported from sync: this module is pure
+# analysis and importing the poller to read one float would invert that. The
+# comment is the link, and the two are checked against each other by a test.
+PARKED_MIN_GAP_HOURS = 180.0 / 3600.0
+
 STANDBY_MIN_GAP_HOURS = 6.0
 # Two overnight parks. Raised with the floor: at 6 h a 12 h total could be a
 # single gap, and one gap has never been a rate anywhere else in this module.
@@ -679,7 +698,10 @@ def window_accounting(drives: list[Any], charges: list[Any] | None,
 
     for a, b in zip(ordered, ordered[1:]):
         hours = (b.start_time - a.end_time).total_seconds() / 3600.0
-        if hours <= 0:
+        # Too short to be a park — see PARKED_MIN_GAP_HOURS. Not counted
+        # anywhere, because it is not time the car spent parked; it is the
+        # seam between two halves of one journey.
+        if hours < PARKED_MIN_GAP_HOURS:
             continue
         if any(a.end_time < c < b.start_time for c in charge_starts):
             charging_hours += hours
@@ -772,7 +794,7 @@ def parked_share(drives: list[Any], charges: list[Any] | None,
 
     for a, b in zip(ordered, ordered[1:]):
         hours = (b.start_time - a.end_time).total_seconds() / 3600.0
-        if hours <= 0:
+        if hours < PARKED_MIN_GAP_HOURS:
             continue
         # The same three exclusions window_accounting makes, so the hours here
         # are the hours it calls parked and the two reports cannot disagree.
@@ -807,10 +829,25 @@ def parked_share(drives: list[Any], charges: list[Any] | None,
             "gaps": count,
             "kwh": round(points / 100.0 * capacity_kwh, 2) if capacity_kwh else None,
         }
-        # The rate, where the hours can carry one. Derived from the same sum,
-        # so it can never disagree with the total above it.
-        out["kw"] = (round(points / 100.0 * capacity_kwh / hours, 4)
-                     if hours and capacity_kwh and points > 0 else None)
+        # The rate, where the hours can carry one — and only there. Derived
+        # from the same sum, so it can never disagree with the total above it.
+        #
+        # Gated on the noise for the reason the fitted rate is, and the screen
+        # showed why: one park of 6.6 minutes carrying a single 0.14% gauge
+        # step reported 0.870 kW, four times what a parked car draws with
+        # Sentry armed. The percentage there is a measurement of something
+        # small; the RATE is that measurement divided by a tenth of an hour,
+        # which multiplies the rounding by ten rather than averaging it away.
+        #
+        # The percent stays either way. It is what was actually measured, and a
+        # total is worth reporting with its error beside it. A rate is a claim
+        # about what an hour costs, and has to earn that.
+        out["kw_noise"] = _noise_kw(count, hours, capacity_kwh)
+        rate = (round(points / 100.0 * capacity_kwh / hours, 4)
+                if hours and capacity_kwh and points > 0 else None)
+        if rate is not None and out["kw_noise"] and rate < STANDBY_SNR_MIN * out["kw_noise"]:
+            rate = None
+        out["kw"] = rate
         return out
 
     total = row(states)
@@ -880,7 +917,7 @@ def parked_decomposition(drives: list[Any], charges: list[Any] | None,
         # short ones can be included at all. This is the same gap set
         # window_accounting calls "parked", which is what lets the energy column
         # be measured over the hours it reports rather than projected onto them.
-        return _gap_totals(drives, charges, 0.0, None,
+        return _gap_totals(drives, charges, PARKED_MIN_GAP_HOURS, None,
                            keep=armed_is(want), signed=True)
 
     all_points, all_hours, all_gaps = totals(None)

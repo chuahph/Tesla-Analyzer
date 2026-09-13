@@ -8488,7 +8488,7 @@ def driving_matrix(days: int = Query(30, ge=1, le=730),
                 "pct": measured["pct"], "pct_noise": measured["pct_noise"],
                 "hours": measured["hours"], "gaps": measured["gaps"],
                 "kwh": measured["kwh"], "kwh_basis": "measured",
-                "measured_kw": measured["kw"],
+                "measured_kw": measured["kw"], "kw_noise": measured["kw_noise"],
             })
         if kw is None or not capacity_kwh:
             return row
