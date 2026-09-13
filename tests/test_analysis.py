@@ -911,12 +911,31 @@ def test_insights_report_material_patterns_only():
 
 
 def test_charging_cost_split_and_per_100km(seeded):
+    """The running cost counts only the charges that fuelled the window.
+
+    This used to compare cost_per_100km against TOTAL cost over total distance,
+    and passed for a long time by luck of the generated data: the fixture spans
+    120 days ending now, so as the clock moves a charge can fall outside the
+    drive span, and the identity it asserted quietly stops holding.
+
+    The figure is deliberately not that. analyze bounds the numerator at both
+    ends of the drives — a session after the last drive paid for nothing in the
+    window and would otherwise be charged to it in full. So the expectation has
+    to be built the same way, or the test is asserting a different function
+    than the one that exists.
+    """
     charges = seeded.scalars(select(Charge)).all()
     drives = seeded.scalars(select(Drive)).all()
     r = charging_analysis.analyze(charges, drives)
     assert round(r["ac_cost"] + r["dc_cost"], 2) == r["total_cost"]
+
     km = sum(d.distance_km for d in drives)
-    assert r["cost_per_100km"] == round(r["total_cost"] / km * 100.0, 2)
+    first, last = min(d.start_time for d in drives), max(d.end_time for d in drives)
+    in_span = sum(c.cost for c in charges if first <= c.end_time <= last)
+    assert r["cost_per_100km"] == round(in_span / km * 100.0, 2)
+    # And the bound is doing something here rather than being a no-op, so this
+    # keeps testing what it means to: some charge sits outside the drives.
+    assert in_span <= r["total_cost"]
 
 
 def test_recent_trips_report_data_quality():
@@ -3447,3 +3466,51 @@ def test_an_unread_park_is_named_with_what_was_seen_around_it():
     blind = driving_analysis.parked_share([a, b, c], [], 68.6, [])
     assert blind["unknown"]["gaps"] == 2
     assert all(u.get("nearest") is None for u in blind["unread_parks"])
+
+
+def test_fast_highway_sits_above_the_110_band_and_falls_through_to_it():
+    """FH for the stretch past 130, and CH banded on 110 +/- 10%.
+
+    Drag goes as the square of speed, so kilometres above 130 cost materially
+    more than a 110 cruise, and averaging the two together hides exactly the
+    difference worth seeing — the same argument that separates CC from CH one
+    band lower.
+
+    The bands are tried fastest first and FALL THROUGH, which is the part that
+    matters. Banding on the peak with an upper bound would drop a trip that
+    touched 130 once out of CH and into CC, calling a motorway run a city
+    drive; requiring both a peak and an average, tried in order, catches it as
+    what it was.
+    """
+    from types import SimpleNamespace
+
+    def trip(avg, mx, idle=0.0):
+        # 60 minutes, so distance in km IS the average speed.
+        return SimpleNamespace(duration_min=60.0, distance_km=avg,
+                               max_speed_kmh=mx, idle_min=idle)
+
+    # Sustained 135 with a 145 peak: constancy 0.93, both fast tests cleared.
+    assert driving_analysis.drive_mode(trip(135.0, 145.0)) == "FH"
+    # A 110 cruise, peak 118 — inside 110 +/- 10%, and not fast.
+    assert driving_analysis.drive_mode(trip(110.0, 118.0)) == "CH"
+    # The bottom of the band: 110 - 10% is 99, so a peak of 99 still counts.
+    assert driving_analysis.drive_mode(trip(75.0, 99.0)) == "CH"
+    assert driving_analysis.drive_mode(trip(75.0, 98.0)) == "CC"
+
+    # Touched 130 once but averaged 75: fails the fast AVERAGE, falls through
+    # to the highway pair, and is CH. This is the case an upper bound on the
+    # peak would have got wrong.
+    assert driving_analysis.drive_mode(trip(75.0, 132.0)) == "CH"
+    # And a genuinely fast trip is not demoted by having a high peak.
+    assert driving_analysis.drive_mode(trip(95.0, 133.0)) == "FH"
+
+    # The constancy gate still rules everything: a trip that touched 140 but
+    # crawled is not a highway drive at all, at any speed.
+    assert driving_analysis.drive_mode(trip(40.0, 140.0)) == "HC"
+    assert driving_analysis.drive_mode(trip(60.0, 140.0)) == "SC"
+    # And genuine waiting still overrides the lot.
+    assert driving_analysis.drive_mode(trip(135.0, 145.0, idle=20.0)) == "HC"
+
+    # The bands are tunable, and moving the fast floor moves the trip.
+    cuts = {"fast_max_kmh": 150.0, "fast_avg_kmh": 120.0}
+    assert driving_analysis.drive_mode(trip(135.0, 145.0), cuts) == "CH"

@@ -2317,10 +2317,26 @@ def analyze(drives: list[Drive], rated_wh_per_km: float = 150.0,
 MODE_CONSTANT_RATIO = 0.55    # at or above: the trip largely held one speed
 MODE_SLOW_RATIO = 0.35        # between: intermittent. below: repeatedly stopped
 MODE_IDLE_HEAVY = 0.30        # or this much of it spent genuinely waiting
-MODE_HIGHWAY_MAX_KMH = 100.0  # "110 km/h +/- 10%" needs a peak up there
-MODE_HIGHWAY_AVG_KMH = 70.0   # and an average that says it stayed there
+# "110 km/h +/- 10%" is the reference this was built against, so the floor is
+# that band's bottom: 110 - 10% = 99. A trip has to have been UP there (the
+# peak) and to have STAYED there (the average) before it is a highway drive —
+# one slip-road burst inside a city run is not, and the pair of tests is what
+# tells those apart.
+MODE_HIGHWAY_MAX_KMH = 99.0
+MODE_HIGHWAY_AVG_KMH = 70.0
+# Above the band entirely. Drag goes as the square of speed, so the stretch
+# past 130 is a different animal from a 110 cruise and averaging them together
+# hides exactly the cost worth seeing — the same argument that separates CC
+# from CH one band lower.
+MODE_FAST_MAX_KMH = 130.0
+# Held at 0.7 of the peak floor, the same proportion CH uses (70 against 99),
+# so the two bands are one rule rather than two opinions. Tested BEFORE the CH
+# pair, and falling through to it: a trip that touched 130 but averaged 75 is a
+# highway drive that was briefly fast, not a fast one.
+MODE_FAST_AVG_KMH = 91.0
 
 MODE_NAMES = {
+    "FH": "Fast Highway",
     "CH": "Constant Highway",
     "CC": "Constant City",
     "SC": "Slow City",
@@ -2348,6 +2364,8 @@ def drive_mode(d: Any, cuts: dict[str, float] | None = None) -> str | None:
     heavy_idle = float(c.get("heavy_idle_share_max", MODE_IDLE_HEAVY))
     hw_max = float(c.get("highway_max_kmh", MODE_HIGHWAY_MAX_KMH))
     hw_avg = float(c.get("highway_avg_kmh", MODE_HIGHWAY_AVG_KMH))
+    fast_max = float(c.get("fast_max_kmh", MODE_FAST_MAX_KMH))
+    fast_avg = float(c.get("fast_avg_kmh", MODE_FAST_AVG_KMH))
     avg = dist / (dur / 60.0)
     ratio = avg / mx
     # Genuine waiting outranks the ratio: a trip that spent a third of itself
@@ -2355,7 +2373,17 @@ def drive_mode(d: Any, cuts: dict[str, float] | None = None) -> str | None:
     if (float(getattr(d, "idle_min", 0.0) or 0.0) / dur) >= heavy_idle:
         return "HC"
     if ratio >= constant:
-        return "CH" if (mx >= hw_max and avg >= hw_avg) else "CC"
+        # Fastest band first, then the highway band, then city. Ordered and
+        # falling through rather than banded on the peak alone: a trip that
+        # touched 130 once but averaged 75 fails the fast pair and is caught by
+        # the highway pair below it, which is what it actually was. Banding on
+        # the peak with an upper bound would instead have dropped it out of CH
+        # and into CC, calling a motorway run a city drive.
+        if mx >= fast_max and avg >= fast_avg:
+            return "FH"
+        if mx >= hw_max and avg >= hw_avg:
+            return "CH"
+        return "CC"
     return "SC" if ratio >= slow else "HC"
 
 
@@ -2394,7 +2422,7 @@ def condition_matrix(drives: list[Any], capacity_kwh: float,
         buckets.setdefault(m, []).append(d)
 
     rows = []
-    for code in ("CH", "CC", "SC", "HC"):
+    for code in ("FH", "CH", "CC", "SC", "HC"):
         got = buckets.get(code) or []
         if not got:
             continue
@@ -2406,10 +2434,19 @@ def condition_matrix(drives: list[Any], capacity_kwh: float,
         rng = capacity_kwh / (wh / 1000.0) if wh else None
         temps = [float(d.outside_temp_c) for d in got
                  if getattr(d, "outside_temp_c", None) is not None]
+        peaks = [float(d.max_speed_kmh) for d in got
+                 if getattr(d, "max_speed_kmh", None)]
         rows.append({
             "code": code, "name": MODE_NAMES[code], "trips": len(got),
             "km": round(km, 1), "hours": round(mins / 60.0, 1),
             "avg_speed_kmh": round(km / (mins / 60.0), 1) if mins else None,
+            # The two figures the classifier actually keyed on, and the ratio
+            # it derived from them. Carried so a row that looks wrong can be
+            # checked against what put it there instead of being argued about:
+            # the bands are tunable, and tuning them blind is guessing.
+            "max_speed_kmh": round(mean(peaks), 1) if peaks else None,
+            "constancy": (round((km / (mins / 60.0)) / mean(peaks), 2)
+                          if mins and peaks and mean(peaks) else None),
             "wh_per_km": round(wh, 1) if wh else None,
             # The same condition priced per HOUR rather than per kilometre,
             # which is the unit a parked car can also be quoted in — so the
@@ -2491,6 +2528,10 @@ def condition_matrix(drives: list[Any], capacity_kwh: float,
                 "heavy_idle_share_max", MODE_IDLE_HEAVY)),
             "highway_max_kmh": float((cuts or {}).get(
                 "highway_max_kmh", MODE_HIGHWAY_MAX_KMH)),
+            "fast_max_kmh": float((cuts or {}).get(
+                "fast_max_kmh", MODE_FAST_MAX_KMH)),
+            "fast_avg_kmh": float((cuts or {}).get(
+                "fast_avg_kmh", MODE_FAST_AVG_KMH)),
             "highway_avg_kmh": float((cuts or {}).get(
                 "highway_avg_kmh", MODE_HIGHWAY_AVG_KMH)),
         },
@@ -2502,15 +2543,23 @@ def condition_matrix(drives: list[Any], capacity_kwh: float,
 # first time it is shared, or reread six months later.
 MATRIX_DEFINITIONS = {
     "modes": [
+        {"code": "FH", "name": "Fast Highway",
+         "means": "Constancy 0.55 or above, with a peak of at least 130 km/h AND "
+                  "an average of at least 91. Above the 110 band entirely — drag "
+                  "goes as the square of speed, so these kilometres cost "
+                  "materially more than CH's and averaging the two together "
+                  "hides exactly that."},
         {"code": "CH", "name": "Constant Highway",
-         "means": "Constancy 0.55 or above, with a peak of at least 100 km/h AND "
-                  "an average of at least 70 — fast, and it stayed fast. Fastest "
-                  "per kilometre in theory, most expensive per hour: drag rises "
-                  "faster than the speed saves."},
+         "means": "Constancy 0.55 or above, with a peak of at least 99 km/h — "
+                  "110 minus 10%, the bottom of the reference band — AND an "
+                  "average of at least 70. Fast and it stayed fast, but not "
+                  "into FH territory. More expensive per hour than CC: drag "
+                  "rises faster than the speed saves."},
         {"code": "CC", "name": "Constant City",
-         "means": "Constancy 0.55 or above but not at motorway pace — open roads, "
-                  "few interruptions, typically 60-80 km/h. Usually the cheapest "
-                  "kilometres a car does, and cheaper per kilometre than CH."},
+         "means": "Constancy 0.55 or above but below the highway pair — open "
+                  "roads, few interruptions, typically 60-80 km/h. Usually the "
+                  "cheapest kilometres a car does, and cheaper per kilometre "
+                  "than CH."},
         {"code": "SC", "name": "Slow City",
          "means": "Constancy between 0.35 and 0.55. Spent a fair part of the trip "
                   "well under its own peak — lights and moderate traffic, but "
@@ -2587,6 +2636,15 @@ MATRIX_DEFINITIONS = {
         "different populations: previously the driving rows counted every trip "
         "while the parked rows were a rate fitted from long parks only, and a "
         "normal day's errand stops appeared in neither."
+    ),
+    "speed_bands": (
+        "The three constant modes differ only in how fast: FH needs a peak of "
+        "130 km/h and an average of 91, CH a peak of 99 (110 minus 10%) and an "
+        "average of 70, and CC is everything constant below that. Both tests "
+        "matter — the peak says the road was there, the average says the trip "
+        "stayed on it — and they are tried fastest first, falling through. So a "
+        "trip that touched 130 once but averaged 75 is caught by CH, which is "
+        "what it was: a highway drive that was briefly fast, not a fast one."
     ),
     "constancy": (
         "Every driving mode turns on one number: CONSTANCY, the trip's average "

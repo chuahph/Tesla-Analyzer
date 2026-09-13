@@ -461,7 +461,7 @@ def test_the_condition_cuts_are_stored_and_re_sort_the_same_trips():
             assert base["thresholds"]["slow_ratio_min"] == pytest.approx(0.35)
             assert "context" in base and base["context"]["region"] == "Malaysia"
             # The report carries its own glossary, and both splits.
-            assert base["definitions"]["modes"][0]["code"] == "CH"
+            assert base["definitions"]["modes"][0]["code"] == "FH"
             assert "weekday" in base and "weekend" in base
 
             # The parked trio: a bill and its two parts, in that order, each
@@ -9451,4 +9451,60 @@ def test_every_row_is_priced_in_percent_and_the_conditions_add_to_the_total():
                 if m["pct"]:
                     assert f"{m['code']} {m['pct']:.2f}%" in t["adds_up"]
     finally:
+        settings.app_passcode = old_pc
+
+
+def test_the_fast_highway_band_is_stored_and_ordered_against_the_highway_one():
+    """The new bands are tunable like the rest, and ordered like the rest.
+
+    FH is tried before CH and falls through to it, so a fast floor at or below
+    the highway floor would not merely be odd — it would leave CH unreachable.
+    That is the same shape as constant_ratio_min against slow_ratio_min, and it
+    is refused with the reason rather than stored and silently misbehaving.
+    """
+    from app import state
+    from app.database import SessionLocal
+
+    settings = get_settings()
+    old_pc = settings.app_passcode
+    settings.app_passcode = ""
+    sess = SessionLocal()
+    prev = state.get(sess, state.MODE_THRESHOLDS_KEY)
+    try:
+        state.put(sess, state.MODE_THRESHOLDS_KEY, "")
+        sess.commit()
+        with TestClient(app) as client:
+            base = client.get("/api/driving-matrix?days=30").json()
+            t = base["thresholds"]
+            # 110 - 10% is the reference band's bottom.
+            assert t["highway_max_kmh"] == pytest.approx(99.0)
+            assert t["fast_max_kmh"] == pytest.approx(130.0)
+            assert t["fast_avg_kmh"] == pytest.approx(91.0)
+            # FH is in the glossary, ahead of CH.
+            codes = [m["code"] for m in base["definitions"]["modes"]]
+            assert codes[:3] == ["FH", "CH", "CC"]
+
+            moved = client.post("/api/driving-matrix/thresholds",
+                                json={"fast_max_kmh": 140.0}).json()
+            assert moved["thresholds"]["fast_max_kmh"] == pytest.approx(140.0)
+
+            # Ordered: a fast floor under the highway floor is refused, with
+            # the reason, rather than leaving CH unreachable.
+            bad = client.post("/api/driving-matrix/thresholds",
+                              json={"fast_max_kmh": 90.0})
+            assert bad.status_code == 422
+            assert "unreachable" in bad.json()["detail"]
+            bad_avg = client.post("/api/driving-matrix/thresholds",
+                                  json={"fast_avg_kmh": 60.0})
+            assert bad_avg.status_code == 422
+
+            # And it survives the request that set it — the bug that once let a
+            # threshold save and then vanish, because the reader filtered for a
+            # different set of key names than the writer accepted.
+            again = client.get("/api/driving-matrix?days=30").json()
+            assert again["thresholds"]["fast_max_kmh"] == pytest.approx(140.0)
+    finally:
+        state.put(sess, state.MODE_THRESHOLDS_KEY, prev or "")
+        sess.commit()
+        sess.close()
         settings.app_passcode = old_pc

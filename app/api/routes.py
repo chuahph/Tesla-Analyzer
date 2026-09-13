@@ -8214,7 +8214,8 @@ def self_check(days: int = Query(30, ge=1, le=730),
 # writer and the reader, because two copies of a key list is how a saved value
 # disappears.
 MODE_CUT_KEYS = ("constant_ratio_min", "slow_ratio_min", "heavy_idle_share_max",
-                 "highway_max_kmh", "highway_avg_kmh")
+                 "highway_max_kmh", "highway_avg_kmh",
+                 "fast_max_kmh", "fast_avg_kmh")
 
 
 def _mode_cuts(session: Session) -> dict[str, float]:
@@ -8278,6 +8279,27 @@ def set_mode_thresholds(payload: dict = Body(...),
             422, "constant_ratio_min must be above slow_ratio_min — a trip "
                  "holding MORE of its peak speed is the more constant one, so "
                  "the constant cut is the higher number")
+    # The speed bands are ordered too, and for the same reason: FH is tried
+    # before CH and falls through to it, so a fast floor at or below the
+    # highway floor would make CH unreachable rather than merely odd.
+    # Spelled out rather than derived from the key names. The first version
+    # built the constant names by string surgery and produced
+    # MODE_FAST_MAXKMH — which would have raised AttributeError on the first
+    # request that set a speed band, for no reason except cleverness.
+    for fast_key, hw_key, fast_default, hw_default in (
+            ("fast_max_kmh", "highway_max_kmh",
+             driving_analysis.MODE_FAST_MAX_KMH,
+             driving_analysis.MODE_HIGHWAY_MAX_KMH),
+            ("fast_avg_kmh", "highway_avg_kmh",
+             driving_analysis.MODE_FAST_AVG_KMH,
+             driving_analysis.MODE_HIGHWAY_AVG_KMH)):
+        fast = cuts.get(fast_key, fast_default)
+        hw = cuts.get(hw_key, hw_default)
+        if fast <= hw:
+            raise HTTPException(
+                422, f"{fast_key} must be above {hw_key} — Fast Highway sits "
+                     f"above Constant Highway, and a floor at or below it would "
+                     f"leave CH unreachable")
     state.put(session, state.MODE_THRESHOLDS_KEY, _json.dumps(cuts))
     session.commit()
     return driving_matrix(days=30, session=session)

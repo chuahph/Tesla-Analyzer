@@ -2225,7 +2225,7 @@ function renderMatrix(d) {
   const rows = modes.map((m) => `
       <tr>
         <td class="mx-code">${m.code}</td>
-        <td class="mx-name">${m.name}<span class="mx-sub">${m.trips} trip${m.trips === 1 ? "" : "s"} · ${num(m.km, 1)} km · ${num(m.hours, 1)} h · ${num(m.pct, 2)}% of the battery · ${num(m.idle_share_pct, 0)}% idle · ${num(m.out_temp_c, 1)}°C${share(m)}</span></td>
+        <td class="mx-name">${m.name}<span class="mx-sub">${m.trips} trip${m.trips === 1 ? "" : "s"} · ${num(m.km, 1)} km · ${num(m.hours, 1)} h · ${num(m.pct, 2)}% of the battery · avg ${num(m.avg_speed_kmh, 0)} / max ${num(m.max_speed_kmh, 0)} km/h${m.constancy != null ? ` (${num(m.constancy, 2)})` : ""} · ${num(m.idle_share_pct, 0)}% idle · ${num(m.out_temp_c, 1)}°C${share(m)}</span></td>
         <td>${num(m.wh_per_km, 1)}<span class="mx-rank">#${m.rank_per_km ?? "—"}</span></td>
         <td>${num(m.kw, 2)}<span class="mx-rank">#${m.rank_per_hour ?? "—"}</span></td>
         <td>${num(m.kwh, 2)}</td>
@@ -2457,6 +2457,8 @@ function setupMatrixModal() {
     heavy_idle_share_max: document.getElementById("cut-heavyidle"),
     highway_max_kmh: document.getElementById("cut-hwmax"),
     highway_avg_kmh: document.getElementById("cut-hwavg"),
+    fast_max_kmh: document.getElementById("cut-fastmax"),
+    fast_avg_kmh: document.getElementById("cut-fastavg"),
   };
   // Which days the table is showing. Held here rather than re-fetched per tab:
   // all three splits arrive in one payload, computed against one set of
