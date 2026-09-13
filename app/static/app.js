@@ -2184,6 +2184,118 @@ function setupEditChargeModal() {
 
 // "Rates" page: set Public/Home/Office AC & DC rates and the default source
 // new charges fall back to when their location doesn't auto-match Home/Office.
+// The driving matrix. Rendered rather than dumped, because the finding is an
+// ORDERING — the per-km and per-hour columns rank the same conditions in
+// opposite directions — and a reader should not have to sort two columns in
+// their head to see it.
+function renderMatrix(d) {
+  const box = document.getElementById("matrix-body");
+  if (!box) return;
+  const modes = d.modes || [];
+  const parked = d.parked || [];
+  if (!modes.length && !parked.some((p) => p.kw != null)) {
+    box.innerHTML =
+      `<p class="modal-sub">Nothing to show yet. A trip can only be sorted once its
+       idle time was tracked live, and ${d.unclassified_trips || 0} trip(s) in this
+       window were not — they are left out rather than guessed into a row.</p>`;
+    return;
+  }
+  const num = (v, dp) => (v == null ? "—" : Number(v).toFixed(dp));
+  const rows = modes.map((m) => `
+      <tr>
+        <td class="mx-code">${m.code}</td>
+        <td class="mx-name">${m.name}<span class="mx-sub">${m.trips} trip${m.trips === 1 ? "" : "s"} · ${num(m.km, 1)} km · ${num(m.idle_share_pct, 0)}% idle · ${num(m.out_temp_c, 1)}°C</span></td>
+        <td>${num(m.wh_per_km, 1)}<span class="mx-rank">#${m.rank_per_km ?? "—"}</span></td>
+        <td>${num(m.kw, 2)}<span class="mx-rank">#${m.rank_per_hour ?? "—"}</span></td>
+        <td>${m.range_km ?? "—"}</td>
+        <td>${num(m.km_per_pct, 1)}</td>
+      </tr>`).join("");
+  const park = parked.map((p) => `
+      <tr class="mx-parked">
+        <td class="mx-code">${p.code}</td>
+        <td class="mx-name">${p.name}<span class="mx-sub">${p.kw == null ? "not enough parked history to fit" : `${num(p.pct_per_day, 2)}%/day · 5% lasts ${p.days_to_5pct} days`}</span></td>
+        <td>—</td>
+        <td>${num(p.kw, 3)}</td>
+        <td>—</td>
+        <td>—</td>
+      </tr>`).join("");
+  box.innerHTML = `
+    <div class="mx-scroll">
+      <table class="mx-table">
+        <thead><tr>
+          <th></th><th>Condition</th><th>Wh/km</th><th>kW</th><th>Range</th><th>km/1%</th>
+        </tr></thead>
+        <tbody>${rows}${park}</tbody>
+      </table>
+    </div>
+    <p class="modal-sub mx-foot">
+      Baseline ${d.baseline_range_km ?? "—"} km at the car's rated consumption.
+      ${d.unclassified_trips ? `${d.unclassified_trips} trip(s) left out — idle never tracked.` : ""}
+      ${d.context ? `${d.context.climate}, ${d.context.region}.` : ""}
+    </p>`;
+}
+
+function setupMatrixModal() {
+  const btn = document.getElementById("btn-matrix");
+  const form = document.getElementById("matrix-form");
+  if (!btn || !form) return;
+  btn.classList.remove("hidden");
+  const msg = document.getElementById("matrix-msg");
+  const fields = {
+    constant_idle_share_max: document.getElementById("cut-constant"),
+    slow_idle_share_max: document.getElementById("cut-slow"),
+    highway_max_kmh: document.getElementById("cut-hwmax"),
+    highway_avg_kmh: document.getElementById("cut-hwavg"),
+  };
+
+  function show(d) {
+    renderMatrix(d);
+    const t = d.thresholds || {};
+    Object.entries(fields).forEach(([k, el]) => {
+      if (el && t[k] != null) el.value = t[k];
+    });
+  }
+
+  btn.addEventListener("click", async () => {
+    openModal("matrix-modal");
+    if (msg) msg.textContent = "";
+    try {
+      const r = await fetch("/api/driving-matrix?days=90");
+      if (!r.ok) throw new Error("load failed");
+      show(await r.json());
+    } catch (e) {
+      document.getElementById("matrix-body").textContent =
+        "Couldn't load the matrix. Try again in a moment.";
+    }
+  });
+
+  form.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    if (msg) msg.textContent = "Redrawing…";
+    const body = {};
+    Object.entries(fields).forEach(([k, el]) => {
+      if (el && el.value !== "") body[k] = Number(el.value);
+    });
+    try {
+      const r = await fetch("/api/driving-matrix/thresholds", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      const d = await r.json();
+      if (!r.ok) {
+        // The endpoint refuses with a reason — show the reason, not "failed".
+        if (msg) msg.textContent = (d && d.detail) || "That didn't save.";
+        return;
+      }
+      show(d);
+      if (msg) msg.textContent = "Saved. The table above is redrawn from the same trips.";
+    } catch (err) {
+      if (msg) msg.textContent = "That didn't save. Check the numbers and try again.";
+    }
+  });
+}
+
 function setupRatesModal() {
   const btn = document.getElementById("btn-rates");
   const form = document.getElementById("rates-form");
@@ -4213,6 +4325,7 @@ if (!STATIC_MODE) setupEditChargeModal();
 if (!STATIC_MODE) setupRenameChargeModal();
 if (!STATIC_MODE) setupEditDriveModal();
 if (!STATIC_MODE) setupRatesModal();
+if (!STATIC_MODE) setupMatrixModal();
 if (!STATIC_MODE) setupDefaultSourceButton();
 if (!STATIC_MODE) loadPricingPrefs();
 

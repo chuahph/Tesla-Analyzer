@@ -106,6 +106,13 @@ TELEMETRY_CHARGES_KEY = "telemetry_charges"  # JSON list of finished shadow
 SYNC_LOG_KEY = "sync_log"  # JSON: run-length record of what each /api/sync tick did —
 # the only place a blackout can be told from a quiet car after the fact, since
 # LAST_STATUS_KEY is overwritten every tick and keeps no history
+MODE_THRESHOLDS_KEY = "drive_mode_thresholds"  # JSON {constant_idle_share_max,
+# slow_idle_share_max, highway_max_kmh, highway_avg_kmh}: where the driving
+# conditions are cut from one another. Stored rather than compiled in because
+# they describe a person's roads and traffic, not a property of the car — the
+# right boundary between "slow city" and "heavy city" is a local fact, and
+# tuning it should not need a deploy. Absent means the defaults in
+# analysis.driving apply.
 ARRIVAL_REPAIR_AT_KEY = "arrival_repair_at"  # epoch of the last automatic
 # run of /api/repair-arrivals. That job reclaims the last few hundred metres of
 # a trip whose stream died before the car finished parking — underground, most

@@ -1397,3 +1397,56 @@ footer { padding: 18px 28px; color: var(--muted); font-size: 12px; border-top: 1
 .compare-table td:first-child, .compare-table th:first-child {
   position: sticky; left: 0; background: var(--panel); font-weight: 600;
 }
+
+
+/* --- driving matrix ------------------------------------------------------
+   Two number columns that must be read against each other, so they share one
+   type treatment and each carries its own rank. The parked rows sit in the
+   same table rather than a second one: the whole point is that a parked car
+   and a moving one are quotable in the same unit. */
+.mx-scroll { overflow-x: auto; }
+.mx-table { width: 100%; border-collapse: collapse; min-width: 460px; }
+.mx-table th {
+  text-align: right;
+  font-size: 11px;
+  letter-spacing: .04em;
+  text-transform: uppercase;
+  opacity: .65;
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--line, #d8ddd9);
+  white-space: nowrap;
+}
+.mx-table th:nth-child(2) { text-align: left; }
+.mx-table td {
+  text-align: right;
+  padding: 9px 8px;
+  border-bottom: 1px solid var(--line, #e6eae7);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.mx-table td.mx-code {
+  text-align: left;
+  font-weight: 700;
+  font-size: 12px;
+  letter-spacing: .04em;
+  opacity: .8;
+}
+.mx-table td.mx-name { text-align: left; white-space: normal; min-width: 150px; }
+.mx-name .mx-sub { display: block; font-size: 11.5px; opacity: .6; margin-top: 2px; }
+/* The rank is the finding, so it travels with the number rather than sitting
+   in a column of its own that could be read separately. */
+.mx-rank { font-size: 10.5px; opacity: .5; margin-left: 5px; }
+.mx-table tr.mx-parked td { opacity: .82; }
+.mx-table tr.mx-parked td.mx-code { opacity: 1; }
+.mx-foot { margin-top: 10px; }
+.matrix-tune { margin-top: 16px; }
+.matrix-tune summary { cursor: pointer; font-weight: 600; font-size: 13.5px; }
+.matrix-form {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+  gap: 10px 14px;
+  margin-top: 10px;
+  align-items: end;
+}
+.matrix-form label { display: flex; flex-direction: column; gap: 4px; font-size: 12.5px; }
+.matrix-form input { padding: 6px 8px; }

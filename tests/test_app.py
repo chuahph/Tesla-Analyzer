@@ -435,6 +435,60 @@ def test_health_judges_the_cron_against_its_own_rhythm_not_a_fixed_number():
         settings.app_passcode = old_pc
 
 
+def test_the_condition_cuts_are_stored_and_re_sort_the_same_trips():
+    """The boundaries between driving conditions describe a person's roads and
+    traffic, not a property of the car, so they live in the database rather
+    than in the code. Tuning where "slow" ends and "heavy" begins should not
+    need a deploy.
+
+    The tuning endpoint answers with the MATRIX rather than an
+    acknowledgement, so a change can be judged against the trips it re-sorts
+    instead of being applied blind.
+    """
+    from app import state
+    from app.database import SessionLocal
+
+    settings = get_settings()
+    old_pc = settings.app_passcode
+    settings.app_passcode = ""
+    sess = SessionLocal()
+    prev = state.get(sess, state.MODE_THRESHOLDS_KEY)
+    try:
+        state.put(sess, state.MODE_THRESHOLDS_KEY, "")
+        sess.commit()
+        with TestClient(app) as client:
+            base = client.get("/api/driving-matrix?days=30").json()
+            assert base["thresholds"]["slow_idle_share_max"] == pytest.approx(0.30)
+            assert "context" in base and base["context"]["region"] == "Malaysia"
+
+            moved = client.post("/api/driving-matrix/thresholds",
+                                json={"slow_idle_share_max": 0.45}).json()
+            assert moved["thresholds"]["slow_idle_share_max"] == pytest.approx(0.45)
+            # Answered with the matrix, not an OK.
+            assert "modes" in moved and "parked" in moved
+
+            # It survives the request that set it.
+            again = client.get("/api/driving-matrix?days=30").json()
+            assert again["thresholds"]["slow_idle_share_max"] == pytest.approx(0.45)
+
+            # A cut that would put "constant" above "slow" is refused with the
+            # reason, because the two are an ordered pair and silently
+            # swapping them would invert every row.
+            bad = client.post("/api/driving-matrix/thresholds",
+                              json={"constant_idle_share_max": 0.60})
+            assert bad.status_code == 422
+            assert "below" in bad.json()["detail"]
+
+            # A share is a share: 40 is not 40%.
+            assert client.post("/api/driving-matrix/thresholds",
+                               json={"slow_idle_share_max": 40}).status_code == 422
+    finally:
+        state.put(sess, state.MODE_THRESHOLDS_KEY, prev or "")
+        sess.commit()
+        sess.close()
+        settings.app_passcode = old_pc
+
+
 def test_the_parked_readings_reach_the_sleep_gap_recovery():
     """The guard is only worth having if the evidence actually gets to it.
 

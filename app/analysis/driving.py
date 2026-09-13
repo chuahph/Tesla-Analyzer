@@ -1767,7 +1767,7 @@ MODE_NAMES = {
 }
 
 
-def drive_mode(d: Any) -> str | None:
+def drive_mode(d: Any, cuts: dict[str, float] | None = None) -> str | None:
     """Which driving condition this trip was, or None when it cannot be said.
 
     None rather than a guess where idle was never tracked: the split between
@@ -1782,18 +1782,24 @@ def drive_mode(d: Any) -> str | None:
         return None
     if not getattr(d, "idle_tracked", False):
         return None
+    c = cuts or {}
+    constant = float(c.get("constant_idle_share_max", MODE_IDLE_CONSTANT))
+    slow = float(c.get("slow_idle_share_max", MODE_IDLE_SLOW))
+    hw_max = float(c.get("highway_max_kmh", MODE_HIGHWAY_MAX_KMH))
+    hw_avg = float(c.get("highway_avg_kmh", MODE_HIGHWAY_AVG_KMH))
     idle_share = float(getattr(d, "idle_min", 0.0) or 0.0) / dur
     avg = dist / (dur / 60.0)
     mx = float(getattr(d, "max_speed_kmh", 0.0) or 0.0)
-    if idle_share < MODE_IDLE_CONSTANT:
-        if mx >= MODE_HIGHWAY_MAX_KMH and avg >= MODE_HIGHWAY_AVG_KMH:
+    if idle_share < constant:
+        if mx >= hw_max and avg >= hw_avg:
             return "CH"
         return "CC"
-    return "SC" if idle_share < MODE_IDLE_SLOW else "HC"
+    return "SC" if idle_share < slow else "HC"
 
 
 def condition_matrix(drives: list[Any], capacity_kwh: float,
-                     baseline_range_km: float | None = None) -> dict[str, Any]:
+                     baseline_range_km: float | None = None,
+                     cuts: dict[str, float] | None = None) -> dict[str, Any]:
     """Per-condition efficiency, as a range rather than a rate.
 
     Wh/km is weighted by DISTANCE, not averaged across trips. A mean of means
@@ -1806,7 +1812,7 @@ def condition_matrix(drives: list[Any], capacity_kwh: float,
     for d in drives:
         if not has_valid_energy(d):
             continue
-        m = drive_mode(d)
+        m = drive_mode(d, cuts)
         if m is None:
             unclassified += 1
             continue
@@ -1876,9 +1882,13 @@ def condition_matrix(drives: list[Any], capacity_kwh: float,
         # from every row above rather than distributed among them.
         "unclassified_trips": unclassified,
         "thresholds": {
-            "constant_idle_share_max": MODE_IDLE_CONSTANT,
-            "slow_idle_share_max": MODE_IDLE_SLOW,
-            "highway_max_kmh": MODE_HIGHWAY_MAX_KMH,
-            "highway_avg_kmh": MODE_HIGHWAY_AVG_KMH,
+            "constant_idle_share_max": float((cuts or {}).get(
+                "constant_idle_share_max", MODE_IDLE_CONSTANT)),
+            "slow_idle_share_max": float((cuts or {}).get(
+                "slow_idle_share_max", MODE_IDLE_SLOW)),
+            "highway_max_kmh": float((cuts or {}).get(
+                "highway_max_kmh", MODE_HIGHWAY_MAX_KMH)),
+            "highway_avg_kmh": float((cuts or {}).get(
+                "highway_avg_kmh", MODE_HIGHWAY_AVG_KMH)),
         },
     }

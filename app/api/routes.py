@@ -7977,6 +7977,68 @@ def self_check(days: int = Query(30, ge=1, le=730),
     }
 
 
+def _mode_cuts(session: Session) -> dict[str, float]:
+    """Where the driving conditions are cut from one another.
+
+    Read from the settings table rather than compiled in, because these
+    describe a person's roads and traffic rather than a property of the car.
+    The boundary between a slow city drive and a heavy one is a local fact,
+    and it should be tunable without a deploy — the model is only useful if
+    its owner can make it match what they actually see out of the window.
+    """
+    import json as _json
+
+    try:
+        raw = _json.loads(state.get(session, state.MODE_THRESHOLDS_KEY) or "{}")
+    except ValueError:
+        return {}
+    out = {}
+    for k in ("constant_idle_share_max", "slow_idle_share_max",
+              "highway_max_kmh", "highway_avg_kmh"):
+        try:
+            if raw.get(k) is not None:
+                out[k] = float(raw[k])
+        except (TypeError, ValueError):
+            continue
+    return out
+
+
+@router.post("/driving-matrix/thresholds")
+def set_mode_thresholds(payload: dict = Body(...),
+                        session: Session = Depends(get_session)):
+    """Move where the conditions are cut, and re-read the matrix underneath.
+
+    Returns the matrix as it now stands rather than an acknowledgement, so a
+    change can be judged against the trips it re-sorts instead of being
+    applied blind.
+    """
+    import json as _json
+
+    cuts = _mode_cuts(session)
+    for k in ("constant_idle_share_max", "slow_idle_share_max",
+              "highway_max_kmh", "highway_avg_kmh"):
+        if payload.get(k) is None:
+            continue
+        try:
+            v = float(payload[k])
+        except (TypeError, ValueError):
+            raise HTTPException(422, f"{k} must be a number")
+        if k.endswith("_share_max") and not 0.0 < v <= 1.0:
+            raise HTTPException(
+                422, f"{k} is a share of the trip, so it must be between 0 and 1")
+        if k.endswith("_kmh") and not 0.0 < v <= 300.0:
+            raise HTTPException(422, f"{k} must be a plausible speed")
+        cuts[k] = v
+    if cuts.get("constant_idle_share_max", 0) >= cuts.get("slow_idle_share_max", 1):
+        raise HTTPException(
+            422, "constant_idle_share_max must be below slow_idle_share_max — "
+                 "the first is where constant driving ends and the second "
+                 "where slow driving does")
+    state.put(session, state.MODE_THRESHOLDS_KEY, _json.dumps(cuts))
+    session.commit()
+    return driving_matrix(days=30, session=session)
+
+
 @router.get("/driving-matrix")
 def driving_matrix(days: int = Query(30, ge=1, le=730),
                    session: Session = Depends(get_session)):
@@ -8009,7 +8071,8 @@ def driving_matrix(days: int = Query(30, ge=1, le=730),
     baseline = (capacity_kwh * 1000.0 / settings.rated_wh_per_km
                 if settings.rated_wh_per_km else None)
     out = driving_analysis.condition_matrix(
-        list(drives), capacity_kwh, baseline_range_km=baseline)
+        list(drives), capacity_kwh, baseline_range_km=baseline,
+        cuts=_mode_cuts(session))
 
     readings = _parked_readings(session, vehicle.id)
     def parked(armed: bool) -> dict[str, Any]:

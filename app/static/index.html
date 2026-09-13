@@ -685,8 +685,48 @@
       <button id="btn-service" class="btn hidden">🔧 Service &amp; Tyres</button>
       <button id="btn-add-charge" class="btn hidden">🔌 Add Historical Charge</button>
       <button id="btn-rates" class="btn hidden">💰 Rates</button>
+      <button id="btn-matrix" class="btn hidden"
+              title="What each kind of driving actually costs — per kilometre and per hour — including standing still">📊 Driving Matrix</button>
     </section>
   </main>
+
+  <!-- Modal: driving-condition matrix. Two units on purpose — the per-km and
+       per-hour orderings are reverses of each other, and a table with only
+       one of them can't show that. -->
+  <div id="matrix-modal" class="modal hidden">
+    <div class="modal-card">
+      <button class="modal-close" data-close>×</button>
+      <h2>📊 Driving matrix</h2>
+      <p class="modal-sub">
+        What each kind of driving costs, measured from your own trips. Every row is
+        priced two ways: <strong>Wh/km</strong> answers how far a charge goes,
+        <strong>kW</strong> answers what an hour costs — and that is the unit a parked
+        car can be quoted in too, so driving and standing still sit on one scale.
+        Nothing here is modelled; it is all measured.
+      </p>
+      <div id="matrix-body">Loading…</div>
+      <details class="matrix-tune">
+        <summary>Where the conditions are cut</summary>
+        <p class="modal-sub">
+          A trip is sorted by how much of it was spent stopped, and only then by speed.
+          These boundaries describe your roads rather than the car, so they are yours to
+          move — the table below redraws from the same trips.
+        </p>
+        <form id="matrix-form" class="matrix-form">
+          <label>Constant driving, idle share under
+            <input id="cut-constant" type="number" step="0.01" min="0.01" max="1" required></label>
+          <label>Slow driving, idle share under
+            <input id="cut-slow" type="number" step="0.01" min="0.01" max="1" required></label>
+          <label>Highway needs a peak of at least (km/h)
+            <input id="cut-hwmax" type="number" step="1" min="1" max="300" required></label>
+          <label>…and an average of at least (km/h)
+            <input id="cut-hwavg" type="number" step="1" min="1" max="300" required></label>
+          <button type="submit" class="btn">Redraw</button>
+        </form>
+        <p id="matrix-msg" class="modal-sub"></p>
+      </details>
+    </div>
+  </div>
 
   <!-- Modal: named places (Home/Office geofences) -->
   <div id="places-modal" class="modal hidden">
