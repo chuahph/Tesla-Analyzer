@@ -8459,6 +8459,20 @@ def driving_matrix(days: int = Query(30, ge=1, le=730),
     for key in ("modes", "weekday", "weekend"):
         rows = out[key] if key == "modes" else (out[key] or {}).get("modes") or []
         share(rows)
+    # The books, stated so they can be checked rather than trusted. Two sums
+    # have to hold, and both used to be implied:
+    #
+    #   modes_kwh + unclassified_kwh + no_energy_kwh = driving_kwh
+    #   driving_kwh + parked_kwh                     = kwh
+    #
+    # and the second is NOT the car's total consumption for the period. It
+    # leaves out the energy of gaps the odometer says the car moved through
+    # (a journey nobody recorded), the parked drain at the window's two
+    # unmeasured edges, and everything charging did. Those are reported in
+    # ``accounting`` in hours; none of them can be priced from this data, and
+    # inventing a figure for them would be the one thing worse than a gap.
+    reconciles = round(
+        out["modes_kwh"] + out["unclassified_kwh"] + out["no_energy_kwh"], 2)
     out["totals"] = {
         "hours": round(total_hours, 1),
         "kwh": round(total_kwh, 2),
@@ -8466,6 +8480,19 @@ def driving_matrix(days: int = Query(30, ge=1, le=730),
         "parked_kwh": round(pk_kwh, 2),
         "parked_share_kwh_pct": (round(pk_kwh / total_kwh * 100.0, 1)
                                  if total_kwh else None),
+        "modes_kwh": out["modes_kwh"],
+        "unclassified_kwh": out["unclassified_kwh"],
+        "no_energy_kwh": out["no_energy_kwh"],
+        # The check itself, computed rather than asserted. A non-zero residual
+        # means a trip's energy went somewhere none of the three buckets looked,
+        # and it should be visible in the payload instead of waiting to be
+        # noticed as a discrepancy between two numbers on screen.
+        "driving_kwh_residual": round(drive_kwh - reconciles, 2),
+        "unpriced": {
+            "moved_through_gaps_hours": acc["excluded"]["hours"],
+            "window_edges_hours": acc["unbounded"]["hours"],
+            "charging_hours": acc["charging"]["hours"],
+        },
     }
     # What the split could not see. Parks with no Sentry reading either way sit
     # in PK and in neither ID nor the armed fit, so their excess over ID lands

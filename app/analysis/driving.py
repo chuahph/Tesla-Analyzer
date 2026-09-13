@@ -2031,12 +2031,25 @@ def condition_matrix(drives: list[Any], capacity_kwh: float,
     """
     buckets: dict[str, list[Any]] = {}
     unclassified = 0
+    # The energy that does NOT reach a row, kept apart by reason. Without these
+    # the table looks like it accounts for the window's driving and quietly does
+    # not: a trip with implausible energy was skipped without even being
+    # counted, and an unsortable one was counted but its kWh was not. Both are
+    # real energy the car used, so the report has to be able to show that
+    # sum(modes) + these = the window's driving energy, rather than leaving a
+    # reader to find the difference and wonder which figure is wrong.
+    unclassified_kwh = 0.0
+    no_energy = 0
+    no_energy_kwh = 0.0
     for d in drives:
         if not has_valid_energy(d):
+            no_energy += 1
+            no_energy_kwh += float(getattr(d, "energy_used_kwh", 0.0) or 0.0)
             continue
         m = drive_mode(d, cuts)
         if m is None:
             unclassified += 1
+            unclassified_kwh += float(d.energy_used_kwh)
             continue
         buckets.setdefault(m, []).append(d)
 
@@ -2108,6 +2121,14 @@ def condition_matrix(drives: list[Any], capacity_kwh: float,
         # Trips that could not be sorted, and why it matters: they are missing
         # from every row above rather than distributed among them.
         "unclassified_trips": unclassified,
+        "unclassified_kwh": round(unclassified_kwh, 2),
+        # And the ones that never reached the classifier at all, because their
+        # energy is not plausible enough to feed an efficiency figure (see
+        # analysis.has_valid_energy). Reported rather than silently dropped —
+        # this was the larger of the two holes and the only invisible one.
+        "no_energy_trips": no_energy,
+        "no_energy_kwh": round(no_energy_kwh, 2),
+        "modes_kwh": round(sum(r["kwh"] for r in rows), 2),
         "thresholds": {
             "constant_ratio_min": float((cuts or {}).get(
                 "constant_ratio_min", MODE_CONSTANT_RATIO)),

@@ -2973,3 +2973,55 @@ def test_pk_equals_id_plus_se_in_energy_not_only_in_rate():
     total_kwh = acc["driving"]["kwh"] + pk
     assert pk / total_kwh == pytest.approx(0.424, abs=0.01)
     assert hours / (hours + acc["driving"]["hours"]) == pytest.approx(0.95, abs=0.01)
+
+
+def test_the_driving_energy_reconciles_to_the_rows_plus_what_was_left_out():
+    """The table looked like it accounted for the window's driving and did not.
+
+    Two trips never reached a row. One whose energy is not plausible enough to
+    feed an efficiency figure was skipped without even being COUNTED — the
+    larger hole and the only invisible one. One that could not be sorted was
+    counted, but its kWh was not. Both are energy the car really used, so a
+    reader adding the rows up got a number below the window's driving total with
+    nothing to say where the difference went.
+
+    The sum that has to hold now:
+        modes_kwh + unclassified_kwh + no_energy_kwh = the window's driving kWh
+    """
+    from types import SimpleNamespace
+
+    def trip(i, km, mins, mx, kwh):
+        return SimpleNamespace(
+            id=i, start_time=_dt_at(i), end_time=_dt_at(i),
+            distance_km=km, duration_min=mins, max_speed_kmh=mx,
+            energy_used_kwh=kwh, wh_per_km=(kwh * 1000.0 / km) if km else 0.0,
+            idle_min=0.0, idle_tracked=True, outside_temp_c=30.0,
+            start_soc=80.0, end_soc=75.0, end_location="Home")
+
+    drives = [
+        trip(1, 40.0, 30.0, 110.0, 6.0),    # sortable
+        trip(2, 20.0, 40.0, 60.0, 3.2),     # sortable
+        # No max speed, so drive_mode cannot say: counted, and its kWh with it.
+        trip(3, 15.0, 20.0, 0.0, 2.4),
+        # Energy too low to be plausible per km: never reaches the classifier.
+        trip(4, 50.0, 45.0, 90.0, 0.4),
+    ]
+    got = driving_analysis.condition_matrix(drives, 68.6, None, None)
+
+    assert got["unclassified_trips"] == 1
+    assert got["unclassified_kwh"] == pytest.approx(2.4)
+    assert got["no_energy_trips"] == 1
+    assert got["no_energy_kwh"] == pytest.approx(0.4)
+    assert got["modes_kwh"] == pytest.approx(9.2)
+
+    # The books balance against every trip's energy, sortable or not.
+    total = sum(d.energy_used_kwh for d in drives)
+    assert (got["modes_kwh"] + got["unclassified_kwh"]
+            + got["no_energy_kwh"]) == pytest.approx(total, abs=0.01)
+    # And the rows themselves still only hold the sortable ones.
+    assert sum(r["kwh"] for r in got["modes"]) == pytest.approx(9.2)
+
+
+def _dt_at(i: int):
+    from datetime import datetime, timedelta
+    return datetime(2026, 7, 1) + timedelta(hours=i)

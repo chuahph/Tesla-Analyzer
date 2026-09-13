@@ -2296,11 +2296,18 @@ function renderMatrix(d) {
   if (a && a.charging.hours) aside.push(`${num(a.charging.hours, 0)} h charging`);
   if (a && a.excluded.hours) aside.push(`${num(a.excluded.hours, 0)} h the odometer says the car moved through`);
   if (a && a.unbounded.hours) aside.push(`${num(a.unbounded.hours, 0)} h at the window's edges, unmeasured`);
+  // What the rows do NOT add up to, said on the page. The rows hold only the
+  // sortable trips, so without this line a reader who sums the kWh column gets
+  // a number under the driving total with nothing to explain the difference.
+  const left = [];
+  if (t && t.unclassified_kwh) left.push(`${num(t.unclassified_kwh, 1)} kWh in trips that could not be sorted`);
+  if (t && t.no_energy_kwh) left.push(`${num(t.no_energy_kwh, 1)} kWh in trips whose energy is not plausible per km`);
   const tot = t && t.kwh
     ? `${num(t.hours, 0)} h driving + parked, ${num(t.kwh, 1)} kWh —
        ${num(t.driving_kwh, 1)} moving, ${num(t.parked_kwh, 1)} standing still
        (${num(t.parked_share_kwh_pct, 1)}% of the energy). Shares below are of
-       those hours.${aside.length ? ` Outside them: ${aside.join(", ")}.` : ""}`
+       those hours.${left.length ? ` The rows come to ${num(t.modes_kwh, 1)} kWh; the rest is ${left.join(" and ")}.` : ""}${
+         aside.length ? ` Not priced at all: ${aside.join(", ")}.` : ""}`
     : "";
   const ev = d.parked_evidence;
   const unknown = ev && ev.hours && ev.hours.unknown > 0
