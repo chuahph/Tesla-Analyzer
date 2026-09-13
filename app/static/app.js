@@ -2233,22 +2233,31 @@ function renderMatrix(d) {
   // Parked energy is the deep-sleep rate projected onto every parked hour, and
   // the fitted hours are a subset of those. Saying so on the row is the
   // difference between a measurement and an estimate that looks like one.
-  const proj = (p) => (p.kwh != null && p.hours_fitted != null && p.hours
-    ? ` · projected from ${num(p.hours_fitted, 0)} h of long parks`
-    : "");
+  // How much of a parked rate is the gauge's own resolution, and what the
+  // six-hour deep-sleep fit says for comparison. The gap between them is the
+  // awake premium — what a car draws in the first minutes of a stop over what
+  // it settles to — and it only became visible once short parks were pooled.
+  const proj = (p) => {
+    const bits = [];
+    if (p.noise_kw) bits.push(`±${num(p.noise_kw, 3)} kW from 1% gauge steps`);
+    if (p.deep_sleep_kw) bits.push(`${num(p.deep_sleep_kw, 3)} kW once properly asleep`);
+    return bits.length ? ` · ${bits.join(" · ")}` : "";
+  };
   const parkSub = (p) => {
     if (p.kw == null) {
-      const why = p.basis === "residual"
+      // The server says WHY, in the row's own terms. It used to be one dash
+      // and one guess, which told a dashboard showing 1,182 parked hours that
+      // it had "not enough parked history".
+      const why = p.why || (p.basis === "residual"
         ? "needs parks both with and without Sentry to separate"
-        : "not enough parked history to fit";
-      // Which hours were ELIGIBLE, not just how many there were. A row with
-      // 1182 parked hours and none of them in a long park of the right Sentry
-      // state looks like a bug until it says that is what happened.
+        : "not enough parked history to fit");
+      // Which hours were ELIGIBLE for THIS row, where that is narrower than
+      // the parked total. A row with 1182 parked hours and none of them in the
+      // right Sentry state looks like a bug until it says that is what
+      // happened. PK has no narrower set, so it says nothing extra.
       const state = p.hours_state != null && p.hours_state !== p.hours
-        ? ` · ${num(p.hours_state, 0)} h in this state, ${num(p.hours_fitted, 0)} h of it in parks long enough to fit`
-        : (p.hours_fitted != null
-            ? ` · ${num(p.hours_fitted, 0)} h of it in parks long enough to fit`
-            : "");
+        ? ` · ${num(p.hours_state, 0)} h of it in this state`
+        : "";
       return `${why}${hrs(p)}${state}`;
     }
     if (p.basis !== "residual") {

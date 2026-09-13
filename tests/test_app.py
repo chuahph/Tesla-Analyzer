@@ -493,12 +493,16 @@ def test_the_condition_cuts_are_stored_and_re_sort_the_same_trips():
                       + a["unbounded"]["hours"])
             assert placed == pytest.approx(a["span_hours"], abs=0.2)
             # A parked row reports its hours whether or not a rate was fitted —
-            # that is what makes a blank rate readable instead of a bare dash.
+            # that is what makes a blank rate readable instead of a bare dash —
+            # and says WHICH of the three causes a blank one was.
             assert all(r["hours"] == a["parked"]["hours"] for r in base["parked"])
+            assert all(r["why"] for r in base["parked"] if r["kw"] is None)
             # Driving energy is measured; parked energy is the deep-sleep rate
             # projected onto every parked hour, and says so rather than passing
             # itself off as a measurement.
-            assert all(r.get("kwh_basis") in (None, "projected")
+            # Parked energy is measured now, not projected: the rate is pooled
+            # from the same gaps it is applied to.
+            assert all(r.get("kwh_basis") in (None, "measured")
                        for r in base["parked"])
             assert all("kwh" in r for r in base["modes"])
 

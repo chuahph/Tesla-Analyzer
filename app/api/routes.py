@@ -8397,14 +8397,13 @@ def driving_matrix(days: int = Query(30, ge=1, le=730),
         # cost, not what a subset of it cost. All three parked rows use the same
         # hours, so PK = ID + SE survives into the energy column.
         #
-        # It is a projection and says so. The rate is measured on parks of six
-        # hours and up, and a fifteen-minute stop draws more than that — the car
-        # is still awake, screens up, Sentry arming — so applying the deep-sleep
-        # rate to every parked hour UNDERSTATES, and by a known direction rather
-        # than an unknown one. parked_awake_kw was deleted for trying to measure
-        # the difference from data that cannot carry it.
+        # MEASURED, not projected. The rate is now pooled from the same gaps
+        # window_accounting calls parked — every one of them, errand stops
+        # included — so the hours it was fitted from are the hours it is applied
+        # to. It used to be the six-hour deep-sleep rate stretched over parked
+        # time it had never seen, which understated by the awake premium.
         row["kwh"] = round(kw * parked_hours, 2)
-        row["kwh_basis"] = "projected"
+        row["kwh_basis"] = "measured"
         return row
 
     # PK = ID + SE, exactly, because all three come off one gap set: PK is
@@ -8418,7 +8417,14 @@ def driving_matrix(days: int = Query(30, ge=1, le=730),
     out["parked"] = [
         {"code": "PK", "name": "Park Overall",
          "gaps": acc["parked"]["gaps"],
-         "hours_fitted": park["hours"]["total"],
+         # How much of the rate is the gauge's own resolution, and the
+         # six-hour deep-sleep figure for comparison. The gap between
+         # deep_sleep_kw and kw IS the awake premium — what the car draws in
+         # the first minutes of a stop, over what it settles to — which is the
+         # thing pooling short parks exists to capture.
+         "noise_kw": park["pk_noise_kw"],
+         "deep_sleep_kw": park["deep_sleep_kw"],
+         "why": park["pk_why"],
          **parked(park["pk_kw"], "total")},
         # gaps matches hours — the TOTAL parked gaps, not this state's. All
         # three rows are priced over every parked hour (that is what keeps
@@ -8428,8 +8434,9 @@ def driving_matrix(days: int = Query(30, ge=1, le=730),
         # the full split.
         {"code": "ID", "name": "Idling, Sentry off",
          "gaps": acc["parked"]["gaps"],
-         "hours_fitted": park["hours"]["sentry_off"],
          "hours_state": acc["parked"]["by_state"]["sentry_off"],
+         "noise_kw": park["id_noise_kw"],
+         "why": park["id_why"],
          **parked(park["id_kw"], "total")},
         # Evidence for SE is the ARMED parks, not the residual's own hours:
         # what makes "Sentry costs something" measurable is having parked with
@@ -8437,9 +8444,11 @@ def driving_matrix(days: int = Query(30, ge=1, le=730),
         # residual can be checked against something rather than believed.
         {"code": "SE", "name": "Sentry impact",
          "gaps": acc["parked"]["gaps"],
-         "hours_fitted": park["hours"]["sentry_on"],
          "hours_state": acc["parked"]["by_state"]["sentry_on"],
          "armed_kw": park["armed_kw"],
+         "why": (None if park["se_kw"] is not None else
+                 (park["pk_why"] or park["id_why"]
+                  or "needs parks both with and without Sentry to separate")),
          **parked(park["se_kw"], "residual")},
     ]
     # Every row's share of the window, driving and parked on one denominator.

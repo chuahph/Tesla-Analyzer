@@ -225,6 +225,16 @@ STANDBY_MIN_GAP_HOURS = 6.0
 # Two overnight parks. Raised with the floor: at 6 h a 12 h total could be a
 # single gap, and one gap has never been a rate anywhere else in this module.
 STANDBY_MIN_TOTAL_HOURS = 24.0
+# The same floor for the matrix's fit, which pools EVERY parked gap rather than
+# only the long ones, and therefore needs more of them. Not because a short park
+# is less real, but because its reading is almost entirely quantisation: at a
+# whole SoC point per 0.7 kWh, an hour parked moves the gauge a twentieth of a
+# point. Summed signed the noise cancels as the square root of the gap count
+# while the signal grows with the hours, so the aggregate is what has to be
+# large. Three days of parked time puts a typical rate several times its own
+# rounding error; parked_noise_kw reports that error alongside the rate rather
+# than leaving the threshold to carry the whole argument.
+STANDBY_ALL_MIN_TOTAL_HOURS = 72.0
 # Outside this the answer is a measurement artifact, not a parked car — a
 # Tesla idles somewhere near 100-500 W depending on Sentry, climate and how
 # long it takes to fall asleep.
@@ -260,7 +270,7 @@ SOC_RISE_TOLERANCE_PCT = 1.0
 def _gap_totals(drives: list[Any], charges: list[Any] | None,
                 min_gap_h: float, max_gap_h: float | None,
                 place: str | None = None,
-                keep: Any = None) -> tuple[float, float, int]:
+                keep: Any = None, signed: bool = False) -> tuple[float, float, int]:
     """SoC points drained, hours parked and gaps counted, over one gap set.
 
     Split out from _gap_rate_kw so that a rate and the evidence behind it come
@@ -322,7 +332,26 @@ def _gap_totals(drives: list[Any], charges: list[Any] | None,
         # of magnitude, so nothing is riding on where exactly it sits.
         if b.start_soc - a.end_soc > SOC_RISE_TOLERANCE_PCT:
             continue
-        total_points += max(a.end_soc - b.start_soc, 0.0)
+        drop = a.end_soc - b.start_soc
+        # ``signed`` is the difference between a fit that can pool SHORT parks
+        # and one that cannot.
+        #
+        # Clipping at zero is right for a handful of long gaps, where a
+        # negative reading means something went wrong. It is fatal once short
+        # gaps are included: a one-hour park drains a twentieth of an SoC
+        # point, so its reading is rounding, and rounding scatters both ways.
+        # Keeping the upward halves in full while truncating the downward ones
+        # RECTIFIES that noise — it has a mean, and the mean is not the truth.
+        # That, not the pooling, is what made parked_awake_kw read 0.348 kW
+        # against the car's own 0.034 and got it deleted.
+        #
+        # Summed signed, the rounding cancels instead of accumulating: error
+        # grows as the square root of the gap count while signal grows with the
+        # hours, so hundreds of parked hours resolve a rate that six could not.
+        # The gaps a negative reading should genuinely disqualify — a charge
+        # nobody logged — are already gone, thrown out above by the
+        # SOC_RISE_TOLERANCE_PCT test, which only lets sub-point noise through.
+        total_points += drop if signed else max(drop, 0.0)
         total_hours += gap_hours
         total_gaps += 1
     return total_points, total_hours, total_gaps
@@ -344,6 +373,38 @@ def _rate_kw(points: float, hours: float, capacity_kwh: float,
     rate = total_kwh / hours
     lo, hi = STANDBY_PLAUSIBLE_KW
     return round(rate, 3) if lo <= rate <= hi else None
+
+
+def _rate_refusal(points: float, hours: float, capacity_kwh: float,
+                  min_total_h: float) -> str | None:
+    """Why _rate_kw said None, or None if it did not. Same tests, same order.
+
+    A blank rate has three quite different causes and they call for three
+    different responses from a reader: wait, look at the gauge, or distrust the
+    fit. Collapsing them into one dash sent a dashboard showing 1,182 parked
+    hours the message "not enough parked history", which is the one explanation
+    that was definitely false.
+
+    Kept beside _rate_kw rather than folded into it so every existing caller
+    keeps its plain float-or-None return, and deliberately re-running the same
+    conditions in the same order: a reason that can disagree with the decision
+    it explains is worse than no reason.
+    """
+    if not capacity_kwh:
+        return "no usable capacity for this car yet"
+    if hours < min_total_h:
+        return (f"only {hours:.0f} h of parked time — needs {min_total_h:.0f} h "
+                f"before a rate means anything")
+    total_kwh = points / 100.0 * capacity_kwh
+    if total_kwh <= 0:
+        return ("these parks show no net drain — the gauge reads to 1%, and "
+                "across them it did not move")
+    rate = total_kwh / hours
+    lo, hi = STANDBY_PLAUSIBLE_KW
+    if not lo <= rate <= hi:
+        return (f"the fit came out at {rate:.3f} kW, outside the {lo}-{hi} kW "
+                f"a parked car can plausibly draw")
+    return None
 
 
 def _gap_rate_kw(drives: list[Any], charges: list[Any] | None, capacity_kwh: float,
@@ -656,22 +717,51 @@ def parked_decomposition(drives: list[Any], charges: list[Any] | None,
         return lambda a, b: index.state(a.end_time, b.start_time) is want
 
     def totals(want: bool | None):
-        return _gap_totals(drives, charges, STANDBY_MIN_GAP_HOURS, None,
-                           keep=armed_is(want))
+        # EVERY parked gap, not only the long ones, and summed signed so the
+        # short ones can be included at all. This is the same gap set
+        # window_accounting calls "parked", which is what lets the energy column
+        # be measured over the hours it reports rather than projected onto them.
+        return _gap_totals(drives, charges, 0.0, None,
+                           keep=armed_is(want), signed=True)
 
     all_points, all_hours, all_gaps = totals(None)
     off_points, off_hours, off_gaps = totals(False) if index else (0.0, 0.0, 0)
     on_points, on_hours, on_gaps = totals(True) if index else (0.0, 0.0, 0)
 
     def rate(points: float, hours: float) -> float | None:
-        return _rate_kw(points, hours, capacity_kwh, STANDBY_MIN_TOTAL_HOURS)
+        return _rate_kw(points, hours, capacity_kwh, STANDBY_ALL_MIN_TOTAL_HOURS)
 
     pk = rate(all_points, all_hours)
     idle = rate(off_points, off_hours)
     armed = rate(on_points, on_hours)
+    # How much of the answer is the gauge's own resolution. Each end of a gap is
+    # read to a whole SoC point, so a gap's drop carries about 0.41 points of
+    # quantisation error; summed over independent gaps that grows as the square
+    # root of their count while the drain grows with the hours. Reported rather
+    # than hidden behind a threshold: a rate that is not several times this is
+    # not yet a measurement, and the reader can see which it is.
+    def noise(gaps: int, hours: float) -> float | None:
+        if not gaps or not hours or not capacity_kwh:
+            return None
+        return round(0.41 * (gaps ** 0.5) / 100.0 * capacity_kwh / hours, 4)
     return {
         "pk_kw": pk,
         "id_kw": idle,
+        "pk_noise_kw": noise(all_gaps, all_hours),
+        "id_noise_kw": noise(off_gaps, off_hours),
+        # Why a blank row is blank, in the row's own terms.
+        "pk_why": _rate_refusal(all_points, all_hours, capacity_kwh,
+                                STANDBY_ALL_MIN_TOTAL_HOURS),
+        "id_why": _rate_refusal(off_points, off_hours, capacity_kwh,
+                                STANDBY_ALL_MIN_TOTAL_HOURS),
+        # The 6-hour deep-sleep rate, kept beside the all-hours one because they
+        # are different quantities and both are wanted. This is the figure
+        # sync.py subtracts from real trip energy, and the gap between the two
+        # is the premium a car draws while still awake — screens up, Sentry
+        # arming — which is exactly what pooling short parks is meant to catch.
+        "deep_sleep_kw": _rate_kw(
+            *_gap_totals(drives, charges, STANDBY_MIN_GAP_HOURS, None)[:2],
+            capacity_kwh, STANDBY_MIN_TOTAL_HOURS),
         # Rounded from the two rounded figures on purpose: the row shows
         # PK and ID to the same three places, and a residual that does not
         # subtract to what the reader can see would be read as a third fit.
@@ -2186,13 +2276,15 @@ MATRIX_DEFINITIONS = {
                                 "compare on one scale."},
         {"name": "kWh", "means": "What this condition actually cost over the "
                                  "window, and the share of hours and energy "
-                                 "beside it. Measured on a driving row — the "
-                                 "trips' own summed energy. PROJECTED on a "
-                                 "parked row: the rate is fitted from parks of "
-                                 "six hours and up, then applied to every "
-                                 "parked hour, and a short stop draws more than "
-                                 "that because the car is still awake. So a "
-                                 "parked kWh understates, in a known direction."},
+                                 "beside it. Measured on every row: a driving "
+                                 "row sums the trips' own energy, and a parked "
+                                 "row is fitted from the same parked gaps it is "
+                                 "then applied to — errand stops included, not "
+                                 "only the long parks. The gauge reads to a "
+                                 "whole SoC point, so a parked row also carries "
+                                 "how much of its rate is that resolution: a "
+                                 "figure not several times its own noise is not "
+                                 "yet a measurement."},
         {"name": "Range", "means": "What a full battery is worth driven entirely "
                                    "in this condition."},
         {"name": "km/1%", "means": "What one percent of the battery buys here."},

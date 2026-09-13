@@ -2693,8 +2693,10 @@ def test_the_parked_bill_splits_into_idling_plus_sentry_and_adds_back_up():
     from types import SimpleNamespace
 
     cap = 68.6
-    # Seven drives, six 11-hour parks: three quiet at a point each, three
-    # watched at four points each. Both halves clear the 24-hour minimum.
+    # Seven drives, six 25-hour parks: three quiet at a point each, three
+    # watched at four points each. Weekend-length rather than overnight because
+    # the fit now pools EVERY parked hour and wants three days per class before
+    # it will answer — see STANDBY_ALL_MIN_TOTAL_HOURS.
     history = _chain([
         ("Home", 100.0, 99.0),   # quiet gap:  1 point
         ("Home",  98.0, 97.0),   # quiet gap:  1 point
@@ -2703,7 +2705,7 @@ def test_the_parked_bill_splits_into_idling_plus_sentry_and_adds_back_up():
         ("Home",  89.0, 88.0),   # armed gap:  4 points
         ("Home",  84.0, 83.0),   # armed gap:  4 points
         ("Home",  79.0, 78.0),
-    ], gap_hours=11.0)
+    ], gap_hours=25.0)
     # One reading inside each gap, keyed off the drive that OPENS it so no two
     # share a timestamp — an any() over a tie silently calls the gap armed.
     readings = [SimpleNamespace(ts=d.end_time + timedelta(hours=1),
@@ -2727,10 +2729,16 @@ def test_the_parked_bill_splits_into_idling_plus_sentry_and_adds_back_up():
     # switching Sentry off saved the whole of an armed hour.
     assert se < got["armed_kw"]
 
+    # The deep-sleep rate is kept beside the all-hours one, because sync.py
+    # subtracts THAT from real trip energy and the two are different
+    # quantities. Here every park is long, so the two fits see the same gaps
+    # and agree; on a real history full of errand stops they will not.
+    assert got["deep_sleep_kw"] == pytest.approx(got["pk_kw"])
+
     # Evidence, so a blank row can be read rather than guessed at.
     assert got["gaps"] == {"total": 6, "sentry_off": 3, "sentry_on": 3,
                            "unknown": 0}
-    assert got["hours"]["total"] == pytest.approx(66.0)
+    assert got["hours"]["total"] == pytest.approx(150.0)
     assert got["hours"]["unknown"] == pytest.approx(0.0)
 
 
@@ -2752,7 +2760,7 @@ def test_a_park_nobody_could_read_lands_in_the_sentry_residual_not_in_idling():
         ("Basement", 89.0, 88.0),  # unknown gap:  4 points
         ("Basement", 84.0, 83.0),  # unknown gap:  4 points
         ("Home",     79.0, 78.0),
-    ], gap_hours=11.0)
+    ], gap_hours=25.0)
     # Readings for the quiet parks only. The basement ones are simply absent.
     readings = [SimpleNamespace(ts=d.end_time + timedelta(hours=1),
                                 sentry_mode=False)
@@ -2769,7 +2777,7 @@ def test_a_park_nobody_could_read_lands_in_the_sentry_residual_not_in_idling():
     assert got["se_kw"] > 0
     # Which is the warning: SE is positive on zero armed hours, so here it is
     # entirely unknown-state drain and the report must say so.
-    assert got["hours"]["unknown"] == pytest.approx(33.0)
+    assert got["hours"]["unknown"] == pytest.approx(75.0)
 
 
 def test_the_parked_floor_refuses_alone_without_taking_the_bill_down_with_it():
@@ -2787,7 +2795,7 @@ def test_the_parked_floor_refuses_alone_without_taking_the_bill_down_with_it():
         ("Resort",  94.0, 93.0),
         ("Resort",  88.0, 87.0),
         ("Resort",  82.0, 81.0),
-    ], gap_hours=11.0)
+    ], gap_hours=25.0)
     readings = [SimpleNamespace(ts=d.end_time + timedelta(hours=1),
                                 sentry_mode=True)
                 for d in history[:-1]]
@@ -2950,7 +2958,7 @@ def test_pk_equals_id_plus_se_in_energy_not_only_in_rate():
         ("Home", 100.0, 99.0), ("Home", 98.0, 97.0), ("Home", 96.0, 95.0),
         ("Home", 94.0, 93.0), ("Home", 89.0, 88.0), ("Home", 84.0, 83.0),
         ("Home", 79.0, 78.0),
-    ], gap_hours=11.0)
+    ], gap_hours=25.0)
     for d in history:
         d.duration_min = 30.0
         d.energy_used_kwh = 2.0
@@ -2971,8 +2979,18 @@ def test_pk_equals_id_plus_se_in_energy_not_only_in_rate():
     # hours and a large minority of the energy, which no column could say while
     # the parked rows were a rate fitted from a different population.
     total_kwh = acc["driving"]["kwh"] + pk
-    assert pk / total_kwh == pytest.approx(0.424, abs=0.01)
-    assert hours / (hours + acc["driving"]["hours"]) == pytest.approx(0.95, abs=0.01)
+    assert pk / total_kwh == pytest.approx(0.425, abs=0.01)
+    assert hours / (hours + acc["driving"]["hours"]) == pytest.approx(0.977, abs=0.01)
+
+    # The energy is now MEASURED over the hours it is reported against, not
+    # projected onto them: the fit pools the same gaps window_accounting calls
+    # parked, so the hours it was fitted from are all of them.
+    assert got["hours"]["total"] == pytest.approx(hours)
+
+    # And the rate is worth several times its own rounding error, which is the
+    # test that matters once short parks are pooled — a rate that is not is
+    # reading the gauge's resolution rather than the car.
+    assert got["pk_noise_kw"] < got["pk_kw"] / 5
 
 
 def test_the_driving_energy_reconciles_to_the_rows_plus_what_was_left_out():
@@ -3025,3 +3043,108 @@ def test_the_driving_energy_reconciles_to_the_rows_plus_what_was_left_out():
 def _dt_at(i: int):
     from datetime import datetime, timedelta
     return datetime(2026, 7, 1) + timedelta(hours=i)
+
+
+def test_short_parks_can_only_be_pooled_because_the_rounding_is_kept_signed():
+    """Why the 6-hour rule went, and why it was never the pooling that was wrong.
+
+    A one-hour park drains about a twentieth of an SoC point, so its reading is
+    almost pure rounding, scattering either side of the truth. Clipping each gap
+    at zero keeps the upward halves in full and truncates the downward ones,
+    which RECTIFIES that noise — it has a mean, and the mean is not the truth.
+    That is what made parked_awake_kw read 0.348 kW against the car's own 0.034
+    and got it deleted.
+
+    Here the true drain is small and the readings quantise both ways: three
+    parks in every seven read a whole point of drain, two read a whole point the
+    wrong way, and the rest read nothing. Netted, that is one point per seven
+    parks. Clipped, it is three — the same readings, three times the answer.
+    """
+    from datetime import datetime, timedelta
+    from types import SimpleNamespace
+
+    cap = 68.6
+    base = datetime(2026, 4, 1)
+    drives, soc = [], 400.0
+    for i in range(121):
+        at = base + timedelta(hours=2.5 * i)
+        drives.append(SimpleNamespace(
+            id=i, start_time=at, end_time=at + timedelta(minutes=30),
+            start_soc=soc, end_soc=soc, end_location="Home",
+            end_odo_km=0.0, start_odo_km=0.0,
+            duration_min=30.0, energy_used_kwh=1.0))
+        # The gap that FOLLOWS this drive, quantised either way.
+        soc -= (1.0 if i % 7 in (0, 2, 4) else -1.0 if i % 7 in (3, 5) else 0.0)
+
+    points_clipped, hours, gaps = driving_analysis._gap_totals(
+        drives, [], 0.0, None)
+    points_signed = driving_analysis._gap_totals(
+        drives, [], 0.0, None, signed=True)[0]
+    assert gaps == 120 and hours == pytest.approx(240.0)
+
+    # Three up and two down in every seven nets one; clipping keeps all three.
+    assert points_signed == pytest.approx(120 / 7, abs=2.0)
+    assert points_clipped == pytest.approx(3 * 120 / 7, abs=3.0)
+
+    clipped_kw = points_clipped / 100.0 * cap / hours
+    signed_kw = points_signed / 100.0 * cap / hours
+    # Both positive — there IS drain here — but the clipped fit reports about
+    # three times as much of it, built from the half of the noise it kept.
+    assert 0 < signed_kw < clipped_kw
+    assert clipped_kw > 2.5 * signed_kw
+
+    # The deep-sleep fit cannot see any of this: every park here is two hours,
+    # so the 6-hour rule leaves it nothing to measure at all. That is the trade
+    # the matrix now makes — the old fit was safe partly because it was blind to
+    # most of the car's parked life.
+    assert driving_analysis._gap_totals(
+        drives, [], driving_analysis.STANDBY_MIN_GAP_HOURS, None)[2] == 0
+
+
+def test_a_blank_parked_rate_says_which_of_its_three_causes_it_was():
+    """A dash meant three quite different things and the dashboard guessed one.
+
+    Showing 1,182 parked hours while saying "not enough parked history" was the
+    one explanation that could not be true. The three causes call for three
+    different responses — wait, look at the gauge, or distrust the fit — so the
+    reason is computed from the same tests in the same order as the decision.
+    """
+    from datetime import datetime, timedelta
+    from types import SimpleNamespace
+
+    cap = 68.6
+    refuse = driving_analysis._rate_refusal
+    floor = driving_analysis.STANDBY_ALL_MIN_TOTAL_HOURS
+
+    # Too little parked time yet.
+    assert "needs" in refuse(4.0, 10.0, cap, floor)
+    assert "10 h of parked time" in refuse(4.0, 10.0, cap, floor)
+    # Plenty of hours, but the gauge never moved across them — demo data does
+    # exactly this, and it is what exposed the wrong message.
+    assert "no net drain" in refuse(0.0, 1182.0, cap, floor)
+    # Netted negative, which is the same story: nothing measurable here.
+    assert "no net drain" in refuse(-3.0, 200.0, cap, floor)
+    # Fitted, but to something no parked car does.
+    assert "outside" in refuse(900.0, 100.0, cap, floor)
+    # And silence when it actually fitted.
+    assert refuse(10.0, 200.0, cap, floor) is None
+
+    # The reason never disagrees with the decision it explains.
+    for points, hours in ((4.0, 10.0), (0.0, 1182.0), (900.0, 100.0),
+                          (10.0, 200.0), (-3.0, 200.0)):
+        fitted = driving_analysis._rate_kw(points, hours, cap, floor)
+        assert (fitted is None) == (refuse(points, hours, cap, floor) is not None)
+
+    # End to end: a history with plenty of parked hours and no drain at all
+    # reports the gauge, not the history.
+    base = datetime(2026, 5, 1)
+    drives = [SimpleNamespace(
+        id=i, start_time=base + timedelta(hours=12 * i),
+        end_time=base + timedelta(hours=12 * i, minutes=30),
+        start_soc=90.0, end_soc=90.0, end_location="Home",
+        end_odo_km=0.0, start_odo_km=0.0,
+        duration_min=30.0, energy_used_kwh=1.0) for i in range(20)]
+    got = driving_analysis.parked_decomposition(drives, [], cap, [])
+    assert got["pk_kw"] is None
+    assert "no net drain" in got["pk_why"]
+    assert got["hours"]["total"] > floor
