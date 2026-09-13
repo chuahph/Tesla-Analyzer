@@ -8565,6 +8565,11 @@ def driving_matrix(days: int = Query(30, ge=1, le=730),
             {"code": "??", "name": "Parks with no Sentry reading",
              "why": ("no reading fell inside these parks, so they belong to "
                      "neither ID nor SE — a short stop often has none"),
+             # Named, so "?? is still there" can be answered. A park from
+             # before the state was recorded will age out of the window on its
+             # own; a park from after it should not be here at all, and the
+             # nearest reading either side says which this is.
+             "unread": share_of["unread_parks"],
              **parked(None, "total", share_of["unknown"])})
     out["parked_share"] = share_of
     # The car's own Park tab, where one has been typed in. It attributes parked

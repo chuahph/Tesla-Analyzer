@@ -2271,6 +2271,17 @@ function renderMatrix(d) {
       else if (p.kw == null && p.kw_noise) bits.push(`too few hours for a rate — 1% steps alone would show ±${num(p.kw_noise, 3)} kW here`);
       if (p.why && p.kw == null && p.code !== "??") bits.push(`no general rate yet — ${p.why}`);
       else if (p.why && p.code === "??") bits.push(p.why);
+      // Which parks, and what was seen near them — the difference between one
+      // old park ageing out of the window and every new one going unread.
+      if (p.code === "??" && p.unread && p.unread.length) {
+        bits.push(p.unread.map((u) => {
+          const n = u.nearest || {};
+          const near = n.before
+            ? `nearest reading ${n.before.sec < 120 ? `${n.before.sec}s` : `${Math.round(n.before.sec / 60)} min`} before it`
+            : "no reading before it at all";
+          return `${u.at.replace("T", " ")}${u.place ? ` at ${u.place}` : ""}, ${dur(u.hours)} — ${near}`;
+        }).join(" · "));
+      }
       if (p.deep_sleep_kw) bits.push(`${num(p.deep_sleep_kw, 3)} kW once properly asleep`);
       return bits.join(" · ");
     }

@@ -3387,3 +3387,63 @@ def test_a_short_park_reports_its_percent_but_not_a_rate():
     assert real["total"]["pct"] == pytest.approx(2.0)
     assert real["total"]["kw"] == pytest.approx(2.0 / 100.0 * cap / 9.0, abs=0.001)
     assert real["total"]["kw"] < 0.2
+
+
+def test_an_unread_park_is_named_with_what_was_seen_around_it():
+    """"?? is still there" cannot be answered from a bare total.
+
+    A park with no Sentry reading inside it has three quite different causes,
+    and they call for three different responses:
+
+      - nothing either side for hours: the car was not streaming, and that park
+        can never be attributed;
+      - a reading seconds before the gap opens: the recording works and the
+        BOUNDARY is wrong, which is a bug and fixable;
+      - readings far either side but none within: an ordinary quiet park from
+        before the state was recorded, which will age out of the window.
+
+    Guessing which from the outside is how a fix gets written for the wrong
+    one, so the report names the parks and what was seen near them.
+    """
+    from datetime import datetime, timedelta
+    from types import SimpleNamespace
+
+    def leg(i, at, mins, soc_start, soc_end, place="Home"):
+        return SimpleNamespace(
+            id=i, start_time=at, end_time=at + timedelta(minutes=mins),
+            start_soc=soc_start, end_soc=soc_end, end_location=place,
+            duration_min=float(mins), energy_used_kwh=1.0)
+
+    base = datetime(2026, 9, 12, 18, 0)
+    a = leg(1, base, 20, 90.0, 88.0)
+    b = leg(2, a.end_time + timedelta(hours=9), 20, 86.0, 84.0, "Office")
+    c = leg(3, b.end_time + timedelta(hours=9), 20, 82.0, 80.0)
+
+    # A reading 40 seconds BEFORE the first park opens and none inside it: the
+    # recording works, the boundary does not. That is the fixable case, and it
+    # must be distinguishable from the others.
+    readings = [SimpleNamespace(ts=a.end_time - timedelta(seconds=40),
+                                sentry_mode=False),
+                # And one well inside the second park, which is attributable.
+                SimpleNamespace(ts=b.end_time + timedelta(hours=1),
+                                sentry_mode=True)]
+
+    got = driving_analysis.parked_share([a, b, c], [], 68.6, readings)
+    assert got["sentry_on"]["gaps"] == 1          # the second park, read
+    assert got["unknown"]["gaps"] == 1            # the first, not
+
+    unread = got["unread_parks"]
+    assert len(unread) == 1
+    assert unread[0]["after_drive_id"] == 1
+    assert unread[0]["place"] == "Home"
+    assert unread[0]["hours"] == pytest.approx(9.0)
+    # The diagnosis: a reading 40 s before it opened, so the state was being
+    # recorded and the gap boundary missed it.
+    assert unread[0]["nearest"]["before"]["sec"] == 40
+    assert unread[0]["nearest"]["before"]["armed"] is False
+
+    # With nothing recorded at all, the same park reports no neighbour rather
+    # than pretending to a diagnosis.
+    blind = driving_analysis.parked_share([a, b, c], [], 68.6, [])
+    assert blind["unknown"]["gaps"] == 2
+    assert all(u.get("nearest") is None for u in blind["unread_parks"])

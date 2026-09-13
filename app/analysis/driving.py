@@ -598,6 +598,37 @@ class SentryIndex:
         seen = [st for st in self._state[lo:hi] if st is not None]
         return any(seen) if seen else None
 
+    def around(self, start, end) -> dict[str, Any]:
+        """The nearest reading either side of a gap, for diagnosing an unread one.
+
+        A park with no reading INSIDE it cannot be attributed, and there are
+        three quite different reasons for that which this tells apart:
+
+        - nothing either side within hours: the car was not streaming, and
+          nothing can be done about that park, ever;
+        - a reading seconds before the gap opens: the recording works and the
+          BOUNDARY is off, which is a bug and fixable;
+        - readings far either side but none within: an ordinary quiet park that
+          predates the state being recorded at all.
+
+        Guessing which of those it is from the outside is how a "fix" gets
+        written for the wrong one, so this reports rather than infers.
+        """
+        out: dict[str, Any] = {"before": None, "after": None}
+        lo = bisect_left(self._ts, start)
+        if lo > 0:
+            out["before"] = {
+                "sec": round((start - self._ts[lo - 1]).total_seconds()),
+                "armed": self._state[lo - 1],
+            }
+        hi = bisect_right(self._ts, end)
+        if hi < len(self._ts):
+            out["after"] = {
+                "sec": round((self._ts[hi] - end).total_seconds()),
+                "armed": self._state[hi],
+            }
+        return out
+
 
 def _sentry_index(readings: Any) -> SentryIndex:
     """A SentryIndex over ``readings``, or ``readings`` itself if already one.
@@ -791,6 +822,7 @@ def parked_share(drives: list[Any], charges: list[Any] | None,
     pts = {k: 0.0 for k in states}
     hrs = {k: 0.0 for k in states}
     gaps = {k: 0 for k in states}
+    unread: list[dict[str, Any]] = []
 
     for a, b in zip(ordered, ordered[1:]):
         hours = (b.start_time - a.end_time).total_seconds() / 3600.0
@@ -807,6 +839,19 @@ def parked_share(drives: list[Any], charges: list[Any] | None,
         armed = index.state(a.end_time, b.start_time) if index else None
         key = ("sentry_on" if armed else
                "sentry_off" if armed is False else "unknown")
+        if key == "unknown":
+            # Named, not just counted. "?? is still there" is unanswerable
+            # from a bare total: it cannot say whether one old park is ageing
+            # out of the window or every new one is still going unread.
+            row_gap = {
+                "at": a.end_time.isoformat(timespec="minutes"),
+                "hours": round(hours, 2),
+                "place": getattr(a, "end_location", None),
+                "after_drive_id": getattr(a, "id", None),
+            }
+            if index is not None:
+                row_gap["nearest"] = index.around(a.end_time, b.start_time)
+            unread.append(row_gap)
         # Signed, for the reason _gap_totals is: clipping each gap at zero
         # rectifies the rounding, and a total built from rectified noise reads
         # high by exactly the half it threw away.
@@ -856,6 +901,10 @@ def parked_share(drives: list[Any], charges: list[Any] | None,
         "sentry_off": row(("sentry_off",)),
         "sentry_on": row(("sentry_on",)),
         "unknown": row(("unknown",)),
+        # Which parks could not be attributed, and what was seen near them.
+        # Newest first, because the question asked of this list is always
+        # "are the RECENT ones still unread?"
+        "unread_parks": list(reversed(unread))[:20],
         # Stated rather than left to be checked: the three parts are measured
         # separately and must come back to the whole.
         "reconciles": abs(total["pct"] - sum(
