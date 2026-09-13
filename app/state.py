@@ -127,6 +127,14 @@ PURGED_STALE_DRIVES_KEY = "purged_stale_drives"  # JSON {at, cutover, rows:
 # overwrite each other, which is how the dedupe backup came to have no way back.
 # /api/data/restore-stale-drives puts them back.
 
+PROMOTE_FAIL_KEY = "promote_last_error"  # JSON {at, where, error}: the last
+# time an automatic promotion of streamed trips raised, and what it said.
+# Both callers catch and roll back, because a sync that dies there loses the
+# poll, the charges and the alerts too — but catching it silently meant a trip
+# could stay staged and invisible for ever with nothing anywhere saying why,
+# which is indistinguishable from the car not having been driven. Cleared on
+# the first run that succeeds, so it only ever describes a live fault.
+
 MATRIX_SINCE_KEY = "matrix_since"  # JSON {last_trips} or {from}: where the
 # driving matrix should START, when the telemetry cutover is not narrow enough.
 # The point of it is that a report can be confined to trips the CURRENT logic

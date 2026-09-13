@@ -1631,6 +1631,17 @@ def health(session: Session = Depends(get_session)):
         # makes that unreachable — so a service found asleep has not been
         # called, whatever the cron's dashboard claims.
         "sync": _sync_liveness(session),
+        # Finished journeys the stream has staged but that are not in the drive
+        # history yet, and why if something is stopping them.
+        #
+        # This is the state a person actually asks about — "I drove half an
+        # hour ago and it is not there" — and nothing could answer it. Both
+        # automatic promotions catch their exception and roll back, which is
+        # right (a sync that dies there loses the poll, the charges and the
+        # alerts too) and was silent, which is not: a trip could sit staged
+        # indefinitely and the dashboard would look exactly like a car nobody
+        # had driven.
+        "promotion": _promotion_health(session),
         # Schema guards the boot declined to install. _ensure_unique_index
         # refuses rather than failing the boot when the data cannot satisfy an
         # index — the right trade, but it reported the refusal only to the
@@ -3561,6 +3572,76 @@ def _clear_promote_refused(session: Session) -> None:
         state.put(session, state.PROMOTE_REFUSED_KEY, "")
 
 
+def _promotion_health(session: Session) -> dict:
+    """Staged-but-not-promoted trips, and the last automatic failure if any.
+
+    ``staged`` counts finished shadow trips the ingest has parked in
+    TELEMETRY_TRIPS_KEY. In the ordinary case they are carried into the Drive
+    table within a tick and this is small or zero; a number that stays up
+    across ticks means promotion is not getting through, and ``last_error``
+    says what stopped it.
+
+    Deliberately cheap — two state reads and no query — because it is on the
+    health endpoint, which the cron hits on a schedule.
+    """
+    import json as _json
+
+    try:
+        staged = len(_json.loads(
+            state.get(session, state.TELEMETRY_TRIPS_KEY) or "[]") or [])
+    except ValueError:
+        staged = None
+    err = None
+    try:
+        err = _json.loads(state.get(session, state.PROMOTE_FAIL_KEY) or "null")
+    except ValueError:
+        err = {"error": "unreadable"}
+    return {
+        "staged": staged,
+        "last_error": err,
+        # Said plainly, because the numbers alone do not say which way to read
+        # them: staged trips with no error are in flight, staged trips WITH one
+        # are stuck.
+        "verdict": ("stuck" if err and staged else
+                    "failing" if err else
+                    "in flight" if staged else "clear"),
+        "max_per_run": PROMOTE_AUTO_MAX_ADD,
+    }
+
+
+def _record_promote_result(session: Session, where: str,
+                           err: BaseException | None) -> None:
+    """Remember that an automatic promotion failed, or that it stopped failing.
+
+    Both callers swallow their exception on purpose: a /api/sync tick that dies
+    here loses the poll, the charges and the alerts as well, and a correction
+    that cannot be made is worth less than everything else the tick does. But
+    swallowing it silently meant a finished journey could sit staged and
+    invisible indefinitely with nothing anywhere saying why — which on the
+    dashboard is indistinguishable from not having driven.
+
+    Written with its own session state, and never allowed to raise: this runs
+    inside an except block, and a failure to record a failure must not replace
+    the original one.
+    """
+    import json as _json
+
+    try:
+        if err is None:
+            if state.get(session, state.PROMOTE_FAIL_KEY):
+                state.put(session, state.PROMOTE_FAIL_KEY, "")
+                session.commit()
+            return
+        state.put(session, state.PROMOTE_FAIL_KEY, _json.dumps({
+            "at": sync_mod.now_local().isoformat(timespec="seconds"),
+            "where": where,
+            "error": f"{type(err).__name__}: {err}"[:400],
+        }))
+        session.commit()
+    except Exception:  # noqa: BLE001 — see the docstring
+        session.rollback()
+
+
 def _promote_shadow_trips(session: Session, apply: bool = False,
                           days: int = PROMOTE_MAX_DAYS,
                           max_add: int | None = None) -> list[dict]:
@@ -4353,12 +4434,17 @@ def sync_now(wake: bool = Query(False), session: Session = Depends(get_session))
             session,
             _promote_shadow_trips(session, apply=True,
                                   max_add=PROMOTE_AUTO_MAX_ADD))
-    except Exception:  # noqa: BLE001 — never let this break the sync
+        _record_promote_result(session, "sync", None)
+    except Exception as exc:  # noqa: BLE001 — never let this break the sync
         # A correction that cannot be made is a stale figure on the
         # dashboard. A sync that dies here is no figures at all, plus no
         # charges, no alerts and no history — so this is caught and the tick
         # carries on. The next one tries again.
+        #
+        # Recorded, though. Caught and forgotten, this is a journey that never
+        # appears and never explains itself.
         session.rollback()
+        _record_promote_result(session, "sync", exc)
     # And give back the ground a trip lost when its stream died before the car
     # finished parking. Tail amendment in the ingest only reaches records that
     # arrive within SHADOW_TAIL_SEC of the end, so a car that parks underground
@@ -10820,12 +10906,14 @@ def summary(
             session,
             _promote_shadow_trips(session, apply=True,
                                   max_add=PROMOTE_AUTO_MAX_ADD))
-    except Exception:  # noqa: BLE001
+        _record_promote_result(session, "summary", None)
+    except Exception as exc:  # noqa: BLE001
         # Rolled back rather than only swallowed: on Postgres the failed
         # statement aborts the transaction, and every query the rest of this
         # summary makes would fail behind it. The unique constraint on drives
         # can raise here when a dashboard load races the ingest.
         session.rollback()
+        _record_promote_result(session, "summary", exc)
     _mark("settle")
 
     settings = get_settings()

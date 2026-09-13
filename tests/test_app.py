@@ -9508,3 +9508,58 @@ def test_the_fast_highway_band_is_stored_and_ordered_against_the_highway_one():
         sess.commit()
         sess.close()
         settings.app_passcode = old_pc
+
+
+def test_a_failing_promotion_is_recorded_instead_of_vanishing():
+    """"I drove half an hour ago and the trip is not there" had no answer.
+
+    Both automatic promotions catch their exception and roll back, which is the
+    right trade — a /api/sync tick that dies there loses the poll, the charges
+    and the alerts as well — but they did it silently. A finished journey could
+    sit staged indefinitely while the dashboard looked exactly like a car
+    nobody had driven, and nothing anywhere said why.
+    """
+    from app import state
+    from app.api import routes
+    from app.database import SessionLocal
+
+    settings = get_settings()
+    old_pc = settings.app_passcode
+    settings.app_passcode = ""
+    sess = SessionLocal()
+    prev = state.get(sess, state.PROMOTE_FAIL_KEY)
+    try:
+        state.put(sess, state.PROMOTE_FAIL_KEY, "")
+        sess.commit()
+        with TestClient(app) as client:
+            clear = client.get("/api/health").json()["promotion"]
+            assert clear["last_error"] is None
+            assert clear["verdict"] in ("clear", "in flight")
+
+            # A failure is written down, with where it happened and what it
+            # said — enough to act on without reading the host's logs.
+            routes._record_promote_result(
+                sess, "sync", RuntimeError("drives_vin_start_uniq violated"))
+            got = client.get("/api/health").json()["promotion"]
+            assert got["last_error"]["where"] == "sync"
+            assert "drives_vin_start_uniq" in got["last_error"]["error"]
+            assert got["last_error"]["at"]
+            # Staged trips WITH an error is stuck; without one they are simply
+            # in flight, and the two need different responses.
+            assert got["verdict"] in ("stuck", "failing")
+
+            # And it clears itself on the first run that works, so it can only
+            # ever describe a live fault.
+            routes._record_promote_result(sess, "sync", None)
+            assert client.get("/api/health").json()["promotion"]["last_error"] is None
+
+        # Recording a failure must never raise in place of the original: this
+        # runs inside an except block.
+        broken = SessionLocal()
+        broken.close()
+        routes._record_promote_result(broken, "sync", RuntimeError("x"))
+    finally:
+        state.put(sess, state.PROMOTE_FAIL_KEY, prev or "")
+        sess.commit()
+        sess.close()
+        settings.app_passcode = old_pc
