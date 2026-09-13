@@ -735,6 +735,97 @@ def window_accounting(drives: list[Any], charges: list[Any] | None,
     }
 
 
+def parked_share(drives: list[Any], charges: list[Any] | None,
+                 capacity_kwh: float, readings: list[Any]) -> dict[str, Any]:
+    """How much battery the window's parking actually ate, split by Sentry state.
+
+    The question the codes were invented to answer, and it is a SUM rather than
+    a fit: add up what the gauge lost across every parked gap, and attribute
+    each gap to the Sentry state it was in. SoC points are already percent, so
+    the headline needs no capacity, no rate, and no model.
+
+    That is why this exists beside parked_decomposition rather than being
+    derived from it. A rate is a generalisation — what an hour of parking costs
+    in general — and it has to earn that with a plausibility band, a minimum,
+    and a signal-to-noise test, any of which can refuse and leave the row
+    blank. A total does not generalise and so owes none of it: there is always
+    an answer to "what did this month cost", and the only honest addition is
+    how much of it is the gauge's own rounding.
+
+    The split is DIRECTLY MEASURED here, which is the other reason to prefer
+    it. In the rate model SE is a residual, PK minus ID, so parks whose Sentry
+    state nothing recorded land in it by subtraction and inflate it. Here every
+    gap is attributed to the state it was actually in, and the ones nothing
+    recorded get their own line instead of being quietly charged to Sentry:
+
+        PK = ID + SE + unknown
+
+    exactly, as a sum of measurements, with nothing standing in for anything.
+    """
+    ordered = sorted(drives, key=lambda d: d.start_time)
+    index = _sentry_index(readings) if readings else None
+    charge_starts = sorted(c.start_time for c in (charges or []))
+    states = ("sentry_off", "sentry_on", "unknown")
+    pts = {k: 0.0 for k in states}
+    hrs = {k: 0.0 for k in states}
+    gaps = {k: 0 for k in states}
+
+    for a, b in zip(ordered, ordered[1:]):
+        hours = (b.start_time - a.end_time).total_seconds() / 3600.0
+        if hours <= 0:
+            continue
+        # The same three exclusions window_accounting makes, so the hours here
+        # are the hours it calls parked and the two reports cannot disagree.
+        if any(a.end_time < c < b.start_time for c in charge_starts):
+            continue
+        moved = _gap_moved_km(a, b)
+        if (moved is not None and moved > PARKED_GAP_MAX_MOVE_KM) or (
+                b.start_soc - a.end_soc > SOC_RISE_TOLERANCE_PCT):
+            continue
+        armed = index.state(a.end_time, b.start_time) if index else None
+        key = ("sentry_on" if armed else
+               "sentry_off" if armed is False else "unknown")
+        # Signed, for the reason _gap_totals is: clipping each gap at zero
+        # rectifies the rounding, and a total built from rectified noise reads
+        # high by exactly the half it threw away.
+        pts[key] += a.end_soc - b.start_soc
+        hrs[key] += hours
+        gaps[key] += 1
+
+    def row(keys: tuple[str, ...]) -> dict[str, Any]:
+        points = sum(pts[k] for k in keys)
+        hours = sum(hrs[k] for k in keys)
+        count = sum(gaps[k] for k in keys)
+        out = {
+            # SoC points ARE percent, so this is the measurement itself.
+            "pct": round(points, 2),
+            # What the 1% gauge steps alone would contribute. Not a gate here,
+            # only a caveat: a total is worth reporting even when the rounding
+            # is a large part of it, so long as it says so.
+            "pct_noise": round(_noise_points(count), 2) or None,
+            "hours": round(hours, 1),
+            "gaps": count,
+            "kwh": round(points / 100.0 * capacity_kwh, 2) if capacity_kwh else None,
+        }
+        # The rate, where the hours can carry one. Derived from the same sum,
+        # so it can never disagree with the total above it.
+        out["kw"] = (round(points / 100.0 * capacity_kwh / hours, 4)
+                     if hours and capacity_kwh and points > 0 else None)
+        return out
+
+    total = row(states)
+    return {
+        "total": total,
+        "sentry_off": row(("sentry_off",)),
+        "sentry_on": row(("sentry_on",)),
+        "unknown": row(("unknown",)),
+        # Stated rather than left to be checked: the three parts are measured
+        # separately and must come back to the whole.
+        "reconciles": abs(total["pct"] - sum(
+            round(pts[k], 2) for k in states)) < 0.011,
+    }
+
+
 def parked_decomposition(drives: list[Any], charges: list[Any] | None,
                          capacity_kwh: float,
                          readings: list[Any]) -> dict[str, Any]:
@@ -2327,23 +2418,33 @@ MATRIX_DEFINITIONS = {
                   "waiting. Worst per kilometre, cheapest per hour — the car "
                   "burns little because it covers little."},
         {"code": "PK", "name": "Park Overall",
-         "means": "Every qualifying parked hour in the window, Sentry on or "
-                  "off. The bill — what the car cost to leave standing, all "
-                  "in, not a Sentry-off best case. PK = ID + SE."},
+         "means": "What the window's parking cost, as a percentage of the "
+                  "battery: add up what the gauge lost across every parked "
+                  "gap. A measurement, not a model, so it is always there. "
+                  "PK = ID + SE + ??, exactly."},
         {"code": "ID", "name": "Idling, Sentry off",
-         "means": "The parks Sentry was measurably OFF for. The floor of what "
-                  "this car costs to own: doors locked, nothing watching."},
+         "means": "The share of PK lost across parks Sentry was measurably OFF "
+                  "for. The floor of what this car costs to own: doors locked, "
+                  "nothing watching."},
         {"code": "SE", "name": "Sentry impact",
-         "means": "PK minus ID — everything in the bill that bare idling does "
-                  "not explain. What arming Sentry cost THIS window, so it "
-                  "depends on how often it was armed, unlike the per-armed-hour "
-                  "rate carried beside it. Parks where no reading said either "
-                  "way land here too, which makes it an upper bound."},
+         "means": "The share of PK lost across parks Sentry was armed for — "
+                  "measured on those parks, not inferred by subtracting ID from "
+                  "PK. That matters: subtracting would charge every park of "
+                  "unknown state to Sentry as well."},
+        {"code": "??", "name": "Parks with no Sentry reading",
+         "means": "Parked time nothing said either way about. A Sentry state is "
+                  "read from the readings inside a gap, and a short stop often "
+                  "has none. Shown as its own row so the other three add up, "
+                  "instead of being quietly charged to Sentry."},
     ],
     "columns": [
         {"name": "Wh/km", "means": "Energy per kilometre, weighted by distance "
                                    "rather than averaged across trips — a 2 km "
-                                   "crawl should not move it as far as a 40 km run."},
+                                   "crawl should not move it as far as a 40 km "
+                                   "run. A parked row has no kilometres, so it "
+                                   "carries the percentage of the battery that "
+                                   "parking ate instead, with how much of the "
+                                   "figure is 1% gauge steps beside it."},
         {"name": "kW", "means": "Energy per hour. The unit a parked car can also "
                                 "be quoted in, so driving and standing still "
                                 "compare on one scale."},

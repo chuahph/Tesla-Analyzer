@@ -8362,7 +8362,7 @@ def driving_matrix(days: int = Query(30, ge=1, le=730),
     parked_hours = acc["parked"]["hours"]
     drive_kwh = acc["driving"]["kwh"]
 
-    def parked(kw: float | None, basis: str) -> dict[str, Any]:
+    def parked(kw: float | None, basis: str, measured: dict | None = None) -> dict[str, Any]:
         """One parked row's figures, from a rate in kW.
 
         ``basis`` says what the rate IS, and the caller must not have to infer
@@ -8381,6 +8381,16 @@ def driving_matrix(days: int = Query(30, ge=1, le=730),
             # says the window is too thin, where a bare dash says nothing.
             "hours": parked_hours, "kwh": None, "kwh_basis": None,
         }
+        if measured is not None:
+            # The measurement comes first and does not depend on the fit. These
+            # are what the gauge lost in this state over the window, the hours
+            # it lost them across, and how much of the figure is 1% steps.
+            row.update({
+                "pct": measured["pct"], "pct_noise": measured["pct_noise"],
+                "hours": measured["hours"], "gaps": measured["gaps"],
+                "kwh": measured["kwh"], "kwh_basis": "measured",
+                "measured_kw": measured["kw"],
+            })
         if kw is None or not capacity_kwh:
             return row
         per_hour = kw / capacity_kwh * 100.0
@@ -8402,8 +8412,9 @@ def driving_matrix(days: int = Query(30, ge=1, le=730),
         # included — so the hours it was fitted from are the hours it is applied
         # to. It used to be the six-hour deep-sleep rate stretched over parked
         # time it had never seen, which understated by the awake premium.
-        row["kwh"] = round(kw * parked_hours, 2)
-        row["kwh_basis"] = "measured"
+        if measured is None:
+            row["kwh"] = round(kw * parked_hours, 2)
+            row["kwh_basis"] = "measured"
         return row
 
     # PK = ID + SE, exactly, because all three come off one gap set: PK is
@@ -8414,43 +8425,49 @@ def driving_matrix(days: int = Query(30, ge=1, le=730),
     # smaller was not a part of the larger.
     park = driving_analysis.parked_decomposition(
         list(drives), list(charges), capacity_kwh, readings)
+    # The measured answer, which is the one that was actually wanted: what
+    # share of the battery this window's parking ate, and how much of that was
+    # Sentry. A sum, not a fit — so it is always there, where the rate can
+    # refuse — and the split is attributed gap by gap rather than by
+    # subtracting one rate from another, which is what let unclassified parks
+    # inflate SE. share["unknown"] is now a row of its own instead.
+    share_of = driving_analysis.parked_share(
+        list(drives), list(charges), capacity_kwh, readings)
+    # PK = ID + SE + unknown, as a sum of measurements with nothing standing in
+    # for anything. The unknown parks get a row rather than being folded into
+    # SE by subtraction, which is what made the old SE an upper bound and needed
+    # a footnote to say so.
     out["parked"] = [
         {"code": "PK", "name": "Park Overall",
-         "gaps": acc["parked"]["gaps"],
-         # How much of the rate is the gauge's own resolution, and the
-         # six-hour deep-sleep figure for comparison. The gap between
-         # deep_sleep_kw and kw IS the awake premium — what the car draws in
-         # the first minutes of a stop, over what it settles to — which is the
-         # thing pooling short parks exists to capture.
+         # The fitted rate and its noise stay alongside, because "what does an
+         # hour of parking cost in general" is a different and still useful
+         # question from "what did this window cost". Where they disagree the
+         # measurement is the one to believe: it is this window, not a model of
+         # it.
          "noise_kw": park["pk_noise_kw"],
          "deep_sleep_kw": park["deep_sleep_kw"],
          "why": park["pk_why"],
-         **parked(park["pk_kw"], "total")},
-        # gaps matches hours — the TOTAL parked gaps, not this state's. All
-        # three rows are priced over every parked hour (that is what keeps
-        # PK = ID + SE true in the energy column), so counting this row's own
-        # state's gaps beside all of the hours read "1182 h over 0 parks".
-        # The per-state evidence is hours_fitted, and parked_evidence carries
-        # the full split.
+         **parked(park["pk_kw"], "total", share_of["total"])},
         {"code": "ID", "name": "Idling, Sentry off",
-         "gaps": acc["parked"]["gaps"],
-         "hours_state": acc["parked"]["by_state"]["sentry_off"],
          "noise_kw": park["id_noise_kw"],
          "why": park["id_why"],
-         **parked(park["id_kw"], "total")},
-        # Evidence for SE is the ARMED parks, not the residual's own hours:
-        # what makes "Sentry costs something" measurable is having parked with
-        # it on. armed_kw is the direct fit on those same hours, carried so the
-        # residual can be checked against something rather than believed.
+         **parked(park["id_kw"], "total", share_of["sentry_off"])},
         {"code": "SE", "name": "Sentry impact",
-         "gaps": acc["parked"]["gaps"],
-         "hours_state": acc["parked"]["by_state"]["sentry_on"],
+         # Measured now, not a residual: what the gauge lost across the parks
+         # Sentry was actually armed for.
          "armed_kw": park["armed_kw"],
-         "why": (None if park["se_kw"] is not None else
-                 (park["pk_why"] or park["id_why"]
-                  or "needs parks both with and without Sentry to separate")),
-         **parked(park["se_kw"], "residual")},
+         **parked(park["armed_kw"], "total", share_of["sentry_on"])},
     ]
+    if share_of["unknown"]["gaps"]:
+        # Only when there are any, but never hidden when there are: these hours
+        # are in PK and in neither of the two named states, so leaving them out
+        # would make the three rows fail to add up with no way to see why.
+        out["parked"].append(
+            {"code": "??", "name": "Parks with no Sentry reading",
+             "why": ("no reading fell inside these parks, so they belong to "
+                     "neither ID nor SE — a short stop often has none"),
+             **parked(None, "total", share_of["unknown"])})
+    out["parked_share"] = share_of
     # Every row's share of the window, driving and parked on one denominator.
     # PK is the parked total and ID and SE are its parts, so only PK counts
     # toward it — adding all three would bill the parked hours twice.

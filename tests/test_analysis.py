@@ -3266,3 +3266,62 @@ def test_a_parked_rate_is_gated_on_its_own_noise_not_on_a_flat_hour_count():
         why = driving_analysis._rate_refusal(
             pts, hrs, cap, driving_analysis.STANDBY_ALL_MIN_TOTAL_HOURS, gaps)
         assert gated == (why is None)
+
+
+def test_the_parked_share_is_a_measured_sum_and_the_three_states_add_up():
+    """What was actually wanted: how much battery this window's parking ate, and
+    how much of that was Sentry. That is a SUM of what the gauge lost, not a
+    fitted rate — so it needs no plausibility band, no minimum hours and no
+    signal-to-noise test, and unlike the rate it is always there.
+
+    And the split is attributed gap by gap. In the rate model SE is a residual,
+    PK minus ID, so parks whose Sentry state nothing recorded land in it by
+    subtraction and inflate it. Here they get their own line and the three parts
+    come back to the whole exactly.
+    """
+    from datetime import timedelta
+    from types import SimpleNamespace
+
+    cap = 68.6
+    history = _chain([
+        ("Home",     100.0, 99.0),   # quiet gap:    1 point
+        ("Home",      98.0, 97.0),   # quiet gap:    1 point
+        ("Resort",    96.0, 95.0),   # armed gap:    4 points
+        ("Resort",    91.0, 90.0),   # armed gap:    4 points
+        ("Basement",  86.0, 85.0),   # unknown gap:  2 points
+        ("Home",      83.0, 82.0),
+    ], gap_hours=11.0)
+    # Readings for the first four gaps only; the basement park has none.
+    readings = [SimpleNamespace(ts=d.end_time + timedelta(hours=1),
+                                sentry_mode=(i >= 2))
+                for i, d in enumerate(history[:4])]
+
+    got = driving_analysis.parked_share(history, [], cap, readings)
+    assert got["reconciles"]
+
+    # Percent is the raw measurement — SoC points already ARE percent, so the
+    # headline needs no capacity and no model.
+    assert got["sentry_off"]["pct"] == pytest.approx(2.0)
+    assert got["sentry_on"]["pct"] == pytest.approx(8.0)
+    assert got["unknown"]["pct"] == pytest.approx(2.0)
+    assert got["total"]["pct"] == pytest.approx(12.0)
+    # PK = ID + SE + unknown, exactly, with nothing standing in for anything.
+    assert (got["sentry_off"]["pct"] + got["sentry_on"]["pct"]
+            + got["unknown"]["pct"]) == pytest.approx(got["total"]["pct"])
+
+    # Hours and gaps split the same way, and the energy follows the percent.
+    assert got["sentry_off"]["gaps"] == 2 and got["sentry_on"]["gaps"] == 2
+    assert got["unknown"]["gaps"] == 1
+    assert got["total"]["hours"] == pytest.approx(55.0)
+    assert got["total"]["kwh"] == pytest.approx(12.0 / 100.0 * cap, abs=0.01)
+
+    # The rounding is reported as a caveat, not used as a gate: a total is worth
+    # having even where the gauge is a large part of it, so long as it says so.
+    assert got["total"]["pct_noise"] == pytest.approx(0.41 * 5 ** 0.5, abs=0.01)
+
+    # Crucially, SE here is what the armed parks actually lost — not PK minus
+    # ID, which would have charged the basement's 2 points to Sentry as well.
+    fitted = driving_analysis.parked_decomposition(history, [], cap, readings)
+    assert fitted["pk_kw"] is not None
+    residual_se_pct = (fitted["pk_kw"] - (fitted["id_kw"] or 0.0)) * 55.0 / cap * 100.0
+    assert got["sentry_on"]["pct"] < residual_se_pct

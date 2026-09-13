@@ -469,10 +469,21 @@ def test_the_condition_cuts_are_stored_and_re_sort_the_same_trips():
             # draw, so the residual must never carry one — read off a
             # difference it would be a lifetime for a habit, which is nonsense.
             park = {row["code"]: row for row in base["parked"]}
-            assert [r["code"] for r in base["parked"]] == ["PK", "ID", "SE"]
-            assert park["PK"]["basis"] == park["ID"]["basis"] == "total"
-            assert park["SE"]["basis"] == "residual"
-            assert park["SE"]["days_to_5pct"] is None
+            assert [r["code"] for r in base["parked"]][:3] == ["PK", "ID", "SE"]
+            # A fourth row appears only when some park had no Sentry reading —
+            # never hidden when there is one, or the three would not add up with
+            # no way to see why.
+            assert [r["code"] for r in base["parked"]][3:] in ([], ["??"])
+            assert all(r["basis"] == "total" for r in base["parked"])
+
+            # The percent is the measurement, and the three named states plus
+            # the unclassified ones come back to the whole exactly.
+            s = base["parked_share"]
+            assert s["reconciles"]
+            assert (s["sentry_off"]["pct"] + s["sentry_on"]["pct"]
+                    + s["unknown"]["pct"]) == pytest.approx(s["total"]["pct"],
+                                                            abs=0.02)
+            assert park["PK"]["pct"] == pytest.approx(s["total"]["pct"])
             # The split says what it could see, so a blank row can be read.
             ev = base["parked_evidence"]
             assert ev["min_gap_hours"] == pytest.approx(6.0)
@@ -492,16 +503,23 @@ def test_the_condition_cuts_are_stored_and_re_sort_the_same_trips():
                       + a["charging"]["hours"] + a["excluded"]["hours"]
                       + a["unbounded"]["hours"])
             assert placed == pytest.approx(a["span_hours"], abs=0.2)
-            # A parked row reports its hours whether or not a rate was fitted —
-            # that is what makes a blank rate readable instead of a bare dash —
-            # and says WHICH of the three causes a blank one was.
-            assert all(r["hours"] == a["parked"]["hours"] for r in base["parked"])
-            assert all(r["why"] for r in base["parked"] if r["kw"] is None)
+            # Each parked row now reports ITS OWN state's hours, measured, not
+            # the parked total repeated four times — that is what makes the
+            # rows an accounting rather than one rate shown four ways. PK is
+            # the total, and the states sum back to it.
+            assert park["PK"]["hours"] == pytest.approx(a["parked"]["hours"])
+            assert sum(r["hours"] for r in base["parked"]
+                       if r["code"] != "PK") == pytest.approx(
+                           park["PK"]["hours"], abs=0.2)
+            # Every row has a percent whether or not a rate could be fitted.
+            # That is the whole point of measuring rather than modelling: a
+            # blank rate no longer means a blank row.
+            assert all(r["pct"] is not None for r in base["parked"])
             # Driving energy is measured; parked energy is the deep-sleep rate
             # projected onto every parked hour, and says so rather than passing
             # itself off as a measurement.
-            # Parked energy is measured now, not projected: the rate is pooled
-            # from the same gaps it is applied to.
+            # Parked energy is measured now, not projected — it is the sum of
+            # what the gauge lost, not a rate applied to hours.
             assert all(r.get("kwh_basis") in (None, "measured")
                        for r in base["parked"])
             assert all("kwh" in r for r in base["modes"])

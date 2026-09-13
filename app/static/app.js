@@ -2244,6 +2244,18 @@ function renderMatrix(d) {
     return bits.length ? ` · ${bits.join(" · ")}` : "";
   };
   const parkSub = (p) => {
+    // A parked row always has something to say now, because the percent is
+    // measured. The old version led with why the RATE was missing, which read
+    // as "nothing to report" when the actual answer was sitting right there.
+    if (p.pct != null) {
+      const bits = [`${num(p.pct, 2)}% of the battery over ${num(p.hours, 0)} h in ${p.gaps} park${p.gaps === 1 ? "" : "s"}`];
+      if (p.pct_noise) bits.push(`±${num(p.pct_noise, 2)}% of that is 1% gauge steps`);
+      if (p.kw == null && p.measured_kw) bits.push(`${num(p.measured_kw, 3)} kW across those hours`);
+      if (p.why && p.kw == null && p.code !== "??") bits.push(`no general rate yet — ${p.why}`);
+      else if (p.why && p.code === "??") bits.push(p.why);
+      if (p.deep_sleep_kw) bits.push(`${num(p.deep_sleep_kw, 3)} kW once properly asleep`);
+      return bits.join(" · ");
+    }
     if (p.kw == null) {
       // The server says WHY, in the row's own terms. It used to be one dash
       // and one guess, which told a dashboard showing 1,182 parked hours that
@@ -2271,12 +2283,16 @@ function renderMatrix(d) {
     const armed = p.armed_kw ? ` · ${num(p.armed_kw, 3)} kW per armed hour` : "";
     return `${num(p.pct_per_day, 2)}%/day${ofPk}${armed}${hrs(p)}${proj(p)}`;
   };
+  // The percent IS the answer for a parked row — how much of the battery this
+  // window's parking ate — so it goes where Wh/km sits on a driving row rather
+  // than being buried in the sub-line. It is a measured sum, always present,
+  // where the kW beside it is a fit that can refuse.
   const park = parked.map((p) => `
       <tr class="mx-parked">
         <td class="mx-code">${p.code}</td>
         <td class="mx-name">${p.name}<span class="mx-sub">${parkSub(p)}</span></td>
-        <td>—</td>
-        <td>${num(p.kw, 3)}</td>
+        <td>${p.pct == null ? "—" : `${num(p.pct, 1)}%${p.pct_noise ? `<span class="mx-rank">±${num(p.pct_noise, 1)}</span>` : ""}`}</td>
+        <td>${num(p.kw ?? p.measured_kw, 3)}</td>
         <td>${num(p.kwh, 2)}</td>
         <td>—</td>
         <td>—</td>
@@ -2319,16 +2335,19 @@ function renderMatrix(d) {
          aside.length ? ` Not priced at all: ${aside.join(", ")}.` : ""}`
     : "";
   const ev = d.parked_evidence;
+  // The unclassified parks have their own row now, so nothing here has to warn
+  // that SE is an upper bound: SE is measured, and they are not inside it. What
+  // is still worth saying is WHY there are any, since it is about what was
+  // observed rather than about the car.
   const sh = a && a.parked && a.parked.short;
-  const unknown = ev && ev.hours && ev.hours.unknown > 0
-    ? `${num(ev.hours.unknown, 0)} parked h had no Sentry reading either way — counted in PK, and in SE by subtraction, so SE reads high.${
-        sh && sh.hours ? ` ${num(sh.hours, 0)} h of the parked time is in stops under ${num(sh.under_hours, 0)} h, and ${num(sh.by_state.unknown, 0)} h of those are the unclassified ones — a short stop is less likely to contain a Sentry reading, which is about what was observed, not about the car.` : ""}`
+  const unknown = sh && sh.by_state && sh.by_state.unknown > 0
+    ? `${num(sh.by_state.unknown, 0)} of the ${num(sh.hours, 0)} h spent in stops under ${num(sh.under_hours, 0)} h have no Sentry reading — a short stop often contains none, which is why the ?? row exists.`
     : "";
   box.innerHTML = `
     <div class="mx-scroll">
       <table class="mx-table">
         <thead><tr>
-          <th></th><th>Condition</th><th>Wh/km</th><th>kW</th><th>kWh</th><th>Range</th><th>km/1%</th>
+          <th></th><th>Condition</th><th>Wh/km<br><span class="mx-sub">%batt parked</span></th><th>kW</th><th>kWh</th><th>Range</th><th>km/1%</th>
         </tr></thead>
         <tbody>${rows}${park}</tbody>
       </table>
