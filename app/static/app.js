@@ -3397,7 +3397,11 @@ function setBuildInfo(info) {
   if (info.sha) parts.push(info.sha);
   if (info.time) parts.push(`${info.time} MYT`);
   el.textContent = parts.length ? `⚙ ${parts.join(" · ")}` : "";
-  if (info.sha && pageBuildSha === null) pageBuildSha = info.sha;
+  // The build this page's CODE came from, stamped into the HTML by the server
+  // (see main.index). Preferred over the first health response, which reports
+  // the build the SERVER is on — and those differ precisely in the case this
+  // is here to catch: a page kept open across a deploy.
+  if (pageBuildSha === null) pageBuildSha = window.PAGE_BUILD || info.sha || null;
   if (info.sha && pageBuildSha && info.sha !== pageBuildSha) {
     // Deliberately a button and not an automatic reload: a reload mid-edit
     // loses whatever was half-typed, and this can fire while the user is doing

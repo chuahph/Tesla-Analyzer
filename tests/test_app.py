@@ -9359,3 +9359,43 @@ def test_the_car_park_screen_is_recorded_as_pk_id_and_se():
         sess.commit()
         sess.close()
         settings.app_passcode = old_pc
+
+
+def test_the_page_stamps_its_assets_with_the_build_it_was_served_from():
+    """A reload was not reliably picking up new code, and this is why.
+
+    index.html referenced /static/app.js with no version, so the browser's HTTP
+    cache and the service worker's cache could each hand back the copy they
+    already had. Combined with a PWA that never re-fetches its own script while
+    it stays open, the dashboard showed a new build SHA in its header while
+    running an older deploy's JavaScript — which reads exactly like the server
+    not having updated.
+
+    A changing URL cannot be answered from a cache keyed on the old one. The
+    page also carries the build its own code came from, which is a different
+    question from the one /api/health answers and the only way to tell the two
+    apart.
+    """
+    from app import main as main_mod
+
+    with TestClient(app) as client:
+        r = client.get("/")
+        assert r.status_code == 200
+        body = r.text
+        v = main_mod.ASSET_VERSION
+        assert v
+        assert f'src="/static/app.js?v={v}"' in body
+        assert f'href="/static/style.css?v={v}"' in body
+        # Nothing unversioned left to be served from a stale cache.
+        assert 'src="/static/app.js"' not in body
+        assert 'href="/static/style.css"' not in body
+        # The page says which build its own code is, before any API call.
+        assert f"window.PAGE_BUILD={v!r}" in body or f'window.PAGE_BUILD="{v}"' in body
+        # And the shell itself must never be cached, or the stamp inside it
+        # would be the stale thing.
+        assert "no-cache" in r.headers.get("cache-control", "")
+
+        # The versioned URL still serves the real file.
+        asset = client.get(f"/static/app.js?v={v}")
+        assert asset.status_code == 200
+        assert "function renderMatrix" in asset.text

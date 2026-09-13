@@ -218,9 +218,63 @@ app.include_router(api_router)
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
 
+# The deployed build, resolved once per process: the app's own files cannot
+# change without a restart, so recomputing this per request would only re-read
+# the same environment variable.
+def _asset_version() -> str:
+    """A token that changes when the deployed code does.
+
+    The git SHA where the host provides one, and otherwise the newest mtime of
+    the two files being versioned — which covers local development, where there
+    is no SHA and editing a file must still bust the cache.
+    """
+    import os
+
+    sha = (os.environ.get("RENDER_GIT_COMMIT") or os.environ.get("GITHUB_SHA") or "")
+    sha = sha.strip()[:7]
+    if sha:
+        return sha
+    try:
+        return str(int(max((STATIC_DIR / name).stat().st_mtime
+                           for name in ("app.js", "style.css"))))
+    except OSError:
+        return "dev"
+
+
+ASSET_VERSION = _asset_version()
+
+
 @app.get("/")
-def index() -> FileResponse:
-    return FileResponse(STATIC_DIR / "index.html")
+def index() -> HTMLResponse:
+    """The dashboard, with its asset URLs stamped with the deployed build.
+
+    The stamp is what makes a reload reliable, and without it a reload was not.
+    index.html referenced /static/app.js with no version, so the browser's HTTP
+    cache and the service worker's cache could each hand back the copy they
+    already had — and a PWA kept open on a phone never re-fetches its own
+    script at all. The result was a dashboard showing a new build SHA in its
+    header while running code from an older deploy, which cost several rounds
+    of "it is deployed but nothing changed" before the cause was found.
+
+    A changing URL cannot be answered from a cache keyed on the old one, so
+    every deploy is fetched exactly once and then cached hard. The page itself
+    must never be cached, or the stamp inside it would be the stale thing.
+    """
+    html = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
+    html = (html
+            .replace('href="/static/style.css"',
+                     f'href="/static/style.css?v={ASSET_VERSION}"')
+            .replace('src="/static/app.js"',
+                     f'src="/static/app.js?v={ASSET_VERSION}"'))
+    # Also handed to the page directly, so setBuildInfo knows the build its own
+    # CODE came from rather than only the one the server is on now. Those are
+    # different questions — see setBuildInfo — and this is the only place that
+    # can answer the first.
+    html = html.replace(
+        "<script src=",
+        f'<script>window.PAGE_BUILD={ASSET_VERSION!r};</script>\n  <script src=',
+        1)
+    return HTMLResponse(html, headers={"Cache-Control": "no-cache, must-revalidate"})
 
 
 # Served from the root so the PWA scope covers the whole app (a service worker
