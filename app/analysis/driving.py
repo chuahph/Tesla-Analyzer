@@ -485,6 +485,44 @@ def sentry_standby_kw(drives: list[Any], charges: list[Any] | None,
         keep=lambda a, b: index.state(a.end_time, b.start_time) is armed)
 
 
+def sentry_increment_kw(drives: list[Any], charges: list[Any] | None,
+                        capacity_kwh: float,
+                        readings: list[Any]) -> float | None:
+    """What ARMING Sentry adds to a parked car's draw, in kW. None if unknown.
+
+    Not the armed rate — the difference between the armed and unarmed fits. The
+    armed rate answers "what does a watched car cost", which is already what
+    the whole-history standby fit reports for a car that is sometimes watched;
+    this answers the question an owner can act on, which is what the habit
+    itself costs on top of standing still.
+
+    A difference of two fits needs BOTH of them, so None comes back whenever
+    either half is missing rather than the half that exists. That is the same
+    rule FACTOR_MIN_DRIVES states for any other penalty measured as a
+    difference of means: a lopsided split measures the smaller sample, not the
+    habit.
+
+    It can come out negative, and that is reported rather than clamped. A
+    negative increment does not mean Sentry gives energy back; it means these
+    two fits cannot separate in the expected direction yet, and the honest
+    reading of a rate is not improved by hiding its sign. See
+    sentry_standby_kw for why the unarmed half is the shakier of the two — it
+    is an upper bound sitting close to the SoC quantum, so it is the half that
+    moves an increment around.
+
+    One index for both halves, because building it is the expensive part and
+    the two fits ask about the same gaps.
+    """
+    if not readings:
+        return None
+    index = _sentry_index(readings)
+    on = sentry_standby_kw(drives, charges, capacity_kwh, index, True)
+    off = sentry_standby_kw(drives, charges, capacity_kwh, index, False)
+    if on is None or off is None:
+        return None
+    return round(on - off, 3)
+
+
 def place_standby_kw(drives: list[Any], charges: list[Any] | None,
                      capacity_kwh: float, place: str | None) -> float | None:
     """The same standby fit, restricted to parks at ONE place.
@@ -1933,13 +1971,15 @@ MATRIX_DEFINITIONS = {
          "means": "Repeatedly stopped, or a third of the trip spent genuinely "
                   "waiting. Worst per kilometre, cheapest per hour — the car "
                   "burns little because it covers little."},
-        {"code": "PK", "name": "Parked, Sentry off",
-         "means": "Standing still with nothing watching. The floor of what this "
-                  "car costs to own."},
-        {"code": "SE", "name": "Parked, Sentry armed",
-         "means": "Standing still with the cameras running. Fitted separately "
-                  "from parks where Sentry was off, not assumed from where the "
-                  "car was."},
+        {"code": "PK", "name": "Parked, all states",
+         "means": "Every parked hour in the window, Sentry on or off. What the "
+                  "car costs to leave standing, all in — not a Sentry-off "
+                  "best case."},
+        {"code": "SE", "name": "Sentry, added cost",
+         "means": "The share of PK that arming Sentry accounts for: the armed "
+                  "fit minus the unarmed one, not the armed rate itself. It is "
+                  "inside PK, not on top of it, and it needs both halves — "
+                  "blank means one of them has too little history."},
     ],
     "columns": [
         {"name": "Wh/km", "means": "Energy per kilometre, weighted by distance "

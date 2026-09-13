@@ -464,6 +464,16 @@ def test_the_condition_cuts_are_stored_and_re_sort_the_same_trips():
             assert base["definitions"]["modes"][0]["code"] == "CH"
             assert "weekday" in base and "weekend" in base
 
+            # The parked pair: a total and a part of it, in that order, each
+            # saying which it is. A "5% lasts" figure is a property of a total
+            # draw, so the increment must never carry one — read off an
+            # increment it would be a lifetime for a habit, which is nonsense.
+            park = {row["code"]: row for row in base["parked"]}
+            assert [r["code"] for r in base["parked"]] == ["PK", "SE"]
+            assert park["PK"]["basis"] == "total"
+            assert park["SE"]["basis"] == "increment"
+            assert park["SE"]["days_to_5pct"] is None
+
             moved = client.post("/api/driving-matrix/thresholds",
                                 json={"slow_ratio_min": 0.40}).json()
             assert moved["thresholds"]["slow_ratio_min"] == pytest.approx(0.40)

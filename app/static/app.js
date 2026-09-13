@@ -2210,10 +2210,31 @@ function renderMatrix(d) {
         <td>${m.range_km ?? "—"}</td>
         <td>${num(m.km_per_pct, 1)}</td>
       </tr>`).join("");
+  // A parked row's sub-line depends on what its rate IS, and the server says
+  // so rather than leaving this to guess from the sign: a total gets the "5%
+  // lasts" form, an increment cannot have one — it is a share of the total
+  // above it, so what it owes the reader is its share, not a lifetime.
+  const pkKw = (parked.find((p) => p.basis === "total") || {}).kw || 0;
+  const parkSub = (p) => {
+    if (p.kw == null) {
+      return p.basis === "increment"
+        ? "needs parks both with and without Sentry to separate"
+        : "not enough parked history to fit";
+    }
+    if (p.basis !== "increment") {
+      return `${num(p.pct_per_day, 2)}%/day · 5% lasts ${p.days_to_5pct} days`;
+    }
+    // An increment can come out at or below zero, and the row still shows the
+    // number — but calling that "x% of the parked total" would dress a failed
+    // separation up as a finding.
+    if (p.kw <= 0) return "armed and unarmed parks don't separate yet";
+    if (!pkKw) return `${num(p.pct_per_day, 2)}%/day added`;
+    return `${num(p.pct_per_day, 2)}%/day · ${num((p.kw / pkKw) * 100, 0)}% of PK`;
+  };
   const park = parked.map((p) => `
       <tr class="mx-parked">
         <td class="mx-code">${p.code}</td>
-        <td class="mx-name">${p.name}<span class="mx-sub">${p.kw == null ? "not enough parked history to fit" : `${num(p.pct_per_day, 2)}%/day · 5% lasts ${p.days_to_5pct} days`}</span></td>
+        <td class="mx-name">${p.name}<span class="mx-sub">${parkSub(p)}</span></td>
         <td>—</td>
         <td>${num(p.kw, 3)}</td>
         <td>—</td>

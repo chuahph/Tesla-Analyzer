@@ -8069,8 +8069,11 @@ def driving_matrix(days: int = Query(30, ge=1, le=730),
     which is what the conditions actually describe.
 
     Parked draw is not modelled here — it is read from the fits the app
-    already keeps, one restricted to Sentry-armed parks and one to unarmed,
-    and reported in the %/day and %/hour the owner's own table uses.
+    already keeps, and reported in the %/day and %/hour the owner's own table
+    uses. The two parked rows are not two alternative cars: PK is every parked
+    hour in the window whatever Sentry was doing, and SE is the share of PK
+    that arming Sentry accounts for. So PK is the bill and SE says how much of
+    it is a habit, which is the only one of the two an owner can change.
     """
     vehicle = _first_vehicle(session)
     settings = get_settings()
@@ -8092,24 +8095,48 @@ def driving_matrix(days: int = Query(30, ge=1, le=730),
     out["weekend"] = split["weekend"]
 
     readings = _parked_readings(session, vehicle.id)
-    def parked(armed: bool) -> dict[str, Any]:
-        kw = (driving_analysis.sentry_standby_kw(
-            list(drives), list(charges), capacity_kwh, readings, armed)
-            if readings else None)
-        if not kw:
-            return {"kw": None, "pct_per_day": None, "pct_per_hour": None,
-                    "days_to_5pct": None}
-        per_hour = kw / capacity_kwh * 100.0
-        return {
-            "kw": round(kw, 3),
-            "pct_per_hour": round(per_hour, 3),
-            "pct_per_day": round(per_hour * 24.0, 2),
-            # The form the owner's table states it in: how long 5% lasts.
-            "days_to_5pct": round(5.0 / (per_hour * 24.0), 1) if per_hour else None,
+
+    def parked(kw: float | None, basis: str) -> dict[str, Any]:
+        """One parked row's figures, from a rate in kW.
+
+        ``basis`` says what the rate IS, and the caller must not have to infer
+        it from the sign or the name: "total" is what the car draws, "increment"
+        is what one habit adds on top of another row. It decides which of these
+        fields mean anything — a time-to-5% is a property of a total draw, and
+        an increment has none, so it is omitted rather than computed from a
+        difference and read as a lifetime.
+        """
+        row: dict[str, Any] = {
+            "kw": None, "pct_per_hour": None, "pct_per_day": None,
+            "days_to_5pct": None, "basis": basis,
         }
+        if kw is None or not capacity_kwh:
+            return row
+        per_hour = kw / capacity_kwh * 100.0
+        row["kw"] = round(kw, 3)
+        row["pct_per_hour"] = round(per_hour, 3)
+        row["pct_per_day"] = round(per_hour * 24.0, 2)
+        # The form the owner's table states it in: how long 5% lasts. Only for
+        # a total, and only for a positive one — 5% divided by an increment is
+        # not a duration, and divided by a negative it is a date in the past.
+        if basis == "total" and per_hour > 0:
+            row["days_to_5pct"] = round(5.0 / (per_hour * 24.0), 1)
+        return row
+
+    # PK is every parked hour in the window, whatever Sentry was doing — the
+    # whole cost of the car standing still, which is the figure an owner is
+    # actually charged for. SE is then not a second total but the part of PK
+    # that arming Sentry is responsible for, so the second row nests inside the
+    # first instead of competing with it: previously PK was the Sentry-OFF fit
+    # and SE the Sentry-ON one, two alternative worlds and neither of them this
+    # car's actual month. Do not add them together.
     out["parked"] = [
-        {"code": "PK", "name": "Parked, Sentry off", **parked(False)},
-        {"code": "SE", "name": "Parked, Sentry armed", **parked(True)},
+        {"code": "PK", "name": "Parked, all states",
+         **parked(driving_analysis.standby_kw(
+             list(drives), list(charges), capacity_kwh), "total")},
+        {"code": "SE", "name": "Sentry, added cost",
+         **parked(driving_analysis.sentry_increment_kw(
+             list(drives), list(charges), capacity_kwh, readings), "increment")},
     ]
     # The context every row shares, stated once rather than prefixed onto each
     # code. Air conditioning is not a variable in this climate — it is on. The
@@ -8128,7 +8155,9 @@ def driving_matrix(days: int = Query(30, ge=1, le=730),
     out["note"] = ("Every condition is priced two ways. wh_per_km answers how "
                    "far a charge goes; kw answers what an hour costs, and is "
                    "the unit the parked rows are also in, so the whole table "
-                   "sits on one axis. The two orderings are not the same — "
+                   "sits on one axis — though SE is a share of PK rather "
+                   "than a row beside it, so those two are never added. "
+                   "The two orderings are not the same — "
                    "see rank_per_km against rank_per_hour. Wh/km is weighted "
                    "by distance, not averaged across trips, and a trip whose "
                    "idle was never tracked is left out entirely rather than "

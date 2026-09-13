@@ -2678,3 +2678,62 @@ def test_the_matrix_splits_into_weekdays_and_weekends():
     # driving in this window" has to be tellable from "this report forgot".
     only = split_matrices(week, capacity_kwh=68.6)
     assert only["weekend"]["modes"] == []
+
+
+def test_pk_is_every_parked_hour_and_se_is_only_what_sentry_adds():
+    """The matrix's two parked rows used to be two alternative cars: PK fitted
+    from Sentry-OFF parks only, SE from Sentry-ON parks only. Neither described
+    the month the owner was actually charged for, and the pair could not be
+    added up or compared — the smaller number was not a part of the bigger one,
+    it was a different world.
+
+    So PK is now every parked hour whatever Sentry was doing, and SE is the
+    share of it arming Sentry accounts for: the armed fit MINUS the unarmed
+    one, not the armed fit itself.
+    """
+    from datetime import timedelta
+    from types import SimpleNamespace
+
+    cap = 68.6
+    # Seven drives, six 11-hour parks: three quiet at a point each, three
+    # watched at four points each. Both halves clear the 24-hour minimum.
+    history = _chain([
+        ("Home", 100.0, 99.0),   # quiet gap:  1 point
+        ("Home",  98.0, 97.0),   # quiet gap:  1 point
+        ("Home",  96.0, 95.0),   # quiet gap:  1 point
+        ("Home",  94.0, 93.0),   # armed gap:  4 points
+        ("Home",  89.0, 88.0),   # armed gap:  4 points
+        ("Home",  84.0, 83.0),   # armed gap:  4 points
+        ("Home",  79.0, 78.0),
+    ], gap_hours=11.0)
+    # One reading inside each gap, keyed off the drive that OPENS it so no two
+    # share a timestamp — an any() over a tie silently calls the gap armed.
+    readings = [SimpleNamespace(ts=d.end_time + timedelta(hours=1),
+                                sentry_mode=(i >= 3))
+                for i, d in enumerate(history[:-1])]
+
+    quiet = driving_analysis.sentry_standby_kw(history, [], cap, readings, False)
+    watched = driving_analysis.sentry_standby_kw(history, [], cap, readings, True)
+    blended = driving_analysis.standby_kw(history, [], cap)
+    assert quiet is not None and watched is not None and blended is not None
+
+    # PK is the blend, and a blend of two rates lies between them — which is
+    # exactly why it is the honest bill and neither half was.
+    assert quiet < blended < watched
+
+    # SE is the difference, not the armed rate. Both matter: a reader who took
+    # SE for the armed rate would think turning Sentry off saved all of it.
+    added = driving_analysis.sentry_increment_kw(history, [], cap, readings)
+    assert added == pytest.approx(round(watched - quiet, 3), abs=0.001)
+    assert added < watched                       # the habit costs less than the park
+
+    # And it is inside PK rather than on top of it.
+    assert 0 < added < blended + watched
+
+    # A difference of two fits needs both. With nothing unarmed to compare
+    # against, the answer is "unknown" — not the armed rate standing in for it.
+    all_armed = [SimpleNamespace(ts=r.ts, sentry_mode=True) for r in readings]
+    assert driving_analysis.sentry_standby_kw(
+        history, [], cap, all_armed, True) is not None
+    assert driving_analysis.sentry_increment_kw(history, [], cap, all_armed) is None
+    assert driving_analysis.sentry_increment_kw(history, [], cap, []) is None
