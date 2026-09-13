@@ -8031,12 +8031,24 @@ def driving_matrix(days: int = Query(30, ge=1, le=730),
         {"code": "PK", "name": "Parked, Sentry off", **parked(False)},
         {"code": "SE", "name": "Parked, Sentry armed", **parked(True)},
     ]
+    # The context every row shares, stated once rather than prefixed onto each
+    # code. Air conditioning is not a variable in this climate — it is on. The
+    # variable is what it is working against, which is why out_temp_c is a
+    # measured column on each mode above and not part of this.
+    out["context"] = {
+        "climate": "AC on, auto, set point 21.5-22 C",
+        "region": "Malaysia",
+    }
     out["days"] = days
     out["capacity_kwh"] = capacity_kwh
-    out["note"] = ("Wh/km is weighted by distance, not averaged across trips. "
-                   "A trip whose idle was never tracked is left out entirely "
-                   "rather than placed in a mode on a guess — see "
-                   "unclassified_trips.")
+    out["note"] = ("Every condition is priced two ways. wh_per_km answers how "
+                   "far a charge goes; kw answers what an hour costs, and is "
+                   "the unit the parked rows are also in, so the whole table "
+                   "sits on one axis. The two orderings are not the same — "
+                   "see rank_per_km against rank_per_hour. Wh/km is weighted "
+                   "by distance, not averaged across trips, and a trip whose "
+                   "idle was never tracked is left out entirely rather than "
+                   "placed in a mode on a guess.")
     return out
 
 

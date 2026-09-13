@@ -2622,6 +2622,15 @@ def test_the_condition_matrix_sorts_on_idling_before_speed():
     # One percent of the pack, the form the reference table is written in.
     assert by["CC"]["km_per_pct"] == pytest.approx(5.5, abs=0.2)
 
+    # And the finding that only the per-hour axis can show: the orderings are
+    # exact reverses. Heavy city is the WORST condition per kilometre and the
+    # BEST per hour, because the car covers so little ground in it. A table
+    # quoted only as range can show one of those and not the other.
+    assert by["HC"]["rank_per_km"] == 4 and by["HC"]["rank_per_hour"] == 1
+    assert by["CH"]["rank_per_km"] == 2 and by["CH"]["rank_per_hour"] == 4
+    assert by["CC"]["rank_per_km"] == 1
+    assert by["HC"]["kw"] < by["SC"]["kw"] < by["CC"]["kw"] < by["CH"]["kw"]
+
     # Distance-weighted, not a mean of means: a 2 km crawl must not move the
     # figure as far as a 40 km run.
     far = D(40.0, 30.0, 1.0, 84.0, 40.0 * 0.120)

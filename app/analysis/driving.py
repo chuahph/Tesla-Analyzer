@@ -1823,11 +1823,33 @@ def condition_matrix(drives: list[Any], capacity_kwh: float,
         kwh = sum(float(d.energy_used_kwh) for d in got)
         wh = kwh * 1000.0 / km if km else None
         rng = capacity_kwh / (wh / 1000.0) if wh else None
+        temps = [float(d.outside_temp_c) for d in got
+                 if getattr(d, "outside_temp_c", None) is not None]
         rows.append({
             "code": code, "name": MODE_NAMES[code], "trips": len(got),
             "km": round(km, 1), "hours": round(mins / 60.0, 1),
             "avg_speed_kmh": round(km / (mins / 60.0), 1) if mins else None,
             "wh_per_km": round(wh, 1) if wh else None,
+            # The same condition priced per HOUR rather than per kilometre,
+            # which is the unit a parked car can also be quoted in — so the
+            # whole table, moving and standing still, sits on one axis.
+            #
+            # It is not a restatement of Wh/km. The two orderings are exact
+            # reverses: heavy city traffic is the worst condition per
+            # kilometre and the best per hour, because the car covers so
+            # little ground. Both are true, and they answer different
+            # questions — how far will this take me, and how long can I sit
+            # here. A range-only table can only show one of them.
+            "kw": round(kwh / (mins / 60.0), 2) if mins else None,
+            # The climate context, measured rather than assumed. Every trip
+            # here runs with the air conditioning on — in this climate that is
+            # a given, not a setting — but the load it draws follows the
+            # OUTSIDE temperature, and that is not constant: the same route
+            # differs by ten degrees between a morning and an afternoon. So
+            # the ambient is carried as a column rather than as a label.
+            "out_temp_c": round(sum(temps) / len(temps), 1) if temps else None,
+            "out_temp_range_c": ([round(min(temps), 1), round(max(temps), 1)]
+                                 if temps else None),
             # What a full battery is worth driven entirely like this, and what
             # one percent of it buys — the form the owner's own reference
             # table is written in.
@@ -1839,6 +1861,13 @@ def condition_matrix(drives: list[Any], capacity_kwh: float,
             "avg_trip_min": round(mins / len(got), 1),
             "idle_share_pct": round(idle / mins * 100.0, 1) if mins else None,
         })
+    # Ranked both ways, because the ordering IS the finding and reading it off
+    # two unsorted columns is work the table can do for the reader.
+    for key, field in (("rank_per_km", "wh_per_km"), ("rank_per_hour", "kw")):
+        ranked = sorted((r for r in rows if r.get(field) is not None),
+                        key=lambda r: r[field])
+        for i, r in enumerate(ranked, 1):
+            r[key] = i
     return {
         "baseline_range_km": (round(baseline_range_km)
                               if baseline_range_km else None),
