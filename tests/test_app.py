@@ -469,15 +469,14 @@ def test_the_condition_cuts_are_stored_and_re_sort_the_same_trips():
             # draw, so the residual must never carry one — read off a
             # difference it would be a lifetime for a habit, which is nonsense.
             park = {row["code"]: row for row in base["parked"]}
-            assert [r["code"] for r in base["parked"]][:3] == ["PK", "ID", "SE"]
-            # A fourth row appears only when some park had no Sentry reading —
-            # never hidden when there is one, or the three would not add up with
-            # no way to see why.
-            assert [r["code"] for r in base["parked"]][3:] in ([], ["??"])
+            # Three rows, always. Sentry is on or off and there is no third
+            # state — a park nothing recorded is a gap in what the app SAW, and
+            # it widens ID and SE rather than getting a row of its own.
+            assert [r["code"] for r in base["parked"]] == ["PK", "ID", "SE"]
             assert all(r["basis"] == "total" for r in base["parked"])
 
-            # The percent is the measurement, and the three named states plus
-            # the unclassified ones come back to the whole exactly.
+            # The percent is the measurement, and the two real states plus the
+            # unattributed remainder come back to the whole exactly.
             s = base["parked_share"]
             assert s["reconciles"]
             assert (s["sentry_off"]["pct"] + s["sentry_on"]["pct"]
@@ -508,9 +507,19 @@ def test_the_condition_cuts_are_stored_and_re_sort_the_same_trips():
             # rows an accounting rather than one rate shown four ways. PK is
             # the total, and the states sum back to it.
             assert park["PK"]["hours"] == pytest.approx(a["parked"]["hours"])
-            assert sum(r["hours"] for r in base["parked"]
-                       if r["code"] != "PK") == pytest.approx(
-                           park["PK"]["hours"], abs=0.2)
+            # ID and SE hold only the hours that were ATTRIBUTED, so they close
+            # on PK once the unread ones are added back. Read off parked_share
+            # rather than the rows, because the rows no longer carry a place
+            # for them — which is the point of the change.
+            assert (park["ID"]["hours"] + park["SE"]["hours"]
+                    + s["unknown"]["hours"]) == pytest.approx(
+                        park["PK"]["hours"], abs=0.2)
+            # The bound each row carries: at least what was measured, at most
+            # that plus everything unattributed.
+            for code in ("ID", "SE"):
+                assert park[code]["pct_max"] == pytest.approx(
+                    park[code]["pct"] + s["unknown"]["pct"], abs=0.02)
+                assert park[code]["pct_max"] <= park["PK"]["pct"] + 0.02
             # Every row has a percent whether or not a rate could be fitted.
             # That is the whole point of measuring rather than modelling: a
             # blank rate no longer means a blank row.

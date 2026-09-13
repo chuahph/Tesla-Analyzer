@@ -2266,21 +2266,27 @@ function renderMatrix(d) {
     // as "nothing to report" when the actual answer was sitting right there.
     if (p.pct != null) {
       const bits = [`${num(p.pct, 2)}% of the battery over ${dur(p.hours)} in ${p.gaps} park${p.gaps === 1 ? "" : "s"}`];
+      // Sentry is on or off; a park nothing recorded is a gap in what the app
+      // SAW, not a third state. So it widens this row rather than getting one.
+      if (p.pct_max != null && p.pct_max > p.pct) {
+        bits.push(`up to ${num(p.pct_max, 2)}% if the ${num(p.unattributed_pct, 2)}% in unread parks was all this one`);
+      }
       if (p.pct_noise) bits.push(`±${num(p.pct_noise, 2)}% of that is 1% gauge steps`);
       if (p.kw == null && p.measured_kw) bits.push(`${num(p.measured_kw, 3)} kW across those hours`);
       else if (p.kw == null && p.kw_noise) bits.push(`too few hours for a rate — 1% steps alone would show ±${num(p.kw_noise, 3)} kW here`);
-      if (p.why && p.kw == null && p.code !== "??") bits.push(`no general rate yet — ${p.why}`);
-      else if (p.why && p.code === "??") bits.push(p.why);
-      // Which parks, and what was seen near them — the difference between one
-      // old park ageing out of the window and every new one going unread.
-      if (p.code === "??" && p.unread && p.unread.length) {
-        bits.push(p.unread.map((u) => {
-          const n = u.nearest || {};
-          const near = n.before
-            ? `nearest reading ${n.before.sec < 120 ? `${n.before.sec}s` : `${Math.round(n.before.sec / 60)} min`} before it`
-            : "no reading before it at all";
-          return `${u.at.replace("T", " ")}${u.place ? ` at ${u.place}` : ""}, ${dur(u.hours)} — ${near}`;
-        }).join(" · "));
+      if (p.why && p.kw == null) bits.push(`no general rate yet — ${p.why}`);
+      // Which parks could not be attributed, and what was seen near them — the
+      // difference between old parks ageing out of the window and new ones
+      // still going unread. Hung on PK, because that is whose hours they are.
+      if (p.unread && p.unread.length) {
+        bits.push(`${p.unread.length} park${p.unread.length === 1 ? "" : "s"} nothing recorded a Sentry state for: ` +
+          p.unread.map((u) => {
+            const n = u.nearest || {};
+            const near = n.before
+              ? `nearest reading ${n.before.sec < 120 ? `${n.before.sec}s` : `${Math.round(n.before.sec / 60)} min`} before`
+              : "nothing recorded before it";
+            return `${u.at.replace("T", " ")}, ${dur(u.hours)} (${near})`;
+          }).join("; "));
       }
       if (p.deep_sleep_kw) bits.push(`${num(p.deep_sleep_kw, 3)} kW once properly asleep`);
       return bits.join(" · ");
@@ -2320,7 +2326,10 @@ function renderMatrix(d) {
       <tr class="mx-parked">
         <td class="mx-code">${p.code}</td>
         <td class="mx-name">${p.name}<span class="mx-sub">${parkSub(p)}</span></td>
-        <td>${p.pct == null ? "—" : `${num(p.pct, 1)}%${p.pct_noise ? `<span class="mx-rank">±${num(p.pct_noise, 1)}</span>` : ""}`}</td>
+        <td>${p.pct == null ? "—"
+          : p.pct_max != null && p.pct_max > p.pct
+            ? `${num(p.pct, 1)}–${num(p.pct_max, 1)}%`
+            : `${num(p.pct, 1)}%${p.pct_noise ? `<span class="mx-rank">±${num(p.pct_noise, 1)}</span>` : ""}`}</td>
         <td>${num(p.kw ?? p.measured_kw, 3)}</td>
         <td>${num(p.kwh, 2)}</td>
         <td>—</td>
@@ -2370,7 +2379,7 @@ function renderMatrix(d) {
   // observed rather than about the car.
   const sh = a && a.parked && a.parked.short;
   const unknown = sh && sh.by_state && sh.by_state.unknown > 0
-    ? `${num(sh.by_state.unknown, 0)} of the ${num(sh.hours, 0)} h spent in stops under ${num(sh.under_hours, 0)} h have no Sentry reading — a short stop often contains none, which is why the ?? row exists.`
+    ? `${num(sh.by_state.unknown, 0)} of the ${num(sh.hours, 0)} h spent in stops under ${num(sh.under_hours, 0)} h have no Sentry reading — a short stop often contains none, which is why ID and SE are shown as ranges rather than single figures.`
     : "";
   // The car's own Park tab, where one has been filed. It measures the same
   // three quantities by CAUSE and to 0.1%, so where it and the rows above

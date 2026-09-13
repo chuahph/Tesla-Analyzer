@@ -2515,15 +2515,19 @@ MATRIX_DEFINITIONS = {
         {"code": "SE", "name": "Sentry impact",
          "means": "The share of PK lost across parks Sentry was armed for — "
                   "measured on those parks, not inferred by subtracting ID from "
-                  "PK. That matters: subtracting would charge every park of "
-                  "unknown state to Sentry as well."},
-        {"code": "??", "name": "Parks with no Sentry reading",
-         "means": "Parked time nothing said either way about. A Sentry state is "
-                  "read from the readings inside a gap, and a short stop often "
-                  "has none. Shown as its own row so the other three add up, "
-                  "instead of being quietly charged to Sentry."},
+                  "PK. That matters: subtracting would charge every park whose "
+                  "state went unrecorded to Sentry as well."},
     ],
     "columns": [
+        {"name": "ID and SE as a range",
+         "means": "Sentry is on or off; there is no third state. Where a park "
+                  "went by with nothing recording which it was, that is a gap "
+                  "in what the app SAW rather than a kind of park — so it "
+                  "widens both rows instead of becoming one. ID reads at least "
+                  "its measured share and at most that plus the unread parks, "
+                  "and SE the same. The truth is one point on each interval. "
+                  "The car's own Park screen has no such gap, which is why it "
+                  "is worth filing one."},
         {"name": "Wh/km", "means": "Energy per kilometre, weighted by distance "
                                    "rather than averaged across trips — a 2 km "
                                    "crawl should not move it as far as a 40 km "

@@ -8532,45 +8532,37 @@ def driving_matrix(days: int = Query(30, ge=1, le=730),
     # inflate SE. share["unknown"] is now a row of its own instead.
     share_of = driving_analysis.parked_share(
         list(drives), list(charges), capacity_kwh, readings)
-    # PK = ID + SE + unknown, as a sum of measurements with nothing standing in
-    # for anything. The unknown parks get a row rather than being folded into
-    # SE by subtraction, which is what made the old SE an upper bound and needed
-    # a footnote to say so.
+    # PK = ID + SE. Two rows, because Sentry is on or off and there is no third
+    # state — a park nothing recorded is a gap in what THIS APP SAW, not a
+    # category of park, and giving it a row of its own said the opposite.
+    #
+    # So the unattributed hours appear as a BOUND on the two real rows instead.
+    # ID is at least its measured share and at most that plus the unread parks;
+    # SE likewise. The truth is one point on that interval and the app cannot
+    # say where, which is exactly what a range means and a fourth row did not.
+    unattributed = share_of["unknown"]["pct"]
     out["parked"] = [
         {"code": "PK", "name": "Park Overall",
-         # The fitted rate and its noise stay alongside, because "what does an
-         # hour of parking cost in general" is a different and still useful
-         # question from "what did this window cost". Where they disagree the
-         # measurement is the one to believe: it is this window, not a model of
-         # it.
          "noise_kw": park["pk_noise_kw"],
          "deep_sleep_kw": park["deep_sleep_kw"],
          "why": park["pk_why"],
+         # The unread parks belong to PK — they are parked hours, measured —
+         # so their detail hangs here rather than on a row of its own.
+         "unread": share_of["unread_parks"],
+         "unattributed_pct": unattributed,
          **parked(park["pk_kw"], "total", share_of["total"])},
         {"code": "ID", "name": "Idling, Sentry off",
          "noise_kw": park["id_noise_kw"],
          "why": park["id_why"],
+         "unattributed_pct": unattributed,
+         "pct_max": round(share_of["sentry_off"]["pct"] + unattributed, 2),
          **parked(park["id_kw"], "total", share_of["sentry_off"])},
         {"code": "SE", "name": "Sentry impact",
-         # Measured now, not a residual: what the gauge lost across the parks
-         # Sentry was actually armed for.
          "armed_kw": park["armed_kw"],
+         "unattributed_pct": unattributed,
+         "pct_max": round(share_of["sentry_on"]["pct"] + unattributed, 2),
          **parked(park["armed_kw"], "total", share_of["sentry_on"])},
     ]
-    if share_of["unknown"]["gaps"]:
-        # Only when there are any, but never hidden when there are: these hours
-        # are in PK and in neither of the two named states, so leaving them out
-        # would make the three rows fail to add up with no way to see why.
-        out["parked"].append(
-            {"code": "??", "name": "Parks with no Sentry reading",
-             "why": ("no reading fell inside these parks, so they belong to "
-                     "neither ID nor SE — a short stop often has none"),
-             # Named, so "?? is still there" can be answered. A park from
-             # before the state was recorded will age out of the window on its
-             # own; a park from after it should not be here at all, and the
-             # nearest reading either side says which this is.
-             "unread": share_of["unread_parks"],
-             **parked(None, "total", share_of["unknown"])})
     out["parked_share"] = share_of
     # The car's own Park tab, where one has been typed in. It attributes parked
     # drain BY CAUSE and to 0.1%, so it outranks anything fitted here — and it
