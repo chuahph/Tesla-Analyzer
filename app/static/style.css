@@ -1487,3 +1487,48 @@ footer { padding: 18px 28px; color: var(--muted); font-size: 12px; border-top: 1
 .mx-carpark > strong { display: block; }
 .mx-carpark .mx-table { margin: .4rem 0; }
 .mx-carpark .mx-table td { padding: .2rem .4rem; }
+
+/* The matrix headline: where the battery went, as one figure and its terms.
+   Given real size because it is the answer the table exists to produce — it
+   used to sit in the footer in muted type, reading as a footnote to the rows
+   rather than their sum. */
+.mx-total {
+  margin: 0 0 .9rem;
+  padding: .8rem .9rem;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--panel-2);
+  box-shadow: var(--edge-hi);
+}
+.mx-total-head { display: flex; align-items: center; gap: .7rem; }
+.mx-total-num {
+  font-size: 2.6rem;
+  font-weight: 700;
+  line-height: 1;
+  letter-spacing: -.02em;
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+.mx-total-pc { font-size: 1.2rem; font-weight: 600; margin-left: .1rem; color: var(--muted); }
+.mx-total-lab { font-size: .82rem; line-height: 1.25; color: var(--muted); }
+/* Wraps to as many lines as it needs: five driving modes plus parked does not
+   fit one phone line, and a total that scrolls sideways is not a headline. */
+.mx-total-terms {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: .3rem .45rem;
+  margin-top: .6rem;
+}
+.mx-term {
+  padding: .18rem .45rem;
+  border-radius: 999px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  font-size: .82rem;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+.mx-term b { color: var(--accent-2); font-weight: 600; }
+.mx-op { color: var(--muted); font-size: .82rem; }
+.mx-total-foot { margin-top: .55rem; font-size: .78rem; color: var(--muted); }

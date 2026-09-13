@@ -2279,14 +2279,21 @@ function renderMatrix(d) {
       // difference between old parks ageing out of the window and new ones
       // still going unread. Hung on PK, because that is whose hours they are.
       if (p.unread && p.unread.length) {
-        bits.push(`${p.unread.length} park${p.unread.length === 1 ? "" : "s"} nothing recorded a Sentry state for: ` +
-          p.unread.map((u) => {
-            const n = u.nearest || {};
-            const near = n.before
-              ? `nearest reading ${n.before.sec < 120 ? `${n.before.sec}s` : `${Math.round(n.before.sec / 60)} min`} before`
-              : "nothing recorded before it";
-            return `${u.at.replace("T", " ")}, ${dur(u.hours)} (${near})`;
-          }).join("; "));
+        // The newest few only. The whole list is in the payload for anything
+        // that wants it, but a dozen of these on a phone buries the row's own
+        // figures under a wall of text — and the question they answer is
+        // always about the RECENT ones, which is why they arrive newest first.
+        const SHOW = 3;
+        const shown = p.unread.slice(0, SHOW).map((u) => {
+          const n = u.nearest || {};
+          const near = n.before
+            ? `nearest reading ${n.before.sec < 120 ? `${n.before.sec}s` : `${Math.round(n.before.sec / 60)} min`} before`
+            : "nothing recorded before it";
+          return `${u.at.replace("T", " ")}, ${dur(u.hours)} (${near})`;
+        });
+        const more = p.unread.length - shown.length;
+        bits.push(`${p.unread.length} park${p.unread.length === 1 ? "" : "s"} nothing recorded a Sentry state for — ` +
+          shown.join("; ") + (more > 0 ? `; and ${more} more` : ""));
       }
       if (p.deep_sleep_kw) bits.push(`${num(p.deep_sleep_kw, 3)} kW once properly asleep`);
       return bits.join(" · ");
@@ -2365,17 +2372,35 @@ function renderMatrix(d) {
   const left = [];
   if (t && t.unclassified_kwh) left.push(`${num(t.unclassified_kwh, 1)} kWh in trips that could not be sorted`);
   if (t && t.no_energy_kwh) left.push(`${num(t.no_energy_kwh, 1)} kWh in trips whose energy is not plausible per km`);
-  // The identity spelled out, in the one unit every row now carries. This is
-  // the whole point of the table: where the battery went, adding to a total.
-  const sum = t && t.adds_up
-    ? `<strong>${t.adds_up}</strong> of the battery over ${num(t.hours, 0)} h. `
+  // The headline, and it earns the room. This figure is what the whole table
+  // is for — where the battery went — and it was set in the same muted footer
+  // type as the baseline and the window, where it read as a footnote to the
+  // rows rather than their sum.
+  //
+  // Built from the rows here rather than from the server's adds_up string, so
+  // each term can be its own element and wrap sensibly on a phone. adds_up
+  // stays in the payload for anything reading the API.
+  const terms = [
+    ...modes.filter((m) => m.pct).map((m) => ({ code: m.code, pct: m.pct })),
+    ...(t && t.parked_pct ? [{ code: "PK", pct: t.parked_pct }] : []),
+    ...(t && t.unclassified_pct ? [{ code: "unsorted", pct: t.unclassified_pct }] : []),
+    ...(t && t.no_energy_pct ? [{ code: "implausible", pct: t.no_energy_pct }] : []),
+  ];
+  const totalBlock = t && t.pct
+    ? `<div class="mx-total">
+         <div class="mx-total-head">
+           <span class="mx-total-num">${num(t.pct, 1)}<span class="mx-total-pc">%</span></span>
+           <span class="mx-total-lab">of the battery<br>over ${num(t.hours, 0)} h</span>
+         </div>
+         <div class="mx-total-terms">
+           ${terms.map((x, i) => `${i ? '<span class="mx-op">+</span>' : ""}
+              <span class="mx-term"><b>${x.code}</b> ${num(x.pct, 2)}%</span>`).join("")}
+         </div>
+         <div class="mx-total-foot">${num(t.kwh, 1)} kWh — ${num(t.driving_kwh, 1)} moving,
+           ${num(t.parked_kwh, 1)} standing still (${num(t.parked_share_kwh_pct, 1)}% of the energy)</div>
+       </div>`
     : "";
-  const tot = t && t.kwh
-    ? `${sum}That is ${num(t.kwh, 1)} kWh — ${num(t.driving_kwh, 1)} moving,
-       ${num(t.parked_kwh, 1)} standing still
-       (${num(t.parked_share_kwh_pct, 1)}% of the energy).${
-         aside.length ? ` Not priced at all: ${aside.join(", ")}.` : ""}`
-    : "";
+  const tot = aside.length ? `Not priced at all: ${aside.join(", ")}.` : "";
   const ev = d.parked_evidence;
   // The unclassified parks have their own row now, so nothing here has to warn
   // that SE is an upper bound: SE is measured, and they are not inside it. What
@@ -2404,6 +2429,7 @@ function renderMatrix(d) {
       <span class="mx-sub">${cp.implied_kw ? `${num(cp.implied_kw, 3)} kW across those hours. ` : ""}Measured by cause at 0.1%, where the rows above infer it from a 1% gauge across whole gaps — so this is the one to believe where they differ. It also splits SE better: the car charges Sentry with what Sentry drew, while a gap can only show the total drop.</span>
     </div>` : "";
   box.innerHTML = `
+    ${totalBlock}
     <div class="mx-scroll">
       <table class="mx-table">
         <thead><tr>
