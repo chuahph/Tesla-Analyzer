@@ -11469,12 +11469,35 @@ def _telemetry_battery_reading(session: Session, vin: str, snap: dict) -> bool:
         .order_by(BatteryReading.ts.desc())
     ).first()
     sentry_now = snap.get("sentry_mode")
+    sentry_state_now = snap.get("sentry_state")
     climate_now = snap.get("climate_on")
     cop_now = snap.get("cabin_overheat_protection")
     cop_cooling_now = snap.get("cabin_overheat_protection_actively_cooling")
     # Everything the configured field set reports and this table still holds.
+    #
+    # sentry_state is in here, and its absence was a real defect. The boolean
+    # is (state != Off), so it is TRUE for Idle and true for Armed alike — and
+    # a park goes Off -> Idle the moment it stops, then Idle -> Armed about two
+    # and a half minutes later. Watching only the boolean, the first of those
+    # wrote a reading and THE SECOND WROTE NOTHING.
+    #
+    # Which matters because the analysis reads the state, not the boolean:
+    # driving.SENTRY_ARMED_STATES excludes Idle deliberately, since Idle is
+    # Sentry enabled and not yet watching, and is where a car sits for a whole
+    # park wherever Sentry is excluded. So an armed park left one reading
+    # saying Idle and no record of it ever arming, and gap_sentry_state read
+    # that gap as SENTRY OFF. Only a coincident 1% SoC change — some seventeen
+    # hours of parked drain — would write a second reading and catch the truth.
+    #
+    # The effect on the matrix is one-directional: armed parks classified as
+    # unarmed inflate ID and deflate SE, which are the two rows whose whole
+    # purpose is to be told apart. The same shape as every other bug in this
+    # app's history — a value written in one form and read back in another,
+    # failing into silence rather than into an error.
     changed = last is not None and (
-        last.sentry_mode != sentry_now or last.climate_on != climate_now
+        last.sentry_mode != sentry_now
+        or (last.sentry_state or None) != (sentry_state_now or None)
+        or last.climate_on != climate_now
         or last.cabin_overheat_protection != cop_now
         or last.cabin_overheat_protection_actively_cooling != cop_cooling_now)
     if not (last is None or abs(last.soc - snap["soc"]) >= 1.0 or changed):
@@ -11492,7 +11515,7 @@ def _telemetry_battery_reading(session: Session, vin: str, snap: dict) -> bool:
         range_km=round(snap["range_km"], 1),
         odo_km=round(snap.get("odo_km") or 0.0, 1),
         sentry_mode=sentry_now,
-        sentry_state=snap.get("sentry_state"),
+        sentry_state=sentry_state_now,
         climate_on=climate_now,
         cabin_overheat_protection=cop_now,
         cabin_overheat_protection_actively_cooling=cop_cooling_now,

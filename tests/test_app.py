@@ -9204,3 +9204,87 @@ def test_the_stale_purge_backs_up_to_its_own_slot_and_comes_back():
             sess.commit()
             sess.close()
             settings.app_passcode = old_pc
+
+
+def test_a_park_that_arms_sentry_writes_a_reading_saying_so():
+    """The moment a car actually arms Sentry was never recorded.
+
+    BatteryReading's write trigger watched sentry_mode, which is
+    (state != Off) — TRUE for Idle and true for Armed alike. A park goes
+    Off -> Idle the moment it stops and Idle -> Armed about two and a half
+    minutes later, so the first transition wrote a reading and the second wrote
+    nothing at all.
+
+    The analysis reads the STATE, not the boolean: driving.SENTRY_ARMED_STATES
+    excludes Idle deliberately, because Idle is Sentry enabled and not yet
+    watching. So an armed park left one reading saying Idle, no record of
+    arming, and gap_sentry_state called the whole gap Sentry OFF — inflating ID
+    and deflating SE, the two rows whose entire purpose is to be told apart.
+    Only a coincident 1% SoC change, some seventeen hours of parked drain,
+    would have caught it.
+    """
+    from app.api import routes
+    from app.database import SessionLocal
+    from app.models import BatteryReading, Vehicle
+    from app.analysis import driving as driving_analysis
+
+    with TestClient(app):
+        sess = SessionLocal()
+        vin = sess.scalars(select(Vehicle.vin)).first()
+        vid = sess.scalar(select(Vehicle.id).where(Vehicle.vin == vin))
+        made = []
+        try:
+            base = datetime(2026, 8, 2, 4, 0, 0).timestamp()
+
+            def snap(ts_offset, state):
+                return {"ts": base + ts_offset, "soc": 72.0, "range_km": 300.0,
+                        "odo_km": 40000.0,
+                        "sentry_mode": state != "SentryModeStateOff",
+                        "sentry_state": state, "climate_on": False,
+                        "cabin_overheat_protection": None,
+                        "cabin_overheat_protection_actively_cooling": None}
+
+            # Parked: Off -> Idle. The boolean moves, so this was always written.
+            assert routes._telemetry_battery_reading(
+                sess, vin, snap(0, "SentryModeStateIdle")) is True
+            sess.commit()
+            # Two and a half minutes later it arms. SoC has not moved a point,
+            # and the boolean is True either side — this is the one that used
+            # to be dropped.
+            assert routes._telemetry_battery_reading(
+                sess, vin, snap(150, "SentryModeStateArmed")) is True
+            sess.commit()
+            # Nothing changed at all: still no write, so the table does not grow
+            # with every twenty-second batch.
+            assert routes._telemetry_battery_reading(
+                sess, vin, snap(300, "SentryModeStateArmed")) is False
+
+            # Stored timestamps are naive MYT wall-clock, converted the way the
+            # writer converts them — building the bound from datetime() alone
+            # puts it eight hours out on a UTC host and finds nothing.
+            from app import sync as sync_mod
+
+            def at(offset):
+                return datetime.fromtimestamp(
+                    base + offset, sync_mod.MYT).replace(tzinfo=None)
+
+            made = list(sess.scalars(
+                select(BatteryReading).where(
+                    BatteryReading.vehicle_id == vid,
+                    BatteryReading.ts >= at(-60),
+                    BatteryReading.ts <= at(360))
+                .order_by(BatteryReading.ts)))
+            assert [r.sentry_state for r in made] == [
+                "SentryModeStateIdle", "SentryModeStateArmed"]
+
+            # And the consequence: the gap now reads as armed. With only the
+            # Idle reading it read as Sentry OFF, which is the wrong row.
+            span = (made[0].ts - timedelta(minutes=1),
+                    made[-1].ts + timedelta(minutes=1))
+            assert driving_analysis.gap_sentry_state(made, *span) is True
+            assert driving_analysis.gap_sentry_state(made[:1], *span) is False
+        finally:
+            for row in made:
+                sess.delete(row)
+            sess.commit()
+            sess.close()
