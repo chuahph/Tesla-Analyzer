@@ -435,6 +435,77 @@ def test_health_judges_the_cron_against_its_own_rhythm_not_a_fixed_number():
         settings.app_passcode = old_pc
 
 
+def test_the_arrival_repair_runs_by_itself_but_only_once_a_day():
+    """The job that reclaims a lost arrival tail had no automatic caller.
+
+    Its own docstring called it "the nightly job" while nothing anywhere ran
+    it nightly, so every trip that parked underground and stayed offline kept
+    a short distance for ever — and nothing reaches back for it later, by
+    design: once the next trip starts, this trip's end is bounded by that
+    start.
+
+    Rate-limited rather than run every tick, because it scans a month of
+    drives against a month of parked readings to fix a tenth of a kilometre.
+    """
+    import time as _time
+
+    from app import state
+    from app.api import routes
+    from app.database import SessionLocal
+
+    sess = SessionLocal()
+    prev = state.get(sess, state.ARRIVAL_REPAIR_AT_KEY)
+    calls = []
+    real = routes.repair_arrivals
+
+    def spy(**kw):
+        calls.append(kw)
+        return {"reclaimed_km": 0.32}
+
+    routes.repair_arrivals = spy
+    try:
+        state.put(sess, state.ARRIVAL_REPAIR_AT_KEY, "")
+        sess.commit()
+
+        # First tick of the day does the work, and applies it — a dry run
+        # would reclaim nothing, which is the shape this endpoint has had all
+        # along for want of a caller passing apply.
+        assert routes._auto_repair_arrivals(sess) == 320
+        assert len(calls) == 1 and calls[0]["apply"] is True
+
+        # Every tick after it that day does not.
+        for _ in range(5):
+            assert routes._auto_repair_arrivals(sess) == 0
+        assert len(calls) == 1, "ran more than once in a day"
+
+        # A day later it runs again.
+        state.put(sess, state.ARRIVAL_REPAIR_AT_KEY,
+                  str(_time.time() - routes.ARRIVAL_REPAIR_EVERY_SEC - 60))
+        sess.commit()
+        assert routes._auto_repair_arrivals(sess) == 320
+        assert len(calls) == 2
+
+        # A repair that raises must not take the sync tick with it, and must
+        # not retry the same month-long scan on every tick afterwards.
+        def boom(**kw):
+            calls.append(kw)
+            raise RuntimeError("continuity scan failed")
+
+        routes.repair_arrivals = boom
+        state.put(sess, state.ARRIVAL_REPAIR_AT_KEY, "")
+        sess.commit()
+        assert routes._auto_repair_arrivals(sess) == 0
+        before = len(calls)
+        for _ in range(3):
+            assert routes._auto_repair_arrivals(sess) == 0
+        assert len(calls) == before, "a failing repair retried on every tick"
+    finally:
+        routes.repair_arrivals = real
+        state.put(sess, state.ARRIVAL_REPAIR_AT_KEY, prev or "")
+        sess.commit()
+        sess.close()
+
+
 def test_repromoting_a_settled_history_reports_nothing_changed():
     """Running promotion twice must not claim it wrote everything twice.
 

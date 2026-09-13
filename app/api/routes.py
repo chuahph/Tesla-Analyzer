@@ -3982,6 +3982,40 @@ def _apply_shadow_to_drive(row, t: dict) -> None:
             setattr(row, field, float(value))
 
 
+# How often the arrival repair runs by itself. Daily: it reads a month of
+# drives against a month of parked readings, and a missed tail is not urgent —
+# it is a tenth of a kilometre on a trip already recorded.
+ARRIVAL_REPAIR_EVERY_SEC = 24 * 3600.0
+
+
+def _auto_repair_arrivals(session: Session) -> int:
+    """Run the arrival repair at most once a day. Returns km reclaimed.
+
+    Swallowed entirely, like every other unattended write on this path: a
+    repair that cannot be made costs a tenth of a kilometre on one trip, and a
+    sync that dies here costs the whole tick.
+    """
+    now_ts = time.time()
+    try:
+        last = float(state.get(session, state.ARRIVAL_REPAIR_AT_KEY) or 0.0)
+    except (TypeError, ValueError):
+        last = 0.0
+    if last and now_ts - last < ARRIVAL_REPAIR_EVERY_SEC:
+        return 0
+    try:
+        # Stamped BEFORE the work, not after. If the repair itself raises every
+        # time, a marker written only on success would retry the same failing
+        # month-long scan on every tick for ever; written first, a fault costs
+        # one day's repair rather than every tick's budget.
+        state.put(session, state.ARRIVAL_REPAIR_AT_KEY, str(now_ts))
+        session.commit()
+        out = repair_arrivals(days=30, apply=True, session=session)
+        return int(round(float(out.get("reclaimed_km") or 0.0) * 1000))
+    except Exception:  # noqa: BLE001 — never let this break the sync
+        session.rollback()
+        return 0
+
+
 def _settle_shadows(session: Session) -> int:
     """Close any shadow trip whose stream went quiet. Returns how many.
 
@@ -4105,6 +4139,29 @@ def sync_now(wake: bool = Query(False), session: Session = Depends(get_session))
         # charges, no alerts and no history — so this is caught and the tick
         # carries on. The next one tries again.
         session.rollback()
+    # And give back the ground a trip lost when its stream died before the car
+    # finished parking. Tail amendment in the ingest only reaches records that
+    # arrive within SHADOW_TAIL_SEC of the end, so a car that parks underground
+    # and stays offline keeps a short arrival for ever — and nothing will reach
+    # back for it later, deliberately: once the next trip starts, this trip's
+    # end is bounded by that start, and folding later ground into an older trip
+    # is what once made one journey swallow the next and count its distance
+    # twice.
+    #
+    # Once a day, not every tick: it scans a month of drives against a month of
+    # parked readings, and the thing it repairs happens on the timescale of
+    # journeys rather than minutes. Rate-limited here rather than run from its
+    # own cron so that a fully automatic record needs no fourth job set up by
+    # hand.
+    #
+    # Safe unattended because it refuses on positive evidence rather than
+    # assuming: a car seen resting AT the recorded stop and only later further
+    # on is a move made during the park, ground already claimed by the next
+    # trip's departure stays claimed, and anything past ARRIVAL_EST_MAX_KM is
+    # reported for a person rather than folded into an arrival. It is also
+    # idempotent — once the boundary matches the reading there is nothing left
+    # to find.
+    _auto_repair_arrivals(session)
     try:
         return _sync_now_impl(wake, session)
     except HTTPException as exc:

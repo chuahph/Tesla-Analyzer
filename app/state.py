@@ -106,6 +106,13 @@ TELEMETRY_CHARGES_KEY = "telemetry_charges"  # JSON list of finished shadow
 SYNC_LOG_KEY = "sync_log"  # JSON: run-length record of what each /api/sync tick did —
 # the only place a blackout can be told from a quiet car after the fact, since
 # LAST_STATUS_KEY is overwritten every tick and keeps no history
+ARRIVAL_REPAIR_AT_KEY = "arrival_repair_at"  # epoch of the last automatic
+# run of /api/repair-arrivals. That job reclaims the last few hundred metres of
+# a trip whose stream died before the car finished parking — underground, most
+# often — and it had no automatic caller at all: its own docstring called it
+# "the nightly job" while nothing anywhere ran it nightly. Rate-limited from
+# here rather than given its own cron, so there is no fourth thing to set up
+# and nothing to forget.
 SYNC_TICKS_KEY = "sync_tick_history"  # JSON [epoch, ...]: when the last few
 # /api/sync ticks completed, newest last. Exists because the cadence cannot be
 # recovered from SYNC_LOG_KEY: that log is run-length encoded, so a stretch of
