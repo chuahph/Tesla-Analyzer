@@ -1736,3 +1736,120 @@ def analyze(drives: list[Drive], rated_wh_per_km: float = 150.0,
             for d in sorted(drives, key=lambda x: x.start_time, reverse=True)[:recent_trips_limit]
         ],
     }
+
+
+# --- driving-condition matrix ----------------------------------------------
+#
+# A taxonomy the owner defined, not one inferred from the data, and the shape
+# of it is the whole reason a new classifier was needed rather than reusing
+# _trip_conditions above. Their own measured ranges run
+#
+#     CC 553 km  >  CH 494  >  SC 460  >  HC 345
+#
+# which is NOT monotonic in speed: a 60-80 km/h cruise beats a 110 km/h one,
+# because drag costs more than the extra speed saves. Any classifier keyed on
+# average speed alone — which is exactly what _trip_conditions is — collapses
+# CC and CH together and cannot reproduce that ordering.
+#
+# What separates them is in the owner's own labels: "Constant" against
+# "Intermittent Idling" against "Repeated Idling". So idling decides the pair
+# first, and speed only separates within it.
+MODE_IDLE_CONSTANT = 0.10     # under this share of the trip stopped: constant
+MODE_IDLE_SLOW = 0.30         # under this: intermittent. over: repeated
+MODE_HIGHWAY_MAX_KMH = 100.0  # "110 km/h +/- 10%" needs a peak up there
+MODE_HIGHWAY_AVG_KMH = 70.0   # and an average that says it stayed there
+
+MODE_NAMES = {
+    "CH": "Constant Highway",
+    "CC": "Constant City",
+    "SC": "Slow City",
+    "HC": "Heavy City",
+}
+
+
+def drive_mode(d: Any) -> str | None:
+    """Which driving condition this trip was, or None when it cannot be said.
+
+    None rather than a guess where idle was never tracked: the split between
+    constant and intermittent IS the idle fraction, so a trip without it can
+    only be sorted on speed, and sorting on speed is the thing that does not
+    work here. A trip that cannot be classified is better left out of a
+    per-mode average than quietly placed in the wrong one.
+    """
+    dur = float(getattr(d, "duration_min", 0.0) or 0.0)
+    dist = float(getattr(d, "distance_km", 0.0) or 0.0)
+    if dur <= 0 or dist <= 0:
+        return None
+    if not getattr(d, "idle_tracked", False):
+        return None
+    idle_share = float(getattr(d, "idle_min", 0.0) or 0.0) / dur
+    avg = dist / (dur / 60.0)
+    mx = float(getattr(d, "max_speed_kmh", 0.0) or 0.0)
+    if idle_share < MODE_IDLE_CONSTANT:
+        if mx >= MODE_HIGHWAY_MAX_KMH and avg >= MODE_HIGHWAY_AVG_KMH:
+            return "CH"
+        return "CC"
+    return "SC" if idle_share < MODE_IDLE_SLOW else "HC"
+
+
+def condition_matrix(drives: list[Any], capacity_kwh: float,
+                     baseline_range_km: float | None = None) -> dict[str, Any]:
+    """Per-condition efficiency, as a range rather than a rate.
+
+    Wh/km is weighted by DISTANCE, not averaged across trips. A mean of means
+    lets a 2 km crawl move the figure as far as a 40 km run, and the question
+    this answers is what a full battery is worth in each condition — which is
+    a property of the kilometres, not of the trips they were grouped into.
+    """
+    buckets: dict[str, list[Any]] = {}
+    unclassified = 0
+    for d in drives:
+        if not has_valid_energy(d):
+            continue
+        m = drive_mode(d)
+        if m is None:
+            unclassified += 1
+            continue
+        buckets.setdefault(m, []).append(d)
+
+    rows = []
+    for code in ("CH", "CC", "SC", "HC"):
+        got = buckets.get(code) or []
+        if not got:
+            continue
+        km = sum(float(d.distance_km) for d in got)
+        mins = sum(float(d.duration_min) for d in got)
+        idle = sum(float(getattr(d, "idle_min", 0.0) or 0.0) for d in got)
+        kwh = sum(float(d.energy_used_kwh) for d in got)
+        wh = kwh * 1000.0 / km if km else None
+        rng = capacity_kwh / (wh / 1000.0) if wh else None
+        rows.append({
+            "code": code, "name": MODE_NAMES[code], "trips": len(got),
+            "km": round(km, 1), "hours": round(mins / 60.0, 1),
+            "avg_speed_kmh": round(km / (mins / 60.0), 1) if mins else None,
+            "wh_per_km": round(wh, 1) if wh else None,
+            # What a full battery is worth driven entirely like this, and what
+            # one percent of it buys — the form the owner's own reference
+            # table is written in.
+            "range_km": round(rng) if rng else None,
+            "km_per_pct": round(rng / 100.0, 1) if rng else None,
+            "vs_baseline_pct": (round((rng - baseline_range_km)
+                                      / baseline_range_km * 100.0)
+                                if rng and baseline_range_km else None),
+            "avg_trip_min": round(mins / len(got), 1),
+            "idle_share_pct": round(idle / mins * 100.0, 1) if mins else None,
+        })
+    return {
+        "baseline_range_km": (round(baseline_range_km)
+                              if baseline_range_km else None),
+        "modes": rows,
+        # Trips that could not be sorted, and why it matters: they are missing
+        # from every row above rather than distributed among them.
+        "unclassified_trips": unclassified,
+        "thresholds": {
+            "constant_idle_share_max": MODE_IDLE_CONSTANT,
+            "slow_idle_share_max": MODE_IDLE_SLOW,
+            "highway_max_kmh": MODE_HIGHWAY_MAX_KMH,
+            "highway_avg_kmh": MODE_HIGHWAY_AVG_KMH,
+        },
+    }

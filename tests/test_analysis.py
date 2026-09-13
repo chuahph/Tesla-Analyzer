@@ -2569,3 +2569,72 @@ def test_cost_per_100km_ignores_charges_older_than_the_drive_history():
     # The window's own totals are untouched — a charge that happened, happened.
     assert out["total_sessions"] == 6
     assert out["total_cost"] == pytest.approx(108.0)
+
+
+def test_the_condition_matrix_sorts_on_idling_before_speed():
+    """The owner's own measured ranges are not monotonic in speed:
+
+        CC 553 km  >  CH 494  >  SC 460  >  HC 345
+
+    A 60-80 km/h cruise beats a 110 km/h one, because drag costs more than the
+    extra speed saves. Any classifier keyed on average speed collapses those
+    two into one bucket and cannot reproduce the ordering — which is exactly
+    what the existing _trip_conditions does, and why this needed its own.
+
+    What separates them is in the labels themselves: Constant against
+    Intermittent Idling against Repeated Idling. So idling decides the pair,
+    and speed only separates within it.
+    """
+    from app.analysis.driving import condition_matrix, drive_mode
+
+    class D:
+        def __init__(self, km, mins, idle, mx, kwh, tracked=True):
+            self.distance_km = km; self.duration_min = mins
+            self.idle_min = idle; self.max_speed_kmh = mx
+            self.energy_used_kwh = kwh; self.idle_tracked = tracked
+            self.energy_estimated = False
+            self.wh_per_km = round(kwh * 1000.0 / km) if km else 0
+
+    # 110 km/h cruise: fast, barely stopped, and WORSE per km than the city
+    # cruise below — the whole point of the ordering.
+    ch = D(80.0, 48.0, 1.0, 118.0, 80.0 * 0.139)
+    # 60-80 km/h, minimal traffic: the efficiency sweet spot.
+    cc = D(30.0, 26.0, 1.0, 84.0, 30.0 * 0.124)
+    # Intermittent idling, moderate traffic.
+    sc = D(20.0, 40.0, 8.0, 70.0, 20.0 * 0.149)
+    # Repeated idling, congested.
+    hc = D(10.0, 45.0, 20.0, 60.0, 10.0 * 0.199)
+
+    assert drive_mode(ch) == "CH"
+    assert drive_mode(cc) == "CC"
+    assert drive_mode(sc) == "SC"
+    assert drive_mode(hc) == "HC"
+
+    m = condition_matrix([ch, cc, sc, hc], capacity_kwh=68.6,
+                         baseline_range_km=461.0)
+    by = {r["code"]: r for r in m["modes"]}
+    assert set(by) == {"CH", "CC", "SC", "HC"}
+    # The ordering survives the round trip, which a speed-sorted classifier
+    # could not produce at all.
+    assert by["CC"]["range_km"] > by["CH"]["range_km"] > by["SC"]["range_km"] \
+        > by["HC"]["range_km"]
+    assert by["CC"]["vs_baseline_pct"] > 0 > by["HC"]["vs_baseline_pct"]
+    # One percent of the pack, the form the reference table is written in.
+    assert by["CC"]["km_per_pct"] == pytest.approx(5.5, abs=0.2)
+
+    # Distance-weighted, not a mean of means: a 2 km crawl must not move the
+    # figure as far as a 40 km run.
+    far = D(40.0, 30.0, 1.0, 84.0, 40.0 * 0.120)
+    near = D(2.0, 4.0, 0.1, 60.0, 2.0 * 0.300)
+    w = {r["code"]: r for r in condition_matrix(
+        [far, near], capacity_kwh=68.6)["modes"]}["CC"]
+    assert w["wh_per_km"] == pytest.approx(
+        (40 * 120 + 2 * 300) / 42, abs=0.5), w["wh_per_km"]
+
+    # A trip whose idle was never tracked cannot be sorted on speed alone, so
+    # it is left out entirely rather than placed in a mode on a guess.
+    blind = D(20.0, 30.0, 0.0, 90.0, 3.0, tracked=False)
+    assert drive_mode(blind) is None
+    out = condition_matrix([cc, blind], capacity_kwh=68.6)
+    assert out["unclassified_trips"] == 1
+    assert sum(r["trips"] for r in out["modes"]) == 1

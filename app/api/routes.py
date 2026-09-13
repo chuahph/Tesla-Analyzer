@@ -7977,6 +7977,69 @@ def self_check(days: int = Query(30, ge=1, le=730),
     }
 
 
+@router.get("/driving-matrix")
+def driving_matrix(days: int = Query(30, ge=1, le=730),
+                   session: Session = Depends(get_session)):
+    """Efficiency by driving condition, plus what the car costs standing still.
+
+    Four driving conditions and two parked ones, each answered as a RANGE
+    rather than a rate, because that is the form the question gets asked in:
+    what is a full battery worth driven like this, and what does one percent
+    buy.
+
+    The classifier keys on idling before speed, and that ordering is the whole
+    point. The reference figures this was built against run CC 553 km > CH 494
+    > SC 460 > HC 345 — a 60-80 km/h cruise beating a 110 km/h one, because
+    drag costs more than the extra speed saves. Sorting on average speed
+    collapses those two and cannot reproduce it; sorting on how much of the
+    trip was spent stopped separates constant driving from intermittent first,
+    which is what the conditions actually describe.
+
+    Parked draw is not modelled here — it is read from the fits the app
+    already keeps, one restricted to Sentry-armed parks and one to unarmed,
+    and reported in the %/day and %/hour the owner's own table uses.
+    """
+    vehicle = _first_vehicle(session)
+    settings = get_settings()
+    capacity_kwh, _ = _usable_capacity(session, vehicle, settings)
+    drives, charges = _window(session, vehicle.id, days)
+    # The yardstick every row is measured against: what this pack is worth at
+    # the car's own rated consumption. Derived rather than configured, so it
+    # cannot drift away from the rated figure the eco score already uses.
+    baseline = (capacity_kwh * 1000.0 / settings.rated_wh_per_km
+                if settings.rated_wh_per_km else None)
+    out = driving_analysis.condition_matrix(
+        list(drives), capacity_kwh, baseline_range_km=baseline)
+
+    readings = _parked_readings(session, vehicle.id)
+    def parked(armed: bool) -> dict[str, Any]:
+        kw = (driving_analysis.sentry_standby_kw(
+            list(drives), list(charges), capacity_kwh, readings, armed)
+            if readings else None)
+        if not kw:
+            return {"kw": None, "pct_per_day": None, "pct_per_hour": None,
+                    "days_to_5pct": None}
+        per_hour = kw / capacity_kwh * 100.0
+        return {
+            "kw": round(kw, 3),
+            "pct_per_hour": round(per_hour, 3),
+            "pct_per_day": round(per_hour * 24.0, 2),
+            # The form the owner's table states it in: how long 5% lasts.
+            "days_to_5pct": round(5.0 / (per_hour * 24.0), 1) if per_hour else None,
+        }
+    out["parked"] = [
+        {"code": "PK", "name": "Parked, Sentry off", **parked(False)},
+        {"code": "SE", "name": "Parked, Sentry armed", **parked(True)},
+    ]
+    out["days"] = days
+    out["capacity_kwh"] = capacity_kwh
+    out["note"] = ("Wh/km is weighted by distance, not averaged across trips. "
+                   "A trip whose idle was never tracked is left out entirely "
+                   "rather than placed in a mode on a guess — see "
+                   "unclassified_trips.")
+    return out
+
+
 @router.get("/continuity")
 def continuity(
     days: int = Query(30, ge=1, le=730),
