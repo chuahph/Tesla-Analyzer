@@ -9408,3 +9408,47 @@ def test_the_page_stamps_its_assets_with_the_build_it_was_served_from():
         asset = client.get(f"/static/app.js?v={v}")
         assert asset.status_code == 200
         assert "function renderMatrix" in asset.text
+
+
+def test_every_row_is_priced_in_percent_and_the_conditions_add_to_the_total():
+    """CC + CH + SC + HC + PK = what the window consumed.
+
+    The table could not be added up before: driving rows were in kWh and parked
+    rows in percent, so half of it had to be converted by hand before the
+    question "where did my battery go" could be answered at all. Percent is the
+    unit both can carry — SoC points ARE percent, which is the only form the
+    parked rows were ever measurable in — and it is what the car's own screens
+    use.
+    """
+    settings = get_settings()
+    old_pc = settings.app_passcode
+    settings.app_passcode = ""
+    try:
+        with TestClient(app) as client:
+            d = client.get("/api/driving-matrix?days=90").json()
+            t = d["totals"]
+            cap = d["capacity_kwh"]
+
+            # Every driving row carries its share of the pack, and it is that
+            # row's own energy — not a re-derivation that could drift from it.
+            for m in d["modes"]:
+                assert m["pct"] == pytest.approx(m["kwh"] / cap * 100.0, abs=0.02)
+            assert t["modes_pct"] == pytest.approx(
+                sum(m["pct"] for m in d["modes"]), abs=0.02)
+
+            # And the identity closes: the conditions, plus parked, plus what
+            # could not be sorted, is the window's consumption.
+            assert t["pct"] == pytest.approx(
+                t["modes_pct"] + t["parked_pct"] + t["unclassified_pct"]
+                + t["no_energy_pct"], abs=0.02)
+            # Against the kWh figures it was derived from, so the two units
+            # cannot tell different stories.
+            assert t["pct"] == pytest.approx(t["kwh"] / cap * 100.0, abs=0.05)
+
+            # Spelled out rather than left to be trusted.
+            assert t["adds_up"].endswith(f"= {t['pct']:.2f}%")
+            for m in d["modes"]:
+                if m["pct"]:
+                    assert f"{m['code']} {m['pct']:.2f}%" in t["adds_up"]
+    finally:
+        settings.app_passcode = old_pc

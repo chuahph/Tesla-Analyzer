@@ -2446,6 +2446,14 @@ def condition_matrix(drives: list[Any], capacity_kwh: float,
             # trips' own summed energy — which is the difference between this
             # column here and the same column on a parked row.
             "kwh": round(kwh, 2),
+            # And the same figure as a share of the pack, which is the ONE unit
+            # every row in the report can be stated in. Driving rows were in
+            # kWh and parked rows in percent, so the table could not be added
+            # up — a reader wanting "where did my battery go" had to convert
+            # half of it by hand. This is what makes
+            #     CC + CH + SC + HC + PK = the window's consumption
+            # something the report can show rather than something to work out.
+            "pct": round(kwh / capacity_kwh * 100.0, 2) if capacity_kwh else None,
         })
     # Ranked both ways, because the ordering IS the finding and reading it off
     # two unsorted columns is work the table can do for the reader.
@@ -2462,13 +2470,18 @@ def condition_matrix(drives: list[Any], capacity_kwh: float,
         # from every row above rather than distributed among them.
         "unclassified_trips": unclassified,
         "unclassified_kwh": round(unclassified_kwh, 2),
+        "unclassified_pct": (round(unclassified_kwh / capacity_kwh * 100.0, 2)
+                             if capacity_kwh else None),
         # And the ones that never reached the classifier at all, because their
         # energy is not plausible enough to feed an efficiency figure (see
         # analysis.has_valid_energy). Reported rather than silently dropped —
         # this was the larger of the two holes and the only invisible one.
         "no_energy_trips": no_energy,
         "no_energy_kwh": round(no_energy_kwh, 2),
+        "no_energy_pct": (round(no_energy_kwh / capacity_kwh * 100.0, 2)
+                          if capacity_kwh else None),
         "modes_kwh": round(sum(r["kwh"] for r in rows), 2),
+        "modes_pct": round(sum(r["pct"] or 0.0 for r in rows), 2),
         "thresholds": {
             "constant_ratio_min": float((cuts or {}).get(
                 "constant_ratio_min", MODE_CONSTANT_RATIO)),

@@ -2225,7 +2225,7 @@ function renderMatrix(d) {
   const rows = modes.map((m) => `
       <tr>
         <td class="mx-code">${m.code}</td>
-        <td class="mx-name">${m.name}<span class="mx-sub">${m.trips} trip${m.trips === 1 ? "" : "s"} · ${num(m.km, 1)} km · ${num(m.hours, 1)} h · ${num(m.idle_share_pct, 0)}% idle · ${num(m.out_temp_c, 1)}°C${share(m)}</span></td>
+        <td class="mx-name">${m.name}<span class="mx-sub">${m.trips} trip${m.trips === 1 ? "" : "s"} · ${num(m.km, 1)} km · ${num(m.hours, 1)} h · ${num(m.pct, 2)}% of the battery · ${num(m.idle_share_pct, 0)}% idle · ${num(m.out_temp_c, 1)}°C${share(m)}</span></td>
         <td>${num(m.wh_per_km, 1)}<span class="mx-rank">#${m.rank_per_km ?? "—"}</span></td>
         <td>${num(m.kw, 2)}<span class="mx-rank">#${m.rank_per_hour ?? "—"}</span></td>
         <td>${num(m.kwh, 2)}</td>
@@ -2365,11 +2365,15 @@ function renderMatrix(d) {
   const left = [];
   if (t && t.unclassified_kwh) left.push(`${num(t.unclassified_kwh, 1)} kWh in trips that could not be sorted`);
   if (t && t.no_energy_kwh) left.push(`${num(t.no_energy_kwh, 1)} kWh in trips whose energy is not plausible per km`);
+  // The identity spelled out, in the one unit every row now carries. This is
+  // the whole point of the table: where the battery went, adding to a total.
+  const sum = t && t.adds_up
+    ? `<strong>${t.adds_up}</strong> of the battery over ${num(t.hours, 0)} h. `
+    : "";
   const tot = t && t.kwh
-    ? `${num(t.hours, 0)} h driving + parked, ${num(t.kwh, 1)} kWh —
-       ${num(t.driving_kwh, 1)} moving, ${num(t.parked_kwh, 1)} standing still
-       (${num(t.parked_share_kwh_pct, 1)}% of the energy). Shares below are of
-       those hours.${left.length ? ` The rows come to ${num(t.modes_kwh, 1)} kWh; the rest is ${left.join(" and ")}.` : ""}${
+    ? `${sum}That is ${num(t.kwh, 1)} kWh — ${num(t.driving_kwh, 1)} moving,
+       ${num(t.parked_kwh, 1)} standing still
+       (${num(t.parked_share_kwh_pct, 1)}% of the energy).${
          aside.length ? ` Not priced at all: ${aside.join(", ")}.` : ""}`
     : "";
   const ev = d.parked_evidence;

@@ -8618,9 +8618,35 @@ def driving_matrix(days: int = Query(30, ge=1, le=730),
     # inventing a figure for them would be the one thing worse than a gap.
     reconciles = round(
         out["modes_kwh"] + out["unclassified_kwh"] + out["no_energy_kwh"], 2)
+    # The sum the report exists to show, in the one unit every row now carries:
+    #     CC + CH + SC + HC  (the driving modes)
+    #   + PK                 (everything parked)
+    #   + what could not be sorted
+    #   = the window's consumption as a share of the pack
+    #
+    # Percent rather than kWh because that is the unit the car's own screens
+    # use and the one an owner reasons in, and because the parked rows were
+    # only ever measurable in it — SoC points ARE percent.
+    pk_pct = out["parked"][0].get("pct") or 0.0
+    total_pct = round(
+        out["modes_pct"] + out["unclassified_pct"] + out["no_energy_pct"] + pk_pct, 2)
     out["totals"] = {
         "hours": round(total_hours, 1),
         "kwh": round(total_kwh, 2),
+        "pct": total_pct,
+        "modes_pct": out["modes_pct"],
+        "parked_pct": pk_pct,
+        "unclassified_pct": out["unclassified_pct"],
+        "no_energy_pct": out["no_energy_pct"],
+        # Spelled out, so the identity can be read off rather than trusted.
+        "adds_up": " + ".join(
+            [f"{m['code']} {m['pct']:.2f}%" for m in out["modes"] if m.get("pct")]
+            + ([f"PK {pk_pct:.2f}%"] if pk_pct else [])
+            + ([f"unsorted {out['unclassified_pct']:.2f}%"]
+               if out["unclassified_pct"] else [])
+            + ([f"implausible {out['no_energy_pct']:.2f}%"]
+               if out["no_energy_pct"] else [])
+        ) + f" = {total_pct:.2f}%",
         "driving_kwh": drive_kwh,
         "parked_kwh": round(pk_kwh, 2),
         "parked_share_kwh_pct": (round(pk_kwh / total_kwh * 100.0, 1)
