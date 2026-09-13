@@ -3194,3 +3194,75 @@ def test_the_short_parks_are_counted_apart_so_their_effect_is_measurable():
     assert acc["parked"]["by_state"]["unknown"] == pytest.approx(3.5)
     # So the short hours are real parked time PK counts and ID cannot.
     assert acc["parked"]["hours"] == pytest.approx(36.5)
+
+
+def test_a_parked_rate_is_gated_on_its_own_noise_not_on_a_flat_hour_count():
+    """Hours were the wrong thing to test, and the arithmetic says so.
+
+    A gap's drop carries about 0.41 SoC points of quantisation error, so over N
+    gaps the noise grows as sqrt(N) while the real drain grows with the HOURS.
+    Identical hours therefore mean quite different evidence depending on how few
+    gaps they arrive in:
+
+       144 h in 12 parks of 12 h  ->  S/N 5.9, a measurement
+       144 h in 72 parks of  2 h  ->  S/N 2.4, mostly rounding
+
+    Any single hours threshold passes one of those and refuses the other for no
+    reason connected to the question. So the test is the quantity itself.
+    """
+    from datetime import datetime, timedelta
+    from types import SimpleNamespace
+
+    cap = 68.6
+
+    def history(gap_hours, n, drop_per_gap):
+        """n parks of gap_hours each, losing drop_per_gap points across each."""
+        base = datetime(2026, 3, 1)
+        out, soc, at = [], 90.0, base
+        for i in range(n + 1):
+            out.append(SimpleNamespace(
+                id=i, start_time=at, end_time=at + timedelta(minutes=20),
+                start_soc=soc, end_soc=soc, end_location="Home",
+                duration_min=20.0, energy_used_kwh=1.0))
+            soc -= drop_per_gap
+            at = out[-1].end_time + timedelta(hours=gap_hours)
+        return out
+
+    # Same hours, same total drain, same rate — and different evidence.
+    # 0.04 kW across 144 h is 5.76 kWh, which is 8.4 SoC points on this pack.
+    few_long = history(12.0, 12, 8.4 / 12)
+    many_short = history(2.0, 72, 8.4 / 72)
+
+    long_pts, long_hrs, long_gaps = driving_analysis._gap_totals(
+        few_long, [], 0.0, None, signed=True)
+    short_pts, short_hrs, short_gaps = driving_analysis._gap_totals(
+        many_short, [], 0.0, None, signed=True)
+    assert long_hrs == pytest.approx(short_hrs) == pytest.approx(144.0)
+    assert long_pts == pytest.approx(short_pts, abs=0.01)
+    assert long_gaps == 12 and short_gaps == 72
+
+    # The noise is what differs: sqrt(72)/sqrt(12) is 2.4x more of it, on the
+    # same hours and the same drain.
+    long_noise = driving_analysis._noise_kw(long_gaps, long_hrs, cap)
+    short_noise = driving_analysis._noise_kw(short_gaps, short_hrs, cap)
+    assert short_noise == pytest.approx(long_noise * (6 ** 0.5), rel=0.02)
+
+    # So the long-park history reports and the short-stop one refuses, on the
+    # same hours and the same rate.
+    assert driving_analysis.parked_decomposition(
+        few_long, [], cap, [])["pk_kw"] is not None
+    got = driving_analysis.parked_decomposition(many_short, [], cap, [])
+    assert got["pk_kw"] is None
+    assert "gauge steps" in got["pk_why"]
+
+    # And the refusal never disagrees with the decision, the same rule the
+    # other two causes follow.
+    for pts, hrs, gaps in ((long_pts, long_hrs, long_gaps),
+                           (short_pts, short_hrs, short_gaps)):
+        fitted = driving_analysis._rate_kw(
+            pts, hrs, cap, driving_analysis.STANDBY_ALL_MIN_TOTAL_HOURS)
+        noise = driving_analysis._noise_kw(gaps, hrs, cap)
+        gated = fitted is not None and fitted >= driving_analysis.STANDBY_SNR_MIN * noise
+        why = driving_analysis._rate_refusal(
+            pts, hrs, cap, driving_analysis.STANDBY_ALL_MIN_TOTAL_HOURS, gaps)
+        assert gated == (why is None)

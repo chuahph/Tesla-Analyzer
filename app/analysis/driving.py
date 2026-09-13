@@ -225,16 +225,57 @@ STANDBY_MIN_GAP_HOURS = 6.0
 # Two overnight parks. Raised with the floor: at 6 h a 12 h total could be a
 # single gap, and one gap has never been a rate anywhere else in this module.
 STANDBY_MIN_TOTAL_HOURS = 24.0
-# The same floor for the matrix's fit, which pools EVERY parked gap rather than
-# only the long ones, and therefore needs more of them. Not because a short park
-# is less real, but because its reading is almost entirely quantisation: at a
-# whole SoC point per 0.7 kWh, an hour parked moves the gauge a twentieth of a
-# point. Summed signed the noise cancels as the square root of the gap count
-# while the signal grows with the hours, so the aggregate is what has to be
-# large. Three days of parked time puts a typical rate several times its own
-# rounding error; parked_noise_kw reports that error alongside the rate rather
-# than leaving the threshold to carry the whole argument.
-STANDBY_ALL_MIN_TOTAL_HOURS = 72.0
+# A sanity floor for the matrix's fit, and no more than that. It pools EVERY
+# parked gap rather than only the long ones, so hours alone stopped being the
+# thing worth testing — see STANDBY_SNR_MIN, which is what actually decides.
+STANDBY_ALL_MIN_TOTAL_HOURS = 24.0
+
+# How far a parked rate must stand above the gauge's own rounding before it is
+# reported at all.
+#
+# A flat hours threshold was the wrong shape and the arithmetic says so. Each
+# end of a gap is read to a whole SoC point, so a gap's drop carries about 0.41
+# points of quantisation error; over N independent gaps that grows as 0.41*sqrt(N)
+# while the real drain grows with the HOURS. So what matters is not how many
+# hours there are but how few gaps they arrive in:
+#
+#    144 h in 12 parks of 12 h  ->  8.40 points of drain, 1.42 of noise  S/N 5.9
+#    144 h in 72 parks of  2 h  ->  8.40 points of drain, 3.48 of noise  S/N 2.4
+#
+# Identical hours, identical drain, identical rate — and one of them is a
+# measurement while the other is mostly rounding. Any single hours figure therefore passes some histories it should
+# refuse and refuses others it should pass, which is exactly what a constant
+# chosen by judgement does when the quantity it stands in for is available.
+#
+# The quantity IS available, so the test is the quantity: report the rate when
+# it is at least this many times its own noise. It makes the threshold
+# self-adjusting in the right direction — a history of long overnight parks
+# qualifies sooner than one of the same hours in errand stops, because it is
+# genuinely better evidence — and it needs no judgement about how many hours a
+# car ought to spend parked.
+#
+# Three, because at S/N 3 the rate is within roughly a third of itself, which is
+# the point where the figure starts being worth acting on. A lower bar would
+# report numbers whose sign is safe but whose value is not.
+STANDBY_SNR_MIN = 3.0
+
+
+def _noise_points(gaps: int) -> float:
+    """Quantisation error, in SoC points, expected across ``gaps`` readings.
+
+    Each end of a gap is read to a whole point, so its error is roughly uniform
+    over half a point either way: standard deviation 0.5/sqrt(3) = 0.289, and a
+    DIFFERENCE of two such readings carries sqrt(2) times that, about 0.41.
+    Independent across gaps, so the sum grows as the square root of the count.
+    """
+    return 0.41 * (gaps ** 0.5) if gaps > 0 else 0.0
+
+
+def _noise_kw(gaps: int, hours: float, capacity_kwh: float) -> float | None:
+    """The same error expressed as a rate, for comparing against a fitted one."""
+    if not gaps or not hours or not capacity_kwh:
+        return None
+    return round(_noise_points(gaps) / 100.0 * capacity_kwh / hours, 4)
 # Outside this the answer is a measurement artifact, not a parked car — a
 # Tesla idles somewhere near 100-500 W depending on Sentry, climate and how
 # long it takes to fall asleep.
@@ -376,7 +417,7 @@ def _rate_kw(points: float, hours: float, capacity_kwh: float,
 
 
 def _rate_refusal(points: float, hours: float, capacity_kwh: float,
-                  min_total_h: float) -> str | None:
+                  min_total_h: float, gaps: int = 0) -> str | None:
     """Why _rate_kw said None, or None if it did not. Same tests, same order.
 
     A blank rate has three quite different causes and they call for three
@@ -404,6 +445,12 @@ def _rate_refusal(points: float, hours: float, capacity_kwh: float,
     if not lo <= rate <= hi:
         return (f"the fit came out at {rate:.3f} kW, outside the {lo}-{hi} kW "
                 f"a parked car can plausibly draw")
+    noise = _noise_kw(gaps, hours, capacity_kwh)
+    if noise and rate < STANDBY_SNR_MIN * noise:
+        return (f"{rate:.3f} kW is under {STANDBY_SNR_MIN:g}x the "
+                f"{noise:.3f} kW the 1% gauge steps alone would produce across "
+                f"{gaps} parks — more hours, or fewer and longer ones, would "
+                f"separate it")
     return None
 
 
@@ -749,12 +796,19 @@ def parked_decomposition(drives: list[Any], charges: list[Any] | None,
     off_points, off_hours, off_gaps = totals(False) if index else (0.0, 0.0, 0)
     on_points, on_hours, on_gaps = totals(True) if index else (0.0, 0.0, 0)
 
-    def rate(points: float, hours: float) -> float | None:
-        return _rate_kw(points, hours, capacity_kwh, STANDBY_ALL_MIN_TOTAL_HOURS)
+    def rate(points: float, hours: float, gaps: int) -> float | None:
+        """The fit, reported only where it stands clear of its own rounding."""
+        fitted = _rate_kw(points, hours, capacity_kwh, STANDBY_ALL_MIN_TOTAL_HOURS)
+        if fitted is None:
+            return None
+        noise = _noise_kw(gaps, hours, capacity_kwh)
+        if noise and fitted < STANDBY_SNR_MIN * noise:
+            return None
+        return fitted
 
-    pk = rate(all_points, all_hours)
-    idle = rate(off_points, off_hours)
-    armed = rate(on_points, on_hours)
+    pk = rate(all_points, all_hours, all_gaps)
+    idle = rate(off_points, off_hours, off_gaps)
+    armed = rate(on_points, on_hours, on_gaps)
     # How much of the answer is the gauge's own resolution. Each end of a gap is
     # read to a whole SoC point, so a gap's drop carries about 0.41 points of
     # quantisation error; summed over independent gaps that grows as the square
@@ -762,9 +816,7 @@ def parked_decomposition(drives: list[Any], charges: list[Any] | None,
     # than hidden behind a threshold: a rate that is not several times this is
     # not yet a measurement, and the reader can see which it is.
     def noise(gaps: int, hours: float) -> float | None:
-        if not gaps or not hours or not capacity_kwh:
-            return None
-        return round(0.41 * (gaps ** 0.5) / 100.0 * capacity_kwh / hours, 4)
+        return _noise_kw(gaps, hours, capacity_kwh)
     return {
         "pk_kw": pk,
         "id_kw": idle,
@@ -772,9 +824,9 @@ def parked_decomposition(drives: list[Any], charges: list[Any] | None,
         "id_noise_kw": noise(off_gaps, off_hours),
         # Why a blank row is blank, in the row's own terms.
         "pk_why": _rate_refusal(all_points, all_hours, capacity_kwh,
-                                STANDBY_ALL_MIN_TOTAL_HOURS),
+                                STANDBY_ALL_MIN_TOTAL_HOURS, all_gaps),
         "id_why": _rate_refusal(off_points, off_hours, capacity_kwh,
-                                STANDBY_ALL_MIN_TOTAL_HOURS),
+                                STANDBY_ALL_MIN_TOTAL_HOURS, off_gaps),
         # The 6-hour deep-sleep rate, kept beside the all-hours one because they
         # are different quantities and both are wanted. This is the figure
         # sync.py subtracts from real trip energy, and the gap between the two
@@ -2303,9 +2355,14 @@ MATRIX_DEFINITIONS = {
                                  "then applied to — errand stops included, not "
                                  "only the long parks. The gauge reads to a "
                                  "whole SoC point, so a parked row also carries "
-                                 "how much of its rate is that resolution: a "
-                                 "figure not several times its own noise is not "
-                                 "yet a measurement."},
+                                 "how much of its rate is that resolution, and "
+                                 "is left blank until it stands three times "
+                                 "clear of it. That is a test of the evidence "
+                                 "rather than of the calendar: the same hours "
+                                 "in a few long parks are better evidence than "
+                                 "in many short stops, because the rounding "
+                                 "grows with the number of parks and the drain "
+                                 "grows with the hours."},
         {"name": "Range", "means": "What a full battery is worth driven entirely "
                                    "in this condition."},
         {"name": "km/1%", "means": "What one percent of the battery buys here."},
