@@ -1513,12 +1513,31 @@ let lastDiagContext = {};
 // stamp says which deployed version produced the numbers — without it there's
 // no telling whether a reading predates a fix.
 function tripDiagnostics(t, ctx) {
+  // Same origin the dashboard was loaded from, so a copy taken on the custom
+  // domain does not hand back a link to onrender.com or the other way round.
+  const base = (typeof window !== 'undefined' && window.location)
+    ? window.location.origin : '';
   return JSON.stringify({
     context: {
       build: ctx.build || null,
       usable_capacity_kwh: ctx.usable_capacity_kwh ?? null,
       capacity_source: ctx.capacity_source || null,
       copied_at: new Date().toISOString(),
+    },
+    // The two follow-ups a copied trip always leads to, built here rather
+    // than retyped on a phone. The reading link carries this trip's id
+    // already, because that is the part that is easy to get wrong and
+    // impossible to notice: a reading filed against the wrong drive is not a
+    // mistake anything downstream can detect.
+    links: {
+      // Fill the figures off the car's Current Drive panel. The last two are
+      // optional — Driving and Climate off the same Consumption breakdown.
+      add_car_reading: t.id
+        ? `${base}/api/add-car-reading?readings=${t.id}:<km>:<pct>:<wh_per_km>:<driving_pct>:<climate_pct>`
+        : null,
+      // Cross-trip statistics only: the energy bias and its significance, the
+      // window totals, per-trip uncertainty. Those cannot live on one trip.
+      compare: `${base}/api/telemetry/compare`,
     },
     trip: {
       id: t.id, route: t.route,
