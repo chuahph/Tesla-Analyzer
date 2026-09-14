@@ -9692,3 +9692,89 @@ def test_a_purge_drops_the_staged_trips_or_promotion_undoes_it():
         sess.commit()
         sess.close()
         settings.app_passcode = old_pc
+
+
+def test_rerunning_a_purge_clears_shadow_trips_it_stranded():
+    """The exact situation on the live database, and the first fix missed it.
+
+    A purge applied before _purge_drives_before learned to drop shadow trips
+    deleted the rows and left the staging area full. Re-running it over the
+    same window is how those get cleared — but the no-op check fired on an
+    empty row set and returned "nothing older than the cutover", having done
+    nothing, while 22 stranded journeys went on refusing every promotion.
+
+    So the check now asks whether there is anything to do at all, rows or
+    staged trips, and the dropped trips are folded into the backup that holds
+    the rows they belong with rather than replacing it with one that has none.
+    """
+    import json as _json_mod
+    from datetime import datetime as _dt
+    from datetime import timedelta as _td
+
+    from app import state
+    from app.database import SessionLocal
+    from app.models import Drive, Vehicle
+
+    settings = get_settings()
+    old_pc = settings.app_passcode
+    settings.app_passcode = ""
+    sess = SessionLocal()
+    prev_staged = state.get(sess, state.TELEMETRY_TRIPS_KEY)
+    prev_backup = state.get(sess, state.PURGED_STALE_DRIVES_KEY)
+    try:
+        with TestClient(app) as client:
+            vin = sess.scalar(select(Vehicle.vin))
+            vid = sess.scalar(select(Vehicle.id))
+            stranded, kept = _dt(2019, 3, 1, 8, 0), _dt(2019, 8, 1, 8, 0)
+            # The rows are already gone — only the staging area still has them,
+            # which is the state a purge from before the fix leaves behind.
+            state.put(sess, state.TELEMETRY_TRIPS_KEY, _json_mod.dumps([
+                {"vin": vin, "start_ts": stranded.timestamp(), "distance_km": 9.0},
+                {"vin": vin, "start_ts": kept.timestamp(), "distance_km": 9.0},
+            ]))
+            # A backup from that earlier purge, holding the deleted rows.
+            state.put(sess, state.PURGED_STALE_DRIVES_KEY, _json_mod.dumps({
+                "at": "2026-09-13T20:00:00", "cutover": "2019-06-01T00:00:00",
+                "rows": [{"id": 999901, "vehicle_id": vid,
+                          "start_time": stranded.isoformat(),
+                          "end_time": (stranded + _td(minutes=20)).isoformat(),
+                          "distance_km": 9.0, "energy_used_kwh": 1.4}],
+            }))
+            sess.commit()
+
+            plan = client.get("/api/data/purge-stale-drives"
+                              "?before=2019-06-01&freeze=false").json()
+            assert plan["would_delete"] == 0
+            assert plan["would_drop_staged"] == 1
+
+            done = client.get("/api/data/purge-stale-drives"
+                              "?before=2019-06-01&freeze=false&apply=true").json()
+            assert done["deleted"] == 0
+            # The point: a run with no rows to delete still did something.
+            assert done["shadow_trips_dropped"] == 1
+            assert "note" not in done or "no staged trips" not in done["note"]
+
+            left = _json_mod.loads(state.get(sess, state.TELEMETRY_TRIPS_KEY))
+            assert [t["start_ts"] for t in left] == [kept.timestamp()]
+
+            # The rows in the earlier backup survive, and the dropped trips
+            # join them rather than being lost — one restore, whole episode.
+            saved = _json_mod.loads(state.get(sess, state.PURGED_STALE_DRIVES_KEY))
+            assert len(saved["rows"]) == 1
+            assert len(saved["shadow_trips"]) == 1
+            assert done["backup_kept"] == 1
+
+            # And a genuine no-op is still a no-op: nothing left to drop.
+            again = client.get("/api/data/purge-stale-drives"
+                               "?before=2019-06-01&freeze=false&apply=true").json()
+            assert again["deleted"] == 0
+            assert "no staged trips dropped" in again["note"]
+    finally:
+        state.put(sess, state.TELEMETRY_TRIPS_KEY, prev_staged or "")
+        state.put(sess, state.PURGED_STALE_DRIVES_KEY, prev_backup or "")
+        for row in sess.scalars(select(Drive).where(
+                Drive.start_time < _dt(2020, 1, 1))):
+            sess.delete(row)
+        sess.commit()
+        sess.close()
+        settings.app_passcode = old_pc

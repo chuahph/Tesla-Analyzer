@@ -2173,14 +2173,35 @@ def _purge_drives_before(session: Session, vehicle, cutover: datetime,
         plan["applied"] = False
         return plan
 
-    if not doomed:
+    # Which staged trips belong to the window being purged, worked out BEFORE
+    # the no-op check — because "no rows to delete" is not the same as "nothing
+    # to do". A purge applied before this function learned to drop shadow trips
+    # leaves them stranded, and re-running it over the same window is exactly
+    # how they get cleared; returning early on an empty row set made that
+    # impossible and the re-run report success having done nothing.
+    try:
+        staged_all = _json_mod.loads(
+            state.get(session, state.TELEMETRY_TRIPS_KEY) or "[]") or []
+    except ValueError:
+        staged_all = []
+    keep_staged, drop_staged = [], []
+    for t in staged_all:
+        ts = t.get("start_ts")
+        started = sync_mod._dt(float(ts)) if ts else None
+        (drop_staged if started and started < cutover else keep_staged).append(t)
+
+    if not doomed and not drop_staged:
         plan["applied"] = True
         plan["deleted"] = 0
-        plan["note"] = ("nothing older than the cutover — no rows deleted, "
-                        "and the stored backup and frozen rates were left alone")
+        plan["note"] = ("nothing older than the cutover — no rows deleted, no "
+                        "staged trips dropped, and the stored backup and frozen "
+                        "rates were left alone")
         return plan
 
-    if freeze:
+    # Only when rows are actually going. With nothing deleted there is no
+    # history to lose, so a re-freeze would replace measurements with whatever
+    # the surviving window can still support for no reason at all.
+    if freeze and doomed:
         frozen = _freeze_parked_rates(session, vehicle, capacity_kwh)
         state.put(session, state.FROZEN_RATES_KEY, _json_mod.dumps(frozen))
         plan["froze"] = {
@@ -2201,17 +2222,6 @@ def _purge_drives_before(session: Session, vehicle, cutover: datetime,
     #
     # Kept in the same backup as the rows, so the restore can put both back and
     # "reversible" stays true of the whole operation rather than half of it.
-    try:
-        staged_all = _json_mod.loads(
-            state.get(session, state.TELEMETRY_TRIPS_KEY) or "[]") or []
-    except ValueError:
-        staged_all = []
-    keep_staged, drop_staged = [], []
-    for t in staged_all:
-        ts = t.get("start_ts")
-        started = sync_mod._dt(float(ts)) if ts else None
-        (drop_staged if started and started < cutover else keep_staged).append(t)
-
     backup = {
         "at": sync_mod.now_local().isoformat(timespec="seconds"),
         "cutover": cutover.isoformat(),
@@ -2221,8 +2231,14 @@ def _purge_drives_before(session: Session, vehicle, cutover: datetime,
     existing_raw = state.get(session, backup_key)
     existing = _json_mod.loads(existing_raw) if existing_raw else {}
     if existing.get("rows") and not backup["rows"]:
-        # Belt and braces behind the early return above: whatever else is
-        # true, a backup holding rows is never replaced by one holding none.
+        # A backup holding rows is never replaced by one holding none. But the
+        # shadow trips being dropped now belong to the purge that stranded
+        # them, so they are folded INTO that backup rather than lost — keeping
+        # the whole episode reversible by the one restore.
+        if drop_staged:
+            existing["shadow_trips"] = (
+                (existing.get("shadow_trips") or []) + drop_staged)
+            state.put(session, backup_key, _json_mod.dumps(existing))
         plan["backup_kept"] = len(existing["rows"])
     else:
         # A backup that already holds rows is being replaced, and the rows it
