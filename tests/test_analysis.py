@@ -3673,3 +3673,53 @@ def test_a_mixed_trip_is_split_across_modes_by_measured_distance():
     assert by_code["FH"]["km"] == pytest.approx(20.0, abs=0.05)
     # Both halves of 735 are counted, and nothing is double counted.
     assert sum(r["km"] for r in got["modes"]) == pytest.approx(40.0, abs=0.05)
+
+
+def test_a_streamed_trips_measured_energy_is_not_overridden_by_its_soc_drop():
+    """The dashboard and the driving matrix disagreed by 5% about the same
+    eight journeys over the same 120.8 km, and this was why.
+
+    analyze() takes max(measured kWh, SoC drop) per trip. That rescue is for
+    POLLED trips, where energy is inferred from rated range read minutes apart
+    and a stale reading makes a trip look cheaper than the pack says. On a
+    STREAMED trip the measurement is a subtraction of the car's own
+    EnergyRemaining counter, good to about 0.02 kWh, while the SoC drop is
+    quantised to a whole point — 0.69 kWh on this pack. The floor was coarser
+    than the thing it was protecting, and it only ever pushed upward.
+    """
+    from datetime import datetime, timedelta
+    from types import SimpleNamespace
+
+    cap = 68.6
+
+    def trip(i, kwh, soc_drop, source):
+        at = datetime(2026, 9, 12) + timedelta(hours=i)
+        return SimpleNamespace(
+            id=i, start_time=at, end_time=at + timedelta(minutes=30),
+            distance_km=15.0, duration_min=30.0, energy_used_kwh=kwh,
+            wh_per_km=kwh * 1000.0 / 15.0, start_soc=80.0,
+            end_soc=80.0 - soc_drop, avg_speed_kmh=30.0, max_speed_kmh=60.0,
+            idle_min=0.0, idle_tracked=True, outside_temp_c=30.0,
+            start_location="Home", end_location="Office",
+            start_area="", end_area="", climate_min=None,
+            source=source, tag="", cost_override=None)
+
+    # Measured 2.0 kWh; the gauge rounded the same trip to 3 points, 2.06 kWh.
+    streamed = trip(1, 2.0, 3.0, "telemetry")
+    polled = trip(2, 2.0, 3.0, "")
+
+    got_stream = driving_analysis.analyze([streamed], capacity_kwh=cap)
+    got_polled = driving_analysis.analyze([polled], capacity_kwh=cap)
+
+    # The streamed trip keeps its measurement.
+    assert got_stream["trip_energy_used_kwh"] == pytest.approx(2.0, abs=0.05)
+    # The polled one is still rescued to the SoC floor, which is what the
+    # rescue is for — 3% of 68.6 is 2.06.
+    assert got_polled["trip_energy_used_kwh"] == pytest.approx(2.06, abs=0.05)
+    assert got_polled["trip_energy_used_kwh"] > got_stream["trip_energy_used_kwh"]
+
+    # And a streamed trip with NO energy figure still takes the floor: the
+    # rescue is about a missing measurement, and that is one.
+    blank = trip(3, 0.0, 3.0, "telemetry")
+    assert driving_analysis.analyze([blank], capacity_kwh=cap)[
+        "trip_energy_used_kwh"] == pytest.approx(2.06, abs=0.05)

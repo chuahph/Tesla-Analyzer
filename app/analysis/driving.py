@@ -1854,8 +1854,36 @@ def analyze(drives: list[Drive], rated_wh_per_km: float = 150.0,
     # energy happens to be the larger of the two window sums — the gap trip's
     # SoC points then never surface at all.
     def _trip_kwh(d: Drive) -> float:
+        """A trip's energy, rescued from an under-read where one is possible.
+
+        The max() is for POLLED trips. There, energy is inferred from rated
+        range read minutes apart, and a reading that arrives stale or missing
+        makes a trip look cheaper than the pack's own SoC says it was — so the
+        SoC drop is taken as a floor.
+
+        It must not apply to a STREAMED trip. There, energy is a subtraction of
+        the car's own EnergyRemaining counter, good to about 0.02 kWh, while
+        the SoC drop is quantised to a whole point — 0.69 kWh on this pack. So
+        the floor is coarser than the thing it is protecting, and whenever the
+        rounding happens to land above the measurement it replaces a good
+        number with a worse one. Always upward, never down.
+
+        Measured on eight streamed trips: 21.9 kWh against a measured 20.8,
+        which is 1.1 kWh of pure rounding — and it is why the dashboard's
+        "battery used" and the driving matrix's total disagreed by 5% while
+        describing the same eight journeys over the same 120.8 km. The
+        comment on ground_truth_used_kwh already called this bias
+        one-directional and worked around it for the since-charge view; this
+        removes it at the source for the trips that never needed it.
+
+        A streamed trip with no energy figure at all still takes the floor:
+        the rescue is about a missing measurement, and that is one.
+        """
         integer_kwh = max(d.start_soc - d.end_soc, 0.0) / 100.0 * capacity_kwh if capacity_kwh else 0.0
-        return max(d.energy_used_kwh, integer_kwh)
+        measured = float(d.energy_used_kwh or 0.0)
+        if measured > 0 and (getattr(d, "source", "") or "") == "telemetry":
+            return measured
+        return max(measured, integer_kwh)
     # Unrounded throughout — km_per_soc and soc_used are sensitive to error
     # introduced by rounding an intermediate sum, so only the values actually
     # returned below get rounded, at the very end.
