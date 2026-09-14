@@ -3560,22 +3560,12 @@ def test_departure_pace_is_per_place_and_survives_an_edit():
             })
             assert client.get("/api/places").json()[0]["departure_pace_kmh"] == 45.0
 
-            # And the sync path finds it from coordinates inside the fence.
-            from app.api.routes import _place_departure_pace
-            with SessionLocal() as s:
-                inside = {"lat": 5.3301, "lon": 100.3001}
-                outside = {"lat": 5.5000, "lon": 100.5000}
-                assert _place_departure_pace(s, inside) == 45.0
-                assert _place_departure_pace(s, outside) is None
-                assert _place_departure_pace(s, None) is None
-                assert _place_departure_pace(s, {"lat": None, "lon": None}) is None
-
             # 0 is how you go back to the global default.
             assert client.get("/api/set-departure-pace",
                               params={"place": "Home", "kmh": 0}).json()[
                                   "departure_pace_kmh"] == 0.0
+            assert client.get("/api/places").json()[0]["departure_pace_kmh"] == 0.0
             with SessionLocal() as s:
-                assert _place_departure_pace(s, {"lat": 5.3301, "lon": 100.3001}) is None
                 s.query(Place).delete()
                 s.commit()
     finally:

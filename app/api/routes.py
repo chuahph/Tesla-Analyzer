@@ -1079,28 +1079,6 @@ def _geofence_name(
     return best_name
 
 
-def _place_departure_pace(session: Session, snap: dict | None) -> float | None:
-    """The departure pace set on the named Place this snapshot sits in, if any
-    — what sync.process_snapshot uses to back-date a start it never saw.
-
-    Nearest containing geofence wins, matching _geofence_name, so overlapping
-    places resolve the same way for the pace as for the name. A place with the
-    field left at 0 is not a match: it means "no opinion", and returning it
-    would shadow a smaller, further place that does have one.
-    """
-    coords = sync_mod._coords(snap) if snap else ""
-    if not coords:
-        return None
-    best_pace, best_km = None, None
-    for p in session.query(Place).all():
-        if not p.departure_pace_kmh:
-            continue
-        d = haversine_km(coords, f"{p.lat}, {p.lon}")
-        if d is not None and d <= p.radius_km and (best_km is None or d < best_km):
-            best_pace, best_km = p.departure_pace_kmh, d
-    return best_pace
-
-
 def _parked_rate_kw_for(session: Session, place: str | None, past_drives: list,
                         past_charges: list, capacity_kwh: float) -> float | None:
     """This car's parked draw at one place, in kW, best source first.
@@ -9503,9 +9481,8 @@ def repair_missing_trip(
             distance_km=round(span, 1), duration_min=mins,
             start_soc=prev_d.end_soc, end_soc=end_soc, energy_used_kwh=energy,
             avg_speed_kmh=round(span / max(mins / 60.0, 1e-9), 1),
-            # No speed was ever observed, so the average is the honest floor —
-            # the same fallback _drive_from uses for a trip with no mid-drive
-            # reading.
+            # No speed was ever observed, so the average is the honest floor:
+            # a speed the car demonstrably reached.
             max_speed_kmh=round(span / max(mins / 60.0, 1e-9), 1),
             outside_temp_c=prev_d.outside_temp_c,
             start_location=start_place, start_area=prev_d.end_area,
@@ -9857,8 +9834,8 @@ def repair_split_trip(
         drive.end_gap_sec = None
         # And a peak speed nothing on this leg measured. When the whole leg was
         # blind the observed maximum came from the other one, so fall back to
-        # the same honest floor _drive_from uses when no mid-drive snapshot
-        # exists: the average, which the car demonstrably reached.
+        # the same honest floor used wherever no mid-drive reading exists:
+        # the average, which the car demonstrably reached.
         if a_measured <= 0:
             drive.max_speed_kmh = drive.avg_speed_kmh
         session.commit()
@@ -10542,7 +10519,7 @@ def repair_lost_departure(
     anchor. Sync recovers it where it can, but a row already written keeps
     whatever it was given — and the case that most needs this is exactly the one
     sync used to decline: a long blackout that hid the previous arrival AND the
-    departure after it (see process_snapshot's prev_close_odo_km).
+    departure after it.
 
     Neither odometer repair fits. repair_trip_boundary trades distance between
     two trips that share a boundary; here the ground belongs to nobody, sitting
