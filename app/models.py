@@ -124,6 +124,28 @@ class Drive(Base):
     end_gap_sec: Mapped[float | None] = mapped_column(Float, nullable=True)
     idle_tracked: Mapped[bool] = mapped_column(Boolean, default=False)
 
+    # Where this trip's kilometres, minutes and kWh actually went, banded by
+    # the speed they happened at: JSON of {"<lower edge>": {km, min, kwh}} in
+    # ten-km/h steps topping out at 160.
+    #
+    # A trip has only ever carried an average and a peak, which is enough to
+    # put it in one category and not enough to say it was partly one thing and
+    # partly another. Trip 735 covered 28 km at an average of 75 with a peak of
+    # 160 — a motorway run with town at both ends, described as neither.
+    #
+    # Each band's kWh is the car's own EnergyRemaining delta over those
+    # stretches, not the trip total split by distance: apportioning by distance
+    # would hand highway and city the same Wh/km, which is the one distinction
+    # the condition matrix exists to draw. Null on every row written before
+    # this existed, and on anything polling wrote.
+    speed_profile: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # How many times the car came to rest during the trip. idle_min counts only
+    # stops of five minutes or more, deliberately — a commute through a dozen
+    # lights is driving, not idling — which left nothing measuring stop-start
+    # traffic at all. Trip 744 crawled 9.7 km at 18.5 km/h through peak hour
+    # and recorded zero idle.
+    stop_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
     # User-assigned category ("work" / "personal", or any free text) for
     # expense-claim/cost-splitting purposes. "" = untagged.
     tag: Mapped[str] = mapped_column(String(20), default="")

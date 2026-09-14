@@ -3601,3 +3601,75 @@ def test_the_driving_modes_share_of_distance_and_energy_sums_to_100():
     assert shown_km == pytest.approx(180.0)
     for r in rows:
         assert r["share_km_pct"] == pytest.approx(r["km"] / shown_km * 100.0, abs=0.1)
+
+
+def test_a_mixed_trip_is_split_across_modes_by_measured_distance():
+    """Trip 735 was a motorway run with town at either end, and whole-trip
+    classification has to call that one category and be wrong about most of it.
+
+    Where the stream recorded where the kilometres actually happened, the
+    highway share is split out by MEASURED distance — and by measured energy,
+    which matters more: apportioning a trip's kWh by distance would hand
+    highway and city the same Wh/km, destroying the one distinction the whole
+    table exists to draw.
+    """
+    import json
+    from types import SimpleNamespace
+
+    # 28 km in 22.4 min: 20 km up at 140 (8.6 min) and 8 km of town spread
+    # across the bands a town stretch really uses, stops included. Energy
+    # banded as it was drawn — the fast part costs far more per kilometre,
+    # which is the point.
+    profile = {
+        "140": {"km": 20.0, "min": 8.6, "kwh": 4.20},
+        "0": {"km": 0.0, "min": 3.0, "kwh": 0.04},
+        "20": {"km": 2.0, "min": 4.8, "kwh": 0.26},
+        "40": {"km": 6.0, "min": 6.0, "kwh": 0.80},
+    }
+    d = SimpleNamespace(
+        id=735, start_time=_dt_at(1), end_time=_dt_at(1),
+        distance_km=28.0, duration_min=22.4, max_speed_kmh=160.0,
+        energy_used_kwh=5.30, wh_per_km=5.30 * 1000.0 / 28.0,
+        idle_min=0.0, idle_tracked=True,
+        outside_temp_c=30.0, start_soc=90.0, end_soc=82.0,
+        end_location="Home", speed_profile=json.dumps(profile))
+
+    split = driving_analysis.mode_split(d)
+    # The motorway share is its own row; the town is classified on ITS OWN
+    # peak, not the trip's — the 160 belongs to the part just taken out, and
+    # using it would make the town look far less constant than it was.
+    assert "FH" in split
+    city = [c for c in split if c != "FH"]
+    assert len(city) == 1 and city[0] in ("CC", "SC", "HC")
+    assert split["FH"]["km"] == pytest.approx(20.0, abs=0.05)
+    assert split[city[0]]["km"] == pytest.approx(8.0, abs=0.05)
+    # The whole trip is reconstituted, so the rest of the report still adds up.
+    assert sum(v["km"] for v in split.values()) == pytest.approx(28.0, abs=0.01)
+    assert sum(v["kwh"] for v in split.values()) == pytest.approx(5.30, abs=0.01)
+
+    # And the two Wh/km figures are genuinely different, which they could not
+    # be if energy had been apportioned by distance.
+    fh_wh = split["FH"]["kwh"] / split["FH"]["km"] * 1000.0
+    city_wh = split[city[0]]["kwh"] / split[city[0]]["km"] * 1000.0
+    assert fh_wh == pytest.approx(210.0, abs=3.0)
+    assert city_wh == pytest.approx(137.5, abs=3.0)
+    assert fh_wh > city_wh * 1.4
+
+    # A trip with no profile is unchanged: one mode, whole.
+    plain = SimpleNamespace(
+        id=736, start_time=_dt_at(2), end_time=_dt_at(2),
+        distance_km=12.0, duration_min=18.0, max_speed_kmh=91.0,
+        energy_used_kwh=1.5, wh_per_km=125.0, idle_min=0.0, idle_tracked=True,
+        outside_temp_c=30.0, start_soc=90.0, end_soc=88.0, end_location="Home")
+    whole = driving_analysis.mode_split(plain)
+    assert list(whole) == ["SC"]
+    assert whole["SC"]["km"] == pytest.approx(12.0)
+
+    # The matrix reports how many journeys were split, so a reader can tell a
+    # row built from whole trips apart from one built from shares.
+    got = driving_analysis.condition_matrix([d, plain], 68.6, None, None)
+    assert got["split_trips"] == 1
+    by_code = {r["code"]: r for r in got["modes"]}
+    assert by_code["FH"]["km"] == pytest.approx(20.0, abs=0.05)
+    # Both halves of 735 are counted, and nothing is double counted.
+    assert sum(r["km"] for r in got["modes"]) == pytest.approx(40.0, abs=0.05)

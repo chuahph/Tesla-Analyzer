@@ -205,6 +205,12 @@ def init_db() -> None:
     # would manufacture a zero bias for trips whose bias is unknown.
     _ensure_column("drives", "out_temp_end_c", "FLOAT", "NULL")
     _ensure_column("drives", "ended_on", "VARCHAR(12)", "NULL")
+    # Where a trip's kilometres, minutes and kWh went by speed, and how often
+    # it stopped. Null on every row written before these existed, which the
+    # matrix has to handle rather than assume away — most of the history has no
+    # profile and never will.
+    _ensure_column("drives", "speed_profile", "TEXT", "NULL")
+    _ensure_column("drives", "stop_count", "INTEGER", "NULL")
     _ensure_column("drives", "start_gap_sec", "FLOAT", "NULL")
     _ensure_column("drives", "end_gap_sec", "FLOAT", "NULL")
     _ensure_column("drives", "end_est_km", "FLOAT", "NULL")

@@ -3236,8 +3236,62 @@ def advance_shadow(shadow: dict[str, Any], snap: dict[str, Any]) -> dict[str, An
                                           + temp * gap)
             if last.get("climate_on"):
                 shadow["climate_sec"] = float(shadow.get("climate_sec") or 0.0) + gap
+
+            # Distance, time and ENERGY banded by the speed they happened at.
+            #
+            # A trip has only ever carried two speed numbers, an average and a
+            # peak, and a peak is one sample. That is enough to put a whole
+            # trip in one box and not enough to say a trip was partly one thing
+            # and partly another — so a 20 km motorway run with 8 km of town
+            # either side was averaged into a single row and the motorway part
+            # disappeared. Measured on trip 735: 28 km at an average of 75 with
+            # a peak of 160, which is neither of the two things it actually was.
+            #
+            # The speed here is IMPLIED from the odometer over the interval,
+            # not read off the speedometer: it is the average over exactly the
+            # stretch being attributed, where an instantaneous sample is the
+            # value at one instant of it. And the energy is the car's own
+            # EnergyRemaining delta over the same interval, so each band's kWh
+            # is measured rather than apportioned from the trip total by
+            # distance — which would hand highway and city the same Wh/km and
+            # destroy the one distinction the matrix exists to draw.
+            odo_a, odo_b = last.get("odo_km"), snap.get("odo_km")
+            if odo_a is not None and odo_b is not None:
+                step_km = float(odo_b) - float(odo_a)
+                # Backwards or implausible: a replayed record, or the odometer
+                # rewind the composite guards against. Banding it would put
+                # negative distance somewhere.
+                if 0.0 <= step_km < 10.0:
+                    kmh = step_km / (gap / 3600.0) if gap else 0.0
+                    # Ten-wide buckets keyed by their lower edge, topping out
+                    # at 160. Fixed rather than derived from the mode
+                    # thresholds, because those are tunable and this is written
+                    # once at ingest: fine buckets can be summed to any cut
+                    # later, a bucket cut to today's threshold cannot.
+                    band = str(int(min(kmh // 10.0 * 10.0, 160.0)))
+                    bands = shadow.setdefault("bands", {})
+                    slot = bands.setdefault(band, [0.0, 0.0, 0.0])
+                    slot[0] += step_km
+                    slot[1] += gap
+                    e_a, e_b = last.get("energy_kwh"), snap.get("energy_kwh")
+                    if e_a is not None and e_b is not None:
+                        used = float(e_a) - float(e_b)
+                        # Regen makes this genuinely negative and that is real,
+                        # so it is kept signed. Only a jump too large to be one
+                        # interval is dropped, which is a replay rather than a
+                        # car.
+                        if abs(used) < 5.0:
+                            slot[2] += used
+
             run_since = shadow.get("idle_run_since")
             if stopped and run_since is None:
+                # The moment the car came to rest, counted. idle_min only ever
+                # counted stops of five minutes or more — deliberately, since a
+                # commute through a dozen lights is driving rather than idling
+                # — which leaves nothing at all measuring stop-start traffic.
+                # Trip 744 crawled 9.7 km at 18.5 km/h through peak hour and
+                # recorded zero idle. This is the count that says otherwise.
+                shadow["stops"] = int(shadow.get("stops") or 0) + 1
                 shadow["idle_run_since"] = float(last["ts"])
             elif not stopped and run_since is not None:
                 span = float(last["ts"]) - float(run_since)
@@ -3286,6 +3340,8 @@ def advance_shadow(shadow: dict[str, Any], snap: dict[str, Any]) -> dict[str, An
             shadow.pop("e_val", None)
             shadow.pop("temp_sec", None)
             shadow.pop("temp_sum", None)
+            shadow.pop("bands", None)
+            shadow.pop("stops", None)
             shadow.pop("temp_hold_sec", None)
             shadow.pop("temp_hold_sum", None)
             open_at = shadow["open"]
@@ -3761,6 +3817,24 @@ def recover_sleep_gap(prev: dict[str, Any], nxt: dict[str, Any],
     return True
 
 
+def _bands_out(bands: dict[str, Any] | None) -> dict[str, dict[str, float]] | None:
+    """The banded accumulator, rounded for storage. None when nothing banded.
+
+    Rounded here rather than at every read: this is written once and read on
+    every dashboard load, and three decimals of a kilometre is a metre.
+    """
+    if not bands:
+        return None
+    out = {}
+    for key, slot in bands.items():
+        km, sec, kwh = float(slot[0]), float(slot[1]), float(slot[2])
+        if km <= 0 and sec <= 0:
+            continue
+        out[key] = {"km": round(km, 3), "min": round(sec / 60.0, 2),
+                    "kwh": round(kwh, 4)}
+    return out or None
+
+
 def _shadow_close(shadow: dict[str, Any], end: dict[str, Any],
                   readings: dict[str, Any] | None = None) -> dict[str, Any] | None:
     """Emit the open trip, ending at ``end``, and clear the machine.
@@ -3783,6 +3857,8 @@ def _shadow_close(shadow: dict[str, Any], end: dict[str, Any],
     climate_sec = float(shadow.pop("climate_sec", 0.0) or 0.0)
     temp_sec = float(shadow.pop("temp_sec", 0.0) or 0.0)
     temp_sum = float(shadow.pop("temp_sum", 0.0) or 0.0)
+    bands = shadow.pop("bands", None)
+    stops = int(shadow.pop("stops", 0) or 0)
     # Whatever is still held is the arrival: nothing moved after it. Dropped
     # rather than counted, exactly as the trailing idle run above is.
     shadow.pop("temp_hold_sec", None)
@@ -3879,6 +3955,13 @@ def _shadow_close(shadow: dict[str, Any], end: dict[str, Any],
         # nobody had recorded.
         "idle_min": round(idle_sec / 60.0, 1),
         "idle_tracked": True,
+        # Where the trip's kilometres, minutes and kWh actually went, banded by
+        # the speed they happened at, and how many times the car came to rest.
+        # See the accumulation in advance_shadow: a trip carrying two speed
+        # numbers can be put in one box, and cannot be described as partly one
+        # thing and partly another.
+        "speed_bands": _bands_out(bands),
+        "stops": stops,
         "climate_min": round(climate_sec / 60.0, 1),
         "soc_start": start.get("soc"),
         "soc_end": end.get("soc"),

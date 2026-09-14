@@ -4354,6 +4354,14 @@ def _apply_shadow_to_drive(row, t: dict) -> None:
     # did.
     if t.get("ended_on"):
         row.ended_on = str(t["ended_on"])[:12]
+    # The speed profile and the stop count, carried across as the stream
+    # measured them. Written only when present: a trip promoted from a shadow
+    # that predates the accumulator has no profile, and overwriting one that
+    # does with a null would lose a measurement to a re-promotion.
+    if t.get("speed_bands"):
+        row.speed_profile = _json_mod.dumps(t["speed_bands"])
+    if t.get("stops") is not None:
+        row.stop_count = int(t["stops"])
 
 
 # The sweep that catches anything the prompt path missed. Daily, because it
@@ -8678,6 +8686,17 @@ def driving_matrix_trips(days: int = Query(30, ge=1, le=730),
         row["route"] = f"{d.start_location or '?'} → {d.end_location or '?'}"
         row["wh_per_km"] = (round(d.energy_used_kwh * 1000.0 / d.distance_km, 1)
                             if d.distance_km else None)
+        row["stops"] = getattr(d, "stop_count", None)
+        # How this trip divides across the modes, where the stream recorded
+        # where its kilometres happened. One entry means it was one thing —
+        # either genuinely, or because it predates the speed profile.
+        split = driving_analysis.mode_split(d, cuts)
+        row["split"] = {k: {"km": round(v["km"], 2),
+                            "min": round(v["min"], 1),
+                            "wh_per_km": (round(v["kwh"] / v["km"] * 1000.0, 1)
+                                          if v["km"] else None)}
+                        for k, v in split.items()}
+        row["profiled"] = driving_analysis.speed_profile_of(d) is not None
         # Named apart from the mode, because a trip can be perfectly sortable
         # and still be kept out of the averages for its energy.
         row["counted"] = bool(has_valid_energy(d)) and row["mode"] is not None

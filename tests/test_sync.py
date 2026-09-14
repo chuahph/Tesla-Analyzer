@@ -4148,3 +4148,56 @@ def test_shadow_charge_still_closes_when_only_the_lifetime_counter_moves():
     assert done is not None
     assert done["kwh_lifetime"] == pytest.approx(4.0)
     assert done["kwh_wall"] is None
+
+
+def test_the_shadow_bands_distance_time_and_energy_by_speed():
+    """A trip carrying two speed numbers can be put in one box and cannot be
+    described as partly one thing and partly another. The stream sees a record
+    every ten seconds, so where each kilometre happened is measurable.
+
+    Energy is banded too, from the car's own EnergyRemaining over the same
+    interval — not apportioned from the trip total by distance, which would
+    hand highway and city the same Wh/km and destroy the one distinction the
+    condition matrix exists to draw.
+    """
+    from app import sync as sync_mod
+
+    shadow: dict = {}
+    base = 1_789_000_000.0
+    odo, energy = 1000.0, 60.0
+    # Six minutes of motorway at ~144 km/h, then six of town at ~30, with the
+    # car stopping twice. Records every 30 s, as a quiet stretch streams.
+    plan = [(144.0, 12), (30.0, 12)]
+    stop_at = {14, 20}
+    ts = base
+    for kmh, steps in plan:
+        for i in range(steps):
+            moving = (len(shadow.get("bands") or {}) >= 0)
+            idx = int((ts - base) / 30.0)
+            speed = 0.0 if idx in stop_at else kmh
+            step_km = speed * (30.0 / 3600.0)
+            odo += step_km
+            energy -= step_km * (0.21 if kmh > 100 else 0.14)
+            snap = {"ts": ts, "shift": "D" if speed else "P",
+                    "speed_kmh": speed, "odo_km": odo, "energy_kwh": energy,
+                    "soc": 80.0, "range_km": 300.0, "out_temp": 30.0,
+                    "climate_on": False, "sentry_mode": False}
+            sync_mod.advance_shadow(shadow, snap)
+            ts += 30.0
+
+    bands = shadow.get("bands") or {}
+    assert bands, "nothing was banded"
+    fast = sum(v[0] for k, v in bands.items() if float(k) >= 130.0)
+    town = sum(v[0] for k, v in bands.items() if float(k) < 90.0)
+    assert fast > 8.0, f"motorway distance not banded high: {bands}"
+    assert town > 1.0, f"town distance not banded low: {bands}"
+
+    # The fast band cost materially more per kilometre, which it could not have
+    # done had energy been split by distance.
+    fast_kwh = sum(v[2] for k, v in bands.items() if float(k) >= 130.0)
+    town_kwh = sum(v[2] for k, v in bands.items() if float(k) < 90.0 and v[0] > 0)
+    assert fast_kwh / fast > (town_kwh / town) * 1.3
+
+    # And the stops were counted — the thing idle_min cannot see, since none of
+    # these lasted the five minutes it requires.
+    assert shadow.get("stops") == len(stop_at)

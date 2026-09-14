@@ -1,6 +1,8 @@
 """Driving pattern analysis."""
 from __future__ import annotations
 
+import json as _json
+
 from bisect import bisect_left, bisect_right
 from collections import Counter, defaultdict
 from datetime import datetime
@@ -2367,6 +2369,146 @@ def resolved_cuts(cuts: dict[str, float] | None = None) -> dict[str, float]:
     return {k: float(c.get(k, v)) for k, v in defaults.items()}
 
 
+def mode_split(d: Any, cuts: dict[str, float] | None = None) -> dict[str, dict[str, float]]:
+    """How one trip divides across the modes: {mode: {km, min, kwh}}.
+
+    A trip is not necessarily one thing. Trip 735 covered 28 km at an average
+    of 75 with a peak of 160 — a motorway run with town at either end — and
+    whole-trip classification has to call that one category and be wrong about
+    most of it.
+
+    Where the stream recorded a speed profile, the highway share is split out
+    by MEASURED distance: the bands at or above each speed bar carry their own
+    kilometres, minutes and kWh, all three accumulated from the odometer and
+    the car's own EnergyRemaining over the stretches they happened in. Nothing
+    is apportioned — apportioning energy by distance would hand highway and
+    city the same Wh/km, which is the one distinction this whole table exists
+    to draw.
+
+    What is left over is city, and the city share keeps the whole-trip verdict
+    that drive_mode already reaches. That part is unchanged on purpose: telling
+    CC from SC from HC is a question about stopping rather than speed, and the
+    thresholds for doing it per-stretch would be invented rather than measured.
+    Measured where it can be measured, unchanged where it cannot.
+
+    A trip with no profile — everything written before the accumulator existed,
+    and anything polling wrote — comes back whole under its own mode, so the
+    two kinds live in one table without either pretending to be the other.
+    """
+    whole = drive_mode(d, cuts)
+    km = float(getattr(d, "distance_km", 0.0) or 0.0)
+    mins = float(getattr(d, "duration_min", 0.0) or 0.0)
+    kwh = float(getattr(d, "energy_used_kwh", 0.0) or 0.0)
+    if whole is None:
+        return {}
+    bands = speed_profile_of(d)
+    if not bands:
+        return {whole: {"km": km, "min": mins, "kwh": kwh}}
+
+    c = resolved_cuts(cuts)
+    hw_max, fast_max = c["highway_max_kmh"], c["fast_max_kmh"]
+    out: dict[str, dict[str, float]] = {}
+
+    def add(mode: str, part: dict[str, float]) -> None:
+        slot = out.setdefault(mode, {"km": 0.0, "min": 0.0, "kwh": 0.0})
+        for k in ("km", "min", "kwh"):
+            slot[k] += part[k]
+
+    leftover = {"km": 0.0, "min": 0.0, "kwh": 0.0}
+    city_peak = 0.0
+    for edge, part in bands.items():
+        try:
+            lower = float(edge)
+        except (TypeError, ValueError):
+            continue
+        # A band is attributed by its LOWER edge, so a band only counts as
+        # highway when every kilometre in it was at or above the bar. The
+        # alternative rounds a 95-105 band up and claims motorway distance the
+        # trip may not have driven.
+        row = {"km": float(part.get("km") or 0.0),
+               "min": float(part.get("min") or 0.0),
+               "kwh": float(part.get("kwh") or 0.0)}
+        if lower >= fast_max:
+            add("FH", row)
+        elif lower >= hw_max:
+            add("CH", row)
+        else:
+            for k in ("km", "min", "kwh"):
+                leftover[k] += row[k]
+            # The city stretch's own peak, from the highest band it actually
+            # used — its upper edge, since a band holds speeds up to it. The
+            # trip's overall peak is the wrong number here by construction: it
+            # belongs to the motorway part that has just been taken out, and
+            # using it makes the town look far less constant than it was.
+            city_peak = max(city_peak, lower + 10.0)
+
+    if leftover["km"] > 0 or leftover["min"] > 0:
+        # The city remainder under the trip's own verdict — unless that verdict
+        # was itself a highway one, which happens when the trip averaged up
+        # there. Then the leftover is the town at either end of it, and calling
+        # that Constant Highway would be the original error in miniature.
+        city = whole if whole in ("CC", "SC", "HC") else drive_mode(
+            SimpleTrip(km=leftover["km"], mins=leftover["min"],
+                       mx=city_peak,
+                       idle=float(getattr(d, "idle_min", 0.0) or 0.0)), cuts)
+        add(city or "HC", leftover)
+
+    # The profile is sampled from records and the trip's own totals come from
+    # its endpoints, so the two differ by whatever the stream missed. Scaled to
+    # the trip rather than left short: the row totals are what the rest of the
+    # report adds up, and a split that does not reconstitute its own trip would
+    # put the difference nowhere.
+    got_km = sum(v["km"] for v in out.values())
+    got_kwh = sum(v["kwh"] for v in out.values())
+    got_min = sum(v["min"] for v in out.values())
+    for v in out.values():
+        if got_km > 0 and km > 0:
+            v["km"] *= km / got_km
+        if got_min > 0 and mins > 0:
+            v["min"] *= mins / got_min
+        if got_kwh > 0 and kwh > 0:
+            v["kwh"] *= kwh / got_kwh
+    return out
+
+
+class SimpleTrip:
+    """The four fields drive_mode reads, for classifying a PART of a trip.
+
+    A named object rather than a dict or a namespace built inline, because
+    drive_mode reads its inputs by attribute and a typo in one of them reads as
+    zero — which is the difference between Heavy City and unclassifiable,
+    silently.
+    """
+
+    __slots__ = ("distance_km", "duration_min", "max_speed_kmh", "idle_min")
+
+    def __init__(self, km: float, mins: float, mx: float, idle: float = 0.0):
+        self.distance_km = km
+        self.duration_min = mins
+        self.max_speed_kmh = mx
+        self.idle_min = idle
+
+
+def speed_profile_of(d: Any) -> dict[str, dict[str, float]] | None:
+    """A trip's stored speed profile, parsed. None where there is not one.
+
+    Most of the history has no profile and never will — the accumulator did not
+    exist when those trips were recorded, and nothing can reconstruct it. So
+    every caller has to handle None, and the report has to show both kinds
+    without either pretending to be the other.
+    """
+    raw = getattr(d, "speed_profile", None)
+    if not raw:
+        return None
+    if isinstance(raw, dict):
+        return raw
+    try:
+        got = _json.loads(raw)
+    except (TypeError, ValueError):
+        return None
+    return got if isinstance(got, dict) and got else None
+
+
 def drive_mode_explained(d: Any, cuts: dict[str, float] | None = None) -> dict[str, Any]:
     """One trip's mode and the numbers that put it there.
 
@@ -2511,6 +2653,12 @@ def condition_matrix(drives: list[Any], capacity_kwh: float,
     this answers is what a full battery is worth in each condition — which is
     a property of the kilometres, not of the trips they were grouped into.
     """
+    # Each trip's contribution to each mode, so a journey that was partly one
+    # thing and partly another lands in both — see mode_split. A trip with no
+    # speed profile contributes wholly to one mode, exactly as before.
+    parts: dict[str, dict[str, float]] = {}
+    members: dict[str, list[Any]] = {}
+    split_trips = 0
     buckets: dict[str, list[Any]] = {}
     unclassified = 0
     # The energy that does NOT reach a row, kept apart by reason. Without these
@@ -2534,16 +2682,30 @@ def condition_matrix(drives: list[Any], capacity_kwh: float,
             unclassified_kwh += float(d.energy_used_kwh)
             continue
         buckets.setdefault(m, []).append(d)
+        share = mode_split(d, cuts)
+        if len(share) > 1:
+            split_trips += 1
+        for code, got_part in share.items():
+            slot = parts.setdefault(code, {"km": 0.0, "min": 0.0, "kwh": 0.0})
+            for k in ("km", "min", "kwh"):
+                slot[k] += got_part[k]
+            members.setdefault(code, []).append(d)
 
     rows = []
     for code in ("FH", "CH", "CC", "SC", "HC"):
-        got = buckets.get(code) or []
+        # Driven by the members list, not the whole-trip bucket: a mode can now
+        # be reached by a journey whose whole-trip verdict was something else —
+        # the motorway share of a mixed trip.
+        got = members.get(code) or []
         if not got:
             continue
-        km = sum(float(d.distance_km) for d in got)
-        mins = sum(float(d.duration_min) for d in got)
+        # Distance, time and energy come from the SPLIT, so a trip counted in
+        # two modes contributes its measured share to each rather than its
+        # whole self to both. Everything else on the row — trip count, speeds,
+        # temperature — describes the journeys that touched this mode.
+        share = parts.get(code) or {"km": 0.0, "min": 0.0, "kwh": 0.0}
+        km, mins, kwh = share["km"], share["min"], share["kwh"]
         idle = sum(float(getattr(d, "idle_min", 0.0) or 0.0) for d in got)
-        kwh = sum(float(d.energy_used_kwh) for d in got)
         wh = kwh * 1000.0 / km if km else None
         rng = capacity_kwh / (wh / 1000.0) if wh else None
         temps = [float(d.outside_temp_c) for d in got
@@ -2638,6 +2800,11 @@ def condition_matrix(drives: list[Any], capacity_kwh: float,
         # Trips that could not be sorted, and why it matters: they are missing
         # from every row above rather than distributed among them.
         "unclassified_trips": unclassified,
+        # Journeys that contributed to more than one mode, because the stream
+        # recorded where their kilometres actually happened. The rest were
+        # placed whole, either because they were one thing throughout or
+        # because they predate the speed profile and nothing can reconstruct it.
+        "split_trips": split_trips,
         "unclassified_kwh": round(unclassified_kwh, 2),
         "unclassified_pct": (round(unclassified_kwh / capacity_kwh * 100.0, 2)
                              if capacity_kwh else None),
@@ -2745,6 +2912,16 @@ MATRIX_DEFINITIONS = {
                                   "and per-hour rankings are reverses of each "
                                   "other, which is the point of showing both."},
     ],
+    "split_trips": (
+        "A trip is not necessarily one thing. Where the stream recorded where a "
+        "journey's kilometres actually happened, its motorway share is counted "
+        "as motorway and its town share as town — measured, not apportioned, "
+        "down to each band's own energy. A 28 km run at an average of 75 with a "
+        "peak of 160 is a motorway drive with town at either end, and counting "
+        "it as one category is wrong about most of it. Trips recorded before "
+        "this existed have no profile and are still placed whole; the report "
+        "says how many of each."
+    ),
     "adds_up": (
         "Every hour of the window lands in exactly one bucket — driving, parked, "
         "charging, excluded (a gap the odometer says the car moved through, or "
