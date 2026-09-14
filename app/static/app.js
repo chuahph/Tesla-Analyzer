@@ -2226,12 +2226,22 @@ function renderMatrixSummary(d) {
   ];
   const top = Math.max(...bars.map((b) => b.pct), 0.01);
 
+  // The same split the expanded table's total block used to carry alone,
+  // moved up beside the headline % so it reads without opening the
+  // disclosure. "Driving" and "parking" name the two things a reader
+  // actually asks about, rather than "moving" and "standing still", which
+  // described the odometer rather than the point of looking.
+  const kwhFoot = t.kwh != null
+    ? `<div class="mx-sum-foot">${num(t.kwh, 1)} kWh — ${num(t.driving_kwh, 1)} driving,
+         ${num(t.parked_kwh, 1)} parking (${num(t.parked_share_kwh_pct, 1)}% of the energy)</div>`
+    : "";
   box.innerHTML = `
     <div class="mx-sum-head">
       <span class="mx-sum-num">${num(t.pct, 1)}<span class="mx-sum-pc">%</span></span>
       <span class="mx-sum-lab">of the battery<br>over ${num(t.hours, 0)} h${
         w.days ? `, ${w.days} days` : ""}</span>
     </div>
+    ${kwhFoot}
     ${bars.length ? `<div class="mx-bars">${bars.map((b) => `
       <div class="mx-bar${b.parked ? " is-parked" : ""}">
         <span class="mx-bar-code">${b.code}</span>
@@ -2458,8 +2468,6 @@ function renderMatrix(d) {
            ${terms.map((x, i) => `${i ? '<span class="mx-op">+</span>' : ""}
               <span class="mx-term"><b>${x.code}</b> ${num(x.pct, 2)}%</span>`).join("")}
          </div>
-         <div class="mx-total-foot">${num(t.kwh, 1)} kWh — ${num(t.driving_kwh, 1)} moving,
-           ${num(t.parked_kwh, 1)} standing still (${num(t.parked_share_kwh_pct, 1)}% of the energy)</div>
        </div>`
     : "";
   const tot = aside.length ? `Not priced at all: ${aside.join(", ")}.` : "";

@@ -1534,7 +1534,6 @@ footer { padding: 18px 28px; color: var(--muted); font-size: 12px; border-top: 1
 }
 .mx-term b { color: var(--accent-2); font-weight: 600; }
 .mx-op { color: var(--muted); font-size: .82rem; }
-.mx-total-foot { margin-top: .55rem; font-size: .78rem; color: var(--muted); }
 
 /* The driving matrix on the dashboard: a summary always visible, the table
    behind a disclosure. See renderMatrixSummary for why the two differ in kind
@@ -1547,7 +1546,8 @@ footer { padding: 18px 28px; color: var(--muted); font-size: 12px; border-top: 1
 .matrix-card { display: block; min-width: 0; }
 .matrix-card .mx-scroll { max-width: 100%; overflow-x: auto; }
 .matrix-details { min-width: 0; }
-.mx-sum-head { display: flex; align-items: center; gap: .7rem; margin-bottom: .8rem; }
+.mx-sum-head { display: flex; align-items: center; gap: .7rem; margin-bottom: .5rem; }
+.mx-sum-foot { margin-bottom: .8rem; font-size: .78rem; color: var(--muted); }
 .mx-sum-num {
   font-size: 2.4rem; font-weight: 700; line-height: 1;
   letter-spacing: -.02em; font-variant-numeric: tabular-nums;
