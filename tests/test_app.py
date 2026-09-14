@@ -1963,6 +1963,63 @@ def test_sentry_drain_alert_fires_once_per_parked_episode(monkeypatch):
                 s.query(BatteryReading).filter(BatteryReading.vehicle_id == v.id).delete()
                 s.delete(v)
                 s.commit()
+def test_live_panel_strips_idle_drain_from_a_streamed_trip(monkeypatch):
+    """The in-flight Wh/km must discount time the car spent stationary.
+
+    live_trip subtracts idle drain before reporting efficiency, and it asks
+    the open trip for `idle_min`/`still_run`. The polled machine used to fill
+    those in. The stream measures exactly the same thing under different
+    names, in a different dict — `idle_sec` and `idle_run_since` on the
+    shadow, not on `open` — so _confirmed_idle_min found nothing and returned
+    zero for every streamed trip in flight, and the live panel quoted the raw
+    figure. A car that spent twenty minutes of its journey stationary read
+    worse than it drove.
+    """
+    import json as _json
+
+    from app import state
+    from app.api.routes import _live_from_stream
+    from app.database import SessionLocal
+
+    vin = "TESTVIN-LIVEIDLE"
+    t = 1_760_700_000.0
+    opened = {"ts": t, "odo_km": 1000.0, "soc": 80, "range_km": 400.0,
+              "speed_kmh": 0.0, "shift": "D"}
+    last = {"ts": t + 3600.0, "odo_km": 1030.0, "soc": 74, "range_km": 370.0,
+            "speed_kmh": 40.0, "shift": "D"}
+    try:
+        with SessionLocal() as s:
+            state.put(s, state.TELEMETRY_SHADOW_KEY, _json.dumps({vin: {
+                "open": opened,
+                "last": last,
+                # Twenty minutes already committed, and a run of ten more
+                # still open at the moment this is read.
+                "idle_sec": 1200.0,
+                "idle_run_since": t + 3000.0,
+            }}))
+            s.commit()
+
+            open_trip, snap = _live_from_stream(s, vin)
+
+        assert open_trip is not None
+        assert open_trip["idle_min"] == 20.0, "committed idle never reached live_trip"
+        # The in-progress run is carried as both its start and its length, the
+        # pair _confirmed_idle_min needs to truncate it at the trip's end.
+        assert open_trip["still_since"] == t + 3000.0
+        assert open_trip["still_run"] == 10.0
+
+        from app import sync as sync_mod
+        assert sync_mod._confirmed_idle_min(open_trip, last["ts"]) == 30.0
+
+        # And the anchor the machine reopens from is untouched — this is a
+        # rendering concern, not a change to the trip's own state.
+        assert "idle_min" not in opened and "still_run" not in opened
+    finally:
+        with SessionLocal() as s:
+            state.put(s, state.TELEMETRY_SHADOW_KEY, "")
+            s.commit()
+
+
 def test_sentry_drain_alert_respects_the_streams_open_trip(monkeypatch):
     """A trip the STREAM has open keeps the polled alert quiet.
 

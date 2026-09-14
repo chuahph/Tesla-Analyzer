@@ -11701,6 +11701,36 @@ def _live_from_stream(session: Session, vin: str):
         if not isinstance(car, dict) or not stamp:
             return None, None
         snap = sync_mod.snapshot_from_telemetry(car, stamp)
+
+    # Carry the shadow's tracked idle across into the shape live_trip reads.
+    #
+    # Both machines measure the same thing and neither knew the other's names
+    # for it: the shadow keeps committed idle in `idle_sec` and an unfinished
+    # stationary run in `idle_run_since`, while live_trip asks the open trip
+    # for `idle_min` and `still_run`/`still_since`. `open` is a plain copy of
+    # the snapshot the journey started from, so it carried none of them — and
+    # _confirmed_idle_min, finding nothing, returned 0.0 for every streamed
+    # trip in flight.
+    #
+    # Which is not cosmetic: live_trip subtracts idle drain before reporting
+    # Wh/km, so the live panel has been quoting the raw figure — a car that
+    # has spent twenty minutes of its journey stationary reads worse than it
+    # drove. The completed trip was always right, because _shadow_close reads
+    # idle_sec directly; only the in-flight readout was wrong.
+    #
+    # Written onto a copy. `open` is the anchor the machine reopens the trip
+    # from on the next record, and this is a rendering concern.
+    idle_sec = float(shadow.get("idle_sec") or 0.0)
+    run_since = shadow.get("idle_run_since")
+    open_trip = dict(open_trip)
+    open_trip["idle_min"] = idle_sec / 60.0
+    if run_since is not None:
+        # still_run is the run's length so far and still_since is when it
+        # began; _confirmed_idle_min takes the smaller of the two against the
+        # end it is given, so both have to be present and agree.
+        open_trip["still_since"] = float(run_since)
+        open_trip["still_run"] = max(
+            (float(snap["ts"]) - float(run_since)) / 60.0, 0.0)
     return open_trip, snap
 
 
