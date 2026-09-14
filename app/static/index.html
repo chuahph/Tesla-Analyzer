@@ -476,6 +476,88 @@
     <section id="week-compare" class="week-compare" style="display:none"></section>
     <hr class="sep" />
 
+    <!-- Driving matrix, on the dashboard rather than behind a button. It is
+         the answer to "where did my battery go", which is the question the page
+         exists for — a summary is always visible and the full table, the
+         parked rows, the glossary and the cut-points are one tap away.
+
+         Two units on purpose: the per-km and per-hour orderings are reverses
+         of each other, and a table with only one of them cannot show that. -->
+    <!-- No data-export: the per-card CSV is built from the /api/summary
+         payload and the matrix has its own endpoint, so the attribute would
+         have injected a download button that 404s. The report is already
+         available whole at /api/driving-matrix. -->
+    <section class="card matrix-card" id="matrix-card" style="display:none">
+      <h2>📊 Driving matrix</h2>
+      <div id="matrix-summary"></div>
+      <details id="matrix-details" class="matrix-details">
+        <summary>The full table, the parked rows and what the names mean</summary>
+
+        <p class="modal-sub">
+          What each kind of driving costs, measured from your own trips. Every row is
+          priced in <strong>percent of the battery</strong>, so the conditions and the
+          parking add up to what the window actually consumed — and two ways besides:
+          <strong>Wh/km</strong> answers how far a charge goes, <strong>kW</strong> what
+          an hour costs. Nothing here is modelled; it is all measured.
+        </p>
+        <div class="matrix-tabs" role="group" aria-label="Which days to include">
+            <button type="button" class="btn mx-tab is-on" data-split="overall">All days</button>
+            <button type="button" class="btn mx-tab" data-split="weekday">Weekdays</button>
+            <button type="button" class="btn mx-tab" data-split="weekend">Weekends</button>
+          </div>
+          <div id="matrix-body">Loading…</div>
+          <div id="matrix-glossary"></div>
+        <details class="matrix-tune">
+          <summary>How far back this report reaches</summary>
+          <p class="modal-sub">
+            The report already starts where streamed history does — polled trips are
+            left out, because their boundaries are the ones the telemetry work spent
+            months correcting. Narrow it further if you only want trips from after the
+            last round of fixes. Nothing is deleted, so you can widen it straight back:
+            the trips stay in the history every other page is built on, and only this
+            report's averages change.
+          </p>
+          <form id="matrix-window-form" class="matrix-form">
+            <label>Start at the last N trips (blank for all)
+              <input id="mw-trips" type="number" step="1" min="1" max="2000"></label>
+            <label>…or start at a date
+              <input id="mw-from" type="date"></label>
+            <button type="submit" class="btn">Apply</button>
+            <button type="button" id="mw-clear" class="btn">All telemetry</button>
+          </form>
+          <p id="matrix-window-msg" class="modal-sub"></p>
+        </details>
+        <details class="matrix-tune">
+          <summary>Where the conditions are cut</summary>
+          <p class="modal-sub">
+            A trip is sorted by how close it stayed to its own peak speed — average
+            divided by maximum — and only then by how fast that was. These boundaries
+            describe your roads rather than the car, so they are yours to move; the table
+            above redraws from the same trips.
+          </p>
+          <form id="matrix-form" class="matrix-form">
+            <label>Constant: held at least this share of its peak speed
+              <input id="cut-constant" type="number" step="0.01" min="0.01" max="1" required></label>
+            <label>Slow: held at least this share (below it, heavy)
+              <input id="cut-slow" type="number" step="0.01" min="0.01" max="1" required></label>
+            <label>Heavy: or this much of the trip spent waiting
+              <input id="cut-heavyidle" type="number" step="0.01" min="0.01" max="1" required></label>
+            <label>Highway needs a peak of at least (km/h)
+              <input id="cut-hwmax" type="number" step="1" min="1" max="300" required></label>
+            <label>…and an average of at least (km/h)
+              <input id="cut-hwavg" type="number" step="1" min="1" max="300" required></label>
+            <label>Fast highway needs a peak of at least (km/h)
+              <input id="cut-fastmax" type="number" step="1" min="1" max="300" required></label>
+            <label>…and an average of at least (km/h)
+              <input id="cut-fastavg" type="number" step="1" min="1" max="300" required></label>
+            <button type="submit" class="btn">Redraw</button>
+          </form>
+          <p id="matrix-msg" class="modal-sub"></p>
+        </details>
+      </details>
+    </section>
+    <hr class="sep" />
+
     <section class="card-grid">
       <div class="card" id="insights-card" style="display:none">
         <h2>🔎 Insights</h2>
@@ -685,81 +767,8 @@
       <button id="btn-service" class="btn hidden">🔧 Service &amp; Tyres</button>
       <button id="btn-add-charge" class="btn hidden">🔌 Add Historical Charge</button>
       <button id="btn-rates" class="btn hidden">💰 Rates</button>
-      <button id="btn-matrix" class="btn hidden"
-              title="What each kind of driving actually costs — per kilometre and per hour — including standing still">📊 Driving Matrix</button>
     </section>
   </main>
-
-  <!-- Modal: driving-condition matrix. Two units on purpose — the per-km and
-       per-hour orderings are reverses of each other, and a table with only
-       one of them can't show that. -->
-  <div id="matrix-modal" class="modal hidden">
-    <div class="modal-card">
-      <button class="modal-close" data-close>×</button>
-      <h2>📊 Driving matrix</h2>
-      <p class="modal-sub">
-        What each kind of driving costs, measured from your own trips. Every row is
-        priced in <strong>percent of the battery</strong>, so the conditions and the
-        parking add up to what the window actually consumed — and two ways besides:
-        <strong>Wh/km</strong> answers how far a charge goes, <strong>kW</strong> what
-        an hour costs. Nothing here is modelled; it is all measured.
-      </p>
-      <div class="matrix-tabs" role="group" aria-label="Which days to include">
-          <button type="button" class="btn mx-tab is-on" data-split="overall">All days</button>
-          <button type="button" class="btn mx-tab" data-split="weekday">Weekdays</button>
-          <button type="button" class="btn mx-tab" data-split="weekend">Weekends</button>
-        </div>
-        <div id="matrix-body">Loading…</div>
-        <div id="matrix-glossary"></div>
-      <details class="matrix-tune">
-        <summary>How far back this report reaches</summary>
-        <p class="modal-sub">
-          The report already starts where streamed history does — polled trips are
-          left out, because their boundaries are the ones the telemetry work spent
-          months correcting. Narrow it further if you only want trips from after the
-          last round of fixes. Nothing is deleted, so you can widen it straight back:
-          the trips stay in the history every other page is built on, and only this
-          report's averages change.
-        </p>
-        <form id="matrix-window-form" class="matrix-form">
-          <label>Start at the last N trips (blank for all)
-            <input id="mw-trips" type="number" step="1" min="1" max="2000"></label>
-          <label>…or start at a date
-            <input id="mw-from" type="date"></label>
-          <button type="submit" class="btn">Apply</button>
-          <button type="button" id="mw-clear" class="btn">All telemetry</button>
-        </form>
-        <p id="matrix-window-msg" class="modal-sub"></p>
-      </details>
-      <details class="matrix-tune">
-        <summary>Where the conditions are cut</summary>
-        <p class="modal-sub">
-          A trip is sorted by how close it stayed to its own peak speed — average
-          divided by maximum — and only then by how fast that was. These boundaries
-          describe your roads rather than the car, so they are yours to move; the table
-          above redraws from the same trips.
-        </p>
-        <form id="matrix-form" class="matrix-form">
-          <label>Constant: held at least this share of its peak speed
-            <input id="cut-constant" type="number" step="0.01" min="0.01" max="1" required></label>
-          <label>Slow: held at least this share (below it, heavy)
-            <input id="cut-slow" type="number" step="0.01" min="0.01" max="1" required></label>
-          <label>Heavy: or this much of the trip spent waiting
-            <input id="cut-heavyidle" type="number" step="0.01" min="0.01" max="1" required></label>
-          <label>Highway needs a peak of at least (km/h)
-            <input id="cut-hwmax" type="number" step="1" min="1" max="300" required></label>
-          <label>…and an average of at least (km/h)
-            <input id="cut-hwavg" type="number" step="1" min="1" max="300" required></label>
-          <label>Fast highway needs a peak of at least (km/h)
-            <input id="cut-fastmax" type="number" step="1" min="1" max="300" required></label>
-          <label>…and an average of at least (km/h)
-            <input id="cut-fastavg" type="number" step="1" min="1" max="300" required></label>
-          <button type="submit" class="btn">Redraw</button>
-        </form>
-        <p id="matrix-msg" class="modal-sub"></p>
-      </details>
-    </div>
-  </div>
 
   <!-- Modal: named places (Home/Office geofences) -->
   <div id="places-modal" class="modal hidden">

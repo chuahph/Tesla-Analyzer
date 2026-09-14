@@ -1485,7 +1485,10 @@ footer { padding: 18px 28px; color: var(--muted); font-size: 12px; border-top: 1
   background: rgba(255, 255, 255, .02);
 }
 .mx-carpark > strong { display: block; }
-.mx-carpark .mx-table { margin: .4rem 0; }
+/* Three short rows, not the comparison table — so it must not inherit that
+   table's 580px floor. It has no scroll wrapper of its own, so on the
+   dashboard that floor pushed the whole page sideways. */
+.mx-carpark .mx-table { margin: .4rem 0; min-width: 0; width: 100%; }
 .mx-carpark .mx-table td { padding: .2rem .4rem; }
 
 /* The matrix headline: where the battery went, as one figure and its terms.
@@ -1532,3 +1535,48 @@ footer { padding: 18px 28px; color: var(--muted); font-size: 12px; border-top: 1
 .mx-term b { color: var(--accent-2); font-weight: 600; }
 .mx-op { color: var(--muted); font-size: .82rem; }
 .mx-total-foot { margin-top: .55rem; font-size: .78rem; color: var(--muted); }
+
+/* The driving matrix on the dashboard: a summary always visible, the table
+   behind a disclosure. See renderMatrixSummary for why the two differ in kind
+   rather than in size. */
+/* min-width:0 because a flex or grid item defaults to min-content width, and
+   the table inside carries min-width:580px — which made it push the whole page
+   sideways once the card moved out of the modal and into the dashboard flow.
+   The scroll wrapper can only contain the table if the card itself is allowed
+   to be narrower than its widest descendant. */
+.matrix-card { display: block; min-width: 0; }
+.matrix-card .mx-scroll { max-width: 100%; overflow-x: auto; }
+.matrix-details { min-width: 0; }
+.mx-sum-head { display: flex; align-items: center; gap: .7rem; margin-bottom: .8rem; }
+.mx-sum-num {
+  font-size: 2.4rem; font-weight: 700; line-height: 1;
+  letter-spacing: -.02em; font-variant-numeric: tabular-nums;
+}
+.mx-sum-pc { font-size: 1.1rem; font-weight: 600; margin-left: .1rem; color: var(--muted); }
+.mx-sum-lab { font-size: .82rem; line-height: 1.25; color: var(--muted); }
+
+.mx-bars { display: flex; flex-direction: column; gap: .1rem; }
+.mx-bar { display: flex; align-items: center; gap: .5rem; }
+.mx-bar-code {
+  width: 2.1rem; flex: none; font-size: .78rem; font-weight: 700;
+  color: var(--accent-2); letter-spacing: .04em;
+}
+.mx-bar-track {
+  flex: 1; height: 9px; border-radius: 999px;
+  background: var(--panel-2); overflow: hidden;
+}
+.mx-bar-fill { display: block; height: 100%; border-radius: 999px; background: var(--accent-2); }
+.mx-bar.is-parked .mx-bar-code { color: var(--amber); }
+.mx-bar.is-parked .mx-bar-fill { background: var(--amber); }
+.mx-bar-pct {
+  width: 3.2rem; flex: none; text-align: right;
+  font-size: .82rem; font-variant-numeric: tabular-nums;
+}
+.mx-bar-sub {
+  margin: 0 0 .5rem 2.6rem; font-size: .74rem; color: var(--muted); line-height: 1.35;
+}
+.matrix-details { margin-top: .9rem; }
+.matrix-details > summary {
+  cursor: pointer; font-size: .84rem; color: var(--muted);
+  padding: .35rem 0;
+}

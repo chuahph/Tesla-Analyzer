@@ -2194,6 +2194,54 @@ function setupEditChargeModal() {
 // ORDERING — the per-km and per-hour columns rank the same conditions in
 // opposite directions — and a reader should not have to sort two columns in
 // their head to see it.
+// The always-visible half: the total, and each condition as one line.
+//
+// Deliberately not a small copy of the table. The table's job is comparison —
+// five columns, two orderings that reverse each other — and shrinking that
+// gives something too dense to read at a glance and too thin to compare with.
+// The summary answers one question, "where did the battery go", and leaves the
+// comparing to the panel underneath.
+function renderMatrixSummary(d) {
+  const box = document.getElementById("matrix-summary");
+  if (!box) return;
+  const num = (v, dp) => (v == null ? "—" : Number(v).toFixed(dp));
+  const t = d.totals || {};
+  const modes = d.modes || [];
+  const parked = (d.parked || []).find((p) => p.code === "PK");
+  const w = d.window || {};
+
+  // One bar per condition, widths in proportion to energy — so the row that
+  // cost the most is the widest thing on screen. Parked is in here too: it is
+  // a share of the same battery, and leaving it out of the picture is how it
+  // stayed invisible for so long.
+  const bars = [
+    ...modes.filter((m) => m.pct).map((m) => ({
+      code: m.code, name: m.name, pct: m.pct,
+      detail: `${num(m.wh_per_km, 0)} Wh/km · ${num(m.km, 0)} km`,
+    })),
+    ...(parked && parked.pct ? [{
+      code: "PK", name: parked.name, pct: parked.pct, parked: true,
+      detail: `${num(parked.hours, 0)} h over ${parked.gaps} park${parked.gaps === 1 ? "" : "s"}`,
+    }] : []),
+  ];
+  const top = Math.max(...bars.map((b) => b.pct), 0.01);
+
+  box.innerHTML = `
+    <div class="mx-sum-head">
+      <span class="mx-sum-num">${num(t.pct, 1)}<span class="mx-sum-pc">%</span></span>
+      <span class="mx-sum-lab">of the battery<br>over ${num(t.hours, 0)} h${
+        w.days ? `, ${w.days} days` : ""}</span>
+    </div>
+    ${bars.length ? `<div class="mx-bars">${bars.map((b) => `
+      <div class="mx-bar${b.parked ? " is-parked" : ""}">
+        <span class="mx-bar-code">${b.code}</span>
+        <span class="mx-bar-track"><span class="mx-bar-fill" style="width:${Math.max(b.pct / top * 100, 2)}%"></span></span>
+        <span class="mx-bar-pct">${num(b.pct, 1)}%</span>
+      </div>
+      <div class="mx-bar-sub">${b.name} · ${b.detail}</div>`).join("")}</div>`
+      : `<p class="modal-sub">No trips in this window yet.</p>`}`;
+}
+
 function renderMatrix(d) {
   const box = document.getElementById("matrix-body");
   if (!box) return;
@@ -2473,11 +2521,17 @@ function renderGlossary(defs) {
     </details>`;
 }
 
+// The matrix lives on the dashboard now rather than behind a button. It
+// answers "where did my battery go", which is the question this page exists
+// for — so a summary is always on screen and the full table is one tap away.
+//
+// The name stays setupMatrixModal because the thing it wires up did not change
+// when the markup moved: the same element IDs, the same three forms, the same
+// render. Only where it is mounted and when it loads are different.
 function setupMatrixModal() {
-  const btn = document.getElementById("btn-matrix");
+  const card = document.getElementById("matrix-card");
   const form = document.getElementById("matrix-form");
-  if (!btn || !form) return;
-  btn.classList.remove("hidden");
+  if (!card || !form) return;
   const msg = document.getElementById("matrix-msg");
   const fields = {
     constant_ratio_min: document.getElementById("cut-constant"),
@@ -2497,6 +2551,7 @@ function setupMatrixModal() {
   function show(d) {
     latest = d;
     draw();
+    renderMatrixSummary(d);
     renderGlossary(d.definitions);
     const t = d.thresholds || {};
     Object.entries(fields).forEach(([k, el]) => {
@@ -2526,18 +2581,21 @@ function setupMatrixModal() {
     });
   });
 
-  btn.addEventListener("click", async () => {
-    openModal("matrix-modal");
-    if (msg) msg.textContent = "";
+  // Loaded once with the dashboard rather than on a click. The summary is
+  // visible without any interaction, so the fetch cannot wait for one — and
+  // the card stays hidden until it succeeds, since an empty panel with a
+  // heading reads as a broken feature rather than as one still loading.
+  (async () => {
     try {
       const r = await fetch("/api/driving-matrix?days=90");
       if (!r.ok) throw new Error("load failed");
       show(await r.json());
+      card.style.display = "";
     } catch (e) {
-      document.getElementById("matrix-body").textContent =
-        "Couldn't load the matrix. Try again in a moment.";
+      // Left hidden. Everything else on the page is independent of this, and
+      // a failure here should cost this card and nothing else.
     }
-  });
+  })();
 
   // How far back the report reaches. Its own form because it is a different
   // kind of change from the cut-points: those re-sort the same trips, this
