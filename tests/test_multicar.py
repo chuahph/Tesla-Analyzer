@@ -4857,3 +4857,49 @@ def test_auto_logged_free_charge_is_labelled_free_not_paid_at_zero():
         assert paid[0]["cost"] > 0
     finally:
         settings.app_passcode = old_pass
+
+
+def test_sync_logged_count_reports_rows_written_not_polled_detections(monkeypatch):
+    """`logged` must count history, not the polled machine's detections.
+
+    Polling still runs its trip and charge state machines — the alerts and the
+    poll cadence read them — but _process_vehicle DROPS the sessions they
+    produce instead of writing them, and has since the stream took over
+    authoring the history. The sync response nonetheless added those
+    detections to `logged`, so the Sync button announced "logged 1 drive(s)"
+    on a tick that wrote no row, and the dashboard reloaded looking for it.
+
+    Driven by making _process_vehicle report detections rather than by timing
+    the state machine through three polls: what is under test is that the
+    counts it returns do not reach `logged`, whatever they are.
+    """
+    from app import services
+    from app.api import routes
+    from app.models import Drive
+
+    settings = get_settings()
+    old = settings.app_passcode
+    settings.app_passcode = ""
+    real = routes._process_vehicle
+    try:
+        monkeypatch.setattr("app.tesla_client.TeslaClient", _FakeClient)
+        with SessionLocal() as s:
+            services.link_with_token(s, "tok")
+            before = s.query(Drive).count()
+
+        def detects_sessions(*a, **kw):
+            vehicle, snap, _nd, _nc, open_trip = real(*a, **kw)
+            return vehicle, snap, 3, 2, open_trip
+
+        monkeypatch.setattr("app.tesla_client.TeslaClient", _WokeParkedClient)
+        monkeypatch.setattr(routes, "_process_vehicle", detects_sessions)
+        with TestClient(app) as client:
+            body = client.post("/api/sync").json()
+
+        assert "logged" in body, body
+        assert body["logged"]["drives"] == 0, "polling's detection reported as logged"
+        assert body["logged"]["charges"] == 0, "polling's detection reported as logged"
+        with SessionLocal() as s:
+            assert s.query(Drive).count() == before, "polling wrote a drive"
+    finally:
+        settings.app_passcode = old

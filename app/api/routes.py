@@ -4574,11 +4574,19 @@ def sync_now(wake: bool = Query(False), session: Session = Depends(get_session))
     # that never happened. The cap turns that failure from a corrupted
     # history into a run that does nothing and says so, which is the only
     # acceptable shape for an unattended write to real records.
+    # What this tick actually WROTE to the history, for the response's
+    # `logged` count. It is the promotion — never the poll — because polling
+    # discards the drives and charges its state machine detects (see the long
+    # note in _process_vehicle). Counting the discarded ones told the Sync
+    # button to say "logged 1 drive(s)" on a tick that wrote no row at all:
+    # the same shape as every other bug here, a value produced in one form and
+    # read back as another, failing into a confident wrong answer.
+    promoted_drives = 0
     try:
-        _repair_after_new_trips(
-            session,
-            _promote_shadow_trips(session, apply=True,
-                                  max_add=PROMOTE_AUTO_MAX_ADD))
+        changed = _promote_shadow_trips(session, apply=True,
+                                        max_add=PROMOTE_AUTO_MAX_ADD)
+        promoted_drives = sum(1 for c in changed if c.get("action") == "add")
+        _repair_after_new_trips(session, changed)
         _record_promote_result(session, "sync", None)
     except Exception as exc:  # noqa: BLE001 — never let this break the sync
         # A correction that cannot be made is a stale figure on the
@@ -4614,7 +4622,7 @@ def sync_now(wake: bool = Query(False), session: Session = Depends(get_session))
     # to find.
     _auto_repair_arrivals(session)
     try:
-        return _sync_now_impl(wake, session)
+        return _sync_now_impl(wake, session, promoted_drives=promoted_drives)
     except HTTPException as exc:
         # Logged too. A tick that returned 401 because the token expired, or
         # 503 because Tesla was unreachable, achieved exactly as little as one
@@ -4643,7 +4651,7 @@ def sync_now(wake: bool = Query(False), session: Session = Depends(get_session))
         raise HTTPException(500, f"sync failed — {reason}") from exc
 
 
-def _sync_now_impl(wake: bool, session: Session):
+def _sync_now_impl(wake: bool, session: Session, promoted_drives: int = 0):
     import time
 
     from .. import sync as sync_mod
@@ -4717,7 +4725,7 @@ def _sync_now_impl(wake: bool, session: Session):
             "poll_fast": False,
             "skipped": "asleep",
             "next_check_sec": round(suspend_until - now_ts),
-            "logged": {"drives": 0, "charges": 0},
+            "logged": {"drives": promoted_drives, "charges": 0},
         }
 
     # List every car on the account (with a single token-refresh retry). Tesla
@@ -4749,7 +4757,7 @@ def _sync_now_impl(wake: bool, session: Session):
     state.put(session, state.LINKED_VIN_KEY, active_target)
 
     client = make_client(token)
-    total = {"drives": 0, "charges": 0}
+    total = {"drives": promoted_drives, "charges": 0}
     purged = False
     active_snap = active_open_trip = active_vehicle = None
     active_cfg: dict = {}
@@ -4912,11 +4920,13 @@ def _sync_now_impl(wake: bool, session: Session):
         if not purged:
             services.purge_demo(session)  # retire the seeded sample on first real data
             purged = True
-        vehicle, snap, nd, nc, open_trip = _process_vehicle(
+        # nd/nc are what the polled state machine DETECTED, and it detects
+        # for the alerts and the poll cadence only — _process_vehicle drops
+        # the rows rather than writing them. They are deliberately not added
+        # to `logged`, which reports rows that exist.
+        vehicle, snap, _nd, _nc, open_trip = _process_vehicle(
             session, data, vv, settings, migrate_legacy=(vvin == active_target)
         )
-        total["drives"] += nd
-        total["charges"] += nc
         if vvin == active_target:
             active_snap, active_open_trip, active_vehicle = snap, open_trip, vehicle
             active_cfg = data.get("vehicle_config") or {}
