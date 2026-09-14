@@ -1642,6 +1642,10 @@ def health(session: Session = Depends(get_session)):
         # indefinitely and the dashboard would look exactly like a car nobody
         # had driven.
         "promotion": _promotion_health(session),
+        # What wrote the rows that are actually in the history. The purge takes
+        # drives and nothing else, so a database can be entirely streamed in
+        # its trips while its charges and readings are still polling's.
+        "rows_by_source": _provenance(session),
         # Schema guards the boot declined to install. _ensure_unique_index
         # refuses rather than failing the boot when the data cannot satisfy an
         # index — the right trade, but it reported the refusal only to the
@@ -3654,6 +3658,33 @@ def _clear_promote_refused(session: Session) -> None:
     """Re-arm the refusal alert after a run that got through."""
     if state.get(session, state.PROMOTE_REFUSED_KEY) == "1":
         state.put(session, state.PROMOTE_REFUSED_KEY, "")
+
+
+def _provenance(session: Session) -> dict:
+    """What wrote the rows now in the history, counted by source.
+
+    "Do I still have polled data?" had no answer anywhere. The purge removes
+    DRIVES before a cutover and nothing else, so a database can be entirely
+    streamed in its trips and still hold charges and battery readings that
+    polling wrote — and the two paths differ in how good their figures are, so
+    which is which is worth being able to see.
+
+    Cheap enough for the health endpoint: two grouped counts over small tables.
+    """
+    out: dict[str, dict[str, int]] = {}
+    for name, model in (("drives", Drive), ("charges", Charge)):
+        rows = session.execute(
+            select(model.source, func.count()).group_by(model.source)).all()
+        # "" and NULL both mean polling — the column's default is empty and
+        # rows written before it existed have neither. Folded into one key
+        # rather than reported as two kinds of nothing.
+        counts: dict[str, int] = {}
+        for source, n in rows:
+            counts[(source or "polled")] = counts.get(source or "polled", 0) + int(n)
+        out[name] = counts
+    out["readings"] = {"all": int(session.scalar(
+        select(func.count()).select_from(BatteryReading)) or 0)}
+    return out
 
 
 def _promotion_health(session: Session) -> dict:

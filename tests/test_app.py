@@ -7,7 +7,7 @@ from unittest import mock
 
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from app.config import get_settings
 from app.main import app
@@ -9980,4 +9980,45 @@ def test_a_single_trip_can_be_asked_why_it_is_not_fast_highway():
             sess.delete(row)
         sess.commit()
         sess.close()
+        settings.app_passcode = old_pc
+
+
+def test_health_says_what_wrote_the_rows_in_the_history():
+    """"Why do I still have polled data?" had no answer anywhere in the app.
+
+    The purge removes DRIVES before a cutover and nothing else, so a database
+    can be entirely streamed in its trips and still hold charges and battery
+    readings that polling wrote. The two paths differ in how good their figures
+    are — a streamed trip's energy is the car's own counter, a polled one's is
+    inferred from rated range read minutes apart — so which is which is worth
+    being able to see rather than infer from a purge you ran days ago.
+    """
+    settings = get_settings()
+    old_pc = settings.app_passcode
+    settings.app_passcode = ""
+    try:
+        with TestClient(app) as client:
+            got = client.get("/api/health").json()["rows_by_source"]
+            assert set(got) == {"drives", "charges", "readings"}
+            for table in ("drives", "charges"):
+                assert isinstance(got[table], dict)
+                # Only ever the two provenances, and "polled" covers both the
+                # empty default and the NULL of rows older than the column —
+                # two kinds of nothing reported as one thing.
+                assert set(got[table]) <= {"telemetry", "polled"}
+                assert all(isinstance(v, int) and v >= 0
+                           for v in got[table].values())
+            assert isinstance(got["readings"]["all"], int)
+
+            # It counts what is actually there: the totals match the tables.
+            from app.database import SessionLocal
+            from app.models import Charge, Drive
+            sess = SessionLocal()
+            try:
+                for table, model in (("drives", Drive), ("charges", Charge)):
+                    assert sum(got[table].values()) == sess.scalar(
+                        select(func.count()).select_from(model))
+            finally:
+                sess.close()
+    finally:
         settings.app_passcode = old_pc
