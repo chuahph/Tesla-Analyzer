@@ -22,7 +22,7 @@ from .. import alerts, auth, notifications, pricing_prefs, services, state, tari
 # for the same module). Needed up here for now_local/to_epoch, which anything
 # comparing against a stored timestamp has to go through — see sync.now_local.
 from .. import sync as sync_mod
-from ..analysis import haversine_km, percentile
+from ..analysis import has_valid_energy, haversine_km, percentile
 from ..analysis import narrative as narrative_engine
 from ..analysis import battery as battery_analysis
 from ..analysis import charging as charging_analysis
@@ -8645,6 +8645,51 @@ def set_matrix_window(payload: dict = Body(...),
     state.put(session, state.MATRIX_SINCE_KEY, _json.dumps(keep))
     session.commit()
     return driving_matrix(days=730, session=session)
+
+
+@router.get("/driving-matrix/trips")
+def driving_matrix_trips(days: int = Query(30, ge=1, le=730),
+                         session: Session = Depends(get_session)):
+    """Every trip in the window, the mode it landed in, and what decided it.
+
+    The matrix reports per-mode aggregates, which is the wrong end for the
+    question people actually ask about a tunable classifier: "I drove fast on
+    Saturday — why is that not Fast Highway?" That needs one trip, its three
+    numbers, and the test that settled it.
+
+    Same window as the matrix, so the two cannot disagree about which trips are
+    in play, and the same cut-points, read from the same place.
+    """
+    vehicle = _first_vehicle(session)
+    now = sync_mod.now_local()
+    asked_since = now - timedelta(days=days)
+    cutover = session.scalar(
+        select(func.min(Drive.start_time)).where(
+            Drive.vehicle_id == vehicle.id, Drive.source == "telemetry"))
+    since = max(asked_since, cutover) if cutover else asked_since
+    drawn = _matrix_boundary(session, vehicle.id)
+    if drawn and drawn[0] > since:
+        since = drawn[0]
+    drives, _ = _window(session, vehicle.id, days, since=since)
+    cuts = _mode_cuts(session)
+    rows = []
+    for d in drives:
+        row = driving_analysis.drive_mode_explained(d, cuts)
+        row["route"] = f"{d.start_location or '?'} → {d.end_location or '?'}"
+        row["wh_per_km"] = (round(d.energy_used_kwh * 1000.0 / d.distance_km, 1)
+                            if d.distance_km else None)
+        # Named apart from the mode, because a trip can be perfectly sortable
+        # and still be kept out of the averages for its energy.
+        row["counted"] = bool(has_valid_energy(d)) and row["mode"] is not None
+        rows.append(row)
+    rows.reverse()  # newest first: the trip being asked about is the recent one
+    return {
+        "days": days,
+        "from": since.isoformat(timespec="minutes"),
+        "trips": len(rows),
+        "thresholds": driving_analysis.resolved_cuts(cuts),
+        "rows": rows,
+    }
 
 
 @router.get("/driving-matrix")

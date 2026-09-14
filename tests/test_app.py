@@ -9910,3 +9910,74 @@ def test_parked_hours_are_elapsed_less_driving_not_the_screens_motion_time():
             c.end_time = was
         sess.commit()
         sess.close()
+
+
+def test_a_single_trip_can_be_asked_why_it_is_not_fast_highway():
+    """The matrix reports per-mode aggregates, which is the wrong end for the
+    question a tunable classifier actually gets asked: "I drove fast on
+    Saturday — why is that not Fast Highway?" That needs one trip, its three
+    numbers, and the test that settled it.
+
+    The distinction the answer has to carry: FH wants the trip to have SPENT
+    itself up there, not touched it. A 130 km/h stretch inside a mixed trip
+    cannot be separated out, because the app keeps two speed numbers per trip
+    and no profile between them.
+    """
+    from datetime import datetime as _dt
+    from datetime import timedelta as _td
+
+    from app.database import SessionLocal
+    from app.models import Drive, Vehicle
+
+    settings = get_settings()
+    old_pc = settings.app_passcode
+    settings.app_passcode = ""
+    sess = SessionLocal()
+    made = []
+    try:
+        with TestClient(app) as client:
+            vid = sess.scalar(select(Vehicle.id))
+            base = datetime.now().replace(microsecond=0) - _td(hours=6)
+            # Sustained: an hour at 135 with a 145 peak.
+            # Mixed: the same peak, but averaged down by town at both ends.
+            for i, (km, mins, mx) in enumerate((
+                    (135.0, 60.0, 145.0), (75.0, 60.0, 132.0))):
+                at = base + _td(hours=i)
+                d = Drive(vehicle_id=vid, start_time=at,
+                          end_time=at + _td(minutes=mins), distance_km=km,
+                          duration_min=mins, energy_used_kwh=km * 0.17,
+                          start_soc=90.0 - i, end_soc=70.0 - i,
+                          avg_speed_kmh=km, max_speed_kmh=mx,
+                          idle_min=0.0, idle_tracked=True,
+                          start_location="A", end_location="B",
+                          source="telemetry")
+                sess.add(d); made.append(d)
+            sess.commit()
+
+            got = client.get("/api/driving-matrix/trips?days=1").json()
+            by_id = {r["id"]: r for r in got["rows"]}
+            sustained, mixed = by_id[made[0].id], by_id[made[1].id]
+
+            # Spent up there: Fast Highway.
+            assert sustained["mode"] == "FH"
+            assert "clears both fast bars" in sustained["why"]
+
+            # Touched it and came back down: Constant Highway, and the answer
+            # says WHICH bar it missed, which is the whole point.
+            assert mixed["mode"] == "CH"
+            assert "under the 91 FH bar" in mixed["why"]
+            assert mixed["avg_kmh"] == pytest.approx(75.0)
+            assert mixed["max_kmh"] == pytest.approx(132.0)
+
+            # Newest first, so the trip being asked about is at the top.
+            assert got["rows"][0]["at"] >= got["rows"][-1]["at"]
+            # And the cut-points come back with the answer, since they are what
+            # the answer turns on.
+            assert got["thresholds"]["fast_avg_kmh"] == pytest.approx(91.0)
+            assert got["thresholds"]["constant_ratio_min"] == pytest.approx(0.55)
+    finally:
+        for row in made:
+            sess.delete(row)
+        sess.commit()
+        sess.close()
+        settings.app_passcode = old_pc

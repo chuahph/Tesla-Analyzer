@@ -2344,6 +2344,112 @@ MODE_NAMES = {
 }
 
 
+def resolved_cuts(cuts: dict[str, float] | None = None) -> dict[str, float]:
+    """The cut-points in force: what was stored, falling back to the defaults.
+
+    One place, because there are now seven of them and every caller that spells
+    the mapping out again is a chance to spell one wrong. The first version of
+    the per-trip endpoint built the constant names from the key names by string
+    surgery and would have raised AttributeError on the first request — the
+    same fault, in the same file, as the threshold validator a few commits
+    earlier. Twice is a pattern, so the mapping is written once and looked up.
+    """
+    c = cuts or {}
+    defaults = {
+        "constant_ratio_min": MODE_CONSTANT_RATIO,
+        "slow_ratio_min": MODE_SLOW_RATIO,
+        "heavy_idle_share_max": MODE_IDLE_HEAVY,
+        "highway_max_kmh": MODE_HIGHWAY_MAX_KMH,
+        "highway_avg_kmh": MODE_HIGHWAY_AVG_KMH,
+        "fast_max_kmh": MODE_FAST_MAX_KMH,
+        "fast_avg_kmh": MODE_FAST_AVG_KMH,
+    }
+    return {k: float(c.get(k, v)) for k, v in defaults.items()}
+
+
+def drive_mode_explained(d: Any, cuts: dict[str, float] | None = None) -> dict[str, Any]:
+    """One trip's mode and the numbers that put it there.
+
+    The cut-points are tunable, and until now there was no way to see a single
+    trip's classification or what decided it — only the per-mode aggregates,
+    which is the wrong end for the question people actually ask: "I drove fast
+    on Saturday, why is that not Fast Highway?"
+
+    Returns the same code drive_mode does, plus the three figures the decision
+    turns on and a sentence naming the test that settled it. The code is taken
+    FROM drive_mode rather than re-derived here: an explanation that can
+    disagree with the decision it explains is worse than none.
+    """
+    code = drive_mode(d, cuts)
+    dur = float(getattr(d, "duration_min", 0.0) or 0.0)
+    dist = float(getattr(d, "distance_km", 0.0) or 0.0)
+    mx = float(getattr(d, "max_speed_kmh", 0.0) or 0.0)
+    idle = float(getattr(d, "idle_min", 0.0) or 0.0)
+    c = resolved_cuts(cuts)
+    constant = c["constant_ratio_min"]
+    slow = c["slow_ratio_min"]
+    heavy_idle = c["heavy_idle_share_max"]
+    hw_max = c["highway_max_kmh"]
+    hw_avg = c["highway_avg_kmh"]
+    fast_max = c["fast_max_kmh"]
+    fast_avg = c["fast_avg_kmh"]
+
+    out: dict[str, Any] = {
+        "id": getattr(d, "id", None),
+        "at": (d.start_time.isoformat(timespec="minutes")
+               if getattr(d, "start_time", None) else None),
+        "km": round(dist, 2), "min": round(dur, 1),
+        "max_kmh": round(mx, 1),
+        "mode": code,
+    }
+    if code is None:
+        out["why"] = ("not sortable — needs a duration, a distance and a peak "
+                      "speed, and one of them is missing or zero")
+        return out
+    avg = dist / (dur / 60.0)
+    ratio = avg / mx
+    out["avg_kmh"] = round(avg, 1)
+    out["constancy"] = round(ratio, 3)
+    out["idle_share"] = round(idle / dur, 3) if dur else None
+
+    if (idle / dur if dur else 0.0) >= heavy_idle:
+        out["why"] = (f"{idle / dur * 100:.0f}% of it was spent genuinely "
+                      f"waiting, past the {heavy_idle * 100:.0f}% mark — heavy "
+                      f"whatever the speeds looked like")
+    elif ratio < slow:
+        out["why"] = (f"held only {ratio:.2f} of its own peak, under the "
+                      f"{slow:.2f} slow cut — repeatedly stopped")
+    elif ratio < constant:
+        out["why"] = (f"held {ratio:.2f} of its peak, between the {slow:.2f} "
+                      f"and {constant:.2f} cuts — moving, but well under "
+                      f"itself a fair part of the time")
+    elif mx >= fast_max and avg >= fast_avg:
+        out["why"] = (f"constant at {ratio:.2f}, peaked at {mx:.0f} and "
+                      f"AVERAGED {avg:.0f} — clears both fast bars "
+                      f"({fast_max:.0f} peak, {fast_avg:.0f} average)")
+    elif mx >= hw_max and avg >= hw_avg:
+        # The case that gets asked about: fast enough at the peak, not over the
+        # whole trip. Says which of the two bars it missed, because "why is my
+        # fast drive not FH" is answered by exactly that.
+        missed = []
+        if mx < fast_max:
+            missed.append(f"peaked at {mx:.0f}, under the {fast_max:.0f} FH bar")
+        if avg < fast_avg:
+            missed.append(f"averaged {avg:.0f}, under the {fast_avg:.0f} FH bar")
+        out["why"] = (f"constant at {ratio:.2f} and over the highway bars "
+                      f"({hw_max:.0f} peak, {hw_avg:.0f} average) — but "
+                      + " and ".join(missed))
+    else:
+        missed = []
+        if mx < hw_max:
+            missed.append(f"peaked at {mx:.0f}, under the {hw_max:.0f} bar")
+        if avg < hw_avg:
+            missed.append(f"averaged {avg:.0f}, under the {hw_avg:.0f} bar")
+        out["why"] = (f"constant at {ratio:.2f} but not at highway pace — "
+                      + " and ".join(missed))
+    return out
+
+
 def drive_mode(d: Any, cuts: dict[str, float] | None = None) -> str | None:
     """Which driving condition this trip was, or None when it cannot be said.
 
@@ -2519,22 +2625,7 @@ def condition_matrix(drives: list[Any], capacity_kwh: float,
                           if capacity_kwh else None),
         "modes_kwh": round(sum(r["kwh"] for r in rows), 2),
         "modes_pct": round(sum(r["pct"] or 0.0 for r in rows), 2),
-        "thresholds": {
-            "constant_ratio_min": float((cuts or {}).get(
-                "constant_ratio_min", MODE_CONSTANT_RATIO)),
-            "slow_ratio_min": float((cuts or {}).get(
-                "slow_ratio_min", MODE_SLOW_RATIO)),
-            "heavy_idle_share_max": float((cuts or {}).get(
-                "heavy_idle_share_max", MODE_IDLE_HEAVY)),
-            "highway_max_kmh": float((cuts or {}).get(
-                "highway_max_kmh", MODE_HIGHWAY_MAX_KMH)),
-            "fast_max_kmh": float((cuts or {}).get(
-                "fast_max_kmh", MODE_FAST_MAX_KMH)),
-            "fast_avg_kmh": float((cuts or {}).get(
-                "fast_avg_kmh", MODE_FAST_AVG_KMH)),
-            "highway_avg_kmh": float((cuts or {}).get(
-                "highway_avg_kmh", MODE_HIGHWAY_AVG_KMH)),
-        },
+        "thresholds": resolved_cuts(cuts),
     }
 
 
