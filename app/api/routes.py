@@ -3177,6 +3177,38 @@ def _check_bridge_quiet(session: Session, vehicle, vin: str, snap: dict,
     return True
 
 
+def _shadow_open(session: Session, vin: str) -> tuple[dict | None, dict | None]:
+    """This car's open trip and open charge AS THE STREAM SEES THEM.
+
+    One source of truth for "is the car parked". It used to be two: the
+    ingest asked the shadow while polling asked its own state machine, and
+    the two answer at rates three orders of magnitude apart — the stream
+    knows the car stopped within twenty seconds, a watchdog poll finds out
+    hours later.
+
+    The ingest passes its own in-memory shadows rather than calling this,
+    deliberately: mid-batch they are ahead of what is stored, and the records
+    it is folding in are the very ones that open and close the trip.
+
+    Which matters because the answer GATES ALERTS. A Sentry episode or an
+    open door only means something on a parked car, so a polling tick that
+    still believed a finished trip was running would suppress a real alert,
+    and one that had not yet noticed a trip start would raise a false one
+    against a car being driven.
+    """
+    import json as _json
+
+    def _open(key: str) -> dict | None:
+        try:
+            shadows = _json.loads(state.get(session, key) or "{}") or {}
+        except ValueError:
+            return None
+        return (shadows.get(vin) or {}).get("open")
+
+    return (_open(state.TELEMETRY_SHADOW_KEY),
+            _open(state.TELEMETRY_CHARGE_SHADOW_KEY))
+
+
 def _evaluate_alerts(session: Session, vehicle, vin: str, snap: dict,
                      open_trip, open_charge, settings) -> None:
     """The three parked-car alerts, from whichever source saw the car.
@@ -3201,6 +3233,19 @@ def _evaluate_alerts(session: Session, vehicle, vin: str, snap: dict,
     import json as _json
 
     sentry_now = snap.get("sentry_mode")
+    # "Not parked" from BOTH the machine's view and the car's own, because
+    # neither alone is enough. An open trip or charge covers the settling
+    # minutes after a car stops, where speed is zero but the journey has not
+    # closed; the snapshot covers the reverse — a source whose open-session
+    # state is stale or absent, looking at a car that is plainly moving.
+    #
+    # This is what the polled path used to get for free from its own state
+    # machine and no longer does. Erring toward "in session" can only ever
+    # SUPPRESS an alert, never invent one, which is the safe direction for
+    # something that pushes to a phone.
+    in_session = (
+        bool(open_trip) or bool(open_charge)
+        or sync_mod.is_driving(snap) or bool(snap.get("charging")))
 
     # Low-battery alert: fires once per low episode (a state.py flag,
     # cleared once SoC recovers past the threshold + a small hysteresis
@@ -3231,7 +3276,7 @@ def _evaluate_alerts(session: Session, vehicle, vin: str, snap: dict,
     if sentry_pct > 0:
         ep_key = state.scoped(state.SENTRY_DRAIN_EPISODE_KEY, vin)
         sentry_notified_key = state.scoped(state.SENTRY_DRAIN_NOTIFIED_KEY, vin)
-        parked_sentry = bool(sentry_now) and not open_trip and not open_charge
+        parked_sentry = bool(sentry_now) and not in_session
         if parked_sentry:
             ep_raw = state.get(session, ep_key)
             if not ep_raw:
@@ -3274,7 +3319,7 @@ def _evaluate_alerts(session: Session, vehicle, vin: str, snap: dict,
         # use quiet.
         armed = (
             (bool(sentry_now) or bool(snap.get("locked")))
-            and not open_trip and not open_charge
+            and not in_session
             and not snap["user_present"]
         )
         opened_doors = bool(snap.get("doors_open"))
@@ -3530,8 +3575,15 @@ def _process_vehicle(
     # every 10, against a watchdog tick that may be hours apart. What stays
     # here is the pair of things only a poll can do.
     if snap["soc"] > 0 and snap.get("range_km", 0) > 0:
+        # The SHADOW's open trip and charge, not the ones the machine above
+        # just produced. Both describe the same car, but the polled pair is
+        # only ever as fresh as the last tick, and at a watchdog cadence that
+        # is hours — long enough to gate a real alert off a trip that ended
+        # this morning. The stream knows within twenty seconds, and it is
+        # already what the ingest's own call to this passes.
+        shadow_trip, shadow_charge = _shadow_open(session, vin)
         _evaluate_alerts(session, vehicle, vin, snap,
-                         open_trip, open_charge, settings)
+                         shadow_trip, shadow_charge, settings)
         # Only polling can raise this: reaching the car is what proves it is
         # awake, and an awake car saying nothing is the fault the stream
         # cannot report about itself.

@@ -1963,6 +1963,85 @@ def test_sentry_drain_alert_fires_once_per_parked_episode(monkeypatch):
                 s.query(BatteryReading).filter(BatteryReading.vehicle_id == v.id).delete()
                 s.delete(v)
                 s.commit()
+def test_sentry_drain_alert_respects_the_streams_open_trip(monkeypatch):
+    """A trip the STREAM has open keeps the polled alert quiet.
+
+    The parked guard used to come from polling's own trip machine. With that
+    gone, the guard is the shadow plus the snapshot — and the shadow is the
+    half that covers the settling minutes after a car stops, where the
+    snapshot reads speed 0 and shift P but the journey has not closed.
+
+    Without it, a watchdog tick landing in that window sees a parked car with
+    Sentry on and a SoC that has dropped over the drive, and pushes "Sentry
+    Mode is draining your battery" about a journey that just happened.
+    """
+    import json as _json
+    from types import SimpleNamespace
+
+    from app import state
+    from app.api.routes import _process_vehicle
+    from app.database import SessionLocal
+    from app.models import BatteryReading, Vehicle
+
+    vin = "TESTVIN-SENTRY2"
+    settings = SimpleNamespace(
+        energy_price_per_kwh=0.90, energy_price_ac_kwh=0.0, energy_price_dc_kwh=0.0,
+        energy_price_peak_kwh=0.0, energy_price_offpeak_kwh=0.0, tariff_peak_start_hour=8,
+        tariff_peak_end_hour=22, tariff_weekend_offpeak=True,
+        battery_capacity_kwh=0.0, battery_new_range_km=0.0, low_soc_notify_pct=0.0,
+        sentry_drain_notify_pct=2.0, intrusion_notify=False, drive_min_km=0.5,
+    )
+
+    def vdata(ts, soc):
+        return {
+            "vin": vin, "display_name": "Test", "vehicle_config": {},
+            "vehicle_state": {"odometer": 2000.0, "is_user_present": False,
+                              "locked": True, "sentry_mode": True},
+            "drive_state": {"timestamp": ts * 1000, "shift_state": "P", "speed": 0,
+                            "latitude": None, "longitude": None},
+            "charge_state": {"battery_level": soc, "battery_range": 200.0,
+                             "charging_state": "Disconnected", "charger_power": 0.0,
+                             "charge_energy_added": 0.0},
+            "climate_state": {"outside_temp": 25.0},
+        }
+
+    pushes = []
+    monkeypatch.setattr("app.api.routes.notifications.notify",
+                        lambda session, title, body, tag=None: pushes.append((title, tag)))
+
+    t = 1_760_600_000
+    try:
+        with SessionLocal() as s:
+            s.add(Vehicle(vin=vin, name="Test", model="Model 3"))
+            s.commit()
+            # Stationary, locked, Sentry on — every condition the alert wants.
+            # The one thing saying otherwise is the stream, which still has
+            # the trip open.
+            state.put(s, state.TELEMETRY_SHADOW_KEY,
+                      _json.dumps({vin: {"open": {"ts": float(t), "odo_km": 3218.0}}}))
+
+            _process_vehicle(s, vdata(t, 80), {"vin": vin}, settings)
+            s.commit()
+            _process_vehicle(s, vdata(t + 1200, 77), {"vin": vin}, settings)
+            s.commit()
+
+            assert [p for p in pushes if p[1] == "sentry-drain"] == [], \
+                "alerted on a drive the stream had not finished"
+            # And no episode was even opened, so the park that follows is
+            # anchored where it really starts rather than mid-journey.
+            assert state.get(s, state.scoped(state.SENTRY_DRAIN_EPISODE_KEY, vin)) in ("", None)
+    finally:
+        with SessionLocal() as s:
+            from app.models import Drive as _Drive
+            state.put(s, state.TELEMETRY_SHADOW_KEY, "")
+            v = s.query(Vehicle).filter(Vehicle.vin == vin).first()
+            if v:
+                s.query(_Drive).filter(_Drive.vehicle_id == v.id).delete()
+                s.query(BatteryReading).filter(BatteryReading.vehicle_id == v.id).delete()
+                s.delete(v)
+            s.commit()
+
+
 def test_repair_moves_a_boundary_and_the_figures_that_follow_from_it(monkeypatch):
     """Undoing the reverted place-split's damage: it credited an arriving trip
     1.311 km it never drove and starved the departing one by the same amount.
