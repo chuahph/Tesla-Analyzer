@@ -3514,3 +3514,48 @@ def test_fast_highway_sits_above_the_110_band_and_falls_through_to_it():
     # The bands are tunable, and moving the fast floor moves the trip.
     cuts = {"fast_max_kmh": 150.0, "fast_avg_kmh": 120.0}
     assert driving_analysis.drive_mode(trip(135.0, 145.0), cuts) == "CH"
+
+
+def test_a_burst_of_speed_does_not_make_a_trip_a_slower_category():
+    """Constancy is average over PEAK, and a peak is one sample.
+
+    Measured on trip 735: 28.12 km in 22.4 minutes, averaging 75 km/h with a
+    peak of 160, was classified SLOW CITY. Had the peak been 130 the same trip
+    would have scored 0.58 and landed in Constant Highway. A higher top speed
+    made it a slower category — not a threshold needing tuning, but the wrong
+    shape.
+
+    So the highway classes are decided on absolute speed, before constancy is
+    consulted. You cannot average 70 km/h over a whole trip in city traffic,
+    however variable the trip was.
+    """
+    from types import SimpleNamespace
+
+    def trip(km, mins, mx, idle=0.0):
+        return SimpleNamespace(distance_km=km, duration_min=mins,
+                               max_speed_kmh=mx, idle_min=idle)
+
+    # Trip 735 itself.
+    real = trip(28.12, 22.4, 160.0)
+    assert driving_analysis.drive_mode(real) == "CH"
+    # And the same journey with a tamer peak, which used to be the only way to
+    # be classified correctly.
+    assert driving_analysis.drive_mode(trip(28.12, 22.4, 130.0)) == "CH"
+    # The constancy ratio is still low; it is simply no longer what decides.
+    assert 28.12 / (22.4 / 60.0) / 160.0 == pytest.approx(0.47, abs=0.01)
+
+    # A higher peak can now never demote a trip. Sweep the peak upward over a
+    # fixed journey and the class may only get faster, never slower.
+    order = {"HC": 0, "SC": 1, "CC": 2, "CH": 3, "FH": 4}
+    seen = [order[driving_analysis.drive_mode(trip(28.12, 22.4, mx))]
+            for mx in range(80, 201, 5)]
+    assert seen == sorted(seen), "a faster peak demoted the trip somewhere"
+
+    # The city modes still sort on constancy, which is what it is for.
+    assert driving_analysis.drive_mode(trip(12.24, 18.8, 91.0)) == "SC"
+    assert driving_analysis.drive_mode(trip(9.68, 31.4, 96.0)) == "HC"
+    # A steady 65 km/h run is Constant City, not highway: the average is below
+    # the bar even though it never varied.
+    assert driving_analysis.drive_mode(trip(65.0, 60.0, 72.0)) == "CC"
+    # And genuine waiting still outranks every speed test.
+    assert driving_analysis.drive_mode(trip(28.12, 22.4, 160.0, idle=8.0)) == "HC"

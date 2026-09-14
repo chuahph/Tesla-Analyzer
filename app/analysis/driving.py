@@ -2416,6 +2416,18 @@ def drive_mode_explained(d: Any, cuts: dict[str, float] | None = None) -> dict[s
         out["why"] = (f"{idle / dur * 100:.0f}% of it was spent genuinely "
                       f"waiting, past the {heavy_idle * 100:.0f}% mark — heavy "
                       f"whatever the speeds looked like")
+    elif mx >= fast_max and avg >= fast_avg:
+        out["why"] = (f"peaked at {mx:.0f} and AVERAGED {avg:.0f} — clears "
+                      f"both fast bars ({fast_max:.0f} peak, {fast_avg:.0f} "
+                      f"average)")
+    elif mx >= hw_max and avg >= hw_avg:
+        missed = []
+        if mx < fast_max:
+            missed.append(f"peaked at {mx:.0f}, under the {fast_max:.0f} FH bar")
+        if avg < fast_avg:
+            missed.append(f"averaged {avg:.0f}, under the {fast_avg:.0f} FH bar")
+        out["why"] = (f"over the highway bars ({hw_max:.0f} peak, "
+                      f"{hw_avg:.0f} average) — but " + " and ".join(missed))
     elif ratio < slow:
         out["why"] = (f"held only {ratio:.2f} of its own peak, under the "
                       f"{slow:.2f} slow cut — repeatedly stopped")
@@ -2423,29 +2435,14 @@ def drive_mode_explained(d: Any, cuts: dict[str, float] | None = None) -> dict[s
         out["why"] = (f"held {ratio:.2f} of its peak, between the {slow:.2f} "
                       f"and {constant:.2f} cuts — moving, but well under "
                       f"itself a fair part of the time")
-    elif mx >= fast_max and avg >= fast_avg:
-        out["why"] = (f"constant at {ratio:.2f}, peaked at {mx:.0f} and "
-                      f"AVERAGED {avg:.0f} — clears both fast bars "
-                      f"({fast_max:.0f} peak, {fast_avg:.0f} average)")
-    elif mx >= hw_max and avg >= hw_avg:
-        # The case that gets asked about: fast enough at the peak, not over the
-        # whole trip. Says which of the two bars it missed, because "why is my
-        # fast drive not FH" is answered by exactly that.
-        missed = []
-        if mx < fast_max:
-            missed.append(f"peaked at {mx:.0f}, under the {fast_max:.0f} FH bar")
-        if avg < fast_avg:
-            missed.append(f"averaged {avg:.0f}, under the {fast_avg:.0f} FH bar")
-        out["why"] = (f"constant at {ratio:.2f} and over the highway bars "
-                      f"({hw_max:.0f} peak, {hw_avg:.0f} average) — but "
-                      + " and ".join(missed))
     else:
         missed = []
         if mx < hw_max:
             missed.append(f"peaked at {mx:.0f}, under the {hw_max:.0f} bar")
         if avg < hw_avg:
             missed.append(f"averaged {avg:.0f}, under the {hw_avg:.0f} bar")
-        out["why"] = (f"constant at {ratio:.2f} but not at highway pace — "
+        out["why"] = (f"held {ratio:.2f} of its peak, at or above the "
+                      f"{constant:.2f} constant cut, but not at highway pace — "
                       + " and ".join(missed))
     return out
 
@@ -2478,17 +2475,28 @@ def drive_mode(d: Any, cuts: dict[str, float] | None = None) -> str | None:
     # stopped is heavy whatever the moving part looked like.
     if (float(getattr(d, "idle_min", 0.0) or 0.0) / dur) >= heavy_idle:
         return "HC"
+    # The highway classes are decided by ABSOLUTE speed, before constancy is
+    # consulted at all. Constancy then sorts only what is left, which is the
+    # city.
+    #
+    # That order matters, and putting it the other way round was wrong.
+    # Constancy is average divided by PEAK, and a peak is one sample — so a
+    # single burst drags the ratio down and the trip looks less constant for
+    # having briefly gone faster. Measured on trip 735: 28.12 km in 22.4
+    # minutes, averaging 75 km/h with a peak of 160, was classified SLOW CITY.
+    # Had the peak been 130 the same trip would have read 0.58 and landed in
+    # Constant Highway. A higher top speed made it a slower category, which is
+    # not a threshold that needs tuning — it is the wrong shape.
+    #
+    # Absolute speed has no such failure: you cannot average 70 km/h over a
+    # whole trip in city traffic, however variable the trip was. So averaging
+    # up there IS the evidence of a highway, and how steady it felt is a
+    # separate question that only becomes interesting below that speed.
+    if mx >= fast_max and avg >= fast_avg:
+        return "FH"
+    if mx >= hw_max and avg >= hw_avg:
+        return "CH"
     if ratio >= constant:
-        # Fastest band first, then the highway band, then city. Ordered and
-        # falling through rather than banded on the peak alone: a trip that
-        # touched 130 once but averaged 75 fails the fast pair and is caught by
-        # the highway pair below it, which is what it actually was. Banding on
-        # the peak with an upper bound would instead have dropped it out of CH
-        # and into CC, calling a motorway run a city drive.
-        if mx >= fast_max and avg >= fast_avg:
-            return "FH"
-        if mx >= hw_max and avg >= hw_avg:
-            return "CH"
         return "CC"
     return "SC" if ratio >= slow else "HC"
 
@@ -2647,10 +2655,10 @@ MATRIX_DEFINITIONS = {
                   "into FH territory. More expensive per hour than CC: drag "
                   "rises faster than the speed saves."},
         {"code": "CC", "name": "Constant City",
-         "means": "Constancy 0.55 or above but below the highway pair — open "
-                  "roads, few interruptions, typically 60-80 km/h. Usually the "
-                  "cheapest kilometres a car does, and cheaper per kilometre "
-                  "than CH."},
+         "means": "Below the highway bars, but held 0.55 or more of its own "
+                  "peak — open roads, few interruptions, typically 60-80 km/h. "
+                  "Usually the cheapest kilometres a car does, and cheaper per "
+                  "kilometre than CH."},
         {"code": "SC", "name": "Slow City",
          "means": "Constancy between 0.35 and 0.55. Spent a fair part of the trip "
                   "well under its own peak — lights and moderate traffic, but "
@@ -2729,22 +2737,27 @@ MATRIX_DEFINITIONS = {
         "normal day's errand stops appeared in neither."
     ),
     "speed_bands": (
-        "The three constant modes differ only in how fast: FH needs a peak of "
-        "130 km/h and an average of 91, CH a peak of 99 (110 minus 10%) and an "
-        "average of 70, and CC is everything constant below that. Both tests "
-        "matter — the peak says the road was there, the average says the trip "
-        "stayed on it — and they are tried fastest first, falling through. So a "
-        "trip that touched 130 once but averaged 75 is caught by CH, which is "
-        "what it was: a highway drive that was briefly fast, not a fast one."
+        "FH needs a peak of 130 km/h and an average of 91; CH a peak of 99 "
+        "(110 minus 10%) and an average of 70. Both tests matter — the peak "
+        "says the road was there, the average says the trip stayed on it — and "
+        "they are tried fastest first, so a trip that touched 130 once but "
+        "averaged 75 is a highway drive that was briefly fast, not a fast one. "
+        "These are decided on ABSOLUTE speed, before constancy is consulted at "
+        "all: you cannot average 70 km/h over a whole trip in city traffic, "
+        "however variable it was."
     ),
     "constancy": (
-        "Every driving mode turns on one number: CONSTANCY, the trip's average "
-        "speed divided by its maximum. It asks how much of its own peak the trip "
-        "held — 1.0 would be a trip at exactly one speed throughout, and 0.16 is "
-        "a crawl that briefly touched 74 km/h. Speed alone cannot sort these: a "
-        "60-80 km/h cruise is CHEAPER per kilometre than a 110 one, because drag "
-        "rises faster than the speed saves, so an ordering by speed would put "
-        "them the wrong way round."
+        "Below the highway bars, the city modes turn on CONSTANCY: the trip's "
+        "average speed divided by its maximum. It asks how much of its own peak "
+        "the trip held — 1.0 is a trip at one speed throughout, 0.16 a crawl "
+        "that briefly touched 74 km/h. It is needed because speed alone sorts "
+        "the cheap kilometres wrongly: a 60-80 km/h cruise costs LESS per "
+        "kilometre than a 110 one, since drag rises faster than the speed "
+        "saves. But it is used only below highway pace, because the peak is a "
+        "single sample — a trip that averaged 75 with one burst to 160 scored "
+        "0.47 and was called Slow City, where the same trip peaking at 130 "
+        "would have been Constant Highway. A higher top speed must not make a "
+        "trip a slower category."
     ),
     "how_sorted": (
         "A trip is sorted by how close it stayed to its own peak speed — average "
