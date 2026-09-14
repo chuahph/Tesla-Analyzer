@@ -2394,9 +2394,23 @@ function renderMatrix(d) {
   // for: the report starts where streamed history does, so a reader comparing
   // two of these needs to see which boundary bit.
   const w = d.window;
+  // Phrased to follow "N days —" rather than "N days of", which read as
+  // "0.8 days of since your last charge".
+  const winSource = w && {
+    telemetry: "streamed history, which is all there is",
+    charge: "since your last charge, the same window as the cards above",
+    boundary: "a boundary you drew",
+    days: w && `the ${w.days_asked} requested`,
+  }[w.limited_by];
+  // Said out loud when the page asked to follow the dashboard and the data
+  // could not reach that far back. Silence here is what made the matrix and
+  // the Vampire Drain card look like they disagreed about the same trips.
+  const winShort = w && w.asked_since_charge && w.limited_by !== "charge"
+    ? " The charge is older than the streamed history, so this is all there is."
+    : "";
   const win = w
-    ? `${w.from.replace("T", " ")} to ${w.to.replace("T", " ")} — ${w.days} days of
-       ${w.limited_by === "telemetry" ? "streamed history (all there is)" : `the ${w.days_asked} requested`}.`
+    ? `${w.from.replace("T", " ")} to ${w.to.replace("T", " ")} — ${w.days} days,
+       ${winSource}.${winShort}`
     : "";
   // Parked hours nothing could state a Sentry verdict for. They are in PK and
   // in neither ID nor the armed fit, so SE carries them — which makes SE an
@@ -2528,6 +2542,24 @@ function renderGlossary(defs) {
 // The name stays setupMatrixModal because the thing it wires up did not change
 // when the markup moved: the same element IDs, the same three forms, the same
 // render. Only where it is mounted and when it loads are different.
+// The dashboard's window as query parameters. One reader for the selector, so
+// the matrix asks for the same stretch the cards above it are answering for —
+// they used to differ silently, and both report a parked figure in percent of
+// the same pack, which is not a difference a reader can see.
+//
+// "Current drive" is deliberately not passed down. A matrix over one trip has
+// one driving row and no parked ones at all (the parked rows need 24 hours of
+// six-hour-plus parks before they will report anything), so narrowing to it
+// empties the card rather than answering a narrower question.
+function matrixWindowQuery() {
+  const raw = document.getElementById("range");
+  const v = raw ? raw.value : "charge";
+  if (v === "charge") return "days=90&since_charge=1";
+  if (v === "drive" || v === "custom") return "days=90";
+  const days = +v;
+  return isFinite(days) && days >= 1 ? `days=${days}` : "days=90";
+}
+
 function setupMatrixModal() {
   const card = document.getElementById("matrix-card");
   const form = document.getElementById("matrix-form");
@@ -2585,9 +2617,9 @@ function setupMatrixModal() {
   // visible without any interaction, so the fetch cannot wait for one — and
   // the card stays hidden until it succeeds, since an empty panel with a
   // heading reads as a broken feature rather than as one still loading.
-  (async () => {
+  async function reload() {
     try {
-      const r = await fetch("/api/driving-matrix?days=90");
+      const r = await fetch(`/api/driving-matrix?${matrixWindowQuery()}`);
       if (!r.ok) throw new Error("load failed");
       show(await r.json());
       card.style.display = "";
@@ -2595,7 +2627,11 @@ function setupMatrixModal() {
       // Left hidden. Everything else on the page is independent of this, and
       // a failure here should cost this card and nothing else.
     }
-  })();
+  }
+  // Re-read whenever the page's window changes, so the card never sits there
+  // answering for a stretch the rest of the page has moved off.
+  document.addEventListener("ta:window-changed", reload);
+  reload();
 
   // How far back the report reaches. Its own form because it is a different
   // kind of change from the cut-points: those re-sort the same trips, this
@@ -3524,12 +3560,20 @@ setInterval(tickClock, 1000);
 // days (1–730, the API's window limit) and pins it as a selectable option.
 const rangeSel = document.getElementById("range");
 let lastRange = rangeSel.value;
+// Announced rather than called directly: the cards below read the same
+// selector and each decides for itself what to do about it. Fired only for an
+// actual window change, not for the other things that call load() (show more
+// trips, expanding the KPI grid) where nothing about the window moved.
+function windowChanged() {
+  load();
+  document.dispatchEvent(new CustomEvent("ta:window-changed"));
+}
 rangeSel.addEventListener("change", () => {
   recentTripsLimit = 5;   // switching windows always starts Recent Trips collapsed again
   kpisExpanded = false;   // ...and the KPI grid too
   if (rangeSel.value !== "custom") {
     lastRange = rangeSel.value;
-    load();
+    windowChanged();
     return;
   }
   const raw = prompt("Show how many days? (1–730)", lastRange);
@@ -3548,7 +3592,7 @@ rangeSel.addEventListener("change", () => {
   opt.textContent = `${days} days`;
   rangeSel.value = String(days);
   lastRange = String(days);
-  load();
+  windowChanged();
 });
 
 // "Show more" trips: bump the cap by 5 and reload (see renderLists()'s

@@ -8322,7 +8322,7 @@ def set_mode_thresholds(payload: dict = Body(...),
                      f"leave CH unreachable")
     state.put(session, state.MODE_THRESHOLDS_KEY, _json.dumps(cuts))
     session.commit()
-    return driving_matrix(days=30, session=session)
+    return driving_matrix(days=30, since_charge=False, session=session)
 
 
 def _matrix_boundary(session: Session, vehicle_id: int):
@@ -8421,7 +8421,7 @@ def set_matrix_window(payload: dict = Body(...),
         keep["from"] = when.isoformat(timespec="minutes")
     state.put(session, state.MATRIX_SINCE_KEY, _json.dumps(keep))
     session.commit()
-    return driving_matrix(days=730, session=session)
+    return driving_matrix(days=730, since_charge=False, session=session)
 
 
 @router.get("/driving-matrix/trips")
@@ -8482,6 +8482,13 @@ def driving_matrix_trips(days: int = Query(30, ge=1, le=730),
 
 @router.get("/driving-matrix")
 def driving_matrix(days: int = Query(30, ge=1, le=730),
+                   # A plain default, not Query(False), because this function is
+                   # also CALLED from Python — and a direct call gets the Query
+                   # object itself, which is truthy. That turned every internal
+                   # caller's report into a since-charge one the moment this
+                   # parameter was added, and the only reason it was caught is
+                   # that a test asserted which boundary bit.
+                   since_charge: bool = False,
                    session: Session = Depends(get_session)):
     """Efficiency by driving condition, plus what the car costs standing still.
 
@@ -8530,6 +8537,25 @@ def driving_matrix(days: int = Query(30, ge=1, le=730),
     drawn = _matrix_boundary(session, vehicle.id)
     if drawn:
         bounds.append((drawn[0], "boundary"))
+    # The dashboard's own window, so the matrix can answer for the same stretch
+    # the cards above it are answering for.
+    #
+    # Worth the parameter because the two disagreeing is not a small confusion:
+    # both report a parked figure, in percent of the same pack, and a reader
+    # has no way to see that one of them reaches back past a charge and the
+    # other does not. Measured on this car, an armed-Sentry park sitting in
+    # that difference put 10.7% against 3.2% for what looked like the same
+    # eleven trips.
+    #
+    # It composes like the rest rather than overriding them: a charge more
+    # recent than the streamed history narrows the report to it, and one older
+    # loses to the cutover, because there is no matrix to draw from trips that
+    # do not exist.
+    if since_charge:
+        charge_end = session.scalar(
+            select(func.max(Charge.end_time)).where(Charge.vehicle_id == vehicle.id))
+        if charge_end:
+            bounds.append((charge_end, "charge"))
     since, limited_by = max(bounds, key=lambda pair: pair[0])
     drives, charges = _window(session, vehicle.id, days, since=since)
     # The yardstick every row is measured against: what this pack is worth at
@@ -8785,6 +8811,7 @@ def driving_matrix(days: int = Query(30, ge=1, le=730),
         "to": now.isoformat(timespec="minutes"),
         "days": round((now - since).total_seconds() / 86400.0, 1),
         "days_asked": days,
+        "asked_since_charge": since_charge,
         "telemetry_from": cutover.isoformat(timespec="minutes") if cutover else None,
         "limited_by": limited_by,
         # What was asked for, so a narrow report can be widened again without
