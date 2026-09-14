@@ -2062,6 +2062,23 @@ def duplicate_trips(
     return plan
 
 
+def _staged_trip_starts(session: Session) -> list:
+    """Start times of the finished shadow trips waiting to be promoted."""
+    import json as _json
+
+    try:
+        rows = _json.loads(
+            state.get(session, state.TELEMETRY_TRIPS_KEY) or "[]") or []
+    except ValueError:
+        return []
+    out = []
+    for t in rows:
+        ts = t.get("start_ts")
+        if ts:
+            out.append(sync_mod._dt(float(ts)))
+    return out
+
+
 def _purge_drives_before(session: Session, vehicle, cutover: datetime,
                          apply: bool, freeze: bool, backup_key: str,
                          restore_path: str) -> dict:
@@ -2133,6 +2150,11 @@ def _purge_drives_before(session: Session, vehicle, cutover: datetime,
         # "after" column: every rate listed here is one that goes null under
         # "after" and keeps working anyway.
         "would_freeze": _freeze_parked_rates(session, vehicle, capacity_kwh) if freeze else None,
+        # Staged trips that would be dropped with the rows. Without this the
+        # delete is undone by the next promotion, so it belongs in the plan
+        # beside what is being deleted rather than as a surprise on apply.
+        "would_drop_staged": sum(
+            1 for t in _staged_trip_starts(session) if t < cutover),
         # The driving matrix fits PK, ID and SE LIVE and never consults the
         # frozen rates — those are a floor under vampire_drain alone. So these
         # rows go blank on a purge that leaves under 24 hours of 6-hour-plus
@@ -2168,10 +2190,33 @@ def _purge_drives_before(session: Session, vehicle, cutover: datetime,
             "from_gaps": frozen["from_gaps"],
         }
 
+    # The shadow trips behind the deleted rows go too, or the purge is undone.
+    #
+    # Measured live, and it is what sent this looking: purging 24 drives left
+    # their finished shadow trips staged, so the very next promotion planned to
+    # ADD all 22 of them back. Worse than merely undoing the delete — 22 adds
+    # is over PROMOTE_AUTO_MAX_ADD, which refuses the whole run, so a trip
+    # driven that morning sat behind a queue of resurrected ones and never
+    # appeared at all.
+    #
+    # Kept in the same backup as the rows, so the restore can put both back and
+    # "reversible" stays true of the whole operation rather than half of it.
+    try:
+        staged_all = _json_mod.loads(
+            state.get(session, state.TELEMETRY_TRIPS_KEY) or "[]") or []
+    except ValueError:
+        staged_all = []
+    keep_staged, drop_staged = [], []
+    for t in staged_all:
+        ts = t.get("start_ts")
+        started = sync_mod._dt(float(ts)) if ts else None
+        (drop_staged if started and started < cutover else keep_staged).append(t)
+
     backup = {
         "at": sync_mod.now_local().isoformat(timespec="seconds"),
         "cutover": cutover.isoformat(),
         "rows": [_drive_row_dict(d) for d in doomed],
+        "shadow_trips": drop_staged,
     }
     existing_raw = state.get(session, backup_key)
     existing = _json_mod.loads(existing_raw) if existing_raw else {}
@@ -2187,6 +2232,9 @@ def _purge_drives_before(session: Session, vehicle, cutover: datetime,
         if existing.get("rows"):
             plan["backup_replaced"] = len(existing["rows"])
         state.put(session, backup_key, _json_mod.dumps(backup))
+    if drop_staged:
+        state.put(session, state.TELEMETRY_TRIPS_KEY, _json_mod.dumps(keep_staged))
+        plan["shadow_trips_dropped"] = len(drop_staged)
     session.commit()
     deleted = services.delete_drives(session, [d.id for d in doomed])
     plan["applied"] = True
@@ -2361,11 +2409,16 @@ def _restore_drives_from(session: Session, key: str, apply: bool) -> dict:
     rows = backup.get("rows") or []
     present = set(session.scalars(select(Drive.id)).all())
     missing = [r for r in rows if r.get("id") not in present]
+    # The shadow trips the purge dropped alongside the rows. Put back too, or
+    # the restore returns the history without the staging that produced it —
+    # and a later correction from the stream would have nothing to correct.
+    staged_back = backup.get("shadow_trips") or []
     plan = {
         "deleted_at": backup.get("at"),
         "in_backup": len(rows),
         "would_restore": len(missing),
         "already_present": len(rows) - len(missing),
+        "shadow_trips_in_backup": len(staged_back),
     }
     if backup.get("cutover"):
         plan["cutover"] = backup["cutover"]
@@ -2374,6 +2427,21 @@ def _restore_drives_from(session: Session, key: str, apply: bool) -> dict:
         return plan
     for row in missing:
         session.add(_drive_from_row_dict(row))
+    if staged_back:
+        # Merged by start_ts rather than appended: a shadow trip that has since
+        # been re-staged by the stream must not end up in the list twice, which
+        # would plan the same journey as two additions.
+        try:
+            now_staged = _json_mod.loads(
+                state.get(session, state.TELEMETRY_TRIPS_KEY) or "[]") or []
+        except ValueError:
+            now_staged = []
+        have = {t.get("start_ts") for t in now_staged}
+        merged = now_staged + [t for t in staged_back
+                               if t.get("start_ts") not in have]
+        merged.sort(key=lambda t: float(t.get("start_ts") or 0.0))
+        state.put(session, state.TELEMETRY_TRIPS_KEY, _json_mod.dumps(merged))
+        plan["shadow_trips_restored"] = len(merged) - len(now_staged)
     session.commit()
     plan["applied"] = True
     plan["restored"] = len(missing)
@@ -3596,16 +3664,29 @@ def _promotion_health(session: Session) -> dict:
         err = _json.loads(state.get(session, state.PROMOTE_FAIL_KEY) or "null")
     except ValueError:
         err = {"error": "unreadable"}
+    # The cap does not promote max_per_run and leave the rest — it REFUSES THE
+    # WHOLE RUN, because a cap that fires halfway through has already written
+    # the duplicates it exists to prevent. So a backlog over the limit promotes
+    # nothing at all, indefinitely, and this block reported that as "in flight"
+    # — the one reading that says no action is needed.
+    #
+    # The flag was already there and already notified; this simply failed to
+    # read it, which made a state the app knew about invisible where someone
+    # would look for it.
+    refused = state.get(session, state.PROMOTE_REFUSED_KEY) == "1"
     return {
         "staged": staged,
         "last_error": err,
+        "refused": refused,
         # Said plainly, because the numbers alone do not say which way to read
         # them: staged trips with no error are in flight, staged trips WITH one
-        # are stuck.
-        "verdict": ("stuck" if err and staged else
+        # are stuck, and a refusal is neither — it is waiting for a person.
+        "verdict": ("refused" if refused else
+                    "stuck" if err and staged else
                     "failing" if err else
                     "in flight" if staged else "clear"),
         "max_per_run": PROMOTE_AUTO_MAX_ADD,
+        "apply_by_hand": ("/api/telemetry/promote?apply=true" if refused else None),
     }
 
 

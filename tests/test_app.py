@@ -9611,3 +9611,84 @@ def test_the_stream_retries_a_promotion_that_failed_on_an_earlier_batch():
         sess.commit()
         sess.close()
         settings.app_passcode = old_pc
+
+
+def test_a_purge_drops_the_staged_trips_or_promotion_undoes_it():
+    """Deleting drives without their shadow trips is not a delete.
+
+    Measured live and it is what this went looking for: purging 24 drives left
+    their finished shadow trips staged, so the very next promotion planned to
+    ADD all 22 of them back. Worse than merely undoing the purge — 22 adds is
+    over PROMOTE_AUTO_MAX_ADD, and the cap REFUSES THE WHOLE RUN rather than
+    promoting part of it, so a trip driven that morning sat behind a queue of
+    resurrected ones and never appeared at all.
+    """
+    from datetime import datetime as _dt
+    from datetime import timedelta as _td
+
+    import json as _json_mod
+
+    from app import state
+    from app.database import SessionLocal
+    from app.models import Drive, Vehicle
+
+    settings = get_settings()
+    old_pc = settings.app_passcode
+    settings.app_passcode = ""
+    sess = SessionLocal()
+    prev_staged = state.get(sess, state.TELEMETRY_TRIPS_KEY)
+    prev_backup = state.get(sess, state.PURGED_STALE_DRIVES_KEY)
+    try:
+        # Inside the client: startup is what seeds the vehicle these rows hang
+        # off, so querying for it first gets None and the insert fails on a
+        # NOT NULL vehicle_id.
+        with TestClient(app) as client:
+            vid = sess.scalar(select(Vehicle.id))
+            vin = sess.scalar(select(Vehicle.vin))
+            assert vid is not None
+            old_at, new_at = _dt(2019, 3, 1, 8, 0), _dt(2019, 8, 1, 8, 0)
+            for at in (old_at, new_at):
+                sess.add(Drive(vehicle_id=vid, start_time=at,
+                               end_time=at + _td(minutes=20), distance_km=10.0,
+                               energy_used_kwh=1.5, start_soc=80.0, end_soc=78.0,
+                               avg_speed_kmh=30.0, max_speed_kmh=60.0,
+                               source="telemetry"))
+            # Both journeys still staged, as they are after a real purge.
+            state.put(sess, state.TELEMETRY_TRIPS_KEY, _json_mod.dumps([
+                {"vin": vin, "start_ts": old_at.timestamp(), "distance_km": 10.0},
+                {"vin": vin, "start_ts": new_at.timestamp(), "distance_km": 10.0},
+            ]))
+            state.put(sess, state.PURGED_STALE_DRIVES_KEY, "")
+            sess.commit()
+
+            # The plan says what it will drop, so apply is not a surprise.
+            plan = client.get("/api/data/purge-stale-drives"
+                              "?before=2019-06-01&freeze=false").json()
+            assert plan["would_drop_staged"] == 1
+
+            done = client.get("/api/data/purge-stale-drives"
+                              "?before=2019-06-01&freeze=false&apply=true").json()
+            assert done["deleted"] == 1
+            assert done["shadow_trips_dropped"] == 1
+
+            # The purged journey is no longer staged, so nothing re-adds it.
+            left = _json_mod.loads(state.get(sess, state.TELEMETRY_TRIPS_KEY))
+            assert [t["start_ts"] for t in left] == [new_at.timestamp()]
+
+            # And the restore puts both halves back, or "reversible" was only
+            # ever true of the rows.
+            back = client.get("/api/data/restore-stale-drives?apply=true").json()
+            assert back["restored"] == 1
+            assert back["shadow_trips_restored"] == 1
+            again = _json_mod.loads(state.get(sess, state.TELEMETRY_TRIPS_KEY))
+            assert sorted(t["start_ts"] for t in again) == sorted(
+                [old_at.timestamp(), new_at.timestamp()])
+    finally:
+        for row in sess.scalars(select(Drive).where(
+                Drive.start_time < _dt(2020, 1, 1))):
+            sess.delete(row)
+        state.put(sess, state.TELEMETRY_TRIPS_KEY, prev_staged or "")
+        state.put(sess, state.PURGED_STALE_DRIVES_KEY, prev_backup or "")
+        sess.commit()
+        sess.close()
+        settings.app_passcode = old_pc
