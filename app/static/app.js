@@ -2217,11 +2217,11 @@ function renderMatrixSummary(d) {
   const bars = [
     ...modes.filter((m) => m.pct).map((m) => ({
       code: m.code, name: m.name, pct: m.pct,
-      detail: `${num(m.wh_per_km, 0)} Wh/km · ${num(m.km, 0)} km`,
+      detail: `${num(m.wh_per_km, 0)} Wh/km · ${num(m.km, 0)} km · ${num(m.kwh, 1)} kWh`,
     })),
     ...(parked && parked.pct ? [{
       code: "PK", name: parked.name, pct: parked.pct, parked: true,
-      detail: `${num(parked.hours, 0)} h over ${parked.gaps} park${parked.gaps === 1 ? "" : "s"}`,
+      detail: `${num(parked.hours, 0)} h over ${parked.gaps} park${parked.gaps === 1 ? "" : "s"} · ${num(parked.kwh, 1)} kWh`,
     }] : []),
   ];
   const top = Math.max(...bars.map((b) => b.pct), 0.01);
