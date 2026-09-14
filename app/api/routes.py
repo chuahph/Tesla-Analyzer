@@ -40,17 +40,6 @@ from ..schemas import ChargeOut, DriveOut, VehicleOut
 
 router = APIRouter(prefix="/api", tags=["analytics"])
 
-# How long after an unexpected wake (phone-as-key, precondition, remote start —
-# not our own manual wake_up) the sync cron should treat the car as "worth
-# polling tightly": long enough to catch a likely departure, short enough that
-# an online-but-idle car isn't kept awake past this on our account.
-FAST_POLL_WINDOW_MIN = 3.0
-# How long to keep the tight polling cadence after a car with an open trip
-# first reads stopped. Covers the final creep into a parking space so the
-# trip's stop is anchored where the car actually came to rest, without
-# polling hard through the whole PARK_END_MIN wait before the trip closes.
-ARRIVAL_SETTLE_MIN = 4.0
-
 
 def _trim_rate_kw(past_drives: list, past_charges: list,
                   capacity_kwh: float) -> float | None:
@@ -716,26 +705,6 @@ def _screen_reading_fresh(screen: dict[str, Any]) -> bool:
     return (sync_mod.now_local() - when).days <= SCREEN_CAPACITY_MAX_AGE_DAYS
 
 
-def _last_charge_end(session: Session, vehicle_id: int) -> tuple[float | None, float | None]:
-    """When this car most recently finished charging, and at what SoC.
-
-    Both, because a trip anchored on a mid-charge snapshot inherits that
-    snapshot's clock AND its state of charge, and correcting one without the
-    other leaves the trip starting at the right moment from the wrong battery.
-    A plugged-in car is not driving, so however far back a blind gap reaches,
-    the trip after a charge began when that charge ended and from the pack it
-    left behind — and nothing else in process_snapshot knows this: its ``prev``
-    is simply the last snapshot, which can perfectly well be one taken
-    mid-charge.
-    """
-    row = session.scalars(
-        select(Charge).where(Charge.vehicle_id == vehicle_id)
-        .order_by(Charge.end_time.desc()).limit(1)).first()
-    if row is None or row.end_time is None:
-        return None, None
-    return row.end_time.replace(tzinfo=sync_mod.MYT).timestamp(), row.end_soc
-
-
 def _fleet_wh_per_km(session: Session, vehicle_id: int) -> float | None:
     """The median Wh/km of this car's own measured trips, or None.
 
@@ -757,26 +726,6 @@ def _fleet_wh_per_km(session: Session, vehicle_id: int) -> float | None:
     if len(rates) < PRICED_ENERGY_MIN_SAMPLES:
         return None
     return percentile(rates, 0.5)
-
-
-def _charge_has_a_reading(session: Session, vin: str) -> bool:
-    """Whether this car's open charge has been read since it opened.
-
-    Same question the read throttle asks, asked again where the back-off is
-    armed — because the back-off returns before the loop that answers it, and
-    suspending a charge that owns only its opening reading would block the
-    tick that gives it a second one.
-    """
-    import json as _json
-
-    try:
-        charge = _json.loads(
-            state.get(session, state.scoped(state.OPEN_CHARGE_KEY, vin)) or "{}")
-        snap = _json.loads(
-            state.get(session, state.scoped(state.SNAPSHOT_KEY, vin)) or "{}")
-    except ValueError:
-        return False
-    return float(snap.get("ts") or 0) > float(charge.get("ts") or 0)
 
 
 def _usable_capacity(session: Session, vehicle: Vehicle, settings) -> tuple[float, str]:
@@ -1257,31 +1206,6 @@ def _full_history(session: Session, vehicle_id: int) -> tuple[list, list]:
     )
 
 
-def _departure_parked_rate_kw(session: Session, vehicle, prev: dict | None,
-                              capacity_kwh: float) -> float | None:
-    """What this car draws parked where ``prev`` is sitting, in kW.
-
-    Feeds process_snapshot\'s decision about how long a park may be before a
-    departure stops trusting its SoC as an energy baseline. Per place, because
-    the two regimes on this car are 6.6x apart (see driving.place_standby_kw)
-    and a bound sized on the blend would be wrong in both directions — which
-    is the whole reason that decision moved off a flat clock.
-
-    The place comes from the same geofence match every other Place-aware
-    feature uses, so it agrees with the ``end_location`` the fit is keyed on.
-    Falls back to the whole-history rate for anywhere unnamed, and to None if
-    even that cannot be fitted — which the caller reads as "keep the clock".
-    """
-    past_drives = session.scalars(
-        select(Drive).where(Drive.vehicle_id == vehicle.id).order_by(Drive.start_time)
-    ).all()
-    past_charges = session.scalars(
-        select(Charge).where(Charge.vehicle_id == vehicle.id)
-    ).all()
-    place = _geofence_name(sync_mod._coords(prev), session) if prev else None
-    return _parked_rate_kw_for(
-        session, place, list(past_drives), list(past_charges), capacity_kwh)
-
 
 def _cached_place_near(coords: str) -> tuple[str, str] | None:
     """An already-resolved label for a coordinate within _SAME_PLACE_M of
@@ -1614,7 +1538,7 @@ def health(session: Session = Depends(get_session)):
             "writes_history": False,
             "bridge_quiet_alert_min": float(
                 getattr(settings, "bridge_quiet_alert_min", 0.0) or 0.0),
-            "role": "watchdog only — wake, reachability, stream silence",
+            "role": "watchdog only — wake, reachability, stream silence, alerts",
         },
         # Is the cron that drives everything still calling?
         #
@@ -3353,18 +3277,16 @@ def _evaluate_alerts(session: Session, vehicle, vin: str, snap: dict,
             state.put(session, intrusion_key, "")
 
 
-def _process_vehicle(
-    session: Session, data: dict, v_summary: dict, settings, migrate_legacy: bool = False
-) -> tuple:
-    """Log drives/charges for one car from its vehicle_data snapshot.
+def _process_vehicle(session: Session, data: dict, v_summary: dict, settings) -> tuple:
+    """Do what a poll — and only a poll — can do with one car's snapshot.
 
-    Snapshot / open-trip / open-charge state is namespaced by VIN, so each car
-    on the account advances its own independent session state machine. Returns
-    ``(vehicle, snapshot, n_drives, n_charges, open_trip)``.
+    Enrich the vehicle record from the car's own config, store the snapshot,
+    raise the three parked-car alerts, and check whether the stream has gone
+    quiet on a car that is demonstrably awake. Returns ``(vehicle, snapshot)``.
 
-    ``migrate_legacy`` (set for the active car) folds in the pre-multi-car global
-    ``last_snapshot`` state a one time, so a drive taken around the upgrade to
-    per-VIN state isn't dropped.
+    It does NOT log drives or charges, and no longer runs a session state
+    machine to find them. The stream authors the history; this is the
+    watchdog that reports when the stream has stopped.
     """
     import json as _json
 
@@ -3410,177 +3332,28 @@ def _process_vehicle(
 
     snap = sync_mod.snapshot_from_vehicle_data(data)
     sk = state.scoped(state.SNAPSHOT_KEY, vin)
-    tk = state.scoped(state.OPEN_TRIP_KEY, vin)
-    ck = state.scoped(state.OPEN_CHARGE_KEY, vin)
-    # Usable pack capacity: override > measured charge EMA (seeded from the
-    # variant spec) > spec > default. The EMA is a smoothed average over
-    # measured charges — robust to a single contaminated charge reading that
-    # a "last full charge" figure would swallow whole.
-    capacity_kwh, _ = _usable_capacity(session, vehicle, settings)
 
-    # One-time migration from the pre-multi-car global keys (only the active car
-    # inherits them), so a drive taken around the upgrade isn't lost.
-    recovered: list[dict] = []
-    if migrate_legacy:
-        legacy_snap = state.get(session, state.SNAPSHOT_KEY)  # bare/global key
-        if legacy_snap:
-            if not state.get(session, sk):
-                # Never synced under the scoped key yet — adopt the legacy state so
-                # the normal gap-fallback below logs the missed drive.
-                state.put(session, sk, legacy_snap)
-                if not state.get(session, tk):
-                    state.put(session, tk, state.get(session, state.OPEN_TRIP_KEY) or "")
-                if not state.get(session, ck):
-                    state.put(session, ck, state.get(session, state.OPEN_CHARGE_KEY) or "")
-            else:
-                # Already synced under the scoped key once (the transition drive
-                # slipped through) — reconstruct it from the legacy → scoped gap.
-                try:
-                    legacy = _json.loads(legacy_snap)
-                    scoped = _json.loads(state.get(session, sk))
-                    d = sync_mod._drive_from(legacy, scoped, capacity_kwh)
-                    if d:
-                        # The car slept between the two snapshots, so the true drive
-                        # time is unknown; give it a sensible duration from the
-                        # distance (~40 km/h) anchored at the later snapshot, rather
-                        # than the whole multi-hour gap.
-                        dur = max(round(d["distance_km"] / 40.0 * 60.0), 1)
-                        end = sync_mod._dt(scoped["ts"])
-                        d["end_time"] = end
-                        d["start_time"] = end - timedelta(minutes=dur)
-                        d["duration_min"] = float(dur)
-                        d["avg_speed_kmh"] = round(d["distance_km"] / (dur / 60.0), 1)
-                        d["max_speed_kmh"] = max(d["max_speed_kmh"], d["avg_speed_kmh"])
-                        recovered.append(d)
-                except (ValueError, KeyError, TypeError):
-                    pass
-            state.delete(
-                session, state.SNAPSHOT_KEY, state.OPEN_TRIP_KEY, state.OPEN_CHARGE_KEY
-            )
-
-    prev_raw = state.get(session, sk)
-    prev = _json.loads(prev_raw) if prev_raw else None
-    open_trip = _json.loads(state.get(session, tk) or "null")
-    open_charge = _json.loads(state.get(session, ck) or "null")
-
-    # Nothing corrects a polled sleep-close here any more, because nothing
-    # creates one. That correction ran off a marker the close wrote, and
-    # polling stopped writing drives — so the 292 lines that read it, merging
-    # further movement into a trip a dead zone had cut short, trimming an
-    # estimate the car never drove, and feeding the arrival model a
-    # measurement, could only ever have fired on a marker left behind before
-    # that change.
+    # The polled trip and charge state machine is GONE, not merely ignored.
     #
-    # The same ground is still recovered, by the same measurement, from the
-    # other end: /api/repair-arrivals reads the odometer against the readings
-    # taken while the car sat parked, needs no marker from the close, and
-    # works on a streamed trip exactly as well as on a polled one. That is
-    # what will give trip 731 back the 245 m it lost when the stream went
-    # quiet before the car finished moving.
-    # Where the last closed trip ended, for the departure recovery — see
-    # process_snapshot's prev_close_odo_km. Looked up only in the one shape
-    # that can use it (no trip open, the car driving now, and the last
-    # snapshot frozen mid-drive because a blackout hid its park), so an
-    # ordinary poll still touches no extra rows.
-    prev_close_odo = None
-    if (open_trip is None and prev is not None and sync_mod.is_driving(prev)
-            and sync_mod.is_driving(snap)):
-        last_closed = session.scalars(
-            select(Drive).where(Drive.vehicle_id == vehicle.id)
-            .order_by(Drive.start_time.desc()).limit(1)
-        ).first()
-        # It has to end at prev's own position to stand in for it: far enough
-        # back and it is some older trip with an unlogged journey since, which
-        # is exactly the case the strict guard should keep refusing. Never past
-        # where the car is now either — that ground is already claimed.
-        if (last_closed is not None and last_closed.end_odo_km is not None
-                and prev["odo_km"] - sync_mod.GAP_CREEP_MAX_KM
-                <= last_closed.end_odo_km <= snap["odo_km"]):
-            prev_close_odo = last_closed.end_odo_km
-
-    # How fast this car gets away from wherever it was last parked, if that
-    # spot is a Place with its own figure. Looked up only when the car is
-    # moving now — that is the only shape the departure recovery runs in, so
-    # an idle poll still touches no extra rows.
-    place_pace = (
-        _place_departure_pace(session, prev)
-        if prev is not None and sync_mod.is_driving(snap) else None
-    )
-
-    # And what it draws sitting there, but only when the flat clock bound would
-    # otherwise decide the question on its own. Under STALE_ANCHOR_MAX_MIN the
-    # baseline is accepted either way, so the fit — which reads the whole trip
-    # and charge history — is not worth paying for; a departure after a long
-    # park is the rare case that needs it.
-    parked_rate = None
-    if (place_pace is not None or prev is not None) and sync_mod.is_driving(snap):
-        gap_min = (snap["ts"] - prev["ts"]) / 60.0 if prev else 0.0
-        if gap_min > sync_mod.STALE_ANCHOR_MAX_MIN:
-            parked_rate = _departure_parked_rate_kw(
-                session, vehicle, prev, capacity_kwh)
-
-    last_charge_end_ts, last_charge_end_soc = _last_charge_end(session, vehicle.id)
-    drives, charges, open_trip, open_charge = sync_mod.process_snapshot(
-        prev, snap, open_trip, open_charge,
-        capacity_kwh, settings.energy_price_per_kwh, settings.drive_min_km,
-        prev_close_odo_km=prev_close_odo,
-        last_quiet_ts=float(state.get(session, state.QUIET_SEEN_KEY) or 0) or None,
-        departure_pace_kmh=place_pace,
-        parked_rate_kw=parked_rate,
-        # So a departure recovered across a blind gap cannot be back-dated into
-        # the charge that preceded it, nor measured from partway up it — see
-        # the floor in process_snapshot.
-        last_charge_end_ts=last_charge_end_ts,
-        last_charge_end_soc=last_charge_end_soc,
-        # For a trip too blind to price from its own sliver — see
-        # sync.BLIND_RATE_FALLBACK_SHARE.
-        fleet_wh_per_km=_fleet_wh_per_km(session, vehicle.id),
-    )
-    drives = recovered + drives  # include a drive recovered from the upgrade gap
-    # A trimmed tail is time the car spent parked, so its standby draw is not
-    # this drive's energy — but the trim only moves the clock, leaving the
-    # stop snapshot's SoC where the late reading found it (see
-    # sync.trim_standby_kwh). Corrected here rather than inside
-    # process_snapshot because the rate comes from this car's own history,
-    # which needs the session; and looked up only when a trim actually fired,
-    # so the ordinary poll still touches no extra rows.
+    # It had already stopped writing history when the stream took over, and
+    # its output was discarded a few lines below this; what kept it running
+    # was that four other things asked it whether a trip or charge was open.
+    # All four now ask the shadow, which answers the same question about the
+    # same car from records arriving every twenty seconds instead of from a
+    # watchdog poll hours apart. Keeping a second machine to answer it worse
+    # bought nothing and cost the whole apparatus that fed it: the snapshot
+    # pair, the departure pace and parked-rate lookups, the previous-close
+    # odometer probe, the fleet Wh/km average, and a one-time migration from
+    # the pre-multi-car state keys that has had years to run.
     #
-    # The departure end needs the same correction for the mirror-image reason:
-    # a recovery that reaches back over a blackout takes prev's SoC as this
-    # trip's baseline, and the minutes the car was still parked in that gap
-    # (start_park_min) drained it without this drive turning a wheel. Same
-    # rate, same floor, same function — the only difference is which end of
-    # the trip the parked minutes sit at.
-    # The drives and charges this tick produced are DISCARDED.
+    # What a poll is still for is below: the three alerts, and the one check
+    # that only something reaching the car can make.
     #
-    # Polling no longer authors the history. The stream writes a drive row the
-    # moment a journey closes and a charge row the moment a session does, and
-    # two sources writing one history is how a polled row that merged two real
-    # trips ended up beside the two telemetry trips that split them correctly.
-    # Worse, polling at a watchdog cadence does not merely disagree: it sees a
-    # fraction of each journey, closes trips where the driver was only
-    # waiting, and misses short ones entirely.
-    #
-    # The machine above still RUNS, and that is deliberate. open_trip and
-    # open_charge tell the alerts below whether the car is parked, and tell
-    # the sync loop whether to look again sooner — and the machine has to be
-    # stepped every tick to keep those truthful. Only its output is dropped.
-    #
-    # What used to be here: the tail-trim and departure standby corrections,
-    # geocoding, the layered cost, the capacity EMA, the drive-complete
-    # webhook, and the two session.add calls. All of it belongs to the
-    # telemetry path now — see _promote_shadow_trips, _geocode_shadow_drive
-    # and _promote_shadow_charges.
-    # Battery readings come from the stream too — Soc every 60s, SentryMode
-    # every 10, against a watchdog tick that may be hours apart. What stays
-    # here is the pair of things only a poll can do.
+    # The snapshot itself is still stored. It is what the dashboard shows as
+    # "last known" when the car is asleep, and what the charge throttle reads.
     if snap["soc"] > 0 and snap.get("range_km", 0) > 0:
-        # The SHADOW's open trip and charge, not the ones the machine above
-        # just produced. Both describe the same car, but the polled pair is
-        # only ever as fresh as the last tick, and at a watchdog cadence that
-        # is hours — long enough to gate a real alert off a trip that ended
-        # this morning. The stream knows within twenty seconds, and it is
-        # already what the ingest's own call to this passes.
+        # The stream's view of whether this car is mid-journey, since polling
+        # no longer has one of its own — see _shadow_open.
         shadow_trip, shadow_charge = _shadow_open(session, vin)
         _evaluate_alerts(session, vehicle, vin, snap,
                          shadow_trip, shadow_charge, settings)
@@ -3591,9 +3364,7 @@ def _process_vehicle(
 
     session.commit()
     state.put(session, sk, _json.dumps(snap))
-    state.put(session, tk, _json.dumps(open_trip) if open_trip else "")
-    state.put(session, ck, _json.dumps(open_charge) if open_charge else "")
-    return vehicle, snap, len(drives), len(charges), open_trip
+    return vehicle, snap
 
 
 # A reading taken in the last moments before a trip is noticed may have been
@@ -4811,7 +4582,7 @@ def _sync_now_impl(wake: bool, session: Session, promoted_drives: int = 0):
     client = make_client(token)
     total = {"drives": promoted_drives, "charges": 0}
     purged = False
-    active_snap = active_open_trip = active_vehicle = None
+    active_snap = active_vehicle = None
     active_cfg: dict = {}
     active_seen_online = False
 
@@ -4868,24 +4639,13 @@ def _sync_now_impl(wake: bool, session: Session, promoted_drives: int = 0):
             sustained_offline = (now_ts - unreachable_since) >= UNREACHABLE_CLOSE_MIN * 60
 
             if vstate == "asleep" or sustained_offline:
-                # Nothing is written from here any more. A trip whose car went
-                # quiet is settled from the records the car already sent, and
-                # that is the better close of the two: it ends the journey
-                # where the car STOPPED, while this one ended it wherever the
-                # poll happened to notice, up to a poll interval later and
-                # with an estimated tail bolted on to cover the difference.
-                #
-                # The polled open-trip and open-charge state is cleared rather
-                # than left alone. Nothing opens either of them now, so
-                # anything still in there was written before the polling path
-                # stopped writing — and a stale open charge is not inert: the
-                # status below reads it and reports the car as "charging" for
-                # as long as it sits there.
-                for stale_key in (state.OPEN_TRIP_KEY, state.OPEN_CHARGE_KEY):
-                    scoped = state.scoped(stale_key, vvin)
-                    if state.get(session, scoped):
-                        state.put(session, scoped, "")
-                        session.commit()
+                # Nothing is written or cleared from here any more. A trip
+                # whose car went quiet is settled from the records the car
+                # already sent, and that is the better close of the two: it
+                # ends the journey where the car STOPPED, while this one
+                # ended it wherever the poll happened to notice, up to a poll
+                # interval later and with an estimated tail bolted on.
+                pass
             continue  # asleep/offline — nothing readable right now
 
         # Back online — this unreachable episode (if any) is over; the next
@@ -4894,60 +4654,32 @@ def _sync_now_impl(wake: bool, session: Session, promoted_drives: int = 0):
 
         # The car is online, but that alone isn't reason enough to read it —
         # it may just not have fallen asleep yet from something unrelated to
-        # us. Only actually call vehicle_data() (the read that resets Tesla's
-        # own sleep countdown) when there's a concrete reason to: a trip or
-        # charge is already open (need to track it live), it woke up
-        # unprompted within the escalation window (may be about to drive
-        # off), the normal base interval has elapsed anyway, or this is the
-        # user's own manual sync.
+        # us. vehicle_data() is the read that resets Tesla's own sleep
+        # countdown, so an unthrottled watchdog is a watchdog that keeps the
+        # car awake to watch it. Read when the interval has elapsed, or when
+        # the person pressing Sync says so.
+        #
+        # The escalations that used to bypass this are gone with the machine
+        # they served. A trip forced a read every tick for distance, peak
+        # speed and both boundaries; an unprompted wake escalated to catch a
+        # departure. Polling records none of those now — the stream does, to
+        # the second — so both were paying per tick for precision that is no
+        # longer collected here.
         poll_key = state.scoped(state.LAST_POLL_KEY, vvin)
         last_poll_ts = float(state.get(session, poll_key) or 0)
-        woke_at = float(state.get(session, state.scoped(state.WOKE_AT_KEY, vvin)) or 0)
-        recently_woke = bool(woke_at) and (now_ts - woke_at) <= FAST_POLL_WINDOW_MIN * 60
-        trip_in_progress = bool(state.get(session, state.scoped(state.OPEN_TRIP_KEY, vvin)))
-        charge_raw = state.get(session, state.scoped(state.OPEN_CHARGE_KEY, vvin))
-        charge_in_progress = bool(charge_raw)
-        # Has this charge been read even once SINCE it opened? Until it has,
-        # the only reading it owns is the one that opened it, and a session
-        # that then stops and sleeps closes on a zero delta and is dropped
-        # entirely. A long charge never meets that — it is where all the spend
-        # is, and it gets the throttle — but a three-minute top-up plugged in
-        # and pulled out between two ticks would vanish from the totals
-        # rather than merely be measured a little coarsely.
-        charge_measured = False
-        if charge_raw:
-            try:
-                opened = float(_json.loads(charge_raw).get("ts") or 0)
-                seen = float(_json.loads(state.get(
-                    session, state.scoped(state.SNAPSHOT_KEY, vvin)) or "{}").get("ts") or 0)
-                charge_measured = seen > opened
-            except (ValueError, TypeError, AttributeError):
-                charge_measured = False
-        # A charge is the one open session that does not earn a read a minute.
-        # Driving does: distance, peak speed and both trip boundaries are only
-        # as good as the polling behind them. A charge records two SoC ends,
-        # its energy and its duration, and it is the one that runs for hours —
-        # measured on this account, a third of every read request went on
-        # watching one. Tesla's charge_energy_added is a cumulative session
-        # meter that SURVIVES the session's end, so a poll arriving five
-        # minutes late still closes on the complete total rather than a
-        # truncated one; and the capacity curve only keeps samples where the
-        # SoC moved, which at AC rates is about one point every six minutes.
-        # What it does cost: a charge that stops and sleeps before any poll
-        # sees it closes on a reading up to charge_poll_interval_min old
-        # instead of sync_poll_interval_min old.
+        # A charge still earns the slower clock, and now on better evidence:
+        # the shadow knows a session opened within twenty seconds, where the
+        # polled flag it replaces was only ever as fresh as the last tick.
+        # Measured on this account, a third of every read request went on
+        # watching one charge — it is the one open session that runs for
+        # hours, and nothing about it needs a reading a minute.
+        _shadow_trip, _shadow_charge = _shadow_open(session, vvin)
         interval = (settings.charge_poll_interval_min
-                    if charge_measured and not trip_in_progress
+                    if _shadow_charge and not _shadow_trip
                     else settings.sync_poll_interval_min)
         due = (now_ts - last_poll_ts) >= interval * 60
         manual_sync = wake and vvin == active_target
-        # A charge with no reading of its own yet bypasses the throttle
-        # outright, exactly as every charge used to: one tick's wait, so the
-        # session owns a second reading and can be closed on something other
-        # than the moment it opened. Everything after that is throttled, which
-        # is where all the spend was.
-        if not (trip_in_progress or (charge_in_progress and not charge_measured)
-                or recently_woke or due or manual_sync):
+        if not (due or manual_sync):
             continue  # online but idle, not due yet — let it settle toward sleep
         state.put(session, poll_key, str(now_ts))
 
@@ -4972,15 +4704,9 @@ def _sync_now_impl(wake: bool, session: Session, promoted_drives: int = 0):
         if not purged:
             services.purge_demo(session)  # retire the seeded sample on first real data
             purged = True
-        # nd/nc are what the polled state machine DETECTED, and it detects
-        # for the alerts and the poll cadence only — _process_vehicle drops
-        # the rows rather than writing them. They are deliberately not added
-        # to `logged`, which reports rows that exist.
-        vehicle, snap, _nd, _nc, open_trip = _process_vehicle(
-            session, data, vv, settings, migrate_legacy=(vvin == active_target)
-        )
+        vehicle, snap = _process_vehicle(session, data, vv, settings)
         if vvin == active_target:
-            active_snap, active_open_trip, active_vehicle = snap, open_trip, vehicle
+            active_snap, active_vehicle = snap, vehicle
             active_cfg = data.get("vehicle_config") or {}
 
     state.put(session, state.SOURCE_KEY, "linked")
@@ -4991,12 +4717,9 @@ def _sync_now_impl(wake: bool, session: Session, promoted_drives: int = 0):
     # doubt clears the window rather than setting it: a missed departure
     # costs boundary precision, and being wrong in that direction is the one
     # this whole week was spent undoing.
-    any_trip = any(
-        state.get(session, state.scoped(state.OPEN_TRIP_KEY, v.get("vin")))
-        for v in vehicles)
-    any_charge = any(
-        state.get(session, state.scoped(state.OPEN_CHARGE_KEY, v.get("vin")))
-        for v in vehicles)
+    opens = {v.get("vin"): _shadow_open(session, v.get("vin")) for v in vehicles}
+    any_trip = any(t for t, _c in opens.values())
+    any_charge = any(c for _t, c in opens.values())
     all_quiet = bool(vehicles) and not any_trip and not any_charge and not any(
         v.get("state") == "online" for v in vehicles)
     # A CHARGE is quiet enough for the back-off too, and until now it was not.
@@ -5011,19 +4734,16 @@ def _sync_now_impl(wake: bool, session: Session, promoted_drives: int = 0):
     # charge_poll_interval_min, so suspending between those reads changes
     # nothing about when the charge's end is noticed — it only stops paying
     # to be told, once a minute, something the throttle has already decided to
-    # ignore. A trip is different and stays excluded: a driving car's position
-    # is worth a request every tick.
+    # ignore. A trip is different and stays excluded: a driving car is worth
+    # a request every tick to the watchdog.
     #
-    # Gated on the charge having been READ at least once, the same condition
-    # the read throttle uses. A charge with only its opening reading must get
-    # its second one on the very next tick — otherwise a session that stops
-    # and sleeps in between closes on a zero delta and is dropped from the
-    # totals entirely — and a suspend armed here would block exactly that
-    # tick, since the back-off returns long before the per-vehicle loop that
-    # knows about it.
-    charge_quiet = bool(vehicles) and not any_trip and any_charge and all(
-        _charge_has_a_reading(session, v.get("vin")) for v in vehicles
-        if state.get(session, state.scoped(state.OPEN_CHARGE_KEY, v.get("vin"))))
+    # The "has this charge been read at least once" gate that used to guard
+    # this is gone. It existed because a polled charge closed on whatever
+    # reading polling owned, so a session holding only its opening reading
+    # would close on a zero delta and vanish from the totals. Polling does
+    # not close charges any more — settle_charge does, from the records — so
+    # there is no longer a reading for a suspend to starve.
+    charge_quiet = bool(vehicles) and not any_trip and any_charge
     # How long to stay quiet. Longer during the hours this car has essentially
     # never departed in: a recheck at 03:00 guards a departure that has never
     # happened, while one at 06:40 guards the commute, and only the first is
@@ -5041,17 +4761,10 @@ def _sync_now_impl(wake: bool, session: Session, promoted_drives: int = 0):
         recheck_min = settings.sleep_recheck_min
     state.put(session, state.SUSPEND_KEY,
               str(now_ts + recheck_min * 60.0) if (all_quiet or charge_quiet) else "")
-    # Record that we LOOKED and found the car still, not merely that we intend
-    # to look again. list_vehicles reporting no car online is proof of absence
-    # of movement: a driving car is online. So each of these stamps closes the
-    # window in which an unseen departure could have started, and the departure
-    # recovery reads it to tell a rechecked overnight park from a blackout.
-    # Only a genuinely quiet account stamps this. A charging car IS online and
-    # could in principle be unplugged and driven off, so a charge-suspended
-    # window is not proof that no departure could have started — which is the
-    # one thing this marker is read for.
-    if all_quiet:
-        state.put(session, state.QUIET_SEEN_KEY, str(now_ts))
+    # The quiet marker that used to be stamped here is gone with its only
+    # reader. It told the polled departure recovery that an overnight park had
+    # been rechecked rather than merely unobserved — and that recovery lived
+    # in the state machine whose output stopped being written.
 
     # What this tick did for the car the dashboard follows. Placed before both
     # return paths below so every tick that reaches here is recorded exactly
@@ -5070,8 +4783,7 @@ def _sync_now_impl(wake: bool, session: Session, promoted_drives: int = 0):
         # arise — an open charge forced a read every tick — and reporting the
         # throttle's own silence as "parked" would have the dashboard contradict
         # a session it is itself displaying, for as long as the interval lasts.
-        charging_open = bool(state.get(
-            session, state.scoped(state.OPEN_CHARGE_KEY, active_target)))
+        charging_open = bool(_shadow_open(session, active_target)[1])
         resp = {
             "status": ("asleep" if not active_seen_online
                        else "charging" if charging_open else "parked"),
@@ -5098,7 +4810,9 @@ def _sync_now_impl(wake: bool, session: Session, promoted_drives: int = 0):
         _mark_full_tick(session, now_ts)
         return resp
 
-    snap, open_trip, vehicle = active_snap, active_open_trip, active_vehicle
+    snap, vehicle = active_snap, active_vehicle
+    # The stream's open trip, for the status and the live panel below.
+    open_trip, _open_charge = _shadow_open(session, active_target)
     if snap["charging"]:
         activity = "charging"
     elif sync_mod.is_driving(snap):
@@ -5109,33 +4823,16 @@ def _sync_now_impl(wake: bool, session: Session, promoted_drives: int = 0):
         activity = "parked"
 
     # Tell the caller (the sync cron) whether it's worth polling again soon
-    # instead of waiting for the next scheduled tick: a trip is actively in
-    # progress, or the car just woke up on its own within the last few
-    # minutes and may be about to drive off. Bounded so an online-but-idle
-    # car isn't kept awake indefinitely — once the window lapses (or it goes
-    # back to sleep) this drops to False and the normal cadence takes over.
-    woke_at = float(state.get(session, state.scoped(state.WOKE_AT_KEY, active_target)) or 0)
-    recently_woke = bool(woke_at) and (now_ts - woke_at) <= FAST_POLL_WINDOW_MIN * 60
-    # Arrival is the one moment this most needs a prompt reading, and it was
-    # exactly when polling used to slow down: the instant the car stops,
-    # is_driving goes false, activity becomes "stopped", and the cadence
-    # dropped back to the idle tick — leaving the trip's stop anchored at
-    # whatever reading happened to be last. That is the direct cause of a
-    # clipped arrival tail (trip 314 lost 0.4 km) and of the pace-based trim
-    # having to reach 1002 s to undo a 17-minute-late reading (trip 316).
+    # instead of waiting for the next scheduled tick.
     #
-    # So keep the tight cadence for a short settle window after the car first
-    # reads stopped with a trip still open — long enough to catch the final
-    # creep into a parking space and anchor the stop where the car actually
-    # came to rest. Bounded deliberately: a trip stays open for PARK_END_MIN
-    # after stopping, and polling hard for all of it would spend the Fleet
-    # API budget this cadence exists to protect. A few readings settle the
-    # anchor; the remaining wait does not need them.
-    # stop_at is set to None outright while the car is moving, so the key
-    # existing says nothing — `or {}` rather than a default argument.
-    stop_ts = ((open_trip or {}).get("stop_at") or {}).get("ts")
-    settling = bool(stop_ts) and (now_ts - stop_ts) <= ARRIVAL_SETTLE_MIN * 60
-    poll_fast = activity == "driving" or settling or recently_woke
+    # Driving only. The two other terms are gone with the machine that earned
+    # them: a short tight window after an unprompted wake, to catch a
+    # departure, and one after the car first read stopped, to anchor the
+    # arrival where it actually came to rest (trip 314 lost 0.4 km to not
+    # having it). Both bought precision on POLLED trip boundaries. The stream
+    # records those now, at twenty seconds, and this path no longer writes a
+    # trip for either window to improve.
+    poll_fast = activity == "driving"
 
     _save_last_status(
         session, active_target, status=activity, ts=now_ts,
@@ -5981,8 +5678,9 @@ def export_csv(
     since = None
     label = "all"
     if current_drive:
-        open_trip = _json.loads(
-            state.get(session, state.scoped(state.OPEN_TRIP_KEY, vehicle.vin)) or "null")
+        # From the stream, so the export covers the same journey the dashboard
+        # is showing rather than whatever the last poll happened to hold.
+        open_trip, _ = _live_from_stream(session, vehicle.vin)
         if open_trip:
             from .. import sync as sync_mod
 
@@ -11262,17 +10960,14 @@ def summary(
     window_label = None
     live = None
     if current_drive:
-        # The stream first. It has the journey in flight to the second, where
-        # the polled pair below is only ever as fresh as the last tick — at
-        # thirty minutes that is a live readout half an hour old, and at the
-        # four-hourly watchdog it is no readout at all.
+        # The stream, and only the stream. It has the journey in flight to
+        # the second, where the polled pair that used to stand behind it was
+        # only ever as fresh as the last tick — at thirty minutes a live
+        # readout half an hour old, and at a watchdog cadence no readout at
+        # all. A fallback that can only be reached when the stream is down,
+        # and can then only show a stale trip as though it were live, is
+        # worse than the panel simply not appearing.
         open_trip, snap = _live_from_stream(session, vehicle.vin)
-        if open_trip is None:
-            open_trip = _json.loads(
-                state.get(session, state.scoped(state.OPEN_TRIP_KEY, vehicle.vin))
-                or "null")
-            snap_raw = state.get(session, state.scoped(state.SNAPSHOT_KEY, vehicle.vin))
-            snap = _json.loads(snap_raw) if snap_raw else None
         if open_trip and snap:
             live = sync_mod.live_trip(open_trip, snap, capacity_kwh, settings.drive_min_km)
             live["eta"] = _live_eta(session, snap, live, capacity_kwh)

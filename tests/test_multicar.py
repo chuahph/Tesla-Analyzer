@@ -324,6 +324,43 @@ class _DrivingClient:
         }
 
 
+
+def _seed_shadow_trip(session, vin, ts=None, odo_km=10_000.0):
+    """Give the stream an open trip for this car.
+
+    Since the polled state machine was removed, this is the ONLY way anything
+    knows a journey is in progress — the back-off, the read interval and the
+    dashboard's status all read it.
+    """
+    import json as _json
+    import time as _time
+
+    from app import state
+
+    state.put(session, state.TELEMETRY_SHADOW_KEY, _json.dumps(
+        {vin: {"open": {"ts": float(ts if ts is not None else _time.time()),
+                        "odo_km": odo_km}}}))
+
+
+def _seed_shadow_charge(session, vin, ts=None):
+    """Give the stream an open charge for this car. See _seed_shadow_trip."""
+    import json as _json
+    import time as _time
+
+    from app import state
+
+    state.put(session, state.TELEMETRY_CHARGE_SHADOW_KEY, _json.dumps(
+        {vin: {"open": {"ts": float(ts if ts is not None else _time.time()),
+                        "soc_start": 40.0}}}))
+
+
+def _clear_shadows(session):
+    from app import state
+
+    state.put(session, state.TELEMETRY_SHADOW_KEY, "")
+    state.put(session, state.TELEMETRY_CHARGE_SHADOW_KEY, "")
+
+
 class _WokeParkedClient:
     """Car just came online on its own (list state = online) but sits parked,
     not driving — the ambiguous case a bounded escalation window is for."""
@@ -373,38 +410,6 @@ def test_poll_fast_true_while_driving(monkeypatch):
             body = resp.json()
             assert body["status"] == "driving"
             assert body["poll_fast"] is True
-    finally:
-        settings.app_passcode = old
-        _reset_to_demo()
-
-
-def test_poll_fast_true_briefly_after_unexpected_wake(monkeypatch):
-    """A car that comes online on its own (phone-as-key, precondition — not our
-    manual wake_up) may be about to drive off. Even though it's still parked,
-    poll_fast should go True for a short bounded window so the cron catches
-    the departure almost immediately instead of up to a full tick late."""
-    from app import services, state
-
-    settings = get_settings()
-    old = settings.app_passcode
-    settings.app_passcode = ""
-    try:
-        monkeypatch.setattr("app.tesla_client.TeslaClient", _FakeClient)
-        vin = "VINAAAAAAAAAAAAAA"
-        with SessionLocal() as s:
-            services.link_with_token(s, "tok")
-            state.put(s, state.scoped(state.LAST_VSTATE_KEY, vin), "asleep")
-
-        monkeypatch.setattr("app.tesla_client.TeslaClient", _WokeParkedClient)
-        with TestClient(app) as client:
-            resp = client.post("/api/sync")
-            assert resp.status_code == 200
-            body = resp.json()
-            assert body["status"] == "parked"    # not driving yet...
-            assert body["poll_fast"] is True      # ...but escalate briefly — it just woke up
-
-        with SessionLocal() as s:
-            assert float(state.get(s, state.scoped(state.WOKE_AT_KEY, vin))) > 0
     finally:
         settings.app_passcode = old
         _reset_to_demo()
@@ -655,37 +660,6 @@ def test_idle_car_polling_actually_respects_the_two_minute_interval(monkeypatch)
         _reset_to_demo()
 
 
-def test_trip_in_progress_bypasses_the_poll_throttle(monkeypatch):
-    """A trip already open must always get a fresh read regardless of the base
-    interval — it needs live tracking, not a stale skip."""
-    import json as _json
-    import time as _time
-
-    from app import services, state
-
-    settings = get_settings()
-    old = settings.app_passcode
-    settings.app_passcode = ""
-    _CountingParkedClient.calls = 0
-    try:
-        monkeypatch.setattr("app.tesla_client.TeslaClient", _FakeClient)
-        vin = "VINAAAAAAAAAAAAAA"
-        with SessionLocal() as s:
-            services.link_with_token(s, "tok")
-            state.put(s, state.scoped(state.LAST_POLL_KEY, vin), str(_time.time() - 60))  # would block alone
-            state.put(s, state.scoped(state.OPEN_TRIP_KEY, vin),
-                      _json.dumps({"ts": _time.time(), "odo_km": 10000.0, "soc": 80}))
-
-        monkeypatch.setattr("app.tesla_client.TeslaClient", _CountingParkedClient)
-        with TestClient(app) as client:
-            resp = client.post("/api/sync")
-            assert resp.status_code == 200
-        assert _CountingParkedClient.calls == 1
-    finally:
-        settings.app_passcode = old
-        _reset_to_demo()
-
-
 def test_manual_sync_bypasses_the_poll_throttle(monkeypatch):
     """The user's own manual Sync button always gets a fresh read of the
     active car, even inside the base-interval throttle window."""
@@ -763,9 +737,14 @@ class _OfflineAfterDrivingClient(_SleepsAfterDrivingClient):
 
 def test_offline_does_not_auto_close_open_trip_on_first_reading(monkeypatch):
     """A single 'offline' reading is ambiguous — unlike 'asleep' it can mean a
-    momentary signal gap during an active drive — so it must not trigger an
-    auto-close immediately (that would risk splitting one real trip into two
-    over a brief dead zone like a tunnel)."""
+    momentary signal gap during an active drive — so it must never produce a
+    drive row (that would risk splitting one real trip into two over a brief
+    dead zone like a tunnel).
+
+    Polling no longer holds trip state of its own, so what is checked here is
+    the part that still matters: an ambiguous reading writes nothing, and
+    reports writing nothing.
+    """
     from app import services, state
     from app.models import Drive
 
@@ -792,7 +771,6 @@ def test_offline_does_not_auto_close_open_trip_on_first_reading(monkeypatch):
         with SessionLocal() as s:
             drives = s.query(Drive).filter(Drive.vehicle_id == vid).all()
             assert len(drives) == 0
-            assert state.get(s, state.scoped(state.OPEN_TRIP_KEY, vin)) != ""  # still open
     finally:
         settings.app_passcode = old
         _reset_to_demo()
@@ -874,11 +852,12 @@ def test_summary_surfaces_last_known_status_from_neon(monkeypatch):
     the database, without itself ever pinging Tesla. This is what lets the
     dashboard show a near-live status on page load: the background cron
     already did the polling and left the answer in Neon."""
-    from app import services
+    from app import services, state
 
     settings = get_settings()
     old = settings.app_passcode
     settings.app_passcode = ""
+    vin = _SleepsAfterDrivingClient.VIN
     _SleepsAfterDrivingClient.step = 0
     try:
         monkeypatch.setattr("app.tesla_client.TeslaClient", _FakeClient)
@@ -886,11 +865,21 @@ def test_summary_surfaces_last_known_status_from_neon(monkeypatch):
             services.link_with_token(s, "tok")
 
         monkeypatch.setattr("app.tesla_client.TeslaClient", _SleepsAfterDrivingClient)
+
+        def _due_now():
+            # Nothing bypasses the read throttle any more — an open trip used
+            # to, for boundary precision polling no longer records. These
+            # ticks land in the same second, so clear the clock between them.
+            with SessionLocal() as s:
+                state.put(s, state.scoped(state.LAST_POLL_KEY, vin), "")
+
         with TestClient(app) as client:
             client.post("/api/sync")                      # step 0: driving
             _SleepsAfterDrivingClient.step = 1
+            _due_now()
             client.post("/api/sync")                       # step 1: still driving
             _SleepsAfterDrivingClient.step = 2
+            _due_now()
             sync_resp = client.post("/api/sync")            # step 2: asleep
             assert sync_resp.json()["status"] == "asleep"
 
@@ -1035,13 +1024,21 @@ def test_a_polled_trip_never_becomes_a_drive_when_the_car_falls_asleep(monkeypat
             services.link_with_token(s, "tok")
             before = s.query(Drive).count()
 
+        vin = _SleepsAfterDrivingClient.VIN
+        with SessionLocal() as s:
+            # A journey really is in progress — this is the state the old
+            # polled close turned into a row, not a hypothetical. It lives in
+            # the stream's shadow now rather than in polling's own machine.
+            _seed_shadow_trip(s, vin, odo_km=10_000.0)
+            s.commit()
+
         monkeypatch.setattr("app.tesla_client.TeslaClient", _SleepsAfterDrivingClient)
         with TestClient(app) as client:
             client.post("/api/sync")                       # driving
             _SleepsAfterDrivingClient.step = 1
+            with SessionLocal() as s:
+                state.put(s, state.scoped(state.LAST_POLL_KEY, vin), "")
             moving = client.post("/api/sync").json()       # driving, 12 km on
-            # The polled machine really is holding a trip — this is the state
-            # the old close turned into a row, not a hypothetical.
             assert moving["trip_in_progress"] is True
 
             _SleepsAfterDrivingClient.step = 2
@@ -1051,16 +1048,15 @@ def test_a_polled_trip_never_becomes_a_drive_when_the_car_falls_asleep(monkeypat
         assert asleep["logged"]["drives"] == 0, "polling wrote a drive"
         with SessionLocal() as s:
             assert s.query(Drive).count() == before, "a phantom trip reached history"
-            # And the state it was holding is cleared rather than left to be
-            # closed by some later tick: a stale open trip is what made this
-            # possible, and a stale open charge reports the car as charging
-            # for as long as it sits there.
-            vin = _SleepsAfterDrivingClient.VIN
-            assert state.get(s, state.scoped(state.OPEN_TRIP_KEY, vin)) == ""
-            assert state.get(s, state.scoped(state.OPEN_CHARGE_KEY, vin)) == ""
+            _clear_shadows(s)
+            s.commit()
     finally:
         settings.app_passcode = old
         _SleepsAfterDrivingClient.step = 0
+        # Linking a token purges the demo seed, and tests further down this
+        # file read it back. Restoring it was previously left to whichever
+        # neighbour happened to do so.
+        _reset_to_demo()
 
 
 class _DrivesThenParksOnlineClient(_SleepsAfterDrivingClient):
@@ -1085,42 +1081,6 @@ class _DrivesThenParksOnlineClient(_SleepsAfterDrivingClient):
                               "is_user_present": True, "locked": False},
             "vehicle_config": {"car_type": "model3"},
         }
-
-
-def test_arrival_keeps_the_fast_poll_cadence(monkeypatch):
-    """The moment a car stops, is_driving goes false and the cadence used to
-    drop straight back to the idle tick — exactly when the trip's stop anchor
-    most needs a prompt reading. That is what left trip 314's arrival 0.4 km
-    short and made trip 316 need a 1002 s trim. A trip still open and only
-    just stopped must hold the tight cadence."""
-    from app import services
-
-    settings = get_settings()
-    old = settings.app_passcode
-    settings.app_passcode = ""
-    _DrivesThenParksOnlineClient.step = 0
-    try:
-        monkeypatch.setattr("app.tesla_client.TeslaClient", _FakeClient)
-        with SessionLocal() as s:
-            services.link_with_token(s, "tok")
-
-        monkeypatch.setattr("app.tesla_client.TeslaClient", _DrivesThenParksOnlineClient)
-        with TestClient(app) as client:
-            client.post("/api/sync")
-            _DrivesThenParksOnlineClient.step = 1
-            moving = client.post("/api/sync").json()
-            assert moving["status"] == "driving"
-            assert moving["poll_fast"] is True            # moving, as before
-
-            _DrivesThenParksOnlineClient.step = 2
-            arrived = client.post("/api/sync").json()
-
-        assert arrived["trip_in_progress"] is True        # trip still open
-        assert arrived["status"] == "stopped"             # and no longer driving
-        assert arrived["poll_fast"] is True               # settling, not abandoned
-    finally:
-        settings.app_passcode = old
-        _reset_to_demo()
 
 
 def test_repair_arrival_tail_takes_back_only_what_the_estimate_credited(monkeypatch):
@@ -1918,7 +1878,10 @@ def test_a_trip_open_through_a_dead_zone_keeps_polling(monkeypatch):
     live drive unwatched and close it on stale readings.
 
     So the open trip is checked as well as the reported state, and it is the
-    condition that saves this case."""
+    condition that saves this case. The trip comes from the stream's shadow
+    now — polling has no session state of its own — which is strictly better
+    evidence here: the shadow knew the car was driving within twenty seconds
+    of it setting off."""
     from app import services, state
 
     settings = get_settings()
@@ -1937,8 +1900,7 @@ def test_a_trip_open_through_a_dead_zone_keeps_polling(monkeypatch):
             client.post("/api/sync")
             _OfflineAfterDrivingClient.step = 2      # offline mid-drive
             with SessionLocal() as s:
-                state.put(s, state.scoped(state.OPEN_TRIP_KEY, vin),
-                          _json.dumps({"ts": 0.0, "odo_km": 10_000.0, "soc": 80}))
+                _seed_shadow_trip(s, vin, ts=0.0, odo_km=10_000.0)
                 s.commit()
             client.post("/api/sync")
 
@@ -1948,7 +1910,7 @@ def test_a_trip_open_through_a_dead_zone_keeps_polling(monkeypatch):
 
             # And with that trip gone, the same offline reading does arm it.
             with SessionLocal() as s:
-                state.put(s, state.scoped(state.OPEN_TRIP_KEY, vin), "")
+                _clear_shadows(s)
                 s.commit()
             client.post("/api/sync")
             with SessionLocal() as s:
@@ -2546,14 +2508,15 @@ class _LongChargeClient:
 def test_a_settled_charge_is_read_on_its_own_slower_clock(monkeypatch):
     """An open charge used to bypass the read throttle outright and take a
     full read on every cron tick for its entire length — a third of this
-    account's read spend went on watching one.
+    account's read spend went on watching one. It does not need that: the
+    stream records the session, and a poll landing five minutes late tells
+    the watchdog exactly as much as one landing one minute late.
 
-    Driving keeps that treatment: distance, peak speed and both trip
-    boundaries are only as good as the polling behind them. A charge does not
-    need it. But a charge that has no reading of its own YET still does: until
-    the second one arrives the session owns only the moment it opened, and one
-    that stops and sleeps in between would close on a zero delta and be
-    dropped from the totals altogether rather than merely measured coarsely."""
+    Whether a charge IS open comes from the stream now. Polling used to keep
+    its own answer, from a state machine it no longer runs, and that answer
+    was only ever as fresh as the last tick — on a car that plugged in during
+    a suspended window it was simply absent.
+    """
     import time
 
     from app import services, state
@@ -2561,81 +2524,58 @@ def test_a_settled_charge_is_read_on_its_own_slower_clock(monkeypatch):
     settings = get_settings()
     old_pass = settings.app_passcode
     settings.app_passcode = ""
+    vin = _LongChargeClient.VIN
     _LongChargeClient.step = 0
     _LongChargeClient.reads = 0
     try:
         monkeypatch.setattr("app.tesla_client.TeslaClient", _FakeClient)
         with SessionLocal() as s:
             services.link_with_token(s, "tok")
+            _seed_shadow_charge(s, vin)
+            s.commit()
 
         monkeypatch.setattr("app.tesla_client.TeslaClient", _LongChargeClient)
         with TestClient(app) as client:
-            client.post("/api/sync")                      # opens the charge
+            client.post("/api/sync")
             opened_at = _LongChargeClient.reads
 
-            # The charge has no reading of its own yet, so this tick reads
-            # despite arriving far inside sync_poll_interval_min.
-            _LongChargeClient.step = 1
-            client.post("/api/sync")
-            assert _LongChargeClient.reads == opened_at + 1
-
-            # Now it is settled, and back-to-back ticks buy nothing — before
-            # this change every one of them spent a full read.
+            # Back-to-back ticks buy nothing — before the throttle every one
+            # of them spent a full read.
             _LongChargeClient.step = 2
             for _ in range(5):
                 client.post("/api/sync")
-            assert _LongChargeClient.reads == opened_at + 1
+            assert _LongChargeClient.reads == opened_at
 
             # And the dashboard still says charging rather than reporting the
             # throttle's own silence as a parked car.
             assert client.post("/api/sync").json()["status"] == "charging"
 
-            # A charge with only its OPENING reading must never arm the window:
-            # it has to get a second reading on the very next tick, and the
-            # back-off returns long before the loop that knows that. Measured
-            # the hard way — the first version of this armed unconditionally
-            # and blocked exactly that tick.
-            from app.api import routes
-            with SessionLocal() as s:
-                snap_key = state.scoped(state.SNAPSHOT_KEY, _LongChargeClient.VIN)
-                real = state.get(s, snap_key)
-                assert routes._charge_has_a_reading(s, _LongChargeClient.VIN)
-                opened = _json.loads(
-                    state.get(s, state.scoped(state.OPEN_CHARGE_KEY,
-                                              _LongChargeClient.VIN)))
-                state.put(s, snap_key, _json.dumps({**opened, "ts": opened["ts"] - 1}))
-                s.commit()
-                assert not routes._charge_has_a_reading(s, _LongChargeClient.VIN)
-                # Put the real snapshot back: everything after this depends on
-                # it, and leaving a doctored one behind made the next sync read
-                # when it should not have.
-                state.put(s, snap_key, real)
-                s.commit()
-
             # Only once the charge's own interval has elapsed does it read
             # again — five minutes, not the two an idle online car gets.
-            # A settled charge now also arms the back-off, so BOTH clocks have
-            # to come round — and in production they expire together, since the
-            # window is armed for exactly the read interval. Rolling only the
-            # read clock back leaves the window still holding, which is the
-            # point of arming it: those ticks cost nothing at all now, where
-            # before each one paid for a list_vehicles it did nothing with.
+            # A settled charge also arms the back-off, so BOTH clocks have to
+            # come round; in production they expire together, since the window
+            # is armed for exactly the read interval.
             def _due(minutes):
                 with SessionLocal() as s:
-                    state.put(s, state.scoped(state.LAST_POLL_KEY, _LongChargeClient.VIN),
+                    state.put(s, state.scoped(state.LAST_POLL_KEY, vin),
                               str(time.time() - minutes * 60 - 1))
                     state.put(s, state.SUSPEND_KEY, "")
                     s.commit()
 
             _due(settings.sync_poll_interval_min)
             client.post("/api/sync")
-            assert _LongChargeClient.reads == opened_at + 1
+            assert _LongChargeClient.reads == opened_at, \
+                "read on the idle clock while a charge was open"
             _due(settings.charge_poll_interval_min)
             client.post("/api/sync")
-            assert _LongChargeClient.reads == opened_at + 2
+            assert _LongChargeClient.reads == opened_at + 1
     finally:
         settings.app_passcode = old_pass
+        with SessionLocal() as s:
+            _clear_shadows(s)
+            s.commit()
         _reset_to_demo()
+
 
 def test_the_recheck_runs_wide_only_in_hours_this_car_never_leaves_in():
     """Confirming a parked car is still parked is the biggest line on the
@@ -4859,46 +4799,41 @@ def test_auto_logged_free_charge_is_labelled_free_not_paid_at_zero():
         settings.app_passcode = old_pass
 
 
-def test_sync_logged_count_reports_rows_written_not_polled_detections(monkeypatch):
-    """`logged` must count history, not the polled machine's detections.
+def test_sync_logged_count_reports_rows_written_not_polled_sessions(monkeypatch):
+    """`logged` counts history, and polling does not write any.
 
-    Polling still runs its trip and charge state machines — the alerts and the
-    poll cadence read them — but _process_vehicle DROPS the sessions they
-    produce instead of writing them, and has since the stream took over
-    authoring the history. The sync response nonetheless added those
-    detections to `logged`, so the Sync button announced "logged 1 drive(s)"
-    on a tick that wrote no row, and the dashboard reloaded looking for it.
+    It used to be taken from what polling's own state machine DETECTED — a
+    machine whose drives and charges were discarded a few lines later. So a
+    tick that wrote nothing could announce "logged 1 drive(s)", and app.js
+    reloads the dashboard on that count, sending it to look for a row that
+    does not exist.
 
-    Driven by making _process_vehicle report detections rather than by timing
-    the state machine through three polls: what is under test is that the
-    counts it returns do not reach `logged`, whatever they are.
+    The machine is gone now, but the contract it broke is worth keeping
+    pinned: whatever a poll sees, `logged` reports rows that exist, and the
+    only thing on this path that creates one is the promotion.
     """
     from app import services
-    from app.api import routes
     from app.models import Drive
 
     settings = get_settings()
     old = settings.app_passcode
     settings.app_passcode = ""
-    real = routes._process_vehicle
     try:
         monkeypatch.setattr("app.tesla_client.TeslaClient", _FakeClient)
         with SessionLocal() as s:
             services.link_with_token(s, "tok")
             before = s.query(Drive).count()
 
-        def detects_sessions(*a, **kw):
-            vehicle, snap, _nd, _nc, open_trip = real(*a, **kw)
-            return vehicle, snap, 3, 2, open_trip
-
-        monkeypatch.setattr("app.tesla_client.TeslaClient", _WokeParkedClient)
-        monkeypatch.setattr(routes, "_process_vehicle", detects_sessions)
+        # A car that is plainly mid-journey — the shape that used to make the
+        # polled machine produce a session on the tick that caught it parked.
+        monkeypatch.setattr("app.tesla_client.TeslaClient", _SleepsAfterDrivingClient)
+        _SleepsAfterDrivingClient.step = 0
         with TestClient(app) as client:
             body = client.post("/api/sync").json()
 
         assert "logged" in body, body
-        assert body["logged"]["drives"] == 0, "polling's detection reported as logged"
-        assert body["logged"]["charges"] == 0, "polling's detection reported as logged"
+        assert body["logged"]["drives"] == 0, "polling reported a drive it did not write"
+        assert body["logged"]["charges"] == 0, "polling reported a charge it did not write"
         with SessionLocal() as s:
             assert s.query(Drive).count() == before, "polling wrote a drive"
     finally:

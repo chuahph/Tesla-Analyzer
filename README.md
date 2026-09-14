@@ -393,6 +393,17 @@ which raises the alarm when the telemetry path has died. Reaching the car is
 the only thing that proves it is awake, so a stream that has gone silent can
 only be distinguished from a sleeping car by a poll.
 
+The tick keeps no session state of its own any more. It used to run a full
+trip/charge state machine so that four other things could ask it whether the
+car was mid-journey; all four ask the stream's shadow now, which answers the
+same question from records arriving every twenty seconds rather than from a
+poll hours apart. With the machine went the escalations that fed it — an open
+trip no longer forces a read every tick, and an unprompted wake no longer
+opens a tight window — because both bought precision on polled trip
+boundaries that are not recorded here any more. A read happens when the
+interval has elapsed (the slower `CHARGE_POLL_INTERVAL_MIN` while the stream
+has a charge open) or when you press Sync.
+
 That inverts the old advice. A tick that is late no longer costs a trip; a
 tick that never comes costs the alarm for a dead stream. The repo
 ships `.github/workflows/sync-car.yml` for this, but **its schedule trigger is
