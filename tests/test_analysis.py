@@ -3559,3 +3559,45 @@ def test_a_burst_of_speed_does_not_make_a_trip_a_slower_category():
     assert driving_analysis.drive_mode(trip(65.0, 60.0, 72.0)) == "CC"
     # And genuine waiting still outranks every speed test.
     assert driving_analysis.drive_mode(trip(28.12, 22.4, 160.0, idle=8.0)) == "HC"
+
+
+def test_the_driving_modes_share_of_distance_and_energy_sums_to_100():
+    """How the driving splits, as opposed to how driving compares with parking.
+
+    The share_* fields the endpoint adds are of driving PLUS parked, which
+    answers the second question and cannot close on 100 across the driving rows
+    alone. These are on the modes' own totals, so they do.
+
+    Unclassified trips sit outside the denominator rather than inside it: a
+    share of a total that includes rows the table does not show is not a number
+    anyone can check against what is in front of them.
+    """
+    from types import SimpleNamespace
+
+    def trip(i, km, mins, mx, kwh):
+        return SimpleNamespace(
+            id=i, start_time=_dt_at(i), end_time=_dt_at(i),
+            distance_km=km, duration_min=mins, max_speed_kmh=mx,
+            energy_used_kwh=kwh, wh_per_km=kwh * 1000.0 / km,
+            idle_min=0.0, idle_tracked=True, outside_temp_c=30.0,
+            start_soc=80.0, end_soc=75.0, end_location="Home")
+
+    drives = [
+        trip(1, 120.0, 60.0, 140.0, 20.0),   # FH
+        trip(2, 40.0, 30.0, 110.0, 5.6),     # CH
+        trip(3, 20.0, 40.0, 60.0, 3.2),      # CC or SC
+        trip(4, 15.0, 20.0, 0.0, 2.4),       # unsortable — no peak speed
+    ]
+    got = driving_analysis.condition_matrix(drives, 68.6, None, None)
+    rows = got["modes"]
+    assert got["unclassified_trips"] == 1
+
+    assert sum(r["share_km_pct"] for r in rows) == pytest.approx(100.0, abs=0.2)
+    assert sum(r["share_drive_kwh_pct"] for r in rows) == pytest.approx(100.0, abs=0.2)
+
+    # The unsortable trip's 15 km is outside the denominator, so the shares
+    # describe the rows on screen and not a total that includes a hidden one.
+    shown_km = sum(r["km"] for r in rows)
+    assert shown_km == pytest.approx(180.0)
+    for r in rows:
+        assert r["share_km_pct"] == pytest.approx(r["km"] / shown_km * 100.0, abs=0.1)

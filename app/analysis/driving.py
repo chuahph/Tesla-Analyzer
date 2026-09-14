@@ -2606,6 +2606,24 @@ def condition_matrix(drives: list[Any], capacity_kwh: float,
             # something the report can show rather than something to work out.
             "pct": round(kwh / capacity_kwh * 100.0, 2) if capacity_kwh else None,
         })
+    # Each mode's share of the driving, on the modes' OWN totals so they sum to
+    # 100%. The share_* fields the endpoint adds are of driving PLUS parked,
+    # which answers a different question — "how much of my month was this" —
+    # and cannot close on 100 across the driving rows alone. Both are wanted:
+    # one says how the driving splits, the other how the driving compares with
+    # standing still.
+    #
+    # Unclassified trips are outside this denominator rather than inside it. A
+    # share of a total that includes rows not shown does not sum to anything a
+    # reader can check, and the count of what was left out is reported beside
+    # it already.
+    mode_km = sum(r["km"] for r in rows) or 0.0
+    mode_kwh = sum(r["kwh"] for r in rows) or 0.0
+    for r in rows:
+        r["share_km_pct"] = round(r["km"] / mode_km * 100.0, 1) if mode_km else None
+        r["share_drive_kwh_pct"] = (round(r["kwh"] / mode_kwh * 100.0, 1)
+                                    if mode_kwh else None)
+
     # Ranked both ways, because the ordering IS the finding and reading it off
     # two unsorted columns is work the table can do for the reader.
     for key, field in (("rank_per_km", "wh_per_km"), ("rank_per_hour", "kw")):
