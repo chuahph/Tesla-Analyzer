@@ -9778,3 +9778,52 @@ def test_rerunning_a_purge_clears_shadow_trips_it_stranded():
         sess.commit()
         sess.close()
         settings.app_passcode = old_pc
+
+
+def test_the_refusal_flag_clears_when_the_backlog_is_dropped_not_promoted():
+    """A refused backlog resolves two ways, and one of them left the flag on.
+
+    _clear_promote_refused runs at the END of _promote_shadow_trips, after the
+    cap check. But the function returns early when nothing is staged — and
+    emptying the staging area is exactly how a stranded backlog gets resolved,
+    since that is what the purge's shadow-trip drop does.
+
+    So the flag outlived the condition: /api/health would report "refused" for
+    ever, pointing at an endpoint with nothing left to apply. Reported on the
+    live database, where the drop cleared 21 trips and the verdict stayed.
+    """
+    import json as _json_mod
+
+    from app import state
+    from app.api import routes
+    from app.database import SessionLocal
+
+    settings = get_settings()
+    old_pc = settings.app_passcode
+    settings.app_passcode = ""
+    sess = SessionLocal()
+    prev_staged = state.get(sess, state.TELEMETRY_TRIPS_KEY)
+    prev_flag = state.get(sess, state.PROMOTE_REFUSED_KEY)
+    try:
+        with TestClient(app) as client:
+            # A refusal standing, and the backlog behind it gone.
+            state.put(sess, state.PROMOTE_REFUSED_KEY, "1")
+            state.put(sess, state.TELEMETRY_TRIPS_KEY, _json_mod.dumps([]))
+            sess.commit()
+            assert client.get("/api/health").json()["promotion"]["verdict"] == "refused"
+
+            # Any promotion run now re-arms it, including the one that finds
+            # nothing to do.
+            routes._promote_shadow_trips(sess, apply=True,
+                                         max_add=routes.PROMOTE_AUTO_MAX_ADD)
+            sess.commit()
+            got = client.get("/api/health").json()["promotion"]
+            assert got["refused"] is False
+            assert got["verdict"] == "clear"
+            assert got["apply_by_hand"] is None
+    finally:
+        state.put(sess, state.TELEMETRY_TRIPS_KEY, prev_staged or "")
+        state.put(sess, state.PROMOTE_REFUSED_KEY, prev_flag or "")
+        sess.commit()
+        sess.close()
+        settings.app_passcode = old_pc

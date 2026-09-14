@@ -3769,6 +3769,15 @@ def _promote_shadow_trips(session: Session, apply: bool = False,
     except ValueError:
         return []
     if not trips:
+        # An empty staging area is definitively not a refusal, so re-arm here
+        # too. This return is BEFORE the clear at the end of the function, and
+        # emptying the staging area is the normal way a refused backlog
+        # resolves — the purge that drops stranded trips does exactly that. So
+        # the flag could outlive the condition for ever, with /api/health
+        # reporting "refused" and pointing at an endpoint that has nothing to
+        # do. Guarded inside _clear_promote_refused, so the ordinary path of a
+        # car streaming every twenty seconds costs one state read.
+        _clear_promote_refused(session)
         return []
 
     since = sync_mod.now_local() - timedelta(days=days)
