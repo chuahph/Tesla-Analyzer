@@ -12154,9 +12154,12 @@ def telemetry_ingest(
     # The stream knows the moment a trip closes, so that is where the row
     # should be written.
     #
-    # Only when one actually closed. A parked car posts a batch every twenty
-    # seconds and promoting on each would be ~1,700 runs a day to write
-    # nothing.
+    # Attempted on every batch. This used to run only when the batch itself
+    # closed a trip, to avoid ~1,700 runs a day writing nothing — but the saving
+    # was one state read, and the cost was that a promotion which failed once
+    # was never retried, because every later batch skipped the code that would
+    # have fixed it. _promote_shadow_trips returns immediately on an empty
+    # staging area, so the ordinary path is that one read.
     #
     # Capped exactly as the sync path is. Automatic promotion is what put 183
     # journeys that never happened into this database — a float identity that
@@ -12185,23 +12188,40 @@ def telemetry_ingest(
             # promotions race.
             session.rollback()
             charges_promoted = 0
-    if closed:
-        try:
-            # Only the rows actually written. len() counted a refusal as a
-            # promotion, so the one number that says the journeys did NOT
-            # land reported that one had.
-            promoted = sum(
-                1 for c in _promote_shadow_trips(
-                    session, apply=True, max_add=PROMOTE_AUTO_MAX_ADD)
-                if c.get("action") in ("add", "correct"))
-        except Exception:  # noqa: BLE001 — never let this reject the batch
-            # The records are already stored. A promotion that fails costs a
-            # late dashboard row, which the next sync tick will write; losing
-            # the batch would cost the journey itself. Rolled back so the rest
-            # of this request still has a usable session — a race against the
-            # drives unique constraint lands here.
-            session.rollback()
-            promoted = 0
+    # Attempted on every batch, not only when THIS one closed a trip.
+    #
+    # Gating it on ``closed`` was the same mistake the summary path already
+    # fixed: it makes whichever call closed a journey the only call allowed to
+    # carry it across, so a promotion that fails once is never retried by a
+    # later batch. It stays staged, the dashboard looks like a car nobody
+    # drove, and every subsequent batch skips the code that would fix it.
+    #
+    # Cheap on the ordinary path. _promote_shadow_trips returns immediately on
+    # an empty staging area, so a car streaming every twenty seconds while
+    # driving costs one state read a batch.
+    #
+    # It does NOT make the cron unnecessary. A trip closed by the settle
+    # TIMEOUT — a car that parks and goes quiet — is closed by no batch at all,
+    # because there are no more batches; that one still waits for a sync tick
+    # or a dashboard load to settle it.
+    try:
+        # Only the rows actually written. len() counted a refusal as a
+        # promotion, so the one number that says the journeys did NOT
+        # land reported that one had.
+        promoted = sum(
+            1 for c in _promote_shadow_trips(
+                session, apply=True, max_add=PROMOTE_AUTO_MAX_ADD)
+            if c.get("action") in ("add", "correct"))
+        _record_promote_result(session, "ingest", None)
+    except Exception as exc:  # noqa: BLE001 — never let this reject the batch
+        # The records are already stored. A promotion that fails costs a
+        # late dashboard row, which the next sync tick will write; losing
+        # the batch would cost the journey itself. Rolled back so the rest
+        # of this request still has a usable session — a race against the
+        # drives unique constraint lands here.
+        session.rollback()
+        _record_promote_result(session, "ingest", exc)
+        promoted = 0
 
     try:
         seen = _json.loads(state.get(session, state.TELEMETRY_SEEN_KEY) or "{}") or {}

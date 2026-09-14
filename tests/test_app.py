@@ -9563,3 +9563,51 @@ def test_a_failing_promotion_is_recorded_instead_of_vanishing():
         sess.commit()
         sess.close()
         settings.app_passcode = old_pc
+
+
+def test_the_stream_retries_a_promotion_that_failed_on_an_earlier_batch():
+    """A promotion that failed once used to be abandoned.
+
+    The ingest promoted only when THAT batch closed a trip, which makes
+    whichever call closed a journey the only call allowed to carry it across.
+    So if that one attempt raised — a race against the drives unique
+    constraint, say — the trip stayed staged, every later batch skipped the
+    code that would have fixed it, and the dashboard looked like a car nobody
+    had driven until a sync tick happened by.
+
+    Same shape as the bug already fixed in the summary path, where reading the
+    comparison consumed the settle the dashboard needed.
+    """
+    from app import state
+    from app.api import routes
+    from app.database import SessionLocal
+
+    settings = get_settings()
+    old_pc = settings.app_passcode
+    settings.app_passcode = ""
+    sess = SessionLocal()
+    prev = state.get(sess, state.TELEMETRY_TRIPS_KEY)
+    calls = []
+    real = routes._promote_shadow_trips
+    try:
+        with TestClient(app) as client:
+            def counting(session, **kw):
+                calls.append(kw)
+                return real(session, **kw)
+            routes._promote_shadow_trips = counting
+
+            # A batch that closes nothing at all — the shape that used to skip
+            # promotion entirely.
+            r = client.post("/api/telemetry", json={"records": []})
+            assert r.status_code == 200
+            assert calls, "a batch that closed no trip must still try to promote"
+            # Capped the same way the sync path is: an unattended write to real
+            # records earns a limit on how wrong one run can go.
+            assert calls[-1]["max_add"] == routes.PROMOTE_AUTO_MAX_ADD
+            assert calls[-1]["apply"] is True
+    finally:
+        routes._promote_shadow_trips = real
+        state.put(sess, state.TELEMETRY_TRIPS_KEY, prev or "")
+        sess.commit()
+        sess.close()
+        settings.app_passcode = old_pc
