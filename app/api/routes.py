@@ -7593,6 +7593,38 @@ def repair_missing_energy(
                  "Dry run. Add &apply=1 to write these." if not apply else None),
     }
 
+def _parked_hours_since_last_charge(session: Session) -> float | None:
+    """Hours the car has stood still since its last charge ended.
+
+    The denominator the Park tab's "N% consumed" actually belongs over. The
+    screen's own "Since Charge ... 8 hrs 53 min" is time in MOTION — proved by
+    watching it advance by exactly one trip's duration across half a day — so
+    it is the wrong number, and asking anyone to type in the right one is
+    asking them to compute it.
+
+    Elapsed since the charge, less the time driving. Charging time inside the
+    window is not subtracted: a session after the one being measured from would
+    have restarted the window, so there is none by construction.
+    """
+    vehicle = _first_vehicle(session)
+    if vehicle is None:
+        return None
+    last_charge_end = session.scalar(
+        select(func.max(Charge.end_time)).where(Charge.vehicle_id == vehicle.id))
+    if last_charge_end is None:
+        return None
+    now = sync_mod.now_local()
+    elapsed_h = (now - last_charge_end).total_seconds() / 3600.0
+    if elapsed_h <= 0:
+        return None
+    driving_min = session.scalar(
+        select(func.sum(Drive.duration_min)).where(
+            Drive.vehicle_id == vehicle.id,
+            Drive.start_time >= last_charge_end)) or 0.0
+    parked = elapsed_h - float(driving_min) / 60.0
+    return parked if parked > 0 else None
+
+
 @router.api_route("/add-park-reading", methods=["GET", "POST"])
 def add_park_reading(
     readings: str = Query(..., description="total:sentry:standby:screen[:hours]"),
@@ -7620,7 +7652,11 @@ def add_park_reading(
         sentry   the Sentry Mode line
         standby  the Vehicle Standby line
         screen   the Screen Time line
-        hours    optional, the Since Charge panel's elapsed time
+
+    The Since Charge panel's "N hrs" is NOT wanted and is not the elapsed time:
+    it counts time in motion, which is where the parked drain did not happen.
+    Pass it if you like and it is kept as driving_h_since_charge, but the
+    parked hours are worked out from the history instead.
 
     Everything else on that tab (Preconditioning, Cabin Overheat Protection,
     Mobile App, Summon Standby) is derived as the remainder rather than typed
@@ -7667,13 +7703,28 @@ def add_park_reading(
         "other_pct": round(total - named, 2),
     }
     if hours is not None:
-        row["since_charge_h"] = hours
-        # The rate the car's own figures imply, which is the number the fitted
-        # rows are trying to land on.
+        # DRIVING time, not elapsed time, and the panel does not say so.
+        #
+        # Proved from two screenshots twelve and a half hours apart: the figure
+        # went from 8 h 22 min to 8 h 53 min — thirty-one minutes, which is
+        # exactly the one trip driven between them. So it counts time in motion
+        # since the charge, and the parked drain on the Park tab did NOT happen
+        # during it. Dividing one by the other, which is what this did, is a
+        # rate of nothing.
+        row["driving_h_since_charge"] = hours
+    # The parked hours are worked out here instead, from the history the app
+    # already has: everything since the last charge ended, less the time spent
+    # driving. Nobody has to read it off a screen, and it is the denominator
+    # the Park tab's percentage actually belongs over.
+    parked_h = _parked_hours_since_last_charge(session)
+    if parked_h:
+        # Derived from the ROUNDED hours, the ones the row shows, so a reader
+        # can divide the two figures in front of them and get the third.
+        row["parked_h"] = round(parked_h, 2)
         row["implied_kw"] = round(
             total / 100.0 * _usable_capacity(
-                session, _first_vehicle(session), get_settings())[0] / hours, 4
-        ) if hours > 0 else None
+                session, _first_vehicle(session), get_settings())[0]
+            / row["parked_h"], 4)
     rows.append(row)
     # Newest last, and capped: this is typed in by hand, so it grows slowly and
     # the old ones stay interesting — a Sentry habit that changed shows up as a

@@ -9357,12 +9357,18 @@ def test_the_car_park_screen_is_recorded_as_pk_id_and_se():
             assert car["se_pct"] == pytest.approx(1.6)
             assert car["id_pct"] == pytest.approx(1.1)
             assert car["pk_pct"] == pytest.approx(car["id_pct"] + car["se_pct"])
-            # The rate the car's own figures imply, against THIS database's
-            # fitted capacity rather than a pack size typed into the test —
-            # the capacity is measured from screen readings and moves.
+            # The rate the car's figures imply, over the hours the drain
+            # actually happened in. NOT the "8 hrs 53 min" on the Since Charge
+            # panel: that counts time in MOTION — proved by watching it advance
+            # by exactly one trip's duration across half a day — so dividing
+            # parked energy by it is a rate of nothing. The parked hours are
+            # worked out from the history instead, and the typed figure is kept
+            # only as what it is.
             cap = mx["capacity_kwh"]
+            assert car["driving_h_since_charge"] == pytest.approx(8.35)
+            assert car["parked_h"] > 0
             assert car["implied_kw"] == pytest.approx(
-                2.7 / 100.0 * cap / 8.35, abs=0.001)
+                2.7 / 100.0 * cap / car["parked_h"], abs=0.001)
     finally:
         state.put(sess, state.PARK_READINGS_KEY, prev or "")
         sess.commit()
@@ -9827,3 +9833,80 @@ def test_the_refusal_flag_clears_when_the_backlog_is_dropped_not_promoted():
         sess.commit()
         sess.close()
         settings.app_passcode = old_pc
+
+
+def test_parked_hours_are_elapsed_less_driving_not_the_screens_motion_time():
+    """The Park tab's percentage needs a denominator the screen does not give.
+
+    "Since Charge ... 8 hrs 53 min" counts time in MOTION. Proved from two
+    photographs twelve and a half hours apart: it advanced by thirty-one
+    minutes, exactly the one trip driven between them. The parked drain on that
+    same tab did not happen during those hours, so dividing one by the other is
+    a rate of nothing — which is what add-park-reading did.
+
+    The scenario is built deterministically. The helper anchors on the NEWEST
+    charge, and the shared fixture's newest ended half an hour ago, which is
+    too short a window to spend an hour driving in — so that one is pushed back
+    for the duration of the test and put back afterwards.
+    """
+    from datetime import timedelta as _td
+
+    from sqlalchemy import func
+
+    from app import sync as sync_mod
+    from app.api import routes
+    from app.database import SessionLocal
+    from app.models import Charge, Drive, Vehicle
+
+    sess = SessionLocal()
+    made = []
+    moved = []
+    try:
+        with TestClient(app):
+            vid = sess.scalar(select(Vehicle.id))
+            now = sync_mod.now_local()
+            charge_end = now - _td(hours=10)
+
+            # Anything that ended after the charge this test is about would be
+            # the one the helper anchors on instead. Shifted back, and restored.
+            for c in sess.scalars(select(Charge).where(
+                    Charge.vehicle_id == vid, Charge.end_time > charge_end)):
+                moved.append((c, c.end_time))
+                c.end_time = charge_end - _td(hours=10)
+
+            mine = Charge(vehicle_id=vid, start_time=charge_end - _td(hours=1),
+                          end_time=charge_end, energy_added_kwh=20.0, cost=18.0)
+            sess.add(mine); made.append(mine)
+            # An hour of driving inside the ten hours since.
+            for i in (1, 2):
+                at = charge_end + _td(hours=2 * i)
+                d = Drive(vehicle_id=vid, start_time=at,
+                          end_time=at + _td(minutes=30), distance_km=15.0,
+                          duration_min=30.0, energy_used_kwh=2.0,
+                          start_soc=80.0, end_soc=77.0, avg_speed_kmh=30.0,
+                          max_speed_kmh=60.0, source="telemetry")
+                sess.add(d); made.append(d)
+            sess.commit()
+
+            driving_min = sess.scalar(
+                select(func.sum(Drive.duration_min)).where(
+                    Drive.vehicle_id == vid,
+                    Drive.start_time >= charge_end)) or 0.0
+            # At least the hour this test put there; the fixture has its own
+            # drives in the window and they count too, which is the point.
+            assert driving_min >= 60.0
+
+            parked = routes._parked_hours_since_last_charge(sess)
+            # Ten hours elapsed, less every minute of it spent moving.
+            assert parked == pytest.approx(
+                10.0 - float(driving_min) / 60.0, abs=0.05)
+            # The whole point: driving time is taken OFF, never used as the
+            # denominator, so the two can no longer be confused.
+            assert 0 < parked < 10.0
+    finally:
+        for row in made:
+            sess.delete(row)
+        for c, was in moved:
+            c.end_time = was
+        sess.commit()
+        sess.close()
