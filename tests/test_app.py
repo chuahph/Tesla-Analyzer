@@ -3273,9 +3273,10 @@ def test_edit_charge_type_corrects_the_label_without_touching_price():
             with SessionLocal() as s:
                 cost_before = s.get(Charge, cid).cost
 
-            resp = client.post("/api/charges/edit-type", json={
-                "id": cid, "charge_type": "DC",
-            })
+            # GET with query params, like the other manual-correction
+            # endpoints — something tappable as a link, not a JSON body.
+            resp = client.get("/api/charges/edit-type",
+                              params={"id": cid, "charge_type": "DC"})
             assert resp.status_code == 200
             assert resp.json() == {"id": cid, "was": "AC", "charge_type": "DC"}
             with SessionLocal() as s:
@@ -3285,20 +3286,26 @@ def test_edit_charge_type_corrects_the_label_without_touching_price():
                 assert s.get(Charge, cid).cost == cost_before
 
             # Lower-case and whitespace from a hand-typed URL still resolve.
-            assert client.post("/api/charges/edit-type", json={
-                "id": cid, "charge_type": " ac ",
-            }).json()["charge_type"] == "AC"
+            assert client.get("/api/charges/edit-type",
+                              params={"id": cid, "charge_type": " ac "}
+                              ).json()["charge_type"] == "AC"
+
+            # POST with the same query params works too — GET is the
+            # convenience, not the only way in.
+            assert client.post("/api/charges/edit-type",
+                               params={"id": cid, "charge_type": "DC"}
+                               ).json()["charge_type"] == "DC"
 
             # Validation.
-            assert client.post("/api/charges/edit-type", json={
-                "id": cid, "charge_type": "DC-fast",
-            }).status_code == 400
-            assert client.post("/api/charges/edit-type", json={
-                "charge_type": "DC",
-            }).status_code == 400   # missing id
-            assert client.post("/api/charges/edit-type", json={
-                "id": 999999, "charge_type": "DC",
-            }).status_code == 404   # unknown charge
+            assert client.get("/api/charges/edit-type",
+                              params={"id": cid, "charge_type": "DC-fast"}
+                              ).status_code == 400
+            assert client.get("/api/charges/edit-type",
+                              params={"charge_type": "DC"}
+                              ).status_code == 422   # missing id
+            assert client.get("/api/charges/edit-type",
+                              params={"id": 999999, "charge_type": "DC"}
+                              ).status_code == 404   # unknown charge
 
             with SessionLocal() as s:
                 s.delete(s.get(Charge, cid))

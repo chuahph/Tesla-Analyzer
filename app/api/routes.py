@@ -5345,9 +5345,18 @@ def edit_charge_location(payload: dict = Body(...), session: Session = Depends(g
     return {"id": charge.id, "location": charge.location, "updated": updated}
 
 
-@router.post("/charges/edit-type")
-def edit_charge_type(payload: dict = Body(...), session: Session = Depends(get_session)):
+@router.api_route("/charges/edit-type", methods=["GET", "POST"])
+def edit_charge_type(
+    charge_id: int = Query(..., alias="id", description="Charge row id"),
+    charge_type: str = Query(..., description="AC or DC"),
+    session: Session = Depends(get_session),
+):
     """Correct one charging session's AC/DC label by hand.
+
+    GET, like the other manual-correction endpoints (add-park-reading,
+    add-car-reading, repair-arrivals) — something typed into a URL bar or
+    tapped as a link on a phone, not a dashboard button yet, so it takes
+    plain query params rather than a JSON body.
 
     _charge_close used to decide this from only the shadow's opening and
     most-recently-seen snapshots — and a DC session that opened and tapered
@@ -5365,10 +5374,7 @@ def edit_charge_type(payload: dict = Body(...), session: Session = Depends(get_s
     Use /charges/edit-rate afterwards with the rate actually billed, if it
     needs correcting too.
     """
-    charge_id = payload.get("id")
-    if not isinstance(charge_id, int):
-        raise HTTPException(400, "Missing or invalid 'id'.")
-    charge_type = str(payload.get("charge_type") or "").strip().upper()
+    charge_type = str(charge_type or "").strip().upper()
     if charge_type not in ("AC", "DC"):
         raise HTTPException(400, "'charge_type' must be 'AC' or 'DC'.")
 
