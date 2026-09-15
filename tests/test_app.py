@@ -3253,6 +3253,60 @@ def test_edit_charge_location_renames_one_or_every_session_there():
         settings.app_passcode = old
 
 
+def test_edit_charge_type_corrects_the_label_without_touching_price():
+    """A DC session filed AC by the old boundary-only detection, fixed by
+    hand — the one thing the fix landing alongside this couldn't reach,
+    since the raw per-snapshot evidence that would re-derive it is gone the
+    moment the session closes; only the already-wrong finished row remains."""
+    settings = get_settings()
+    old = settings.app_passcode
+    settings.app_passcode = ""
+    from app.database import SessionLocal
+    from app.models import Charge
+
+    try:
+        with TestClient(app) as client:
+            cid = client.post("/api/charges/manual", json={
+                "start_time": "2025-04-01T20:00:00", "end_time": "2025-04-01T20:40:00",
+                "energy_added_kwh": 41.0, "charge_type": "AC", "location": "Highway stop",
+            }).json()["id"]
+            with SessionLocal() as s:
+                cost_before = s.get(Charge, cid).cost
+
+            resp = client.post("/api/charges/edit-type", json={
+                "id": cid, "charge_type": "DC",
+            })
+            assert resp.status_code == 200
+            assert resp.json() == {"id": cid, "was": "AC", "charge_type": "DC"}
+            with SessionLocal() as s:
+                assert s.get(Charge, cid).charge_type == "DC"
+                # A relabel is not a repricing — that stays a deliberate,
+                # separate step via edit-rate, which knows what was billed.
+                assert s.get(Charge, cid).cost == cost_before
+
+            # Lower-case and whitespace from a hand-typed URL still resolve.
+            assert client.post("/api/charges/edit-type", json={
+                "id": cid, "charge_type": " ac ",
+            }).json()["charge_type"] == "AC"
+
+            # Validation.
+            assert client.post("/api/charges/edit-type", json={
+                "id": cid, "charge_type": "DC-fast",
+            }).status_code == 400
+            assert client.post("/api/charges/edit-type", json={
+                "charge_type": "DC",
+            }).status_code == 400   # missing id
+            assert client.post("/api/charges/edit-type", json={
+                "id": 999999, "charge_type": "DC",
+            }).status_code == 404   # unknown charge
+
+            with SessionLocal() as s:
+                s.delete(s.get(Charge, cid))
+                s.commit()
+    finally:
+        settings.app_passcode = old
+
+
 def test_recent_charges_carry_the_stored_location_alongside_the_shown_one():
     """The Recent Charges rows expose location_raw so the rename button can
     tell a charge's own label from one inferred for it from a nearby trip —

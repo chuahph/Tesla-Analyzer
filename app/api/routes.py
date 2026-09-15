@@ -5345,6 +5345,43 @@ def edit_charge_location(payload: dict = Body(...), session: Session = Depends(g
     return {"id": charge.id, "location": charge.location, "updated": updated}
 
 
+@router.post("/charges/edit-type")
+def edit_charge_type(payload: dict = Body(...), session: Session = Depends(get_session)):
+    """Correct one charging session's AC/DC label by hand.
+
+    _charge_close used to decide this from only the shadow's opening and
+    most-recently-seen snapshots — and a DC session that opened and tapered
+    off on the same generic DetailedChargeStateCharging an AC one uses,
+    reporting DetailedChargeStateDCCharging only in the stretch between,
+    could be filed AC if neither boundary record happened to be the DC one.
+    Fixed going forward (the flag now accumulates across every snapshot the
+    session saw), but a row already written under the old logic stays wrong
+    until corrected — there is no raw telemetry left to re-derive it from,
+    only this session's own finished, already-mislabelled record.
+
+    Cost and price source are deliberately left alone, the same as
+    edit-location: AC and DC often bill at different rates, but guessing
+    which one applies here would trade a wrong label for a wrong price.
+    Use /charges/edit-rate afterwards with the rate actually billed, if it
+    needs correcting too.
+    """
+    charge_id = payload.get("id")
+    if not isinstance(charge_id, int):
+        raise HTTPException(400, "Missing or invalid 'id'.")
+    charge_type = str(payload.get("charge_type") or "").strip().upper()
+    if charge_type not in ("AC", "DC"):
+        raise HTTPException(400, "'charge_type' must be 'AC' or 'DC'.")
+
+    charge = session.get(Charge, charge_id)
+    if charge is None:
+        raise HTTPException(404, "Charge not found.")
+
+    was = charge.charge_type or "AC"
+    charge.charge_type = charge_type
+    session.commit()
+    return {"id": charge.id, "was": was, "charge_type": charge.charge_type}
+
+
 @router.get("/pricing-prefs")
 def get_pricing_prefs(session: Session = Depends(get_session)):
     """Current Public/Home/Office AC+DC rates and which source new charges

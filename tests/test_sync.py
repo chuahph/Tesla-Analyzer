@@ -1069,6 +1069,56 @@ def test_a_supercharge_is_not_recorded_as_zero_kilowatts():
     assert ac["fast"] is False
 
 
+def test_a_dc_session_is_not_filed_as_ac_because_both_ends_missed_the_state():
+    """A 41 kWh Supercharge stop, filed as AC.
+
+    _charge_close used to read "fast" from only the shadow's ``open`` and
+    ``last`` snapshots — the record the session started on and whichever
+    charging record the machine most recently saw before it closed. A DC
+    session can open on the same generic DetailedChargeStateCharging an AC
+    one does (see the test above this one), taper into that same generic
+    state as it approaches the target SoC, and only report
+    DetailedChargeStateDCCharging in the stretch between — so a real session
+    that spent its whole middle on DC could still be filed AC if the two
+    records it was judged by, start and most-recent, both happened to be the
+    generic one.
+
+    "fast" now accumulates across every snapshot the session saw, the same
+    way peak_kw already does — read once, at the end, off the shadow itself
+    rather than off two records that were never guaranteed to be the ones
+    that mattered.
+    """
+    shadow: dict = {}
+    assert advance_charge(shadow, snapshot_from_telemetry({
+        "DetailedChargeState": "DetailedChargeStateCharging",
+        "EnergyRemaining": 40.0, "Soc": 60.0,
+        "Gear": "ShiftStateP", "VehicleSpeed": 0.0,
+    }, ts=0)) is None
+    assert advance_charge(shadow, snapshot_from_telemetry({
+        "DetailedChargeState": "DetailedChargeStateDCCharging",
+        "DCChargingPower": 150.0, "DCChargingEnergyIn": 20.0,
+        "EnergyRemaining": 60.0, "Soc": 74.0,
+        "Gear": "ShiftStateP", "VehicleSpeed": 0.0,
+    }, ts=300)) is None
+    # Tapering off, back on the generic state — and now the record the
+    # machine holds as "last" going into the close, exactly as a real
+    # session's power curve rolls off approaching the target SoC.
+    assert advance_charge(shadow, snapshot_from_telemetry({
+        "DetailedChargeState": "DetailedChargeStateCharging",
+        "DCChargingPower": 5.0, "DCChargingEnergyIn": 40.5,
+        "EnergyRemaining": 80.5, "Soc": 79.5,
+        "Gear": "ShiftStateP", "VehicleSpeed": 0.0,
+    }, ts=550)) is None
+    done = advance_charge(shadow, snapshot_from_telemetry({
+        "DetailedChargeState": "DetailedChargeStateDisconnected",
+        "DCChargingEnergyIn": 41.0,
+        "EnergyRemaining": 81.0, "Soc": 80.0,
+        "Gear": "ShiftStateP", "VehicleSpeed": 0.0,
+    }, ts=600))
+    assert done is not None
+    assert done["fast"] is True, "the middle of the session was DC"
+
+
 def test_a_bms_never_seen_in_drive_cannot_end_a_trip():
     """The composite holds the last value sent, and BMSState is sent on change.
 

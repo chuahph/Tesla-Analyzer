@@ -2045,12 +2045,14 @@ def advance_charge(shadow: dict[str, Any], snap: dict[str, Any]) -> dict[str, An
         # be on the record that reopens this.
         shadow["open"] = dict(snap)
         shadow["peak_kw"] = float(snap.get("charger_kw") or 0.0)
+        shadow["fast"] = bool(snap.get("fast"))
         shadow["last"] = dict(snap)
         return done
 
     if charging and not open_at:
         shadow["open"] = dict(snap)
         shadow["peak_kw"] = float(snap.get("charger_kw") or 0.0)
+        shadow["fast"] = bool(snap.get("fast"))
         shadow["last"] = dict(snap)
         return None
 
@@ -2077,10 +2079,22 @@ def advance_charge(shadow: dict[str, Any], snap: dict[str, Any]) -> dict[str, An
             done = _charge_close(shadow, last or snap)
             shadow["open"] = dict(snap)
             shadow["peak_kw"] = float(snap.get("charger_kw") or 0.0)
+            shadow["fast"] = bool(snap.get("fast"))
             shadow["last"] = dict(snap)
             return done
         shadow["peak_kw"] = max(float(shadow.get("peak_kw") or 0.0),
                                 float(snap.get("charger_kw") or 0.0))
+        # Whether ANY snapshot in the session reported DC, not just the two
+        # that happen to be kept as ``open``/``last``. Those are the record
+        # the session started on and whichever the machine most recently saw
+        # — and a DC session opens on "Starting" and can close on "Complete",
+        # neither of which is the DetailedChargeStateDC... string this reads.
+        # A 41 kWh Supercharge stop was filed as AC because both ends of it
+        # missed the state that every snapshot in between was reporting.
+        # peak_kw already accumulates the same way across the whole session
+        # for the same reason: the two ends are not the session, they are
+        # just what is left of it once the middle has been thrown away.
+        shadow["fast"] = bool(shadow.get("fast")) or bool(snap.get("fast"))
         shadow["last"] = dict(snap)
         return None
 
@@ -2121,6 +2135,9 @@ def _charge_close(shadow: dict[str, Any], end: dict[str, Any]) -> dict[str, Any]
     """Emit the open charge, ending at ``end``, and clear the machine."""
     start = shadow.pop("open", None)
     peak = float(shadow.pop("peak_kw", 0.0) or 0.0)
+    # Popped rather than re-derived from start/end below — see advance_charge,
+    # where it accumulates across every snapshot the session actually saw.
+    fast = bool(shadow.pop("fast", False))
     if not start:
         return None
 
@@ -2197,7 +2214,7 @@ def _charge_close(shadow: dict[str, Any], end: dict[str, Any]) -> dict[str, Any]
         "soc_start": start.get("soc"),
         "soc_end": end.get("soc"),
         "peak_kw": round(peak, 1),
-        "fast": bool(start.get("fast") or end.get("fast")),
+        "fast": fast,
         "lat": start.get("lat"), "lon": start.get("lon"),
         "pack_temp_c": end.get("pack_temp_c"),
         # Nothing writes a Charge row from this. It is evidence.
