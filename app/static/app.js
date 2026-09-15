@@ -3373,6 +3373,12 @@ let recentTripsLimit = 5;
 // recentTripsLimit whenever the window changes.
 let kpisExpanded = false;
 const KPI_COLLAPSED_COUNT = 8;
+// When load() last ran (or was last asked to), regardless of who called it —
+// read by refreshOnResume() below to decide whether a resume is worth another
+// fetch. Stamped at the top of load() itself rather than at each call site,
+// so every existing caller (Sync, a window change, a correction) keeps the
+// clock current for free.
+let lastLoadAt = 0;
 
 function importedDataset() {
   try { return JSON.parse(localStorage.getItem(STORE_KEY)); } catch (_) { return null; }
@@ -3383,6 +3389,7 @@ async function demoDataset() {
 }
 
 async function load() {
+  lastLoadAt = Date.now();
   const rawRange = document.getElementById("range").value;
   const sinceCharge = rawRange === "charge";
   const currentDrive = rawRange === "drive";
@@ -3563,6 +3570,39 @@ function setBuildInfo(info) {
 if (window.BUILD_INFO) setBuildInfo(window.BUILD_INFO);
 tickClock();
 setInterval(tickClock, 1000);
+
+// Refresh on resume, not only on first open.
+//
+// A phone's home-screen icon does not reload a running PWA — it brings the
+// SAME already-rendered page back to the foreground, exactly as it looked
+// when backgrounded. load() only ever ran once, on the tap that first opened
+// the car (openCar()), and nothing after that re-ran it on its own. So a
+// trip that finished while the phone was in a pocket — or the app was merely
+// switched away from and back — stayed missing until something else
+// happened to call load() again (Sync, a window change), which is a manual
+// step this dashboard exists specifically not to need. That is the actual
+// mechanism behind "I launched the app and the trip was not there" even
+// though promotion itself, checked separately, had already finished its job.
+//
+// Two events cover it because no one signal is reliable everywhere: a
+// backgrounded-then-foregrounded tab or PWA fires visibilitychange, while a
+// page Safari (and some Android WebViews) served from the back/forward cache
+// fires pageshow with persisted=true instead, sometimes without a
+// visibilitychange at all. Both can also fire together on the same resume,
+// which lastLoadAt's debounce collapses into one fetch rather than two.
+const RESUME_REFRESH_MIN_MS = 15_000;
+function refreshOnResume() {
+  if (document.body.classList.contains("view-home")) return; // nothing shown to go stale
+  if (document.hidden) return;                                 // not actually foregrounded
+  if (Date.now() - lastLoadAt < RESUME_REFRESH_MIN_MS) return;  // load() already just ran
+  load();
+}
+document.addEventListener("visibilitychange", () => {
+  if (!document.hidden) refreshOnResume();
+});
+window.addEventListener("pageshow", (e) => {
+  if (e.persisted) refreshOnResume();
+});
 
 // Window selector: fixed choices plus "Custom…" which asks for any number of
 // days (1–730, the API's window limit) and pins it as a selectable option.
