@@ -9961,6 +9961,101 @@ def test_the_refusal_flag_clears_when_the_backlog_is_dropped_not_promoted():
         settings.app_passcode = old_pc
 
 
+def test_promotion_health_staged_count_is_not_the_shadow_cache_size():
+    """"staged" must mean not-yet-promoted, not "everything ever staged".
+
+    Nothing prunes TELEMETRY_TRIPS_KEY when a trip is successfully promoted —
+    _promote_shadow_trips is idempotent by design and re-corrects an existing
+    row rather than skipping it, which is exactly what a stale entry needs.
+    So the cache grows with total trip count forever, and reading its raw
+    length reported 13 on an account with exactly 13 telemetry drives: a
+    coincidence that should have read as reassuring instead looked like a
+    stuck backlog, because len() cannot tell "already promoted" from "still
+    waiting" apart.
+
+    Reproduced directly: stage three trips, promote them, then add two more
+    genuinely new ones alongside the three now sitting in the cache. The true
+    pending count is two, not five.
+    """
+    import json as _json_mod
+    import time as _time
+
+    from app import state, sync as sync_mod
+    from app.api import routes
+    from app.database import SessionLocal
+    from app.models import Drive, Vehicle
+
+    def _trip(vin, start):
+        return {"vin": vin, "start_ts": start, "end_ts": start + 300,
+                "start_time": sync_mod._dt(start).isoformat(timespec="seconds"),
+                "end_time": sync_mod._dt(start + 300).isoformat(timespec="seconds"),
+                "distance_km": 5.0, "duration_min": 5.0, "energy_kwh": 1.0,
+                "wh_per_km": 200.0, "soc_start": 80.0, "soc_end": 79.0,
+                "start_odo_km": 3000.0 + start % 1000, "end_odo_km": 3005.0 + start % 1000,
+                "avg_speed_kmh": 60.0, "max_speed_kmh": 70.0}
+
+    settings = get_settings()
+    old_pc = settings.app_passcode
+    settings.app_passcode = ""
+    sess = SessionLocal()
+    prev_staged = state.get(sess, state.TELEMETRY_TRIPS_KEY)
+    prev_flag = state.get(sess, state.PROMOTE_REFUSED_KEY)
+    car = None
+    starts: list = []
+    try:
+        # A dedicated vehicle, never "first()" of the table. This account has
+        # exactly one real vehicle, and a shared "now minus a round offset"
+        # timestamp — the same trick this test and several others use to
+        # avoid hard-coding a date — can and does collide to the exact
+        # second with another test's own synthetic trips against that same
+        # vehicle when the two happen to run close together. Caught live: a
+        # genuine telemetry row at car.id 1 matched one of this test's three
+        # "already promoted" timestamps, turning an "add" into a "correct"
+        # and failing the count for a reason that had nothing to do with the
+        # code under test — and the cleanup below, matching by exact
+        # timestamp, would have deleted that real row afterwards.
+        car = sess.query(Vehicle).filter(Vehicle.vin == "PENDINGVIN000001").first()
+        if car is None:
+            car = Vehicle(name="Pending-count fixture", vin="PENDINGVIN000001")
+            sess.add(car)
+            sess.commit()
+
+        now = _time.time() - 7200
+        starts = [now + i * 600 for i in range(3)] + [now + 3600 + i * 600 for i in range(2)]
+        already = [_trip(car.vin, now + i * 600) for i in range(3)]
+        state.put(sess, state.TELEMETRY_TRIPS_KEY, _json_mod.dumps(already))
+        sess.commit()
+        # Promote all three now, so they exist in Drive — but stay in the
+        # cache, exactly as the real ingest leaves them.
+        out = routes._promote_shadow_trips(sess, apply=True, max_add=None)
+        assert sum(1 for c in out if c["action"] == "add") == 3, out
+        sess.commit()
+
+        pending = [_trip(car.vin, now + 3600 + i * 600) for i in range(2)]
+        state.put(sess, state.TELEMETRY_TRIPS_KEY,
+                  _json_mod.dumps(already + pending))
+        sess.commit()
+
+        with TestClient(app) as client:
+            got = client.get("/api/health").json()["promotion"]
+        # Five entries sit in the cache; only two have no matching Drive row.
+        assert got["staged"] == 2, got
+        assert got["verdict"] == "in flight"
+    finally:
+        state.put(sess, state.TELEMETRY_TRIPS_KEY, prev_staged or "")
+        state.put(sess, state.PROMOTE_REFUSED_KEY, prev_flag or "")
+        # By exact start_time, not a range — a broad delete here could catch
+        # a real telemetry trip from another test sharing this database.
+        if car is not None and starts:
+            sess.query(Drive).filter(
+                Drive.vehicle_id == car.id, Drive.source == "telemetry",
+                Drive.start_time.in_([sync_mod._dt(s) for s in starts])
+            ).delete(synchronize_session=False)
+        sess.commit()
+        sess.close()
+        settings.app_passcode = old_pc
+
+
 def test_parked_hours_are_elapsed_less_driving_not_the_screens_motion_time():
     """The Park tab's percentage needs a denominator the screen does not give.
 

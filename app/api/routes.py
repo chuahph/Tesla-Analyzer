@@ -3491,21 +3491,34 @@ def _provenance(session: Session) -> dict:
 def _promotion_health(session: Session) -> dict:
     """Staged-but-not-promoted trips, and the last automatic failure if any.
 
-    ``staged`` counts finished shadow trips the ingest has parked in
-    TELEMETRY_TRIPS_KEY. In the ordinary case they are carried into the Drive
-    table within a tick and this is small or zero; a number that stays up
-    across ticks means promotion is not getting through, and ``last_error``
-    says what stopped it.
+    ``staged`` used to count every entry in TELEMETRY_TRIPS_KEY — the ingest's
+    shadow-trip cache — on the theory that it stays small or zero once
+    promotion keeps up. It does not: nothing ever removes an entry from that
+    list once it is promoted, since _promote_shadow_trips is idempotent BY
+    DESIGN (it re-corrects a row that already exists rather than skipping it,
+    which is what lets a tick run safely after every deploy). So the raw
+    length is every trip ever staged, capped at TELEMETRY_TRIPS_MAX, and it
+    climbs with total trip count whether promotion is healthy or completely
+    broken — it cannot tell those apart, which is the one job this field has.
+    Caught when it read 13 on an account with exactly 13 telemetry drives:
+    the coincidence that should have looked reassuring instead looked like a
+    backlog.
 
-    Deliberately cheap — two state reads and no query — because it is on the
-    health endpoint, which the cron hits on a schedule.
+    _promote_shadow_trips itself already knows the true answer — a dry run
+    returns the full plan, unfiltered by the cap, with each entry marked
+    "add" (nothing in Drive matches yet) or "correct" (it does). Asking it
+    directly is the only way to get a real count, so this now costs the same
+    bounded, indexed query — PROMOTE_MAX_DAYS wide — that every real
+    promotion attempt already pays. No longer a bare state read, but no
+    heavier than what already runs on every /api/summary load right before
+    this is fetched alongside it.
     """
     import json as _json
 
     try:
-        staged = len(_json.loads(
-            state.get(session, state.TELEMETRY_TRIPS_KEY) or "[]") or [])
-    except ValueError:
+        staged = sum(1 for c in _promote_shadow_trips(session, apply=False)
+                    if c.get("action") == "add")
+    except Exception:  # noqa: BLE001 — health must never itself fail to answer
         staged = None
     err = None
     try:
@@ -3609,7 +3622,14 @@ def _promote_shadow_trips(session: Session, apply: bool = False,
         # reporting "refused" and pointing at an endpoint that has nothing to
         # do. Guarded inside _clear_promote_refused, so the ordinary path of a
         # car streaming every twenty seconds costs one state read.
-        _clear_promote_refused(session)
+        #
+        # Only on a real attempt, though — ``apply`` gates it. _promotion_health
+        # calls this with apply=False purely to COUNT what is pending, and a
+        # health check must not be able to clear a real refusal just by being
+        # read: the flag exists to survive until something actually resolves
+        # the backlog, not until someone next checks on it.
+        if apply:
+            _clear_promote_refused(session)
         return []
 
     since = sync_mod.now_local() - timedelta(days=days)
