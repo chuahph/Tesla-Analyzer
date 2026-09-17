@@ -2714,20 +2714,7 @@ def condition_matrix(drives: list[Any], capacity_kwh: float,
     no_energy = 0
     no_energy_kwh = 0.0
     for d in drives:
-        # has_valid_energy only floors Wh/km — a range-reading gap reads too
-        # LOW, which it exists to catch — and never ceilings it. A trip that
-        # is almost entirely idle (climate, Sentry, a long stop mid-journey)
-        # with only a sliver of real distance is the opposite fault: real
-        # energy, near-zero km, and their ratio reads in the thousands —
-        # reported live as a "Slow City" row at 3511 Wh/km over 4 km. The
-        # ceiling this reuses, MAX_PLAUSIBLE_WH_PER_KM, is the same one the
-        # departure-recovery guard in sync.py already earns its keep on
-        # (there: 1100 Wh/km measured as "impossible", 406 as "entirely
-        # ordinary" for a slow hot crawl) — a mode row's weighted average is
-        # exactly as vulnerable to one such trip dominating a small
-        # denominator as that recovery was.
-        implausible = (getattr(d, "wh_per_km", None) or 0.0) > sync_mod.MAX_PLAUSIBLE_WH_PER_KM
-        if not has_valid_energy(d) or implausible:
+        if not has_valid_energy(d):
             no_energy += 1
             no_energy_kwh += float(getattr(d, "energy_used_kwh", 0.0) or 0.0)
             continue
@@ -2741,6 +2728,25 @@ def condition_matrix(drives: list[Any], capacity_kwh: float,
         if len(share) > 1:
             split_trips += 1
         for code, got_part in share.items():
+            # Per SLICE, not per trip. mode_split can hand one mode a real
+            # slice of a trip's energy against almost none of its distance —
+            # a crawl-to-a-stop inside an otherwise ordinary drive, where the
+            # car kept drawing climate/idle power while covering almost no
+            # ground during that stretch specifically. The trip's OWN overall
+            # Wh/km (has_valid_energy's whole-trip check above) stays
+            # perfectly sane; only the slice looks like an impossible rate —
+            # reported live as a "Slow City" row at 3511 Wh/km over 4 km even
+            # after a whole-trip-only ceiling shipped, because no single
+            # trip's own average was ever the problem. Same
+            # MAX_PLAUSIBLE_WH_PER_KM ceiling sync.py's departure-recovery
+            # guard already trusts for this exact shape of fault; the slice's
+            # kWh still counts (toward no_energy_kwh, same "implausible"
+            # bucket a whole bad trip already used), it just cannot claim a
+            # Wh/km for this mode.
+            part_km, part_kwh = got_part["km"], got_part["kwh"]
+            if part_km > 0 and part_kwh * 1000.0 / part_km > sync_mod.MAX_PLAUSIBLE_WH_PER_KM:
+                no_energy_kwh += part_kwh
+                continue
             slot = parts.setdefault(code, {"km": 0.0, "min": 0.0, "kwh": 0.0})
             for k in ("km", "min", "kwh"):
                 slot[k] += got_part[k]
