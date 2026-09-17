@@ -2547,6 +2547,54 @@ function renderMatrix(d) {
     </p>`;
 }
 
+// One row per trip: the same classification the aggregate table ran, kept
+// visible per journey rather than only summed. The aggregate answers "what
+// does Heavy City cost overall" — this answers "why was THIS trip Heavy
+// City", which is the question a reader actually holds a memory to check
+// against. Newest first, as the endpoint already orders them.
+function renderMatrixTrips(d) {
+  const box = document.getElementById("matrix-trips");
+  if (!box) return;
+  const rows = d && d.rows || [];
+  if (!rows.length) {
+    box.innerHTML = `<p class="modal-sub">No trips in this window yet.</p>`;
+    return;
+  }
+  const num = (v, dp) => (v == null ? "—" : Number(v).toFixed(dp));
+  const splitLine = (r) => {
+    const codes = Object.keys(r.split || {});
+    if (codes.length < 2) return "";
+    const parts = codes.map((c) => {
+      const s = r.split[c];
+      return `${c} ${num(s.km, 1)} km @ ${s.wh_per_km != null ? num(s.wh_per_km, 0) : "—"} Wh/km`;
+    });
+    return ` · split across the trip: ${parts.join(", ")}`;
+  };
+  const html = rows.map((r) => `
+      <tr${r.counted === false ? ' class="mx-parked"' : ""}>
+        <td class="mx-code">${r.mode ?? "—"}</td>
+        <td class="mx-name">${(r.at || "").replace("T", " ")} — ${r.route || "?"}
+          <span class="mx-sub">${num(r.km, 1)} km · ${num(r.min, 0)} min ·
+            avg ${num(r.avg_kmh, 0)} / max ${num(r.max_kmh, 0)} km/h${
+              r.constancy != null ? ` (${num(r.constancy, 2)})` : ""} ·
+            idle ${r.idle_share != null ? `${Math.round(r.idle_share * 100)}%` : "—"}${
+              r.stops ? ` over ${r.stops} stop${r.stops === 1 ? "" : "s"}` : ""}
+            ${r.why ? ` · ${r.why}` : ""}${splitLine(r)}
+            ${r.counted === false ? " · not counted in the totals above" : ""}
+            ${r.profiled === false ? " · no speed profile — pre-telemetry or a poll" : ""}
+          </span></td>
+        <td>${num(r.wh_per_km, 0)}</td>
+      </tr>`).join("");
+  box.innerHTML = `
+    <div class="mx-scroll">
+      <table class="mx-table">
+        <thead><tr><th></th><th>Trip</th><th>Wh/km</th></tr></thead>
+        <tbody>${html}</tbody>
+      </table>
+    </div>
+    <p class="modal-sub mx-foot">${rows.length} trip${rows.length === 1 ? "" : "s"} in this window, newest first.</p>`;
+}
+
 // The glossary the report carries with it. Rendered from the payload rather
 // than written into the page, so a code and its meaning cannot drift apart.
 function renderGlossary(defs) {
@@ -2648,6 +2696,23 @@ function setupMatrixModal() {
     });
   });
 
+  // The per-trip table's own days, parsed from the same window the aggregate
+  // just asked for. since_charge has no meaning here — the trips endpoint
+  // has no charge boundary to narrow to — so only the day count carries over.
+  function matrixDays() {
+    const m = /days=(\d+)/.exec(matrixWindowQuery());
+    return m ? m[1] : "90";
+  }
+  async function reloadTrips() {
+    const box = document.getElementById("matrix-trips");
+    try {
+      const r = await fetch(`/api/driving-matrix/trips?days=${matrixDays()}`);
+      if (!r.ok) throw new Error("load failed");
+      renderMatrixTrips(await r.json());
+    } catch (e) {
+      if (box) box.innerHTML = `<p class="modal-sub">Could not load recent trips.</p>`;
+    }
+  }
   // Loaded once with the dashboard rather than on a click. The summary is
   // visible without any interaction, so the fetch cannot wait for one — and
   // the card stays hidden until it succeeds, since an empty panel with a
@@ -2658,6 +2723,7 @@ function setupMatrixModal() {
       if (!r.ok) throw new Error("load failed");
       show(await r.json());
       card.style.display = "";
+      reloadTrips();
     } catch (e) {
       // Left hidden. Everything else on the page is independent of this, and
       // a failure here should cost this card and nothing else.
@@ -2689,6 +2755,7 @@ function setupMatrixModal() {
         return;
       }
       show(d);
+      reloadTrips();
       const w = d.window || {};
       // Said plainly, because a narrow window is what takes the parked rows
       // blank and that should not look like a bug.
@@ -2740,6 +2807,7 @@ function setupMatrixModal() {
         return;
       }
       show(d);
+      reloadTrips();
       if (msg) msg.textContent = "Saved. The table above is redrawn from the same trips.";
     } catch (err) {
       if (msg) msg.textContent = "That didn't save. Check the numbers and try again.";
