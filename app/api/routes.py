@@ -3172,13 +3172,27 @@ def _evaluate_alerts(session: Session, vehicle, vin: str, snap: dict,
     # Anchor the SoC when a parked-with-Sentry episode starts, then fire
     # once it's cost at least sentry_drain_notify_pct points — a prompt
     # "turn it off" nudge, not a next-day retrospective. The episode resets
-    # whenever the car drives/charges or Sentry goes off (below), so a real
-    # short errand with Sentry on never trips it.
+    # whenever the car drives/charges or Sentry stops actually watching
+    # (below), so a real short errand with Sentry on never trips it.
+    #
+    # Gated on sentry_armed, not the raw sentry_now boolean. That boolean is
+    # true for every state but Off — including Idle, which is Sentry enabled
+    # and NOT YET watching: the ~2.5 minutes after a park starts before Idle
+    # promotes to Armed, and the whole of a park at a location Sentry has been
+    # told to exclude (home, work). The accuracy record measured Idle's own
+    # draw directly against the car's Park tab: an office park sat Idle the
+    # entire day and Sentry's own line never moved. A car that only ever sees
+    # Idle parks — Sentry left on, every park at a recognised place — got the
+    # drain warning on ordinary standby loss it could do nothing about, which
+    # is the "too much" this was reported as. sentry_armed already exists for
+    # exactly this distinction (the parked-drain rate fit uses it), so this
+    # reuses it rather than inventing a second answer to the same question.
     sentry_pct = settings.sentry_drain_notify_pct
     if sentry_pct > 0:
         ep_key = state.scoped(state.SENTRY_DRAIN_EPISODE_KEY, vin)
         sentry_notified_key = state.scoped(state.SENTRY_DRAIN_NOTIFIED_KEY, vin)
-        parked_sentry = bool(sentry_now) and not in_session
+        armed_now = driving_analysis.sentry_armed(snap.get("sentry_state"), sentry_now)
+        parked_sentry = bool(armed_now) and not in_session
         if parked_sentry:
             ep_raw = state.get(session, ep_key)
             if not ep_raw:
@@ -3195,8 +3209,10 @@ def _evaluate_alerts(session: Session, vehicle, vin: str, snap: dict,
                     )
                     state.put(session, sentry_notified_key, "1")
         elif state.get(session, ep_key) or state.get(session, sentry_notified_key) == "1":
-            # Drove off, started charging, or Sentry switched off — end the
-            # episode so the next parked-with-Sentry stretch is judged fresh.
+            # Drove off, started charging, or Sentry stopped being armed —
+            # switched off outright, or settled back to Idle at a recognised
+            # location — end the episode so the next armed stretch is judged
+            # fresh rather than inheriting a start point from before it.
             state.put(session, ep_key, "")
             state.put(session, sentry_notified_key, "")
 

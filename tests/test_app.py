@@ -2099,6 +2099,74 @@ def test_sentry_drain_alert_respects_the_streams_open_trip(monkeypatch):
             s.commit()
 
 
+def test_sentry_drain_alert_ignores_an_idle_park_that_never_arms(monkeypatch):
+    """Sentry "on" is not Sentry watching — reported as "too much" alerting.
+
+    sentry_mode is true for every state but Off, Idle included — the ~2.5
+    minutes after a park starts before Sentry promotes to Armed, and the
+    whole of a park at a location Sentry has been told to exclude (home,
+    work). A car that mostly parks somewhere excluded, with Sentry left on
+    by habit, got a drain warning every time ordinary standby loss crossed
+    the threshold — nothing Sentry did, nothing turning it off would change.
+
+    Only telemetry carries sentry_state, so this calls _evaluate_alerts
+    directly rather than through the polled snapshot path, which never has
+    it to give.
+    """
+    from types import SimpleNamespace
+
+    from app.api.routes import _evaluate_alerts
+    from app.database import SessionLocal
+    from app.models import BatteryReading, Vehicle
+
+    vin = "TESTVIN-IDLESENTRY"
+    settings = SimpleNamespace(low_soc_notify_pct=0.0, sentry_drain_notify_pct=2.0,
+                              intrusion_notify=False)
+
+    def snap(ts, soc, sentry_state):
+        return {"ts": ts, "soc": soc, "sentry_mode": True, "sentry_state": sentry_state,
+                "shift": "P", "speed_kmh": 0.0, "locked": True, "user_present": False,
+                "doors_open": False, "windows_open": False}
+
+    pushes = []
+    monkeypatch.setattr("app.api.routes.notifications.notify",
+                        lambda session, title, body, tag=None: pushes.append((title, tag)))
+
+    t = 1_760_700_000
+    try:
+        with SessionLocal() as s:
+            v = Vehicle(vin=vin, name="Test", model="Model 3")
+            s.add(v)
+            s.commit()
+
+            # Idle the whole way: enabled, sitting at a location Sentry has
+            # excluded, never promoted to Armed. A genuine 4% drop, same
+            # shape that would have fired before this change.
+            _evaluate_alerts(s, v, vin, snap(t, 80, "SentryModeStateIdle"),
+                             None, None, settings)
+            _evaluate_alerts(s, v, vin, snap(t + 1200, 76, "SentryModeStateIdle"),
+                             None, None, settings)
+            s.commit()
+            assert [p for p in pushes if p[1] == "sentry-drain"] == [], \
+                "alerted on Sentry sitting Idle the whole park"
+
+            # Now genuinely armed, and the same drop crosses the threshold —
+            # the alert still has to work when Sentry is actually watching.
+            _evaluate_alerts(s, v, vin, snap(t + 1800, 76, "SentryModeStateArmed"),
+                             None, None, settings)
+            _evaluate_alerts(s, v, vin, snap(t + 3000, 73, "SentryModeStateArmed"),
+                             None, None, settings)
+            s.commit()
+            assert len([p for p in pushes if p[1] == "sentry-drain"]) == 1
+    finally:
+        with SessionLocal() as s:
+            vv = s.query(Vehicle).filter(Vehicle.vin == vin).first()
+            if vv:
+                s.query(BatteryReading).filter(BatteryReading.vehicle_id == vv.id).delete()
+                s.delete(vv)
+            s.commit()
+
+
 def test_repair_moves_a_boundary_and_the_figures_that_follow_from_it(monkeypatch):
     """Undoing the reverted place-split's damage: it credited an arriving trip
     1.311 km it never drove and starved the departing one by the same amount.
