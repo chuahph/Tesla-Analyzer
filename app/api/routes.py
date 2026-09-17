@@ -11610,6 +11610,61 @@ TELEMETRY_GAPS_MAX = 200
 SENTRY_COOLDOWN_SEC = 300.0
 
 
+def _sentry_aware_confirmed(session: Session, vin: str, now_sentry: str | None,
+                            was_sentry: str | None, ts: float,
+                            confirm_sec: float) -> bool:
+    """Whether THIS record is the one that should raise the Aware alert.
+
+    Aware fires on ordinary passing traffic as readily as on someone actually
+    at the car — see settings.sentry_aware_confirm_sec: "near" already covers
+    a person walking past, a trolley, a cat, because that is genuinely what
+    Tesla's own Sentry considers noticing something. What separates a
+    passer-by from someone actually at the car, with no zone or distance
+    field to ask instead, is how long the state holds: a walker is near for a
+    few seconds, someone pulling a handle or standing at the boot deciding
+    holds it much longer.
+
+    So Aware is confirmed rather than announced on sight. The first record
+    reporting it is remembered; the alert fires only once a LATER record
+    still reads Aware and confirm_sec has passed since, timed off the
+    records' own timestamps rather than when this ingest happened to run, so
+    a bridge posting in bursts cannot distort it. If the state reverts before
+    then, nothing held the car's attention long enough to matter, and nothing
+    is sent — which is the entire point.
+
+    Not for Panic. The caller keeps that path unthrottled: an alarm actually
+    going off must never wait to be confirmed.
+    """
+    import json as _json
+
+    key = state.scoped(state.SENTRY_AWARE_PENDING_KEY, vin)
+    if confirm_sec <= 0:
+        # The setting this replaces: fire on the transition, nothing held.
+        return now_sentry == "SentryModeStateAware" and now_sentry != was_sentry
+    if now_sentry != "SentryModeStateAware":
+        # The stretch is over, confirmed or not — the next one starts fresh
+        # rather than inheriting a start time from before this gap.
+        if state.get(session, key):
+            state.put(session, key, "")
+        return False
+    try:
+        pending = _json.loads(state.get(session, key) or "null")
+    except ValueError:
+        pending = None
+    if not isinstance(pending, dict) or pending.get("fired") or now_sentry != was_sentry:
+        # A fresh transition into Aware, or nothing pending yet, or this
+        # stretch already fired once — in every case, THIS record is not the
+        # confirmation. Start (or restart) the clock and wait for a later one.
+        if not isinstance(pending, dict) or now_sentry != was_sentry:
+            state.put(session, key, _json.dumps({"since": ts, "fired": False}))
+        return False
+    since = float(pending.get("since") or ts)
+    if ts - since < confirm_sec:
+        return False
+    state.put(session, key, _json.dumps({"since": since, "fired": True}))
+    return True
+
+
 def _sentry_alert(session: Session, vin: str, sentry_state: str, what: str,
                   car: dict) -> None:
     """Tell someone the car noticed something, at most once every few minutes.
@@ -11918,6 +11973,7 @@ def telemetry_ingest(
     if not isinstance(records, list):
         raise HTTPException(400, "Expected {'records': [...]}.")
 
+    settings = get_settings()
     now = sync_mod.now_local()
     kept = []
     amended = 0
@@ -12115,9 +12171,24 @@ def telemetry_ingest(
         # Sentry. Polling could never see this — vehicle_data reports a bare
         # on/off boolean, which is why the app's own note says the alarm state
         # is not visible in the API. It is visible here, as a transition.
+        #
+        # Panic is unthrottled beyond the flicker cooldown in _sentry_alert
+        # itself — an alarm actually going off must never wait to be
+        # confirmed. Aware goes through _sentry_aware_confirmed first: see
+        # settings.sentry_aware_confirm_sec for why a passer-by and someone
+        # actually at the car report the identical state and only differ in
+        # how long it holds.
         now_sentry = car.get("SentryMode")
-        if now_sentry in SENTRY_ALERT and now_sentry != was_sentry:
-            _sentry_alert(session, vin, now_sentry, SENTRY_ALERT[now_sentry], car)
+        if now_sentry == "SentryModeStatePanic":
+            if now_sentry != was_sentry:
+                _sentry_alert(session, vin, now_sentry, SENTRY_ALERT[now_sentry], car)
+        elif now_sentry == "SentryModeStateAware":
+            if ts and _sentry_aware_confirmed(session, vin, now_sentry, was_sentry,
+                                              ts, settings.sentry_aware_confirm_sec):
+                _sentry_alert(session, vin, now_sentry, SENTRY_ALERT[now_sentry], car)
+        else:
+            _sentry_aware_confirmed(session, vin, now_sentry, was_sentry,
+                                    ts or 0.0, settings.sentry_aware_confirm_sec)
 
         ts = _telemetry_ts(record.get("created_at"))
         if ts:

@@ -217,6 +217,17 @@ class Settings(BaseSettings):
     # opening itself, which the stream reports as DoorState and which happens
     # whether or not Sentry ever noticed.
     intrusion_notify: bool = False
+    # How long SentryMode has to hold Aware before the trigger alert fires —
+    # not a toggle, a wait. Aware is the car noticing something NEAR it, and
+    # the car's own definition of "near" already covers a person walking
+    # past, a trolley, a cat: real motion, not a false reading, just not the
+    # kind anyone wants a push for. What tells a passer-by from someone
+    # actually at the car — pulling a handle, standing at the boot deciding —
+    # is how long it holds, since there is no zone or distance field to ask
+    # instead. 0 fires on the first record that reports Aware, as it always
+    # has; Panic is never held back by this, at any setting, because an
+    # actual alarm must never wait to be confirmed.
+    sentry_aware_confirm_sec: float = 20.0
 
     # Analysis parameters
     energy_price_per_kwh: float = 0.90

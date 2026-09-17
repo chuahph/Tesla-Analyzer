@@ -193,6 +193,13 @@ LOW_SOC_NOTIFIED_KEY = "low_soc_notified"  # "1" once the low-SoC push has fired
 SENTRY_DRAIN_EPISODE_KEY = "sentry_drain_episode"
 SENTRY_DRAIN_NOTIFIED_KEY = "sentry_drain_notified"
 
+# Sentry-Aware confirmation, per VIN: JSON {since, fired} tracking one
+# unbroken Aware stretch, so the alert can wait to see whether it holds
+# rather than firing on the first record that reports it — see
+# _sentry_aware_confirmed. Cleared the moment the state is anything but
+# Aware, so the next stretch is timed from its own start.
+SENTRY_AWARE_PENDING_KEY = "sentry_aware_pending"
+
 # Parked-intrusion alert, per VIN: "1" once the push has fired for the current
 # opening, cleared as soon as everything is shut again (or the car is driven),
 # so each separate opening alerts once rather than every sync tick.

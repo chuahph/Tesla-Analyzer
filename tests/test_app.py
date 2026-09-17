@@ -4324,7 +4324,12 @@ def test_sentry_escalation_raises_an_alert_once(monkeypatch):
 
     settings = get_settings()
     old_sk = settings.sync_key
+    old_confirm = settings.sentry_aware_confirm_sec
     settings.sync_key = "cronkey"
+    # This test is about escalation and the cooldown bypass, not about how
+    # long Aware has to hold — that has its own test. 0 keeps the legacy
+    # fire-on-sight behaviour these assertions were written against.
+    settings.sentry_aware_confirm_sec = 0
     alerts: list[tuple] = []
     monkeypatch.setattr(routes_mod.notifications, "notify",
                         lambda s, title, body, tag=None: alerts.append((title, body, tag)))
@@ -4354,6 +4359,65 @@ def test_sentry_escalation_raises_an_alert_once(monkeypatch):
         assert "ALARM went off" in alerts[1][1]
     finally:
         settings.sync_key = old_sk
+        settings.sentry_aware_confirm_sec = old_confirm
+
+
+def test_sentry_aware_confirms_before_alerting(monkeypatch):
+    """A passer-by and someone actually at the car report the identical
+    Aware state; only how long it holds tells them apart.
+
+    A blip that reverts before sentry_aware_confirm_sec elapses raises
+    nothing. A stretch that holds past it raises exactly one alert, not one
+    per record while it holds. Panic is never held back by this, at any
+    setting.
+    """
+    from app.api import routes as routes_mod
+
+    settings = get_settings()
+    old_sk = settings.sync_key
+    old_confirm = settings.sentry_aware_confirm_sec
+    settings.sync_key = "cronkey"
+    settings.sentry_aware_confirm_sec = 20.0
+    alerts: list[tuple] = []
+    monkeypatch.setattr(routes_mod.notifications, "notify",
+                        lambda s, title, body, tag=None: alerts.append((title, body, tag)))
+    monkeypatch.setattr(routes_mod, "SENTRY_COOLDOWN_SEC", 0.0)
+
+    def sentry(vin, state, at):
+        return {"vin": vin, "createdAt": at,
+                "data": [{"key": "SentryMode",
+                          "value": {"sentryModeStateValue": state}}]}
+
+    try:
+        with TestClient(app) as client:
+            # A passer-by: Aware for five seconds, then back to Armed.
+            client.post("/api/telemetry?key=cronkey", json={"records": [
+                sentry("SENTRYCONFIRM0001", "SentryModeStateArmed", "2026-09-08T10:00:00Z"),
+                sentry("SENTRYCONFIRM0001", "SentryModeStateAware", "2026-09-08T10:00:05Z"),
+                sentry("SENTRYCONFIRM0001", "SentryModeStateArmed", "2026-09-08T10:00:10Z"),
+            ]})
+            assert alerts == [], "a five-second blip should not have raised anything"
+
+            # Someone actually at the car: Aware holds for 25 seconds.
+            client.post("/api/telemetry?key=cronkey", json={"records": [
+                sentry("SENTRYCONFIRM0002", "SentryModeStateArmed", "2026-09-08T10:00:00Z"),
+                sentry("SENTRYCONFIRM0002", "SentryModeStateAware", "2026-09-08T10:00:05Z"),
+                sentry("SENTRYCONFIRM0002", "SentryModeStateAware", "2026-09-08T10:00:15Z"),
+                sentry("SENTRYCONFIRM0002", "SentryModeStateAware", "2026-09-08T10:00:30Z"),
+                sentry("SENTRYCONFIRM0002", "SentryModeStateAware", "2026-09-08T10:00:45Z"),
+            ]})
+            assert [a[0] for a in alerts] == ["Sentry"], alerts
+            assert "moved near the car" in alerts[0][1]
+
+            # Panic must never wait for confirmation, even at the same setting.
+            client.post("/api/telemetry?key=cronkey", json={"records": [
+                sentry("SENTRYCONFIRM0003", "SentryModeStateArmed", "2026-09-08T10:00:00Z"),
+                sentry("SENTRYCONFIRM0003", "SentryModeStatePanic", "2026-09-08T10:00:05Z"),
+            ]})
+            assert alerts[-1][0] == "Sentry: alarm", alerts
+    finally:
+        settings.sync_key = old_sk
+        settings.sentry_aware_confirm_sec = old_confirm
 
 
 def test_push_test_lives_on_telegram_alone():
@@ -6634,7 +6698,10 @@ def test_sentry_alert_says_what_actually_happened(monkeypatch):
 
     settings = get_settings()
     old_sk = settings.sync_key
+    old_confirm = settings.sentry_aware_confirm_sec
     settings.sync_key = "cronkey"
+    # About the message's wording, not how long Aware has to hold first.
+    settings.sentry_aware_confirm_sec = 0
     alerts: list[tuple] = []
     monkeypatch.setattr(routes_mod.notifications, "notify",
                         lambda s, title, body, tag=None: alerts.append((title, body, tag)))
@@ -6686,6 +6753,7 @@ def test_sentry_alert_says_what_actually_happened(monkeypatch):
         assert "OPEN: driver door" in body and "UNLOCKED" in body
     finally:
         settings.sync_key = old_sk
+        settings.sentry_aware_confirm_sec = old_confirm
 
 
 def test_windows_are_read_so_the_intrusion_check_can_see_them():
@@ -6781,6 +6849,9 @@ def test_sentry_alert_reports_a_window(monkeypatch):
     settings = get_settings()
     old_sk = settings.sync_key
     settings.sync_key = "cronkey"
+    # About window reporting, not how long Aware has to hold first.
+    old_confirm = settings.sentry_aware_confirm_sec
+    settings.sentry_aware_confirm_sec = 0
     alerts: list[tuple] = []
     monkeypatch.setattr(routes_mod.notifications, "notify",
                         lambda s, title, body, tag=None: alerts.append((title, body, tag)))
@@ -6808,6 +6879,7 @@ def test_sentry_alert_reports_a_window(monkeypatch):
         assert "window" not in body.lower()
     finally:
         settings.sync_key = old_sk
+        settings.sentry_aware_confirm_sec = old_confirm
 
 
 def test_waiting_in_the_seat_does_not_end_the_journey():
