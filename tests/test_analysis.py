@@ -3346,6 +3346,37 @@ def test_the_parked_share_is_a_measured_sum_and_the_three_states_add_up():
     assert got["sentry_on"]["pct"] < residual_se_pct
 
 
+def test_parked_share_anchor_measures_gap_before_first_drive():
+    """The same fix vampire_drain() already had, for the same reason: without
+    an anchor, the gap before drives[0] has nothing earlier in the list to
+    pair it with, so a since-charge window silently dropped the overnight
+    stretch right after the charge — often the single longest parked gap of
+    all — while the Vampire Drain card (already anchored) counted it. The two
+    cards then disagreed by exactly that gap's worth, for no reason a reader
+    could see. Passing anchor=(charge_end_time, charge_end_soc) fixes it the
+    same way it fixes vampire_drain()."""
+    from datetime import timedelta
+
+    cap = 68.6
+    drives = _chain([("Home", 90.0, 88.0), ("Home", 85.0, 83.0)], gap_hours=5.0)
+
+    # No anchor: only the 5h gap between the two drives is visible.
+    no_anchor = driving_analysis.parked_share(drives, [], cap, None)
+    assert no_anchor["total"]["gaps"] == 1
+    assert no_anchor["total"]["pct"] == pytest.approx(3.0)  # 88 -> 85
+
+    # With the charge's own end as an anchor, the 8h gap before drives[0]
+    # (95% at the charge, 90% at the first drive's start — 5 points) is now
+    # measured too, on top of the gap already seen.
+    charge_end = drives[0].start_time - timedelta(hours=8)
+    anchored = driving_analysis.parked_share(
+        drives, [], cap, None, anchor=(charge_end, 95.0))
+    assert anchored["total"]["gaps"] == 2
+    assert anchored["total"]["hours"] == pytest.approx(8.0 + 5.0)
+    assert anchored["total"]["pct"] == pytest.approx(5.0 + 3.0)  # anchor + the original gap
+    assert anchored["unknown"]["gaps"] == 2  # no Sentry readings given — both land as unknown
+
+
 def test_a_short_park_reports_its_percent_but_not_a_rate():
     """Straight off the screen: SE read "0.14% of the battery over 0 h in 1
     park" and 0.870 kW — four times what a parked car draws with Sentry armed.

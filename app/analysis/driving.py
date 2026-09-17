@@ -791,7 +791,8 @@ def window_accounting(drives: list[Any], charges: list[Any] | None,
 
 
 def parked_share(drives: list[Any], charges: list[Any] | None,
-                 capacity_kwh: float, readings: list[Any]) -> dict[str, Any]:
+                 capacity_kwh: float, readings: list[Any],
+                 anchor: tuple[datetime, float] | None = None) -> dict[str, Any]:
     """How much battery the window's parking actually ate, split by Sentry state.
 
     The question the codes were invented to answer, and it is a SUM rather than
@@ -816,8 +817,21 @@ def parked_share(drives: list[Any], charges: list[Any] | None,
         PK = ID + SE + unknown
 
     exactly, as a sum of measurements, with nothing standing in for anything.
+
+    ``anchor``, if given, is ``(end_time, end_soc)`` for a boundary *before*
+    the first drive — the same shape vampire_drain() takes, for the same
+    reason. Without it, the parked stretch before the window's first drive is
+    invisible to this function, because the loop below only ever looks
+    BETWEEN two drives it already has. For a since-charge window that gap is
+    typically the overnight stretch right after the charge itself — often the
+    single longest one in the window — and vampire_drain() has been receiving
+    an anchor for it since the two cards' windows were aligned; this function
+    was not, and a reader comparing the two still saw them disagree by
+    whatever that one gap was worth.
     """
     ordered = sorted(drives, key=lambda d: d.start_time)
+    boundary = SimpleNamespace(end_time=anchor[0], end_soc=anchor[1]) if anchor else None
+    chain = ([boundary] if boundary else []) + ordered
     index = _sentry_index(readings) if readings else None
     charge_starts = sorted(c.start_time for c in (charges or []))
     states = ("sentry_off", "sentry_on", "unknown")
@@ -826,7 +840,7 @@ def parked_share(drives: list[Any], charges: list[Any] | None,
     gaps = {k: 0 for k in states}
     unread: list[dict[str, Any]] = []
 
-    for a, b in zip(ordered, ordered[1:]):
+    for a, b in zip(chain, chain[1:]):
         hours = (b.start_time - a.end_time).total_seconds() / 3600.0
         if hours < PARKED_MIN_GAP_HOURS:
             continue

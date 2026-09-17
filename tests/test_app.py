@@ -1335,6 +1335,87 @@ def test_since_charge_battery_used_anchors_to_actual_soc_not_bottom_up_estimate(
         settings.battery_capacity_kwh = old_cap
 
 
+def test_driving_matrix_pk_matches_vampire_drain_for_the_same_since_charge_window():
+    """Reported live: the Vampire Drain card and the driving matrix's PK row
+    disagreed by "some minor gap" even after their windows were aligned
+    (commit 9a92329). Cause: vampire_drain() gets an anchor at the charge's
+    own end so the overnight stretch before the window's first drive isn't
+    invisible to it; parked_share(), which the matrix's PK/ID/SE rows are
+    measured from, did not, so that one gap was counted on one card and not
+    the other. Built so that gap is the ONLY nonzero one in the window —
+    every drive-to-drive gap has zero measured SoC drop, exactly like
+    test_since_charge_battery_used_anchors_..._estimate above — so PK's kwh
+    must come out equal to vampire_kwh, to the kWh, once both are anchored
+    the same way."""
+    settings = get_settings()
+    old_pc, old_cap = settings.app_passcode, settings.battery_capacity_kwh
+    settings.app_passcode = ""
+    settings.battery_capacity_kwh = 70.0
+    try:
+        with TestClient(app) as client:  # startup seeds demo data
+            from app.database import SessionLocal
+            from app.models import BatteryReading, Charge, Drive, Vehicle
+
+            with SessionLocal() as s:
+                v = Vehicle(vin="TESTVIN-PKMATCH", name="Test", model="Model 3")
+                s.add(v)
+                s.commit()
+                s.add(Charge(
+                    vehicle_id=v.id,
+                    start_time=datetime(2026, 7, 1, 19, 30), end_time=datetime(2026, 7, 1, 20, 0),
+                    duration_min=30, start_soc=80, end_soc=100, energy_added_kwh=14.0,
+                    charge_type="AC", max_power_kw=7, location="Home", cost=12.6,
+                ))
+                # A 14h overnight gap between the charge's end (100%) and the
+                # first drive since (97%) — 3 points, the anchor gap. Every
+                # later gap is back-to-back with zero measured drop, same as
+                # the ground-truth test above, so the anchor is the window's
+                # only nonzero parked measurement.
+                for start, end, ssoc, esoc in [
+                    (datetime(2026, 7, 2, 10, 0), datetime(2026, 7, 2, 10, 10), 97, 95),
+                    (datetime(2026, 7, 2, 10, 20), datetime(2026, 7, 2, 10, 30), 95, 93),
+                    (datetime(2026, 7, 2, 10, 40), datetime(2026, 7, 2, 10, 50), 93, 91),
+                ]:
+                    s.add(Drive(
+                        vehicle_id=v.id, start_time=start, end_time=end,
+                        distance_km=5, duration_min=10, start_soc=ssoc, end_soc=esoc,
+                        energy_used_kwh=0.5, avg_speed_kmh=30, max_speed_kmh=50, outside_temp_c=28,
+                    ))
+                s.add(BatteryReading(
+                    vehicle_id=v.id, ts=datetime(2026, 7, 2, 10, 55),
+                    soc=91, range_km=300.0, odo_km=1000.0,
+                ))
+                s.commit()
+
+            client.post("/api/active-vehicle", json={"vin": "TESTVIN-PKMATCH"})
+            try:
+                bal = client.get("/api/summary?days=365&since_charge=true").json()["battery_balance"]
+                # Ground truth: 100% -> 91% = 9%; 6 of that is the three
+                # trips (2 points each), leaving exactly the anchor's 3.
+                assert bal["used_pct"] == 9.0
+                assert bal["vampire_kwh"] == round(3.0 / 100.0 * 70.0, 1)  # 2.1
+
+                matrix = client.get(
+                    "/api/driving-matrix?days=365&since_charge=true").json()
+                pk = {row["code"]: row for row in matrix["parked"]}["PK"]
+                # The figure this bug report was actually about: PK's own
+                # kWh, now anchored the same way, matches the card above it
+                # exactly rather than missing the one gap that mattered.
+                assert pk["kwh"] == bal["vampire_kwh"]
+                assert pk["pct"] == pytest.approx(3.0)
+            finally:
+                client.post("/api/active-vehicle", json={"vin": "DEMO0SAMPLE0000001"})
+                with SessionLocal() as s:
+                    s.query(Drive).filter(Drive.vehicle_id == v.id).delete()
+                    s.query(Charge).filter(Charge.vehicle_id == v.id).delete()
+                    s.query(BatteryReading).filter(BatteryReading.vehicle_id == v.id).delete()
+                    s.query(Vehicle).filter(Vehicle.id == v.id).delete()
+                    s.commit()
+    finally:
+        settings.app_passcode = old_pc
+        settings.battery_capacity_kwh = old_cap
+
+
 def test_since_charge_driving_cost_anchors_to_ground_truth_not_bottom_up_estimate():
     """Reported live: Driving Cost showed RM 0.246/km while Charging Cost
     showed RM 23.67/100km (RM 0.2367/km) from the very same charge — Driving

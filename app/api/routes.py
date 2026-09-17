@@ -8679,11 +8679,16 @@ def driving_matrix(days: int = Query(30, ge=1, le=730),
     # recent than the streamed history narrows the report to it, and one older
     # loses to the cutover, because there is no matrix to draw from trips that
     # do not exist.
+    # The full row, not just its end_time — parked_share()'s anchor below
+    # needs end_soc too, to measure the gap before the window's first drive
+    # rather than leave it invisible.
+    last_charge = None
     if since_charge:
-        charge_end = session.scalar(
-            select(func.max(Charge.end_time)).where(Charge.vehicle_id == vehicle.id))
-        if charge_end:
-            bounds.append((charge_end, "charge"))
+        last_charge = session.scalar(
+            select(Charge).where(Charge.vehicle_id == vehicle.id)
+            .order_by(Charge.end_time.desc()))
+        if last_charge:
+            bounds.append((last_charge.end_time, "charge"))
     since, limited_by = max(bounds, key=lambda pair: pair[0])
     drives, charges = _window(session, vehicle.id, days, since=since)
     # The yardstick every row is measured against: what this pack is worth at
@@ -8782,8 +8787,23 @@ def driving_matrix(days: int = Query(30, ge=1, le=730),
     # refuse — and the split is attributed gap by gap rather than by
     # subtracting one rate from another, which is what let unclassified parks
     # inflate SE. share["unknown"] is now a row of its own instead.
+    #
+    # Anchored at the charge's own end when the window genuinely starts there
+    # (limited_by == "charge") — otherwise the parked stretch before this
+    # window's first drive, often the single longest gap of all, is invisible
+    # to this sum. The Vampire Drain card's own figure already gets this
+    # anchor (see vampire_anchor in /api/summary), so leaving it out here was
+    # the last place these two still disagreed after their windows were
+    # aligned. Guarded on limited_by rather than since_charge alone: a
+    # cutover or drawn boundary newer than the charge means the window does
+    # not actually start at the charge, and anchoring to it anyway would
+    # invent a gap this window was never in.
+    parked_anchor = (
+        (last_charge.end_time, last_charge.end_soc)
+        if limited_by == "charge" and last_charge is not None else None
+    )
     share_of = driving_analysis.parked_share(
-        list(drives), list(charges), capacity_kwh, readings)
+        list(drives), list(charges), capacity_kwh, readings, anchor=parked_anchor)
     # PK = ID + SE. Two rows, because Sentry is on or off and there is no third
     # state — a park nothing recorded is a gap in what THIS APP SAW, not a
     # category of park, and giving it a row of its own said the opposite.
