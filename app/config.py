@@ -217,6 +217,20 @@ class Settings(BaseSettings):
     # opening itself, which the stream reports as DoorState and which happens
     # whether or not Sentry ever noticed.
     intrusion_notify: bool = False
+    # How long an opening is held before the intrusion alert fires — not a
+    # toggle, a wait. Fleet Telemetry has no field for who is at the car: the
+    # stream has no equivalent of vehicle_data's is_user_present, so an
+    # opening from the owner's own phone key and an opening from anyone else
+    # arrive looking identical, and reported as "kind of redundant" the one
+    # time it fired on a legitimate unlock. What tells them apart is not who
+    # opened it but what happens next: the owner who unlocked to get in
+    # drives off (or plugs in) within this window; someone who should not be
+    # there does not. So the alert is held rather than announced, and fires
+    # only if intrusion_confirm_sec passes with no trip or charge started —
+    # in_session already exists for exactly that check. A door shut again
+    # with nothing driven still counts as nothing following, and still
+    # fires: that is the more suspicious pattern, not a safer one.
+    intrusion_confirm_sec: float = 90.0
     # How long SentryMode has to hold Aware before the trigger alert fires —
     # not a toggle, a wait. Aware is the car noticing something NEAR it, and
     # the car's own definition of "near" already covers a person walking

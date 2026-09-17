@@ -1186,9 +1186,14 @@ def snapshot_from_telemetry(fields: dict[str, Any], ts: float) -> dict[str, Any]
         "sentry_state": sentry or None,
         "doors_open": (any(bool(v) for v in doors.values())
                        if isinstance(doors, dict) and doors else None),
-        # Not streamed by the configured field set. See the docstring: None is
-        # "unknown", and the parked-drain code relies on that not being False.
-        "user_present": False,
+        # Not streamed by the configured field set — Fleet Telemetry has no
+        # equivalent of vehicle_data's is_user_present at all. None, not
+        # False: the intrusion check is this field's only consumer, and
+        # "unknown" is not the same claim as "definitely not there," even
+        # though today's check treats them alike (see
+        # settings.intrusion_confirm_sec for what actually tells them
+        # apart on this path).
+        "user_present": None,
         "car_wash_mode": False,
         # Read at last. The app has alerted on a car opened while parked since
         # long before telemetry existed, and that check covers windows as well

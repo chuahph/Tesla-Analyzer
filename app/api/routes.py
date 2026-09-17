@@ -3229,12 +3229,19 @@ def _evaluate_alerts(session: Session, vehicle, vin: str, snap: dict,
     # than borrowing "Sentry alert", which would overstate it.
     if settings.intrusion_notify:
         intrusion_key = state.scoped(state.INTRUSION_NOTIFIED_KEY, vin)
+        pending_key = state.scoped(state.INTRUSION_PENDING_KEY, vin)
         # Armed by Sentry OR simply by being locked — it's the locked
         # state that makes an opening anomalous, not Sentry, and requiring
         # Sentry meant a car parked locked without it was silently
         # unwatched. Widening costs nothing: both flags are already in the
         # payload, and the trip/charge/occupant guards still keep ordinary
         # use quiet.
+        #
+        # user_present cannot help here: Fleet Telemetry has no equivalent
+        # of vehicle_data's is_user_present, so on the streamed path it is
+        # always false and cannot tell the owner's own phone key from
+        # anyone else's at the moment of opening. See intrusion_confirm_sec
+        # for what does — held below rather than announced immediately.
         armed = (
             (bool(sentry_now) or bool(snap.get("locked")))
             and not in_session
@@ -3243,7 +3250,9 @@ def _evaluate_alerts(session: Session, vehicle, vin: str, snap: dict,
         opened_doors = bool(snap.get("doors_open"))
         opened_windows = bool(snap.get("windows_open"))
         breached = armed and (opened_doors or opened_windows)
-        if breached and state.get(session, intrusion_key) != "1":
+        ts = float(snap.get("ts") or 0.0)
+
+        def _fire(opened_doors, sentry_now, locked, soc, event_ts):
             what = "A door or trunk" if opened_doors else "A window"
             notifications.notify(
                 session, "Car opened while parked",
@@ -3258,17 +3267,57 @@ def _evaluate_alerts(session: Session, vehicle, vin: str, snap: dict,
             # SecurityEvent.
             session.add(SecurityEvent(
                 vehicle_id=vehicle.id,
-                ts=sync_mod._dt(snap["ts"]),
+                ts=sync_mod._dt(event_ts),
                 kind="door" if opened_doors else "window",
                 sentry_mode=sentry_now,
-                locked=snap.get("locked"),
-                soc=snap.get("soc"),
+                locked=locked,
+                soc=soc,
             ))
             state.put(session, intrusion_key, "1")
-        elif not breached and state.get(session, intrusion_key) == "1":
-            # Everything shut again (or the car was driven/occupied) — arm
-            # the alert for the next separate opening.
-            state.put(session, intrusion_key, "")
+
+        if settings.intrusion_confirm_sec <= 0:
+            # The setting this replaces: fire on the opening itself, nothing
+            # held — matches every test and deployment written before the
+            # confirm window existed.
+            if breached and state.get(session, intrusion_key) != "1":
+                _fire(opened_doors, sentry_now, snap.get("locked"), snap.get("soc"), snap["ts"])
+            elif not breached and state.get(session, intrusion_key) == "1":
+                state.put(session, intrusion_key, "")
+        else:
+            try:
+                pending = _json.loads(state.get(session, pending_key) or "null")
+            except ValueError:
+                pending = None
+
+            if pending:
+                if in_session:
+                    # Drove off, or plugged in, before the window closed —
+                    # the opening that started this was the owner's own.
+                    # Quiet.
+                    state.put(session, pending_key, "")
+                    pending = None
+                elif ts and ts - float(pending.get("since") or ts) >= settings.intrusion_confirm_sec:
+                    # Nothing followed. Alert now, with the facts as they
+                    # were AT the opening, not whatever is true this tick.
+                    if state.get(session, intrusion_key) != "1":
+                        _fire(pending.get("opened_doors"), pending.get("sentry_now"),
+                             pending.get("locked"), pending.get("soc"),
+                             pending.get("ts") or ts)
+                    state.put(session, pending_key, "")
+                    pending = None
+                # Otherwise still waiting — neither resolved this tick.
+
+            if breached and pending is None and state.get(session, intrusion_key) != "1":
+                # A fresh opening. Start the clock rather than announce it.
+                state.put(session, pending_key, _json.dumps({
+                    "since": ts, "ts": ts, "opened_doors": opened_doors,
+                    "sentry_now": sentry_now, "locked": snap.get("locked"),
+                    "soc": snap.get("soc"),
+                }))
+            elif not breached and pending is None and state.get(session, intrusion_key) == "1":
+                # Everything shut again (or the car was driven/occupied) —
+                # arm the alert for the next separate opening.
+                state.put(session, intrusion_key, "")
 
 
 def _process_vehicle(session: Session, data: dict, v_summary: dict, settings) -> tuple:

@@ -2350,6 +2350,9 @@ def test_intrusion_alert_fires_once_per_opening(monkeypatch):
         tariff_peak_end_hour=22, tariff_weekend_offpeak=True,
         battery_capacity_kwh=0.0, battery_new_range_km=0.0, low_soc_notify_pct=0.0,
         sentry_drain_notify_pct=0.0, intrusion_notify=True, drive_min_km=0.5,
+        # About the fire-once-per-opening/re-arm logic, not the confirm
+        # window — 0 keeps every tick's same-call firing this test asserts.
+        intrusion_confirm_sec=0,
     )
 
     def vdata(ts, sentry, door_open, user_present=False, locked=True):
@@ -2432,6 +2435,98 @@ def test_intrusion_alert_fires_once_per_opening(monkeypatch):
             if v:
                 s.query(_Drive).filter(_Drive.vehicle_id == v.id).delete()
                 s.query(_Sec).filter(_Sec.vehicle_id == v.id).delete()
+                s.query(BatteryReading).filter(BatteryReading.vehicle_id == v.id).delete()
+                s.delete(v)
+                s.commit()
+
+
+def test_intrusion_alert_waits_to_see_whether_you_drove_off(monkeypatch):
+    """A door opened with a valid phone key looks identical, on the stream,
+    to a stranger's — Fleet Telemetry has no presence field to tell them
+    apart. What tells them apart is what happens next: the owner drives off
+    within intrusion_confirm_sec; nobody else does. Confirmed rather than
+    announced on the opening itself — reported as "kind of redundant" when
+    it fired on an ordinary unlock."""
+    from types import SimpleNamespace
+
+    from app.api.routes import _process_vehicle
+    from app.database import SessionLocal
+    from app.models import BatteryReading, SecurityEvent, Vehicle
+
+    settings = SimpleNamespace(
+        energy_price_per_kwh=0.90, energy_price_ac_kwh=0.0, energy_price_dc_kwh=0.0,
+        energy_price_peak_kwh=0.0, energy_price_offpeak_kwh=0.0, tariff_peak_start_hour=8,
+        tariff_peak_end_hour=22, tariff_weekend_offpeak=True,
+        battery_capacity_kwh=0.0, battery_new_range_km=0.0, low_soc_notify_pct=0.0,
+        sentry_drain_notify_pct=0.0, intrusion_notify=True, drive_min_km=0.5,
+        intrusion_confirm_sec=60.0,
+    )
+
+    vin = "TESTVIN-INTRUDE-CONFIRM"
+
+    def vdata(ts, sentry, door_open, shift="P", speed=0, locked=True):
+        return {
+            "vin": vin, "display_name": "Test", "vehicle_config": {},
+            "vehicle_state": {"odometer": 2000.0, "is_user_present": False,
+                              "locked": locked, "sentry_mode": sentry,
+                              "df": 1 if door_open else 0, "dr": 0, "pf": 0, "pr": 0,
+                              "ft": 0, "rt": 0},
+            "drive_state": {"timestamp": ts * 1000, "shift_state": shift, "speed": speed,
+                            "latitude": None, "longitude": None},
+            "charge_state": {"battery_level": 80, "battery_range": 200.0,
+                             "charging_state": "Disconnected", "charger_power": 0.0,
+                             "charge_energy_added": 0.0},
+            "climate_state": {"outside_temp": 25.0},
+        }
+
+    pushes = []
+    monkeypatch.setattr("app.api.routes.notifications.notify",
+                        lambda session, title, body, tag=None: pushes.append((title, tag)))
+
+    def fired():
+        return len([p for p in pushes if p[1] == "intrusion"])
+
+    t = 1_760_700_000
+    try:
+        with SessionLocal() as s:
+            s.add(Vehicle(vin=vin, name="Test", model="Model 3"))
+            s.commit()
+
+            def tick(dt, sentry, door_open, shift="P", speed=0, locked=True):
+                _process_vehicle(s, vdata(t + dt, sentry, door_open, shift, speed, locked),
+                                 {"vin": vin}, settings)
+                s.commit()
+
+            # Own key: door opens, then driven off inside the window. Silent.
+            tick(0, True, False)
+            tick(60, True, True)                       # unlocked and opened
+            assert fired() == 0
+            tick(75, True, True, shift="D", speed=25)  # drove off 15s later
+            assert fired() == 0, "driving off inside the window must stay silent"
+
+            # A separate opening, with nothing following it out.
+            tick(300, True, False)                     # settled, parked, shut
+            tick(360, True, True)                      # opens again — fresh pending
+            assert fired() == 0, "must not fire on the opening itself"
+            tick(390, True, True)                       # +30s, inside the window
+            assert fired() == 0, "must not fire before the window elapses"
+            tick(430, False, True)                      # +70s, window elapsed
+            assert fired() == 1, "must fire once nothing has followed the window out"
+
+            v = s.query(Vehicle).filter(Vehicle.vin == vin).first()
+            rows = s.query(SecurityEvent).filter(
+                SecurityEvent.vehicle_id == v.id).order_by(SecurityEvent.ts).all()
+            assert len(rows) == 1
+            # Persisted with the facts AS THEY WERE at the opening — Sentry
+            # was still on then, even though the firing tick reports it off.
+            assert rows[0].sentry_mode is True
+    finally:
+        with SessionLocal() as s:
+            from app.models import Drive as _Drive
+            v = s.query(Vehicle).filter(Vehicle.vin == vin).first()
+            if v:
+                s.query(_Drive).filter(_Drive.vehicle_id == v.id).delete()
+                s.query(SecurityEvent).filter(SecurityEvent.vehicle_id == v.id).delete()
                 s.query(BatteryReading).filter(BatteryReading.vehicle_id == v.id).delete()
                 s.delete(v)
                 s.commit()
@@ -8372,10 +8467,13 @@ def test_telemetry_raises_the_parked_alerts_and_does_not_double_send():
 
     settings = get_settings()
     saved = (settings.app_passcode, settings.low_soc_notify_pct,
-             settings.intrusion_notify)
+             settings.intrusion_notify, settings.intrusion_confirm_sec)
     settings.app_passcode = ""
     settings.low_soc_notify_pct = 20.0
     settings.intrusion_notify = True
+    # About cross-path state sharing and SecurityEvent persistence, not the
+    # confirm window — single batch, nothing to drive off before.
+    settings.intrusion_confirm_sec = 0
     vin = "TESTVIN-TELEALERT"
     sent = []
 
@@ -8433,7 +8531,7 @@ def test_telemetry_raises_the_parked_alerts_and_does_not_double_send():
                 assert status["soc"] == 17.0
     finally:
         (settings.app_passcode, settings.low_soc_notify_pct,
-         settings.intrusion_notify) = saved
+         settings.intrusion_notify, settings.intrusion_confirm_sec) = saved
 
 
 def test_status_staleness_is_judged_against_the_source_own_cadence():

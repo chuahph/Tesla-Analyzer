@@ -204,6 +204,11 @@ SENTRY_AWARE_PENDING_KEY = "sentry_aware_pending"
 # opening, cleared as soon as everything is shut again (or the car is driven),
 # so each separate opening alerts once rather than every sync tick.
 INTRUSION_NOTIFIED_KEY = "intrusion_notified"
+# Parked-intrusion CONFIRMATION, per VIN: JSON {since, ts, opened_doors,
+# sentry_now, locked, soc} for one opening awaiting its intrusion_confirm_sec
+# window — the facts as they were AT the opening, not whatever is true when
+# the window closes and the alert actually fires. See _evaluate_alerts.
+INTRUSION_PENDING_KEY = "intrusion_pending"
 
 # Charging price preferences (see pricing_prefs.py) — user-editable RM/kWh
 # rates per source × charger type, saved from the dashboard's Rates page
