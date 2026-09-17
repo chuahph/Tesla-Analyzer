@@ -910,10 +910,10 @@ function renderKpis(d) {
         ? `${bal.vampire_gaps} parked gap${bal.vampire_gaps === 1 ? "" : "s"} · ${fmt(bal.vampire_hours, 0)} h parked`
         : (bal.vampire_kwh > 0 ? "no single gap 1h+ — several shorter stops" : "no qualifying parked gap (charge-free) in this window");
       cards.push(vampirePct != null
-        ? kpiCard(`Vampire Drain${vampireInfoBtn}`, fmt(vampirePct, 1, true) + "%",
+        ? kpiCard(`Idling Drain${vampireInfoBtn}`, fmt(vampirePct, 1, true) + "%",
             `${fmt(bal.vampire_kwh, 1)} kWh of ${fmt(bal.full_charge_kwh, 1)} kWh full pack · ${gapInfo}`,
             "amber")
-        : kpiCard(`Vampire Drain${vampireInfoBtn}`, `${fmt(bal.vampire_kwh, 1)} kWh`, gapInfo, "amber"));
+        : kpiCard(`Idling Drain${vampireInfoBtn}`, `${fmt(bal.vampire_kwh, 1)} kWh`, gapInfo, "amber"));
     }
     if (bal) {
       const v = d.vehicle || {};
