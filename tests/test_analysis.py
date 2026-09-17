@@ -2666,107 +2666,6 @@ def test_the_condition_matrix_sorts_on_constancy_not_on_idle_time():
     assert sum(r["trips"] for r in out["modes"]) == 1
 
 
-def test_condition_matrix_keeps_a_near_zero_distance_trip_out_of_the_average():
-    """Reported live: a "Slow City" row at 3511 Wh/km over 4 km, another at
-    2515 over 2 km — read as the sum-instead-of-average bug it looks like,
-    but the arithmetic (kwh/km, distance-weighted) was already correct. The
-    real fault: has_valid_energy only floors Wh/km, so a whole trip that is
-    almost entirely idle — climate, Sentry, a long stop mid-journey — with
-    only a sliver of real distance sails through with a real kWh over a
-    near-zero km, and its ratio in the thousands drags the whole mode's
-    weighted average with it, same as one huge-Wh/km trip would drag any
-    average.
-
-    MAX_PLAUSIBLE_WH_PER_KM (600) is the ceiling already trusted elsewhere in
-    this codebase for exactly this shape of fault (sync.py's departure-
-    recovery guard) — reused here rather than invented fresh."""
-    from app.analysis.driving import condition_matrix
-
-    class D:
-        def __init__(self, km, mins, idle, mx, kwh):
-            self.distance_km = km; self.duration_min = mins
-            self.idle_min = idle; self.max_speed_kmh = mx
-            self.energy_used_kwh = kwh; self.idle_tracked = True
-            self.energy_estimated = False
-            self.wh_per_km = round(kwh * 1000.0 / km) if km else 0
-            self.outside_temp_c = 31.0
-
-    # An ordinary Slow City trip: 149 Wh/km, comfortably plausible.
-    sc = D(20.0, 40.0, 2.0, 70.0, 20.0 * 0.149)
-    # A whole TRIP that is almost entirely idle: 0.3 km, but 1.2 kWh of real
-    # climate/Sentry draw over the stop — 4000 Wh/km, an order of magnitude
-    # past the ceiling. No speed_profile, so mode_split hands this back as
-    # one slice covering the whole trip.
-    idled = D(0.3, 25.0, 20.0, 15.0, 1.2)
-    assert idled.wh_per_km > 600
-
-    out = condition_matrix([sc, idled], capacity_kwh=68.6)
-    by = {r["code"]: r for r in out["modes"]}
-    # Only the ordinary trip reached a row — its own figure, untouched.
-    assert set(by) == {"SC"}
-    assert by["SC"]["trips"] == 1
-    assert by["SC"]["wh_per_km"] == pytest.approx(149.0, abs=0.5)
-    # The idled trip's real energy is still accounted for, just not as a
-    # rate: same bucket (and the same word, "implausible") the table already
-    # uses for a trip whose energy read too low to trust. Not counted as a
-    # no_energy TRIP, though — that count is for trips excluded wholesale,
-    # and this one has no valid slice to have kept it out of in the first
-    # place (see the profile-trip case below for the distinction that
-    # matters: a trip excluded per-SLICE still keeps its other slices).
-    assert out["no_energy_trips"] == 0
-    assert out["no_energy_kwh"] == pytest.approx(1.2, abs=0.01)
-
-
-def test_condition_matrix_keeps_an_implausible_slice_out_even_when_the_whole_trip_looks_fine():
-    """The case the fix above didn't cover, and that kept reporting live
-    after it shipped: a trip whose OWN overall Wh/km is perfectly ordinary
-    can still contain one stretch — a crawl to a dead stop in traffic,
-    inside an otherwise normal drive — where the car covered almost no
-    ground while climate/idle power kept drawing. mode_split correctly
-    hands that stretch to its own mode as a real, tiny-km/real-kWh slice,
-    and it is the SLICE, not the trip, whose implied Wh/km lands in the
-    thousands. A whole-trip-only ceiling (has_valid_energy, or a check on
-    d.wh_per_km before mode_split runs) never sees this, because the
-    trip's blended average — 4.0 kWh over 20.2 km, ~198 Wh/km — is fine.
-    """
-    from app.analysis.driving import condition_matrix
-
-    class D:
-        def __init__(self, km, mins, mx, kwh, profile):
-            self.distance_km = km; self.duration_min = mins
-            self.idle_min = 5.0; self.max_speed_kmh = mx
-            self.energy_used_kwh = kwh; self.idle_tracked = True
-            self.energy_estimated = False
-            self.wh_per_km = round(kwh * 1000.0 / km)
-            self.outside_temp_c = 31.0
-            self.speed_profile = profile
-
-    # 20 km at highway speed (3.0 kWh, 150 Wh/km — ordinary), then 0.2 km
-    # creeping to a stop over 5 minutes at 1.0 kWh — 5000 Wh/km for that
-    # stretch alone. Bands sum exactly to the trip's own totals, so
-    # mode_split's rescaling is a no-op here and cannot be the explanation.
-    trip = D(20.2, 35.0, 110.0, 4.0, {
-        "100": {"km": 20.0, "min": 30.0, "kwh": 3.0},
-        "0": {"km": 0.2, "min": 5.0, "kwh": 1.0},
-    })
-    assert trip.wh_per_km < 600  # the whole trip looks entirely ordinary
-
-    out = condition_matrix([trip], capacity_kwh=68.6)
-    # No row anywhere claims an implausible rate.
-    for row in out["modes"]:
-        assert row["wh_per_km"] is None or row["wh_per_km"] <= 600, row
-    # The highway slice still reached a row, at its own real 150 Wh/km — the
-    # trip was not excluded wholesale over one bad stretch inside it.
-    ch = next(r for r in out["modes"] if r["code"] == "CH")
-    assert ch["wh_per_km"] == pytest.approx(150.0, abs=0.5)
-    assert ch["km"] == pytest.approx(20.0, abs=0.05)
-    # And the creeping slice's real energy is still in the books, just not
-    # claiming a rate for whichever city mode it would otherwise have hit.
-    assert out["no_energy_kwh"] == pytest.approx(1.0, abs=0.01)
-    total_kwh = sum(r["kwh"] for r in out["modes"]) + out["no_energy_kwh"]
-    assert total_kwh == pytest.approx(4.0, abs=0.01)
-
-
 def test_the_matrix_splits_into_weekdays_and_weekends():
     """Asked for as overall or split. Computed together because the three
     share every threshold and baseline, and computing them apart is how two of
@@ -3749,13 +3648,18 @@ def test_a_mixed_trip_is_split_across_modes_by_measured_distance():
     from types import SimpleNamespace
 
     # 28 km in 22.4 min: 20 km up at 140 (8.6 min) and 8 km of town spread
-    # across the bands a town stretch really uses, stops included. Energy
-    # banded as it was drawn — the fast part costs far more per kilometre,
-    # which is the point.
+    # across the bands a town stretch really uses. Energy banded as it was
+    # drawn — the fast part costs far more per kilometre, which is the point.
+    #
+    # The town's stops are inside its slowest band rather than in a band of
+    # their own: banding is anchored to the odometer (see
+    # sync.advance_shadow), so a stop's seconds and its kWh join the stretch
+    # that follows it. A band holding energy against no distance at all is
+    # the signature of the pre-anchor accumulator, and speed_profile_of now
+    # refuses a profile carrying one.
     profile = {
         "140": {"km": 20.0, "min": 8.6, "kwh": 4.20},
-        "0": {"km": 0.0, "min": 3.0, "kwh": 0.04},
-        "20": {"km": 2.0, "min": 4.8, "kwh": 0.26},
+        "20": {"km": 2.0, "min": 7.8, "kwh": 0.30},
         "40": {"km": 6.0, "min": 6.0, "kwh": 0.80},
     }
     d = SimpleNamespace(
@@ -3805,6 +3709,54 @@ def test_a_mixed_trip_is_split_across_modes_by_measured_distance():
     assert by_code["FH"]["km"] == pytest.approx(20.0, abs=0.05)
     # Both halves of 735 are counted, and nothing is double counted.
     assert sum(r["km"] for r in got["modes"]) == pytest.approx(40.0, abs=0.05)
+
+
+def test_a_profile_that_cannot_describe_a_real_drive_is_refused_at_read_time():
+    """Every profile written before the banding was anchored to the odometer
+    is wrong in the database and cannot be rebuilt — the records it came from
+    are gone. Two shapes give it away, and both are impossible for a
+    correctly built one: energy banded where the car covered no ground (the
+    intervals whose odometer had not refreshed yet), and kilometres filed
+    above the speed the trip ever reached (30 seconds of distance divided by
+    a 10-second record gap).
+
+    Refused rather than believed, so the reader falls back to the whole-trip
+    verdict — what every pre-accumulator trip already uses — instead of
+    showing "Fast Highway" at 6 Wh/km beside "Slow City" at 3511.
+    """
+    import json
+    from types import SimpleNamespace
+
+    def trip(profile, peak=90.0):
+        return SimpleNamespace(
+            id=1, start_time=_dt_at(1), end_time=_dt_at(1),
+            distance_km=20.0, duration_min=30.0, max_speed_kmh=peak,
+            energy_used_kwh=3.0, wh_per_km=150.0, idle_min=0.0,
+            idle_tracked=True, outside_temp_c=30.0, start_soc=90.0,
+            end_soc=86.0, end_location="Home",
+            speed_profile=json.dumps(profile))
+
+    # Coherent: kept, and split.
+    ok = trip({"40": {"km": 8.0, "min": 12.0, "kwh": 1.2},
+               "60": {"km": 12.0, "min": 18.0, "kwh": 1.8}})
+    assert driving_analysis.speed_profile_of(ok) is not None
+
+    # Energy stranded in a band with no distance to divide it by.
+    stranded = trip({"0": {"km": 0.0, "min": 20.0, "kwh": 2.0},
+                     "60": {"km": 20.0, "min": 10.0, "kwh": 1.0}})
+    assert driving_analysis.speed_profile_of(stranded) is None
+    assert list(driving_analysis.mode_split(stranded)) == [
+        driving_analysis.drive_mode(stranded)]
+
+    # Kilometres filed faster than the trip ever went: a car that peaked at
+    # 90 cannot have driven any of them in the 160 bucket.
+    too_fast = trip({"160": {"km": 20.0, "min": 30.0, "kwh": 3.0}}, peak=90.0)
+    assert driving_analysis.speed_profile_of(too_fast) is None
+
+    # The bucket is ten wide, so a trip peaking at 135 legitimately reaches
+    # the 130 one — that must still be believed.
+    legit = trip({"130": {"km": 20.0, "min": 30.0, "kwh": 3.0}}, peak=135.0)
+    assert driving_analysis.speed_profile_of(legit) is not None
 
 
 def test_a_streamed_trips_measured_energy_is_not_overridden_by_its_soc_drop():

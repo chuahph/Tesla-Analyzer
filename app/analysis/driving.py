@@ -2538,17 +2538,52 @@ def speed_profile_of(d: Any) -> dict[str, dict[str, float]] | None:
     exist when those trips were recorded, and nothing can reconstruct it. So
     every caller has to handle None, and the report has to show both kinds
     without either pretending to be the other.
+
+    A profile that cannot describe a real drive is treated the same way, and
+    that is not hypothetical: every profile written before the banding was
+    anchored to the odometer (see sync.advance_shadow) divided 30 seconds of
+    distance by a 10-second record gap, filing kilometres at three times the
+    speed they were driven at and stranding the energy of the intervals in
+    between in a bucket with no distance to divide it by. Those rows are
+    already in the database and cannot be rebuilt — the records they came
+    from are long gone — so they are refused here rather than left to produce
+    a "Fast Highway" row at 6 Wh/km and a "Slow City" one at 3511. Refusing
+    costs the per-band split and nothing else: the caller falls back to the
+    whole-trip verdict, which is what every pre-accumulator trip already
+    uses.
     """
     raw = getattr(d, "speed_profile", None)
     if not raw:
         return None
     if isinstance(raw, dict):
-        return raw
-    try:
-        got = _json.loads(raw)
-    except (TypeError, ValueError):
+        got = raw
+    else:
+        try:
+            got = _json.loads(raw)
+        except (TypeError, ValueError):
+            return None
+    if not isinstance(got, dict) or not got:
         return None
-    return got if isinstance(got, dict) and got else None
+    # Two things a correctly built profile cannot contain. Energy in a band
+    # the car covered no ground in is the stranded-interval half of that bug;
+    # a band whose floor is above the trip's own peak speed is the
+    # three-times-too-fast half. Ten of tolerance because the buckets are ten
+    # wide, so a trip peaking at 135 legitimately reaches the 130 bucket.
+    peak = float(getattr(d, "max_speed_kmh", 0.0) or 0.0)
+    for edge, part in got.items():
+        if not isinstance(part, dict):
+            return None
+        try:
+            km = float(part.get("km") or 0.0)
+            kwh = float(part.get("kwh") or 0.0)
+            floor = float(edge)
+        except (TypeError, ValueError):
+            return None
+        if km <= 0.0 and abs(kwh) > 0.01:
+            return None
+        if km > 0.0 and peak and floor > peak + 10.0:
+            return None
+    return got
 
 
 def drive_mode_explained(d: Any, cuts: dict[str, float] | None = None) -> dict[str, Any]:
@@ -2728,25 +2763,6 @@ def condition_matrix(drives: list[Any], capacity_kwh: float,
         if len(share) > 1:
             split_trips += 1
         for code, got_part in share.items():
-            # Per SLICE, not per trip. mode_split can hand one mode a real
-            # slice of a trip's energy against almost none of its distance —
-            # a crawl-to-a-stop inside an otherwise ordinary drive, where the
-            # car kept drawing climate/idle power while covering almost no
-            # ground during that stretch specifically. The trip's OWN overall
-            # Wh/km (has_valid_energy's whole-trip check above) stays
-            # perfectly sane; only the slice looks like an impossible rate —
-            # reported live as a "Slow City" row at 3511 Wh/km over 4 km even
-            # after a whole-trip-only ceiling shipped, because no single
-            # trip's own average was ever the problem. Same
-            # MAX_PLAUSIBLE_WH_PER_KM ceiling sync.py's departure-recovery
-            # guard already trusts for this exact shape of fault; the slice's
-            # kWh still counts (toward no_energy_kwh, same "implausible"
-            # bucket a whole bad trip already used), it just cannot claim a
-            # Wh/km for this mode.
-            part_km, part_kwh = got_part["km"], got_part["kwh"]
-            if part_km > 0 and part_kwh * 1000.0 / part_km > sync_mod.MAX_PLAUSIBLE_WH_PER_KM:
-                no_energy_kwh += part_kwh
-                continue
             slot = parts.setdefault(code, {"km": 0.0, "min": 0.0, "kwh": 0.0})
             for k in ("km", "min", "kwh"):
                 slot[k] += got_part[k]

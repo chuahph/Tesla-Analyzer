@@ -1750,14 +1750,37 @@ def advance_shadow(shadow: dict[str, Any], snap: dict[str, Any]) -> dict[str, An
             # is measured rather than apportioned from the trip total by
             # distance — which would hand highway and city the same Wh/km and
             # destroy the one distinction the matrix exists to draw.
-            odo_a, odo_b = last.get("odo_km"), snap.get("odo_km")
-            if odo_a is not None and odo_b is not None:
-                step_km = float(odo_b) - float(odo_a)
-                # Backwards or implausible: a replayed record, or the odometer
-                # rewind the composite guards against. Banding it would put
-                # negative distance somewhere.
-                if 0.0 <= step_km < 10.0:
-                    kmh = step_km / (gap / 3600.0) if gap else 0.0
+            # Bounded by two real ODOMETER readings, not by two records. The
+            # car streams Odometer every 30 seconds and VehicleSpeed and
+            # EnergyRemaining every 10, so the composite repeats the same
+            # odometer two records out of three — and measuring a step against
+            # the RECORD gap divided 30 seconds of distance by 10 seconds of
+            # clock, reading three times the true speed, while the two
+            # intervals that showed no movement banded their energy at zero
+            # km/h against no distance at all.
+            #
+            # Simulated on a steady 60 km/h, 150 Wh/km drive: every kilometre
+            # landed in the 160+ bucket at 50 Wh/km and two thirds of the
+            # energy landed in the 0 bucket with nothing to divide by. That is
+            # exactly what the matrix showed live — 114 km of "Fast Highway"
+            # at 6 Wh/km beside 4 km of "Slow City" at 3511 — on a car whose
+            # average speed for the window was 36 km/h.
+            #
+            # So the anchor carries the odometer, the clock and the energy
+            # counter from the last banded step, and a step is taken only when
+            # the odometer itself moves. The intervals in between are not
+            # discarded: their seconds and their kWh belong to the stretch the
+            # next reading completes, which is where they happened.
+            odo_now = snap.get("odo_km")
+            if odo_now is not None:
+                anchor_km = shadow.get("band_odo")
+                # Not "span": the idle-run block below owns that name, and
+                # these two measure different stretches.
+                band_span = ts - float(shadow.get("band_ts") or ts)
+                step_km = (float(odo_now) - float(anchor_km)
+                           if anchor_km is not None else None)
+                if step_km is not None and 0.0 < step_km < 10.0 and band_span > 0.0:
+                    kmh = step_km / (band_span / 3600.0)
                     # Ten-wide buckets keyed by their lower edge, topping out
                     # at 160. Fixed rather than derived from the mode
                     # thresholds, because those are tunable and this is written
@@ -1767,16 +1790,28 @@ def advance_shadow(shadow: dict[str, Any], snap: dict[str, Any]) -> dict[str, An
                     bands = shadow.setdefault("bands", {})
                     slot = bands.setdefault(band, [0.0, 0.0, 0.0])
                     slot[0] += step_km
-                    slot[1] += gap
-                    e_a, e_b = last.get("energy_kwh"), snap.get("energy_kwh")
+                    slot[1] += band_span
+                    e_a, e_b = shadow.get("band_e"), snap.get("energy_kwh")
                     if e_a is not None and e_b is not None:
                         used = float(e_a) - float(e_b)
                         # Regen makes this genuinely negative and that is real,
                         # so it is kept signed. Only a jump too large to be one
-                        # interval is dropped, which is a replay rather than a
+                        # stretch is dropped, which is a replay rather than a
                         # car.
                         if abs(used) < 5.0:
                             slot[2] += used
+                    shadow["band_odo"] = float(odo_now)
+                    shadow["band_ts"] = ts
+                    shadow["band_e"] = snap.get("energy_kwh")
+                elif step_km is None or step_km < 0.0 or step_km >= 10.0:
+                    # Nothing to measure from yet, or a rewind/replay. Start
+                    # the next step here rather than band one that never
+                    # happened.
+                    shadow["band_odo"] = float(odo_now)
+                    shadow["band_ts"] = ts
+                    shadow["band_e"] = snap.get("energy_kwh")
+                # step_km == 0: the odometer has not moved yet. The anchor is
+                # deliberately left where it is — see above.
 
             run_since = shadow.get("idle_run_since")
             if stopped and run_since is None:
@@ -1793,6 +1828,14 @@ def advance_shadow(shadow: dict[str, Any], snap: dict[str, Any]) -> dict[str, An
                 if span >= IDLE_STREAK_MIN * 60.0:
                     shadow["idle_sec"] = float(shadow.get("idle_sec") or 0.0) + span
                 shadow["idle_run_since"] = None
+        else:
+            # A blackout, or two records sharing a timestamp. The band anchor
+            # must not reach across it: the car drove somewhere in there and
+            # nothing measured how fast, so a step spanning it would band real
+            # distance at an invented speed. Start afresh on this side of it.
+            shadow["band_odo"] = snap.get("odo_km")
+            shadow["band_ts"] = ts
+            shadow["band_e"] = snap.get("energy_kwh")
 
     parked_gear = (snap.get("shift") or "P") == "P"
     if is_driving(snap) and not (open_at and parked_gear):
@@ -1836,6 +1879,13 @@ def advance_shadow(shadow: dict[str, Any], snap: dict[str, Any]) -> dict[str, An
             shadow.pop("temp_sec", None)
             shadow.pop("temp_sum", None)
             shadow.pop("bands", None)
+            # The band anchor starts where the journey does — odometer, clock
+            # and energy counter together, so the first stretch is measured
+            # from the trip's own beginning rather than from wherever the
+            # previous one left off.
+            shadow["band_odo"] = snap.get("odo_km")
+            shadow["band_ts"] = ts
+            shadow["band_e"] = snap.get("energy_kwh")
             shadow.pop("stops", None)
             shadow.pop("temp_hold_sec", None)
             shadow.pop("temp_hold_sum", None)
@@ -2370,6 +2420,12 @@ def _shadow_close(shadow: dict[str, Any], end: dict[str, Any],
     temp_sec = float(shadow.pop("temp_sec", 0.0) or 0.0)
     temp_sum = float(shadow.pop("temp_sum", 0.0) or 0.0)
     bands = shadow.pop("bands", None)
+    # The anchor goes with the histogram it feeds, for the same reason e_ts
+    # does: left behind, the next trip's first step would be measured from
+    # this one's last odometer reading, across the park in between.
+    shadow.pop("band_odo", None)
+    shadow.pop("band_ts", None)
+    shadow.pop("band_e", None)
     stops = int(shadow.pop("stops", 0) or 0)
     # Whatever is still held is the arrival: nothing moved after it. Dropped
     # rather than counted, exactly as the trailing idle run above is.

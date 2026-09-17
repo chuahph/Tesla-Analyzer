@@ -1851,3 +1851,55 @@ def test_the_shadow_bands_distance_time_and_energy_by_speed():
     # And the stops were counted — the thing idle_min cannot see, since none of
     # these lasted the five minutes it requires.
     assert shadow.get("stops") == len(stop_at)
+
+
+def test_the_bands_survive_the_odometer_arriving_slower_than_the_records():
+    """The cadence the car actually streams at, which the test above does not
+    reproduce: Odometer every 30 seconds, VehicleSpeed and EnergyRemaining
+    every 10. The composite repeats the last odometer two records out of
+    three, so banding a step against the RECORD gap divided 30 seconds of
+    distance by 10 seconds of clock — three times the true speed — while the
+    two intervals showing no movement banded their energy at zero km/h
+    against no distance to divide it by.
+
+    Reported live as a driving matrix showing 114 km of "Fast Highway" at
+    6 Wh/km beside 4 km of "Slow City" at 3511, on a car whose average speed
+    for the window was 36 km/h. Here the same shape, simulated: a steady
+    60 km/h at 150 Wh/km, which must band as 60 km/h at 150 Wh/km.
+    """
+    from app import sync as sync_mod
+
+    shadow: dict = {}
+    ts, odo, energy = 1_789_000_000.0, 1000.0, 60.0
+    KM_PER_10S = 60.0 / 360.0          # 60 km/h for ten seconds
+    for i in range(180):               # half an hour of it
+        ts += 10.0
+        energy -= KM_PER_10S * 0.150   # 150 Wh/km
+        if i % 3 == 2:                 # ...but the odometer only lands here
+            odo += KM_PER_10S * 3
+        sync_mod.advance_shadow(shadow, {
+            "ts": ts, "shift": "D", "speed_kmh": 60.0, "odo_km": odo,
+            "energy_kwh": energy, "soc": 80.0, "range_km": 300.0,
+            "out_temp": 30.0, "climate_on": False, "sentry_mode": False})
+
+    bands = shadow.get("bands") or {}
+    assert bands, "nothing was banded"
+    total_km = sum(v[0] for v in bands.values())
+    total_kwh = sum(v[2] for v in bands.values())
+    # The whole drive is banded, and at its own real cost per kilometre.
+    assert total_km == pytest.approx(30.0, abs=0.2), bands
+    assert total_kwh * 1000.0 / total_km == pytest.approx(150.0, abs=5.0), bands
+
+    # No band may hold energy it has no distance to divide by — that bucket
+    # is where two thirds of every drive's kWh used to land.
+    for edge, (km, _sec, kwh) in bands.items():
+        assert not (kwh > 0.01 and km <= 0.0), f"band {edge} holds {kwh} kWh over {km} km"
+
+    # And the speed each kilometre is filed under is the speed it was driven
+    # at, not a multiple of it: a 60 km/h drive reaches neither the 0 bucket
+    # nor the 160 one.
+    assert not [k for k in bands if float(k) >= 130.0], bands
+    for edge, (km, _sec, kwh) in bands.items():
+        if km > 0.5:
+            assert 40.0 <= float(edge) <= 90.0, f"{km:.1f} km filed at {edge} km/h"
+            assert kwh * 1000.0 / km == pytest.approx(150.0, abs=30.0), bands
