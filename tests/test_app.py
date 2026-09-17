@@ -1403,6 +1403,23 @@ def test_driving_matrix_pk_matches_vampire_drain_for_the_same_since_charge_windo
                 # exactly rather than missing the one gap that mattered.
                 assert pk["kwh"] == bal["vampire_kwh"]
                 assert pk["pct"] == pytest.approx(3.0)
+
+                # And the remaining gap — driving here is deliberately built
+                # from raw energy_used_kwh (0.5 per trip) rather than each
+                # trip's own SoC-implied 1.4, unlike PK above — is reported
+                # rather than silently absorbed. battery_used_pct is Battery
+                # Used's own ground-truth %; the gap is this total's own
+                # reading minus it, to the same rounding both already use.
+                t = matrix["totals"]
+                assert t["battery_used_pct"] == 9.0
+                assert t["battery_used_gap_pct"] == round(t["pct"] - 9.0, 2)
+
+                # Not shown outside a since-charge window: without it there
+                # is no ground truth to anchor to, same as Battery Used's
+                # own % (bal["used_pct"]) only appearing for since_charge.
+                plain = client.get("/api/driving-matrix?days=365").json()
+                assert plain["totals"]["battery_used_pct"] is None
+                assert plain["totals"]["battery_used_gap_pct"] is None
             finally:
                 client.post("/api/active-vehicle", json={"vin": "DEMO0SAMPLE0000001"})
                 with SessionLocal() as s:

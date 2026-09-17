@@ -2235,6 +2235,20 @@ function renderMatrixSummary(d) {
     ? `<div class="mx-sum-foot">${num(t.kwh, 1)} kWh — ${num(t.driving_kwh, 1)} driving,
          ${num(t.parked_kwh, 1)} parking (${num(t.parked_share_kwh_pct, 1)}% of the energy)</div>`
     : "";
+  // This total is a bottom-up sum of individual trips and parked gaps;
+  // Battery Used is anchored to the pack's actual current SoC reading. The
+  // two normally agree closely but aren't forced to — see battery_used_pct
+  // in routes.py for why not — so the gap is reported here rather than left
+  // for a reader to notice as an unexplained difference between two cards.
+  // Only present for a since-charge window with a real current SoC reading.
+  const battFoot = t.battery_used_pct != null
+    ? `<div class="mx-sum-foot">Battery Used card: ${num(t.battery_used_pct, 1)}% — ${
+        Math.abs(t.battery_used_gap_pct) < 0.05
+          ? "matches this total"
+          : `this total reads ${num(Math.abs(t.battery_used_gap_pct), 1)} pts ${
+              t.battery_used_gap_pct > 0 ? "higher" : "lower"}`
+      }</div>`
+    : "";
   box.innerHTML = `
     <div class="mx-sum-head">
       <span class="mx-sum-num">${num(t.pct, 1)}<span class="mx-sum-pc">%</span></span>
@@ -2242,6 +2256,7 @@ function renderMatrixSummary(d) {
         w.days ? `, ${w.days} days` : ""}</span>
     </div>
     ${kwhFoot}
+    ${battFoot}
     ${bars.length ? `<div class="mx-bars">${bars.map((b) => `
       <div class="mx-bar${b.parked ? " is-parked" : ""}">
         <span class="mx-bar-code">${b.code}</span>
@@ -2458,6 +2473,17 @@ function renderMatrix(d) {
     ...(t && t.unclassified_pct ? [{ code: "unsorted", pct: t.unclassified_pct }] : []),
     ...(t && t.no_energy_pct ? [{ code: "implausible", pct: t.no_energy_pct }] : []),
   ];
+  // Same gap-against-Battery-Used report as the collapsed summary card (see
+  // renderMatrixSummary) — a reader who opened the full table gets the same
+  // reconciliation, not just the headline.
+  const battNote = t && t.battery_used_pct != null
+    ? `<div class="mx-sub">Battery Used card: ${num(t.battery_used_pct, 1)}% — ${
+        Math.abs(t.battery_used_gap_pct) < 0.05
+          ? "matches this total"
+          : `this total reads ${num(Math.abs(t.battery_used_gap_pct), 1)} pts ${
+              t.battery_used_gap_pct > 0 ? "higher" : "lower"}`
+      }</div>`
+    : "";
   const totalBlock = t && t.pct
     ? `<div class="mx-total">
          <div class="mx-total-head">
@@ -2468,6 +2494,7 @@ function renderMatrix(d) {
            ${terms.map((x, i) => `${i ? '<span class="mx-op">+</span>' : ""}
               <span class="mx-term"><b>${x.code}</b> ${num(x.pct, 2)}%</span>`).join("")}
          </div>
+         ${battNote}
        </div>`
     : "";
   const tot = aside.length ? `Not priced at all: ${aside.join(", ")}.` : "";

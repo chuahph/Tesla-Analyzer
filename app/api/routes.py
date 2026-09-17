@@ -8902,6 +8902,29 @@ def driving_matrix(days: int = Query(30, ge=1, le=730),
     pk_pct = out["parked"][0].get("pct") or 0.0
     total_pct = round(
         out["modes_pct"] + out["unclassified_pct"] + out["no_energy_pct"] + pk_pct, 2)
+    # The gap against Battery Used's own figure — reported rather than
+    # hidden or forced to match. This total is a bottom-up sum of individual
+    # trips and parked gaps; Battery Used is anchored to the pack's actual
+    # current SoC reading (see /api/summary's ground_truth_used_kwh). The two
+    # normally agree closely, but forcing them to match exactly would mean
+    # either this table's own rows stop summing to its stated total, or
+    # their genuinely-measured Wh/km figures get silently rescaled to absorb
+    # a correction that has nothing to do with them — the same trade that
+    # broke Avg Efficiency's own arithmetic the one time it was tried there
+    # (see the reverted bal.trip_kwh substitution in app.js). Only
+    # computable for the same window Battery Used itself reports a % for —
+    # since-charge, and only when the window genuinely starts at the charge
+    # (limited_by == "charge", the same guard parked_anchor uses above).
+    battery_used_pct = None
+    if limited_by == "charge" and last_charge is not None and capacity_kwh:
+        current_soc = session.scalar(
+            select(BatteryReading.soc)
+            .where(BatteryReading.vehicle_id == vehicle.id)
+            .order_by(BatteryReading.ts.desc())
+            .limit(1)
+        )
+        if current_soc is not None:
+            battery_used_pct = round(max(last_charge.end_soc - current_soc, 0.0), 2)
     out["totals"] = {
         "hours": round(total_hours, 1),
         "kwh": round(total_kwh, 2),
@@ -8931,6 +8954,14 @@ def driving_matrix(days: int = Query(30, ge=1, le=730),
         # and it should be visible in the payload instead of waiting to be
         # noticed as a discrepancy between two numbers on screen.
         "driving_kwh_residual": round(drive_kwh - reconciles, 2),
+        # Battery Used's own %, and this total's gap against it — None
+        # outside a since-charge window with a real current SoC reading.
+        # See battery_used_pct above for why this is reported, not closed.
+        "battery_used_pct": battery_used_pct,
+        "battery_used_gap_pct": (
+            round(total_pct - battery_used_pct, 2)
+            if battery_used_pct is not None else None
+        ),
         "unpriced": {
             "moved_through_gaps_hours": acc["excluded"]["hours"],
             "window_edges_hours": acc["unbounded"]["hours"],
