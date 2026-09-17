@@ -1169,7 +1169,13 @@ footer { padding: 18px 28px; color: var(--muted); font-size: 12px; border-top: 1
 
 /* --- Mobile / iPhone layout --- */
 @media (max-width: 640px) {
-  header { padding: calc(10px + env(safe-area-inset-top)) 14px 10px; gap: 8px; }
+  /* Extra clearance below env(safe-area-inset-top): the iOS status bar sits
+     translucent over the app (apple-mobile-web-app-status-bar-style is
+     black-translucent), and its own blur/gradient reads visually taller than
+     the safe-area inset alone accounts for — 10px left the title crowded
+     right under it. 22px matches the desktop header's own margin instead of
+     undercutting it on the one layout where the status bar is closest. */
+  header { padding: calc(22px + env(safe-area-inset-top)) 14px 10px; gap: 8px; }
   /* iPhone Pro/Pro Max (402/440pt): app name on line 1, then the full car
      details grouped into two lines. The meta box matches this height. */
   header h1 { font-size: 15px; line-height: 1.15; }
