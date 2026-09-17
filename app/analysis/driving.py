@@ -1804,6 +1804,7 @@ def analyze(drives: list[Drive], rated_wh_per_km: float = 150.0,
             vampire_place_rates: dict[str, float] | None = None,
             vampire_readings: list[Any] | None = None,
             vampire_frozen: dict[str, Any] | None = None,
+            mode_cuts: dict[str, float] | None = None,
             ) -> dict[str, Any]:
     """``energy_price`` is either a flat RM/kWh float, or a
     ``datetime -> RM/kWh`` callable (time-of-use pricing — see app.tariff) for
@@ -1824,7 +1825,12 @@ def analyze(drives: list[Drive], rated_wh_per_km: float = 150.0,
     when trip_costs is omitted. ``vampire_rate_history`` (optional) is the
     vehicle's FULL (drives, charges) for fitting its parked-draw rate, which
     is a property of the car rather than of this window — see vampire_drain();
-    omitted, the window fits its own rate and a short one may fit none."""
+    omitted, the window fits its own rate and a short one may fit none.
+    ``mode_cuts`` (optional) are the same tunable cut-points the driving
+    matrix reads (see resolved_cuts) — passed through so a recent trip's
+    own condition tag agrees with the row it landed in there, rather than
+    each reading its own copy of the thresholds and drifting apart when
+    one is retuned."""
     if not drives:
         return {"available": False}
     price_at = energy_price if callable(energy_price) else (lambda _dt: energy_price)
@@ -2234,6 +2240,16 @@ def analyze(drives: list[Drive], rated_wh_per_km: float = 150.0,
                 # explanation for a trip that reads short against the car.
                 "ended_on": getattr(d, "ended_on", None),
                 "conditions": _trip_conditions(d),
+                # The driving matrix's OWN classification of this same trip —
+                # a different, tunable test (idle share and speed-vs-peak
+                # ratio) from the fixed heuristic above. The two can disagree,
+                # and silently having both on screen with no way to tell them
+                # apart is what made a trip's condition tag and its matrix row
+                # look like two opinions rather than two different questions.
+                # None when the trip lacks a duration, distance or peak speed
+                # to sort by (see drive_mode).
+                "matrix_mode": (_dme := drive_mode_explained(d, mode_cuts))["mode"],
+                "matrix_mode_why": _dme.get("why"),
                 # "measured" (real tracked idle) / "estimated" (heuristic
                 # fallback) / "incomplete" (no valid energy) — how much to
                 # trust this trip's efficiency figures.

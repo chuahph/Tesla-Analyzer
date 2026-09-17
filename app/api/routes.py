@@ -4964,7 +4964,7 @@ def compare_vehicles(days: int = Query(30, ge=1, le=730), session: Session = Dep
             vampire_rate_history=_full_history(session, vehicle.id),
         vampire_place_rates=_place_parked_rates(session),
         vampire_readings=_parked_readings(session, vehicle.id),
-        vampire_frozen=_frozen_rates(session))
+        vampire_frozen=_frozen_rates(session), mode_cuts=_mode_cuts(session))
         charging = charging_analysis.analyze(charges, drives)
         readings = _newest_readings(
             session, vehicle.id,
@@ -11265,7 +11265,8 @@ def summary(
         vampire_rate_history=_hist("full_history", _full_history, session, vehicle.id),
         vampire_place_rates=_hist("place_rates", _place_parked_rates, session),
         vampire_readings=_hist("parked_readings", _parked_readings, session, vehicle.id),
-        vampire_frozen=_hist("frozen_rates", _frozen_rates, session))
+        vampire_frozen=_hist("frozen_rates", _frozen_rates, session),
+        mode_cuts=_mode_cuts(session))
     _mark("driving")
     # A since-charge window's own `charges` list is always empty by
     # definition (it starts right where last_charge ends, so no charge can

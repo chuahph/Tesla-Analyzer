@@ -1494,6 +1494,16 @@ function tripConditionWhy(t) {
     "city = low steady speed. Peak hour (7–9am, 5–7pm) and hot (33°C+) are " +
     "added as context.",
   ];
+  // The bold code beside this text is a SEPARATE classification, from the
+  // Driving matrix card's own tunable test (idle share and average-vs-peak
+  // ratio), not this sentence's speed heuristic — the two can disagree on
+  // the same trip, and matrix_mode_why is the same explanation the matrix's
+  // own "recent trips" panel gives for that code.
+  if (t.matrix_mode) {
+    bits.push(
+      `<strong>${t.matrix_mode}</strong> is the Driving matrix's own code for ` +
+      `this trip${t.matrix_mode_why ? ` — ${t.matrix_mode_why}` : ""}.`);
+  }
   return bits.join("<br>");
 }
 
@@ -1590,6 +1600,7 @@ function tripDiagnostics(t, ctx) {
       // for a trip reading short against the car's own screen.
       ended_on: t.ended_on,
       conditions: t.conditions,
+      matrix_mode: t.matrix_mode, matrix_mode_why: t.matrix_mode_why,
       cost: t.cost, cost_parts: t.cost_parts, cost_source: t.cost_source,
       start_coords: t.start_coords, end_coords: t.end_coords,
       tag: t.tag,
@@ -1694,8 +1705,14 @@ function renderLists(d) {
       const check = tripSelectMode && t.id != null
         ? `<input type="checkbox" class="trip-check" value="${t.id}" aria-label="Select trip" />` : "";
       const condId = `cond-why-${i}`;
+      // The driving matrix's own code for this trip, ahead of the plain-
+      // language tag: they come from two different tests (see
+      // driving_analysis.drive_mode vs _trip_conditions) and can disagree,
+      // so the code says which matrix row this trip's numbers landed in
+      // before the sentence describes what the drive looked like.
+      const modeTag = t.matrix_mode ? `<b class="trip-cond-mode">${t.matrix_mode}</b> · ` : "";
       const cond = t.conditions
-        ? `<span class="trip-cond">🚦 ${t.conditions}` +
+        ? `<span class="trip-cond">🚦 ${modeTag}${t.conditions}` +
           `<button class="info-btn" data-info="${condId}">!</button></span>` +
           `<span id="${condId}" class="info-pop hidden">${tripConditionWhy(t)}</span>`
         : "";
