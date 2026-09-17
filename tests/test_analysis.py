@@ -2666,6 +2666,50 @@ def test_the_condition_matrix_sorts_on_constancy_not_on_idle_time():
     assert sum(r["trips"] for r in out["modes"]) == 1
 
 
+def test_condition_matrix_keeps_a_near_zero_distance_trip_out_of_the_average():
+    """Reported live: a "Slow City" row at 3511 Wh/km over 4 km, another at
+    2515 over 2 km — read as the sum-instead-of-average bug it looks like,
+    but the arithmetic (kwh/km, distance-weighted) was already correct. The
+    real fault: has_valid_energy only floors Wh/km, so a trip that is almost
+    entirely idle — climate, Sentry, a long stop mid-journey — with only a
+    sliver of real distance sails through with a real kWh over a near-zero
+    km, and its ratio in the thousands drags the whole mode's weighted
+    average with it, same as one huge-Wh/km trip would drag any average.
+
+    MAX_PLAUSIBLE_WH_PER_KM (600) is the ceiling already trusted elsewhere in
+    this codebase for exactly this shape of fault (sync.py's departure-
+    recovery guard) — reused here rather than invented fresh."""
+    from app.analysis.driving import condition_matrix
+
+    class D:
+        def __init__(self, km, mins, idle, mx, kwh):
+            self.distance_km = km; self.duration_min = mins
+            self.idle_min = idle; self.max_speed_kmh = mx
+            self.energy_used_kwh = kwh; self.idle_tracked = True
+            self.energy_estimated = False
+            self.wh_per_km = round(kwh * 1000.0 / km) if km else 0
+            self.outside_temp_c = 31.0
+
+    # An ordinary Slow City trip: 149 Wh/km, comfortably plausible.
+    sc = D(20.0, 40.0, 2.0, 70.0, 20.0 * 0.149)
+    # Almost entirely idle: 0.3 km, but 1.2 kWh of real climate/Sentry draw
+    # over the stop — 4000 Wh/km, an order of magnitude past the ceiling.
+    idled = D(0.3, 25.0, 20.0, 15.0, 1.2)
+    assert idled.wh_per_km > 600
+
+    out = condition_matrix([sc, idled], capacity_kwh=68.6)
+    by = {r["code"]: r for r in out["modes"]}
+    # Only the ordinary trip reached a row — its own figure, untouched.
+    assert set(by) == {"SC"}
+    assert by["SC"]["trips"] == 1
+    assert by["SC"]["wh_per_km"] == pytest.approx(149.0, abs=0.5)
+    # The idled trip's real energy is still accounted for, just not as a
+    # rate: same bucket (and the same word, "implausible") the table
+    # already uses for a trip whose energy read too low to trust.
+    assert out["no_energy_trips"] == 1
+    assert out["no_energy_kwh"] == pytest.approx(1.2, abs=0.01)
+
+
 def test_the_matrix_splits_into_weekdays_and_weekends():
     """Asked for as overall or split. Computed together because the three
     share every threshold and baseline, and computing them apart is how two of

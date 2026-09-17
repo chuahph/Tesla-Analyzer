@@ -2714,7 +2714,20 @@ def condition_matrix(drives: list[Any], capacity_kwh: float,
     no_energy = 0
     no_energy_kwh = 0.0
     for d in drives:
-        if not has_valid_energy(d):
+        # has_valid_energy only floors Wh/km — a range-reading gap reads too
+        # LOW, which it exists to catch — and never ceilings it. A trip that
+        # is almost entirely idle (climate, Sentry, a long stop mid-journey)
+        # with only a sliver of real distance is the opposite fault: real
+        # energy, near-zero km, and their ratio reads in the thousands —
+        # reported live as a "Slow City" row at 3511 Wh/km over 4 km. The
+        # ceiling this reuses, MAX_PLAUSIBLE_WH_PER_KM, is the same one the
+        # departure-recovery guard in sync.py already earns its keep on
+        # (there: 1100 Wh/km measured as "impossible", 406 as "entirely
+        # ordinary" for a slow hot crawl) — a mode row's weighted average is
+        # exactly as vulnerable to one such trip dominating a small
+        # denominator as that recovery was.
+        implausible = (getattr(d, "wh_per_km", None) or 0.0) > sync_mod.MAX_PLAUSIBLE_WH_PER_KM
+        if not has_valid_energy(d) or implausible:
             no_energy += 1
             no_energy_kwh += float(getattr(d, "energy_used_kwh", 0.0) or 0.0)
             continue
