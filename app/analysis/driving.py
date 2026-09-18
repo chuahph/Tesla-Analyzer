@@ -1587,27 +1587,37 @@ def score_grade(score: int) -> str:
         "C" if score >= 55 else "D" if score >= 40 else "E"
 
 
-def _trip_conditions(d: Drive) -> str:
-    """Route/traffic character inferred from the trip's own signals.
+# The plain-language word for each of the matrix's own codes — one voice,
+# not two. This used to run its own average/peak heuristic (mx >= 90 read as
+# "highway cruise"), independent of drive_mode, and the two could and did
+# disagree ON THE SAME TRIP: an 11.7 km town hop that briefly touched
+# 107 km/h read "highway cruise" here while the matrix correctly called it
+# Slow City, because 107 for a few seconds is not a sustained highway pace —
+# drive_mode requires the AVERAGE to clear a highway bar too, this heuristic
+# never checked one. A reader seeing "SC · highway cruise" on one line has no
+# way to tell which of the two the app actually believes, which is worse than
+# either verdict alone.
+_COND_BASE = {
+    "FH": "fast highway", "CH": "highway cruise", "CC": "steady flow",
+    "SC": "stop-go traffic", "HC": "heavy traffic",
+}
 
-    The speed profile tells the story: high peak with a high average is open
-    highway; high peak with a low average means congestion; a low average
-    with spiky peaks is stop-go traffic. Peak-hour timing and heat are added
-    as context tags.
+
+def _trip_conditions(mode: str | None, d: Drive) -> str:
+    """Route/traffic character, in the SAME words the Driving matrix uses.
+
+    ``mode`` is drive_mode's own verdict for this trip (see MODE_NAMES /
+    MATRIX_DEFINITIONS) — passed in rather than re-derived here, for the same
+    reason drive_mode_explained's code is read from drive_mode instead of
+    reimplemented: two readings of one classification can drift apart, one
+    reading cannot. Peak-hour timing and heat are still this function's own
+    observation, layered on afterwards — they are context, not a competing
+    classification.
     """
-    avg, mx = d.avg_speed_kmh or 0.0, d.max_speed_kmh or 0.0
-    if mx >= 90:
-        base = "highway + congestion" if avg < 50 else "highway cruise"
-    elif avg < 50 and mx > 2.2 * avg > 0:
-        base = "stop-go traffic"
-    elif avg < 40:
-        base = "city driving"
-    else:
-        base = "steady flow"
-    parts = [base]
+    parts = [_COND_BASE[mode]] if mode in _COND_BASE else []
     if d.start_time.hour in (7, 8, 17, 18, 19):
         parts.append("peak hour")
-    if d.outside_temp_c >= 33:
+    if (d.outside_temp_c or 0.0) >= 33:
         parts.append(f"hot {round(d.outside_temp_c)}°C")
     return " · ".join(parts)
 
@@ -2239,17 +2249,14 @@ def analyze(drives: list[Drive], rated_wh_per_km: float = 150.0,
                 # bms / exit / timeout / stream_lost. Usually the whole
                 # explanation for a trip that reads short against the car.
                 "ended_on": getattr(d, "ended_on", None),
-                "conditions": _trip_conditions(d),
                 # The driving matrix's OWN classification of this same trip —
-                # a different, tunable test (idle share and speed-vs-peak
-                # ratio) from the fixed heuristic above. The two can disagree,
-                # and silently having both on screen with no way to tell them
-                # apart is what made a trip's condition tag and its matrix row
-                # look like two opinions rather than two different questions.
-                # None when the trip lacks a duration, distance or peak speed
-                # to sort by (see drive_mode).
+                # computed first because "conditions" below is written IN
+                # these words rather than its own separate guess (see
+                # _trip_conditions). None when the trip lacks a duration,
+                # distance or peak speed to sort by (see drive_mode).
                 "matrix_mode": (_dme := drive_mode_explained(d, mode_cuts))["mode"],
                 "matrix_mode_why": _dme.get("why"),
+                "conditions": _trip_conditions(_dme["mode"], d),
                 # "measured" (real tracked idle) / "estimated" (heuristic
                 # fallback) / "incomplete" (no valid energy) — how much to
                 # trust this trip's efficiency figures.

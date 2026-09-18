@@ -1122,26 +1122,68 @@ def test_driving_analysis_reports_scores(seeded):
     assert all("eco_score" in t for t in result["recent_trips"])
 
 
-def test_trip_conditions_infer_character():
+def test_trip_conditions_speak_the_matrix_own_words():
+    """The condition phrase used to run its own average/peak heuristic,
+    independent of drive_mode, and the two could disagree on the same trip:
+    an 11.7 km town hop that briefly touched 107 km/h (avg 51) read "highway
+    cruise" under the old heuristic (peak >= 90) while the matrix correctly
+    called it Slow City, because 107 for a few seconds is not a sustained
+    highway pace — drive_mode requires the AVERAGE to clear a highway bar
+    too. That exact trip is the first case below.
+
+    So the phrase is now driven BY drive_mode's own verdict — one voice, not
+    two guesses that can drift apart — and only the peak-hour/heat context
+    after it is _trip_conditions' own, additional observation.
+    """
     from datetime import datetime
 
-    from app.analysis.driving import _trip_conditions
+    from app.analysis.driving import _trip_conditions, drive_mode
     from app.models import Drive
 
-    def drive(avg, mx, hour=12, temp=25.0):
+    def drive(avg, mx, dur=30.0, hour=12, temp=25.0):
+        dist = avg * dur / 60.0
         return Drive(
-            start_time=datetime(2026, 7, 4, hour, 0), end_time=datetime(2026, 7, 4, hour, 30),
-            distance_km=20.0, duration_min=30.0, avg_speed_kmh=avg, max_speed_kmh=mx,
-            outside_temp_c=temp,
+            start_time=datetime(2026, 7, 4, hour, 0),
+            end_time=datetime(2026, 7, 4, hour, int(dur)),
+            distance_km=dist, duration_min=dur, avg_speed_kmh=avg, max_speed_kmh=mx,
+            outside_temp_c=temp, idle_min=0.0,
         )
 
-    assert _trip_conditions(drive(95, 115)) == "highway cruise"
-    assert _trip_conditions(drive(35, 100)) == "highway + congestion"
-    assert _trip_conditions(drive(20, 60)) == "stop-go traffic"
-    assert _trip_conditions(drive(30, 45)) == "city driving"
-    assert _trip_conditions(drive(55, 70)) == "steady flow"
-    assert "peak hour" in _trip_conditions(drive(30, 45, hour=8))
-    assert "hot 35°C" in _trip_conditions(drive(30, 45, temp=35.0))
+    def cond(d):
+        # Exactly how the caller in analyze() drives it: the mode comes from
+        # drive_mode first, and the phrase is read off THAT, never its own
+        # copy of the speed logic.
+        return _trip_conditions(drive_mode(d), d)
+
+    # The regression itself: briefly touched 107 km/h, averaged 51 over 14
+    # minutes — the matrix calls this Slow City, and the phrase must agree.
+    real = drive(51, 107, dur=14.0)
+    assert drive_mode(real) == "SC"
+    assert cond(real) == "stop-go traffic"
+
+    # One phrase per matrix code, all five reachable.
+    assert cond(drive(95, 135)) == "fast highway"     # FH
+    assert cond(drive(75, 100)) == "highway cruise"   # CH — sustained, not a blip
+    assert cond(drive(55, 70)) == "steady flow"       # CC
+    assert cond(drive(20, 60)) == "stop-go traffic"   # SC
+    assert cond(drive(20, 90)) == "heavy traffic"     # HC
+
+    # A peak that used to read "highway + congestion" under the old,
+    # independent heuristic is now correctly Slow City in the same words as
+    # every other SC trip — no third, competing phrase for this case.
+    assert drive_mode(drive(35, 100)) == "SC"
+    assert cond(drive(35, 100)) == "stop-go traffic"
+
+    # Peak hour and heat are still layered on afterwards, as context rather
+    # than a classification.
+    assert "peak hour" in cond(drive(30, 45, hour=8))
+    assert "hot 35°C" in cond(drive(30, 45, temp=35.0))
+
+    # A trip drive_mode can't sort (missing duration/distance/peak) gets no
+    # base phrase at all, rather than a guess the matrix does not share.
+    unsortable = drive(0.0, 0.0)
+    assert drive_mode(unsortable) is None
+    assert _trip_conditions(None, unsortable) == ""
 
 
 # --- charging --------------------------------------------------------------

@@ -1489,21 +1489,25 @@ function tripConditionWhy(t) {
   const bits = [
     `Inferred from this trip's own data — average speed ${avg} km/h` +
     (t.duration_min ? `, ${t.duration_min} min over ${t.distance_km} km` : "") + ".",
-    "Highway cruise = sustained high speed; highway + congestion = high top " +
-    "speed but low average; stop-go = low average with spiky peaks; " +
-    "city = low steady speed. Peak hour (7–9am, 5–7pm) and hot (33°C+) are " +
-    "added as context.",
   ];
-  // The bold code beside this text is a SEPARATE classification, from the
-  // Driving matrix card's own tunable test (idle share and average-vs-peak
-  // ratio), not this sentence's speed heuristic — the two can disagree on
-  // the same trip, and matrix_mode_why is the same explanation the matrix's
-  // own "recent trips" panel gives for that code.
+  // The phrase after the bold code is now written IN that code's own words
+  // rather than a separate guess — see driving_analysis._trip_conditions.
+  // They used to disagree on the same trip (a brief 107 km/h in an 11.7 km
+  // town hop once read "highway cruise" here while the matrix correctly
+  // called it Slow City), which is worse than either verdict alone, so the
+  // wording now comes from matrix_mode_why, the same explanation the
+  // matrix's own "recent trips" panel gives for that code.
   if (t.matrix_mode) {
     bits.push(
       `<strong>${t.matrix_mode}</strong> is the Driving matrix's own code for ` +
-      `this trip${t.matrix_mode_why ? ` — ${t.matrix_mode_why}` : ""}.`);
+      `this trip, and the words after it ARE that code` +
+      `${t.matrix_mode_why ? ` — ${t.matrix_mode_why}` : ""}.`);
+  } else {
+    bits.push("This trip is missing a duration, distance or peak speed, so " +
+      "the Driving matrix can't sort it — no condition is shown for it.");
   }
+  bits.push("Peak hour (7–9am, 5–7pm) and hot (33°C+) are added afterwards " +
+    "as extra context, not part of the classification.");
   return bits.join("<br>");
 }
 
