@@ -167,6 +167,41 @@ def analyze(charges: list[Charge], drives: list[Drive] | None = None) -> dict[st
             # session logged before this existed (the frontend falls back
             # to guessing from location text in that case).
             "source": getattr(c, "price_source", "") or None,
+            # The rest are diagnostic-only — not rendered on the list row,
+            # kept here so the "copy diagnostics" button can hand them back
+            # for one session without a DB query, the same way a trip's own
+            # boundary instrumentation rides on recent_trips (see analyze()).
+            "duration_min": (
+                round(getattr(c, "duration_min", 0.0) or 0.0, 1) or None
+            ),
+            "max_power_kw": (
+                round(getattr(c, "max_power_kw", 0.0) or 0.0, 1) or None
+            ),
+            "outside_temp_c": getattr(c, "outside_temp_c", None),
+            # What the CHARGER billed, from a receipt, vs what the car itself
+            # logged (energy_added_kwh above) — the AC-DC conversion sits
+            # between them, and only a receipt can show the gap (see
+            # Charge.billed_kwh).
+            "billed_kwh": (
+                round(getattr(c, "billed_kwh", 0.0) or 0.0, 2) or None
+            ),
+            # Which of the car's own energy counters energy_added_kwh was
+            # read from — the three disagree by about 11%.
+            "energy_source": getattr(c, "energy_source", "") or None,
+            # telemetry / polled / blank (legacy) — which path wrote this
+            # row, same distinction Drive.source carries for a trip.
+            "ingest_source": getattr(c, "source", "") or None,
+            "polled_kwh": (
+                round(c.polled_kwh, 2) if getattr(c, "polled_kwh", None) is not None else None
+            ),
+            # This session's own implied pack capacity, fit from its
+            # energy-vs-SoC slope (see battery.capacity_from_curve) — None
+            # when the session couldn't support a fit.
+            "implied_capacity_kwh": (
+                round(c.implied_capacity_kwh, 1)
+                if getattr(c, "implied_capacity_kwh", None) is not None else None
+            ),
+            "capacity_samples": getattr(c, "capacity_samples", None),
         }
         for c in sorted(charges, key=lambda c: c.start_time, reverse=True)
     ]

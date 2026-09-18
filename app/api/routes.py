@@ -11220,6 +11220,23 @@ def summary(
             "is_free": bool(last_charge.is_free),
             "used_since_kwh": round(used_since_last_charge_kwh, 2),
             "source": last_charge.price_source or None,
+            # Same diagnostic-only fields recent_charges carries (see
+            # charging_analysis.analyze) — this row shares chargeRowHtml and
+            # its diagnostics button with that list, so it needs them too.
+            "duration_min": round(last_charge.duration_min, 1) if last_charge.duration_min else None,
+            "max_power_kw": round(last_charge.max_power_kw, 1) if last_charge.max_power_kw else None,
+            "outside_temp_c": last_charge.outside_temp_c,
+            "billed_kwh": round(last_charge.billed_kwh, 2) if last_charge.billed_kwh else None,
+            "energy_source": last_charge.energy_source or None,
+            "ingest_source": last_charge.source or None,
+            "polled_kwh": (
+                round(last_charge.polled_kwh, 2) if last_charge.polled_kwh is not None else None
+            ),
+            "implied_capacity_kwh": (
+                round(last_charge.implied_capacity_kwh, 1)
+                if last_charge.implied_capacity_kwh is not None else None
+            ),
+            "capacity_samples": last_charge.capacity_samples,
             # What was actually IN the pack when this charge finished (end SoC
             # × usable capacity) — the real "fuel in the tank" figure, unlike
             # energy_added_kwh which is just what this one session topped up

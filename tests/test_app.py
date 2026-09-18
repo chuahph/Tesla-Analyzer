@@ -1130,6 +1130,12 @@ def test_summary_since_charge_window():
                 "id", "start_time", "end_time", "energy_added_kwh", "start_soc",
                 "end_soc", "cost", "charge_type", "location", "location_raw",
                 "rate_per_kwh", "is_free", "used_since_kwh", "source", "battery_kwh_at_end",
+                # Diagnostic-only fields, added so this pinned row's own ⧉
+                # button hands back the same shape recent_charges does (see
+                # charging_analysis.analyze's recent_charges).
+                "duration_min", "max_power_kw", "outside_temp_c", "billed_kwh",
+                "energy_source", "ingest_source", "polled_kwh",
+                "implied_capacity_kwh", "capacity_samples",
             }
             assert lc["used_since_kwh"] >= 0
             # Energy Charged/AC-DC Energy/Charging Cost (and Driving Cost,

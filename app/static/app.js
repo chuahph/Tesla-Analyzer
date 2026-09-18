@@ -695,6 +695,29 @@ function wireTripDiagButtons(root) {
   });
 }
 
+// Same button, same behaviour, for Recent Charges — see wireTripDiagButtons.
+function wireChargeDiagButtons(root) {
+  root.querySelectorAll(".charge-diag[data-charge-idx]").forEach((btn) => {
+    btn.addEventListener("click", async (e) => {
+      e.stopPropagation();
+      const c = lastRenderedCharges[+btn.dataset.chargeIdx];
+      if (!c) return;
+      const text = chargeDiagnostics(c, lastDiagContext);
+      const done = await copyText(text);
+      const was = btn.textContent;
+      btn.textContent = done ? "✓" : "✕";
+      btn.classList.toggle("copied", done);
+      setTimeout(() => {
+        btn.textContent = was;
+        btn.classList.remove("copied");
+      }, 1500);
+      if (!done) {
+        window.prompt("Copy this charge's diagnostics:", text);
+      }
+    });
+  });
+}
+
 // navigator.clipboard is unavailable on non-HTTPS origins and can reject even
 // inside a click on some iOS builds, so fall back to the execCommand route
 // rather than losing the copy. Returns whether either path worked.
@@ -1517,6 +1540,10 @@ function tripConditionWhy(t) {
 // carries an index into this instead.
 let lastRenderedTrips = [];
 let lastDiagContext = {};
+// Same idea, for Recent Charges — kept separately since the two lists
+// re-render independently and a charge's own index has nothing to do with
+// a trip's.
+let lastRenderedCharges = [];
 
 // Everything needed to diagnose one trip's accuracy, and nothing else.
 // Reading these out of /api/summary by hand means scrolling a whole window's
@@ -1608,6 +1635,53 @@ function tripDiagnostics(t, ctx) {
       cost: t.cost, cost_parts: t.cost_parts, cost_source: t.cost_source,
       start_coords: t.start_coords, end_coords: t.end_coords,
       tag: t.tag,
+    },
+  }, null, 2);
+}
+
+// Everything needed to diagnose one charging session's accuracy — the same
+// idea as tripDiagnostics, for the other list that shares this problem: a
+// session read against the car's own screen or a charger receipt, on a
+// phone, without scrolling a whole window's payload to find one row.
+function chargeDiagnostics(c, ctx) {
+  const base = (typeof window !== 'undefined' && window.location)
+    ? window.location.origin : '';
+  return JSON.stringify({
+    context: {
+      build: ctx.build || null,
+      usable_capacity_kwh: ctx.usable_capacity_kwh ?? null,
+      capacity_source: ctx.capacity_source || null,
+      copied_at: new Date().toISOString(),
+    },
+    // Cross-session statistics only — one charge can't show a bias or a
+    // fleet-wide capacity trend by itself.
+    links: { compare: `${base}/api/telemetry/compare` },
+    charge: {
+      id: c.id, location: c.location, location_raw: c.location_raw,
+      charge_type: c.charge_type,
+      start_time: c.start_time, end_time: c.end_time,
+      duration_min: c.duration_min,
+      start_soc: c.start_soc, end_soc: c.end_soc,
+      energy_added_kwh: c.energy_added_kwh,
+      // What the CHARGER billed, from a receipt, against what the car
+      // itself logged just above — the AC-DC conversion sits between them,
+      // and only a receipt can show the gap (see Charge.billed_kwh).
+      billed_kwh: c.billed_kwh,
+      max_power_kw: c.max_power_kw, outside_temp_c: c.outside_temp_c,
+      // Which of the car's own energy counters energy_added_kwh was read
+      // from — the three disagree by about 11%.
+      energy_source: c.energy_source,
+      // telemetry / polled / blank (legacy) — which path wrote this row,
+      // and what polling had logged before telemetry corrected it, the same
+      // pair a trip's own diagnostics carry.
+      ingest_source: c.ingest_source, polled_kwh: c.polled_kwh,
+      // This session's own implied pack capacity and how many samples that
+      // rests on (see battery.capacity_from_curve) — None when the session
+      // couldn't support a fit.
+      implied_capacity_kwh: c.implied_capacity_kwh,
+      capacity_samples: c.capacity_samples,
+      cost: c.cost, is_free: c.is_free, rate_per_kwh: c.rate_per_kwh,
+      source: c.source,
     },
   }, null, 2);
 }
@@ -1852,10 +1926,12 @@ function renderLists(d) {
     const lc = d.last_charge;
     const pinned = lc && !recentCharges.some((c) => c.id === lc.id) ? [lc] : [];
     const allCharges = [...pinned, ...recentCharges];
-    const rows = allCharges.map((c) => chargeRowHtml(c, d.currency)).join("");
+    lastRenderedCharges = allCharges;
+    const rows = allCharges.map((c, i) => chargeRowHtml(c, d.currency, i)).join("");
     chargesEl.innerHTML = rows || '<li class="empty">No charging sessions in this window</li>';
     wireEditRateButtons(chargesEl);
     wireRenameLocButtons(chargesEl);
+    wireChargeDiagButtons(chargesEl);
     // Only offer the charge tools when there's a real (self-hosted) DB behind them.
     const chargeTools = document.getElementById("charge-tools");
     if (chargeTools) {
@@ -1978,7 +2054,7 @@ function attr(text) {
 // One Recent Charges row — shared by the pinned "last charge" entry and
 // every session in charging.recent_charges, so both look and behave
 // identically (same buttons) instead of two different formats.
-function chargeRowHtml(c, currency) {
+function chargeRowHtml(c, currency, idx) {
   const when = `${tripWhen(c.start_time)} → ${tripEnd(c.start_time, c.end_time)}`;
   const loc = c.location ? `${c.location} · ${c.charge_type}` : c.charge_type;
   const kwh = `${fmt(c.energy_added_kwh, 1)} kWh`;
@@ -2026,10 +2102,17 @@ function chargeRowHtml(c, currency) {
         `title="${title}">${icon}</button>`;
     }
   }
+  // Copy this session's raw figures for checking against the car's own
+  // screen or a charger receipt — same tool as a trip's own ⧉, and needs no
+  // id (an old row with none still has fields worth copying).
+  const diagBtn = !chargeSelectMode
+    ? `<button class="charge-diag" data-charge-idx="${idx}" ` +
+      `title="Copy this charge's diagnostics">⧉</button>`
+    : "";
   return `<li class="charge${chargeSelectMode && c.id != null ? " selectable" : ""}">` +
     `<span class="charge-main">${check}<span class="charge-loc">${loc}${renameBtn}</span>` +
     `<span class="charge-when">${when}</span></span>` +
-    `<span class="charge-figs">${kwh}${soc} · ${cost}${rate}${buttons}</span></li>`;
+    `<span class="charge-figs">${kwh}${soc} · ${cost}${rate}${buttons}${diagBtn}</span></li>`;
 }
 
 // TNB residential Time-of-Use, all-in per-kWh (energy + network + capacity
