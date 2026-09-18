@@ -1597,10 +1597,23 @@ def score_grade(score: int) -> str:
 # never checked one. A reader seeing "SC · highway cruise" on one line has no
 # way to tell which of the two the app actually believes, which is worse than
 # either verdict alone.
-_COND_BASE = {
-    "FH": "fast highway", "CH": "highway cruise", "CC": "steady flow",
-    "SC": "stop-go traffic", "HC": "heavy traffic",
+#
+# What each code is CALLED, read once here rather than typed twice — this
+# used to be its own paraphrase ("highway cruise" for CH, "steady flow" for
+# CC…), a second wording for the same five names MODE_NAMES already carries.
+# The matrix table's own row and this sentence disagreeing on what to CALL a
+# code was the same "two voices" problem as disagreeing on WHICH code, one
+# layer further in: a reader could see "CH" paired with "Constant Highway" in
+# the matrix and "highway cruise" here, two labels for one thing, neither
+# wrong. Lower-cased because this reads mid-sentence, not as a heading.
+MODE_NAMES = {
+    "FH": "Fast Highway",
+    "CH": "Constant Highway",
+    "CC": "Constant City",
+    "SC": "Slow City",
+    "HC": "Heavy City",
 }
+_COND_BASE = {code: name.lower() for code, name in MODE_NAMES.items()}
 
 
 def _trip_conditions(mode: str | None, d: Drive) -> str:
@@ -2411,14 +2424,6 @@ MODE_FAST_MAX_KMH = 130.0
 # pair, and falling through to it: a trip that touched 130 but averaged 75 is a
 # highway drive that was briefly fast, not a fast one.
 MODE_FAST_AVG_KMH = 91.0
-
-MODE_NAMES = {
-    "FH": "Fast Highway",
-    "CH": "Constant Highway",
-    "CC": "Constant City",
-    "SC": "Slow City",
-    "HC": "Heavy City",
-}
 
 
 def resolved_cuts(cuts: dict[str, float] | None = None) -> dict[str, float]:

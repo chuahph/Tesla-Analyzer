@@ -1159,20 +1159,22 @@ def test_trip_conditions_speak_the_matrix_own_words():
     # minutes — the matrix calls this Slow City, and the phrase must agree.
     real = drive(51, 107, dur=14.0)
     assert drive_mode(real) == "SC"
-    assert cond(real) == "stop-go traffic"
+    assert cond(real) == "slow city"
 
-    # One phrase per matrix code, all five reachable.
-    assert cond(drive(95, 135)) == "fast highway"     # FH
-    assert cond(drive(75, 100)) == "highway cruise"   # CH — sustained, not a blip
-    assert cond(drive(55, 70)) == "steady flow"       # CC
-    assert cond(drive(20, 60)) == "stop-go traffic"   # SC
-    assert cond(drive(20, 90)) == "heavy traffic"     # HC
+    # One phrase per matrix code, all five reachable — MODE_NAMES itself,
+    # lower-cased, so this can never drift from what the matrix table calls
+    # the same code (see _COND_BASE).
+    assert cond(drive(95, 135)) == "fast highway"       # FH
+    assert cond(drive(75, 100)) == "constant highway"   # CH — sustained, not a blip
+    assert cond(drive(55, 70)) == "constant city"       # CC
+    assert cond(drive(20, 60)) == "slow city"           # SC
+    assert cond(drive(20, 90)) == "heavy city"          # HC
 
     # A peak that used to read "highway + congestion" under the old,
     # independent heuristic is now correctly Slow City in the same words as
     # every other SC trip — no third, competing phrase for this case.
     assert drive_mode(drive(35, 100)) == "SC"
-    assert cond(drive(35, 100)) == "stop-go traffic"
+    assert cond(drive(35, 100)) == "slow city"
 
     # Peak hour and heat are still layered on afterwards, as context rather
     # than a classification.
