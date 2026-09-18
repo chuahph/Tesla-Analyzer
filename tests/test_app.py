@@ -458,7 +458,7 @@ def test_the_condition_cuts_are_stored_and_re_sort_the_same_trips():
         sess.commit()
         with TestClient(app) as client:
             base = client.get("/api/driving-matrix?days=30").json()
-            assert base["thresholds"]["slow_ratio_min"] == pytest.approx(0.35)
+            assert base["thresholds"]["slow_ratio_min"] == pytest.approx(0.28)
             assert "context" in base and base["context"]["region"] == "Malaysia"
             # The report carries its own glossary, and both splits.
             assert base["definitions"]["modes"][0]["code"] == "FH"

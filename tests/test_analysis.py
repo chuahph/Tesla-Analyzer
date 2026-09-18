@@ -2626,9 +2626,11 @@ def test_the_condition_matrix_sorts_on_constancy_not_on_idle_time():
     assert drive_mode(sc) == "SC"
     assert drive_mode(hc) == "HC"
 
-    # A trip that spent a third of itself genuinely waiting is heavy whatever
-    # the moving part looked like — real idle outranks the ratio.
-    waited = D(30.0, 60.0, 25.0, 40.0, 30.0 * 0.200)
+    # A trip that spent over half of itself genuinely waiting is heavy
+    # whatever the moving part looked like — real idle outranks the ratio.
+    # 32/60 clears the 45% bar with room, since the bar itself is meant to be
+    # severe: an ordinary single light should not earn HC on idle alone.
+    waited = D(30.0, 60.0, 32.0, 40.0, 30.0 * 0.200)
     assert drive_mode(waited) == "HC"
 
     m = condition_matrix([ch, cc, sc, hc], capacity_kwh=68.6,
@@ -3537,10 +3539,12 @@ def test_fast_highway_sits_above_the_110_band_and_falls_through_to_it():
 
     # The constancy gate still rules everything: a trip that touched 140 but
     # crawled is not a highway drive at all, at any speed.
-    assert driving_analysis.drive_mode(trip(40.0, 140.0)) == "HC"
+    assert driving_analysis.drive_mode(trip(30.0, 140.0)) == "HC"
     assert driving_analysis.drive_mode(trip(60.0, 140.0)) == "SC"
-    # And genuine waiting still overrides the lot.
-    assert driving_analysis.drive_mode(trip(135.0, 145.0, idle=20.0)) == "HC"
+    # And genuine waiting still overrides the lot. 32/60 rather than 20/60:
+    # the idle bar is deliberately severe now, so overriding a highway-paced
+    # trip takes waiting through over half of it, not a third.
+    assert driving_analysis.drive_mode(trip(135.0, 145.0, idle=32.0)) == "HC"
 
     # The bands are tunable, and moving the fast floor moves the trip.
     cuts = {"fast_max_kmh": 150.0, "fast_avg_kmh": 120.0}
@@ -3588,8 +3592,9 @@ def test_a_burst_of_speed_does_not_make_a_trip_a_slower_category():
     # A steady 65 km/h run is Constant City, not highway: the average is below
     # the bar even though it never varied.
     assert driving_analysis.drive_mode(trip(65.0, 60.0, 72.0)) == "CC"
-    # And genuine waiting still outranks every speed test.
-    assert driving_analysis.drive_mode(trip(28.12, 22.4, 160.0, idle=8.0)) == "HC"
+    # And genuine waiting still outranks every speed test — 13 of 22.4
+    # minutes clears the (deliberately severe) 45% idle bar with room.
+    assert driving_analysis.drive_mode(trip(28.12, 22.4, 160.0, idle=13.0)) == "HC"
 
 
 def test_the_driving_modes_share_of_distance_and_energy_sums_to_100():

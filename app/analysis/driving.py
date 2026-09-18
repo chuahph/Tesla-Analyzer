@@ -2375,8 +2375,18 @@ def analyze(drives: list[Drive], rated_wh_per_km: float = 150.0,
 # avg / max has none of that problem. A cruise holds most of its peak; a crawl
 # through lights does not, whatever its stops were too short to register as.
 MODE_CONSTANT_RATIO = 0.55    # at or above: the trip largely held one speed
-MODE_SLOW_RATIO = 0.35        # between: intermittent. below: repeatedly stopped
-MODE_IDLE_HEAVY = 0.30        # or this much of it spent genuinely waiting
+MODE_SLOW_RATIO = 0.28        # between: intermittent. below: repeatedly stopped
+# Both moved (from 0.35 and 0.30) after two real trips — a 24-min commute
+# with one ~10-minute wait (idle share 0.40, ratio 0.31) and a 17-minute hop
+# with no long stop at all (ratio 0.33) — both landed in HC despite costing
+# 129 and 150 Wh/km, cheaper than plenty of this car's SC and CC trips. HC
+# is a traffic-PATTERN verdict, not a cost one, and at the old cuts it was
+# catching ordinary stop-go rather than the genuine crawls it exists for.
+# Slow city's floor came down to absorb that middle ground; heavy idle's
+# floor went up so a single ordinary light no longer earns HC on its own —
+# it now takes waiting through nearly half the trip, not moving as little
+# as a third of one, before genuine idle overrides the speed reading.
+MODE_IDLE_HEAVY = 0.45        # or this much of it spent genuinely waiting
 # "110 km/h +/- 10%" is the reference this was built against, so the floor is
 # that band's bottom: 110 - 10% = 99. A trip has to have been UP there (the
 # peak) and to have STAYED there (the average) before it is a highway drive —
@@ -2821,12 +2831,16 @@ def condition_matrix(drives: list[Any], capacity_kwh: float,
             # which is the unit a parked car can also be quoted in — so the
             # whole table, moving and standing still, sits on one axis.
             #
-            # It is not a restatement of Wh/km. The two orderings are exact
-            # reverses: heavy city traffic is the worst condition per
-            # kilometre and the best per hour, because the car covers so
-            # little ground. Both are true, and they answer different
-            # questions — how far will this take me, and how long can I sit
-            # here. A range-only table can only show one of them.
+            # It is not a restatement of Wh/km. A slow condition is typically
+            # cheap per hour and expensive per kilometre because the car
+            # covers so little ground for what it burns — but "slow" here
+            # means covering little ground, not necessarily costing the most
+            # per km: HC can come in under SC, because a car standing
+            # genuinely still (HC's idle share) draws far less than one
+            # repeatedly slowing and re-accelerating (SC's ratio). The two
+            # columns answer different questions — how far will this take
+            # me, and how long can I sit here — and a range-only table can
+            # only show one of them.
             "kw": round(kwh / (mins / 60.0), 2) if mins else None,
             # The climate context, measured rather than assumed. Every trip
             # here runs with the air conditioning on — in this climate that is
@@ -2938,14 +2952,19 @@ MATRIX_DEFINITIONS = {
                   "Usually the cheapest kilometres a car does, and cheaper per "
                   "kilometre than CH."},
         {"code": "SC", "name": "Slow City",
-         "means": "Constancy between 0.35 and 0.55. Spent a fair part of the trip "
+         "means": "Constancy between 0.28 and 0.55. Spent a fair part of the trip "
                   "well under its own peak — lights and moderate traffic, but "
-                  "still moving."},
+                  "still moving. This is ordinary stop-go, not the worst "
+                  "condition here: it can cost more per km than HC, because a "
+                  "car that is genuinely stopped burns far less than one "
+                  "repeatedly slowing and accelerating."},
         {"code": "HC", "name": "Heavy City",
-         "means": "Constancy under 0.35, or a third of the trip spent genuinely "
-                  "waiting (stops of five minutes or more). Worst per kilometre, "
-                  "cheapest per hour — the car burns little because it covers "
-                  "little."},
+         "means": "Constancy under 0.28, or 45% or more of the trip spent "
+                  "genuinely waiting (stops of five minutes or more) — a "
+                  "deliberately severe bar, since either one means most of the "
+                  "trip was barely moving at all. Cheapest per hour — the car "
+                  "burns little because it covers little — but not "
+                  "necessarily worst per kilometre; see SC."},
         {"code": "PK", "name": "Park Overall",
          "means": "What the window's parking cost, as a percentage of the "
                   "battery: add up what the gauge lost across every parked "
