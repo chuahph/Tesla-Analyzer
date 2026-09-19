@@ -1866,7 +1866,37 @@ def test_continuity_ignores_parking_shuffle():
 
     drives = [_drv(1, "2026-07-01T08:00", "2026-07-01T09:00", 10000.0)]
     readings = [_rd("2026-07-01T09:05", 10000.1)]
-    assert odometer_continuity(drives, readings)["gaps"] == []
+    out = odometer_continuity(drives, readings)
+    assert out["gaps"] == []
+    # Below tolerance, but not thrown away: a trip that lost a little at BOTH
+    # its start and its end would clear neither check's own tolerance alone,
+    # and the only way to see that is if the real, sub-threshold number
+    # survives here instead of collapsing into the same "no gap" as a trip
+    # that lost nothing at all.
+    assert out["checked"][0]["missing_km"] == pytest.approx(0.1, abs=0.001)
+
+
+def test_continuity_checked_reveals_a_two_boundary_loss_a_single_check_cannot():
+    """A trip losing a little at BOTH ends clears neither check's tolerance on
+    its own — that is exactly the case `checked` exists to make visible,
+    since `gaps` alone would report both boundaries as clean."""
+    from app.analysis.driving import (
+        CONTINUITY_TOLERANCE_KM, departure_continuity, odometer_continuity)
+
+    # 0.08 km missing at each end, 0.16 km total against the car's own
+    # screen — under the 0.15 km tolerance individually, over it combined.
+    drives = [_drv(1, "2026-07-01T08:00", "2026-07-01T09:00", 10000.0,
+                   start_odo=9999.92)]
+    before = [_rd("2026-07-01T07:50", 9999.84)]
+    after = [_rd("2026-07-01T09:05", 10000.08)]
+    arrival = odometer_continuity(drives, after)
+    departure = departure_continuity(drives, before)
+    assert arrival["gaps"] == [] and departure["gaps"] == []
+    end_missing = arrival["checked"][0]["missing_km"]
+    start_missing = departure["checked"][0]["missing_km"]
+    assert end_missing == pytest.approx(0.08, abs=0.001)
+    assert start_missing == pytest.approx(0.08, abs=0.001)
+    assert (start_missing + end_missing) > CONTINUITY_TOLERANCE_KM
 
 
 def test_continuity_only_counts_readings_before_the_next_trip_sets_off():

@@ -124,6 +124,7 @@ def odometer_continuity(drives: list[Any], readings: list[Any]) -> dict[str, Any
                 "unattributed_km": 0.0}
 
     out: list[dict[str, Any]] = []
+    checked: list[dict[str, Any]] = []
     unchecked: list[dict[str, Any]] = []
     total = 0.0
     for i, d in enumerate(ordered):
@@ -143,6 +144,19 @@ def odometer_continuity(drives: list[Any], readings: list[Any]) -> dict[str, Any
             continue
         seen = max(o for _, o in resting)
         missing = seen - d.end_odo_km - (getattr(d, "end_lost_km", None) or 0.0)
+        # Recorded whether or not it clears the tolerance below. A trip a few
+        # centimetres under CONTINUITY_TOLERANCE_KM and one with nothing
+        # missing at all used to look identical — both just absent from
+        # `gaps` — which hides the one case this exists for: two trips each
+        # losing a little at a DIFFERENT boundary, neither large enough alone
+        # to be a `gap` here, but real and additive across both checks.
+        checked.append({
+            "drive_id": getattr(d, "id", None),
+            "route": f"{d.start_location} → {d.end_location}"
+            if d.start_location and d.end_location else "",
+            "end_time": d.end_time.isoformat(timespec="minutes"),
+            "missing_km": round(missing, 3),
+        })
         if missing <= CONTINUITY_TOLERANCE_KM:
             continue
         total += missing
@@ -192,6 +206,7 @@ def odometer_continuity(drives: list[Any], readings: list[Any]) -> dict[str, Any
     return {
         "available": True,
         "gaps": out[-10:],
+        "checked": checked[-200:],
         "trips_checked": len(ordered),
         "unchecked": unchecked[-10:],
         "unattributed_km": round(total, 2),
@@ -252,6 +267,7 @@ def departure_continuity(drives: list[Any], readings: list[Any]) -> dict[str, An
                 "unattributed_km": 0.0}
 
     out: list[dict[str, Any]] = []
+    checked: list[dict[str, Any]] = []
     unchecked: list[dict[str, Any]] = []
     total = 0.0
     for i, d in enumerate(ordered):
@@ -267,6 +283,18 @@ def departure_continuity(drives: list[Any], readings: list[Any]) -> dict[str, An
             continue
         seen = max(o for _, o in resting)
         missing = d.start_odo_km - seen - (getattr(d, "start_lost_km", None) or 0.0)
+        # Same reasoning as odometer_continuity's own `checked` list: kept
+        # whether or not it clears the tolerance, so a trip losing a little at
+        # BOTH boundaries doesn't look identical to one losing nothing at
+        # either — which is exactly what a tolerance built for one boundary
+        # at a time cannot tell apart on its own.
+        checked.append({
+            "drive_id": getattr(d, "id", None),
+            "route": f"{d.start_location} → {d.end_location}"
+            if d.start_location and d.end_location else "",
+            "start_time": d.start_time.isoformat(timespec="minutes"),
+            "missing_km": round(missing, 3),
+        })
         if missing <= CONTINUITY_TOLERANCE_KM:
             continue
         total += missing
@@ -290,6 +318,7 @@ def departure_continuity(drives: list[Any], readings: list[Any]) -> dict[str, An
     return {
         "available": True,
         "gaps": out[-10:],
+        "checked": checked[-200:],
         "trips_checked": len(ordered),
         "unchecked": unchecked[-10:],
         "unattributed_km": round(total, 2),
