@@ -1914,6 +1914,84 @@ def test_continuity_needs_odometer_anchors_and_readings():
     assert odometer_continuity(good, [])["available"] is False
 
 
+def test_departure_continuity_flags_a_trip_that_started_after_the_car_moved():
+    """The mirror of trip 314: the car was last confirmed resting at 9999.5,
+    the trip's own start reads 9999.8, and that 0.3 km is real ground the
+    stream picked up too late to count — the departure-side analogue of a
+    missed arrival tail, which nothing checked for before this."""
+    from app.analysis.driving import departure_continuity
+
+    drives = [_drv(1, "2026-07-01T08:00", "2026-07-01T09:00", 10000.0,
+                   start_odo=9999.8)]
+    readings = [_rd("2026-07-01T07:50", 9999.5), _rd("2026-07-01T07:55", 9999.5)]
+    out = departure_continuity(drives, readings)
+    assert out["available"] is True
+    assert out["unattributed_km"] == pytest.approx(0.3, abs=0.001)
+    assert out["gaps"][0]["drive_id"] == 1
+    assert out["gaps"][0]["recorded_start_odo_km"] == 9999.8
+    assert out["gaps"][0]["observed_odo_km"] == 9999.5
+
+
+def test_departure_continuity_ignores_parking_shuffle():
+    """Sub-tolerance movement is parking-spot noise here exactly as it is on
+    the arrival side, not a boundary the app got wrong."""
+    from app.analysis.driving import departure_continuity
+
+    drives = [_drv(1, "2026-07-01T08:00", "2026-07-01T09:00", 10000.0,
+                   start_odo=9999.95)]
+    readings = [_rd("2026-07-01T07:50", 9999.9)]
+    assert departure_continuity(drives, readings)["gaps"] == []
+
+
+def test_departure_continuity_ignores_a_stale_reading_from_before_the_previous_trip():
+    """A reading from before the PREVIOUS trip even started is not evidence
+    of where the car rested before THIS one — without the lower bound, an
+    old, unrelated reading could manufacture a huge phantom gap instead of
+    correctly reading as no evidence at all."""
+    from app.analysis.driving import departure_continuity
+
+    drives = [
+        _drv(1, "2026-07-01T08:00", "2026-07-01T09:00", 10025.0, start_odo=9000.05),
+        _drv(2, "2026-07-01T12:00", "2026-07-01T13:00", 10075.0, start_odo=10050.0),
+    ]
+    # Trip 1 has this as its own (unbounded-below, first-in-window) evidence
+    # and reads clean. Trip 2 must not reuse it — nothing was seen resting in
+    # ITS OWN window, between trip 1 ending and trip 2 starting.
+    readings = [_rd("2026-07-01T06:00", 9000.0)]
+    out = departure_continuity(drives, readings)
+    assert out["gaps"] == []
+    assert [u["drive_id"] for u in out["unchecked"]] == [2]
+
+
+def test_departure_continuity_separates_no_gap_from_no_evidence():
+    """A trip with no parked reading before it started was never compared at
+    all — the same distinction odometer_continuity had to learn to draw, now
+    needed on this side too."""
+    from app.analysis.driving import departure_continuity
+
+    drives = [
+        _drv(1, "2026-07-01T08:00", "2026-07-01T09:00", 10000.0, start_odo=9995.0),
+        _drv(2, "2026-07-01T20:00", "2026-07-01T20:20", 10005.0, start_odo=10000.0),
+    ]
+    # Only trip 2 has a reading in its pre-departure window; trip 1 has
+    # nothing before it in the window at all.
+    readings = [_rd("2026-07-01T19:00", 10000.0)]
+    out = departure_continuity(drives, readings)
+    assert out["gaps"] == []
+    assert [u["drive_id"] for u in out["unchecked"]] == [1]
+
+
+def test_departure_continuity_needs_odometer_anchors_and_readings():
+    """Trips logged before start_odo_km was recorded can't be checked, and
+    must not be silently counted as clean."""
+    from app.analysis.driving import departure_continuity
+
+    legacy = [_drv(1, "2026-07-01T08:00", "2026-07-01T09:00", 10000.0, start_odo=None)]
+    assert departure_continuity(legacy, [_rd("2026-07-01T07:55", 9999.5)])["available"] is False
+    good = [_drv(1, "2026-07-01T08:00", "2026-07-01T09:00", 10000.0, start_odo=9999.8)]
+    assert departure_continuity(good, [])["available"] is False
+
+
 def test_a_habit_covering_almost_everything_has_nothing_to_compare_against():
     """The penalty is a difference of two means, so a lopsided split measures
     the smaller sample rather than the habit.

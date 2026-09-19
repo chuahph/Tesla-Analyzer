@@ -198,6 +198,104 @@ def odometer_continuity(drives: list[Any], readings: list[Any]) -> dict[str, Any
     }
 
 
+def departure_continuity(drives: list[Any], readings: list[Any]) -> dict[str, Any]:
+    """Check each trip's recorded start against where the car was last seen
+    resting beforehand — the mirror image of odometer_continuity, and the
+    check the arrival side has had all along that the departure side never
+    got.
+
+    Fleet Telemetry replaced a polled machine that tracked both ends: a
+    departure recovery once pulled a trip's start back to the last parked
+    reading before it, recording what it moved with start_lost_km and what it
+    recovered with start_recovered_km. That machine was deleted along with
+    polling, and nothing replaced it — recover_sleep_gap and the arrival-tail
+    repair both give ground back to the trip that just ENDED, never to the one
+    about to start. A car that wakes and rolls out of a dead-signal garage
+    before the stream reconnects loses those first metres exactly the way an
+    arrival used to lose its last ones, and until this, nothing was even
+    looking.
+
+    Same evidence, same tolerance, same honesty about what a missing reading
+    means: a trip with nothing parked in its window beforehand is unchecked,
+    not clean, for the same reason odometer_continuity had to learn to say
+    so. A gap under CONTINUITY_TOLERANCE_KM is parking shuffle here exactly as
+    it is on the arrival side — which means a real departure gap smaller than
+    that tolerance will not show up as one, and that is a limit on what this
+    check can see, not evidence it isn't there.
+    """
+    ordered = [d for d in sorted(drives, key=lambda d: d.start_time)
+               if getattr(d, "start_odo_km", None) is not None]
+    if not ordered:
+        return {"available": False, "gaps": [], "unchecked": [], "unattributed_km": 0.0}
+
+    def _unchecked_entry(d: Any) -> dict[str, Any]:
+        return {
+            "drive_id": getattr(d, "id", None),
+            "route": f"{d.start_location} → {d.end_location}"
+            if d.start_location and d.end_location else "",
+            "start_time": d.start_time.isoformat(timespec="minutes"),
+        }
+
+    if not readings:
+        return {"available": False, "gaps": [],
+                "trips_checked": len(ordered),
+                "unchecked": [_unchecked_entry(d) for d in ordered][-10:],
+                "unattributed_km": 0.0}
+    obs = sorted(
+        ((r.ts, r.odo_km) for r in readings if getattr(r, "odo_km", None) is not None),
+        key=lambda x: x[0],
+    )
+    if not obs:
+        return {"available": False, "gaps": [],
+                "trips_checked": len(ordered),
+                "unchecked": [_unchecked_entry(d) for d in ordered][-10:],
+                "unattributed_km": 0.0}
+
+    out: list[dict[str, Any]] = []
+    unchecked: list[dict[str, Any]] = []
+    total = 0.0
+    for i, d in enumerate(ordered):
+        prev = ordered[i - 1] if i > 0 else None
+        # Readings taken while parked before this trip: after the previous one
+        # stopped (or from the start of the window, if there was none in it),
+        # and before this one's own first recorded moment.
+        since = prev.end_time if prev else None
+        resting = [(t, o) for t, o in obs
+                   if t <= d.start_time and (since is None or t >= since)]
+        if not resting:
+            unchecked.append(_unchecked_entry(d))
+            continue
+        seen = max(o for _, o in resting)
+        missing = d.start_odo_km - seen - (getattr(d, "start_lost_km", None) or 0.0)
+        if missing <= CONTINUITY_TOLERANCE_KM:
+            continue
+        total += missing
+        out.append({
+            "drive_id": getattr(d, "id", None),
+            "prev_drive_id": getattr(prev, "id", None) if prev else None,
+            "boundary_odo_km": round(seen, 3),
+            "route": f"{d.start_location} → {d.end_location}"
+            if d.start_location and d.end_location else "",
+            "start_time": d.start_time.isoformat(timespec="minutes"),
+            "recorded_start_odo_km": round(d.start_odo_km, 1),
+            "observed_odo_km": round(seen, 1),
+            # The last moment the car was confirmed still at the resting
+            # position, so a large finding can be judged by when the gap
+            # actually opened rather than assumed to span the whole window.
+            "last_at_rest": max(
+                (t for t, o in resting if o >= seen - 0.001),
+                default=d.start_time).isoformat(timespec="minutes"),
+            "unrecorded_km": round(missing, 2),
+        })
+    return {
+        "available": True,
+        "gaps": out[-10:],
+        "trips_checked": len(ordered),
+        "unchecked": unchecked[-10:],
+        "unattributed_km": round(total, 2),
+    }
+
+
 # Measuring this car's own parked standby draw once it is properly asleep.
 # Deliberately stricter than vampire_drain's reporting thresholds, because this
 # feeds a correction rather than a narrative: start/end SoC are whole percents,

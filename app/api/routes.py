@@ -9183,6 +9183,60 @@ def continuity(
     return out
 
 
+@router.get("/departure-continuity")
+def departure_continuity(
+    days: int = Query(30, ge=1, le=730),
+    session: Session = Depends(get_session),
+):
+    """Each trip's recorded start against where the car was last seen resting
+    beforehand — the check /api/continuity runs at the other end.
+
+    Built to test a specific hypothesis: several short, stream_lost trips
+    read short against the car's screen on distance but not on energy, which
+    does not look like a missed arrival tail (already ruled out for them by
+    /api/continuity — real driving costs energy roughly in proportion to
+    distance, and theirs mostly didn't). A slow, low-power roll out of a
+    dead-signal garage before the stream reconnects would look exactly like
+    this: a few metres of real ground, at almost no energy cost, missing from
+    the other end of the trip instead. Nothing previously checked for that —
+    the polling-era departure recovery that used to (start_lost_km,
+    start_recovered_km) was deleted with polling and never rebuilt for the
+    stream.
+    """
+    vehicle = _first_vehicle(session)
+    since = sync_mod.now_local() - timedelta(days=days)
+    drives = session.scalars(
+        select(Drive).where(Drive.vehicle_id == vehicle.id,
+                            Drive.start_time >= since)
+        .order_by(Drive.start_time)
+    ).all()
+    readings = session.scalars(
+        select(BatteryReading).where(BatteryReading.vehicle_id == vehicle.id,
+                                     BatteryReading.ts >= since)
+        .order_by(BatteryReading.ts)
+    ).all()
+    out = driving_analysis.departure_continuity(list(drives), list(readings))
+    out["days"] = days
+    out["readings_checked"] = len(readings)
+    unchecked = out.get("unchecked") or []
+    if not readings:
+        out["note"] = "No parked readings in this window — nothing could be checked."
+    elif out.get("gaps"):
+        out["note"] = (
+            f"{len(out['gaps'])} trip(s) started already short of where the car was "
+            f"last seen resting — real ground the stream picked up too late to "
+            f"count, not a hole in the odometer.")
+    elif unchecked:
+        checked = out.get("trips_checked", 0) - len(unchecked)
+        out["note"] = (
+            f"No gap found in the {checked} trip(s) with a parked reading to check "
+            f"against. {len(unchecked)} more had none before they started, so "
+            f"nothing could be said about them either way — see unchecked.")
+    else:
+        out["note"] = "Every trip started from where the car was last seen resting."
+    return out
+
+
 @router.get("/energy-reconcile")
 def energy_reconcile(session: Session = Depends(get_session)):
     """Where the battery went since the last charge, and how much is unexplained.

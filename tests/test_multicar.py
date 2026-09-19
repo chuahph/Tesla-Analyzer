@@ -4529,6 +4529,69 @@ def test_continuity_endpoint_catches_what_boundary_checks_cannot():
         settings.app_passcode = old_pass
 
 
+def test_departure_continuity_endpoint_catches_a_late_start():
+    """The mirror of the arrival-side endpoint test: a trip whose own start
+    already sits ahead of where the car was last confirmed resting, which
+    used to have no check at all now that polling's departure recovery is
+    gone.
+    """
+    from datetime import timedelta
+
+    from app import sync as sync_mod
+    from app.models import BatteryReading, Drive
+
+    settings = get_settings()
+    old_pass = settings.app_passcode
+    settings.app_passcode = ""
+    try:
+        with TestClient(app) as client:
+            with SessionLocal() as s:
+                for row in s.query(Drive).all():
+                    s.delete(row)
+                for row in s.query(BatteryReading).all():
+                    s.delete(row)
+                s.flush()
+                veh = s.query(Vehicle).first()
+                base = sync_mod.now_local() - timedelta(days=1)
+
+                # The car was last confirmed resting at 999.6, but this trip's
+                # own start already reads 1000.0 — 0.4 km it drove before the
+                # stream reconnected.
+                s.add(Drive(vehicle_id=veh.id, start_time=base,
+                            end_time=base + timedelta(minutes=20),
+                            distance_km=10.0, duration_min=20, start_soc=60,
+                            end_soc=58, energy_used_kwh=1.5, avg_speed_kmh=30,
+                            max_speed_kmh=60, outside_temp_c=30,
+                            start_location="Home", end_location="B",
+                            start_odo_km=1000.0, end_odo_km=1010.0))
+                for i in range(3):
+                    s.add(BatteryReading(
+                        vehicle_id=veh.id,
+                        ts=base - timedelta(minutes=60 - 20 * i),
+                        soc=60.0, range_km=250.0, odo_km=999.6))
+                s.commit()
+
+            body = client.get("/api/departure-continuity?days=7").json()
+            assert body["available"] is True
+            assert body["readings_checked"] == 3
+            assert body["unattributed_km"] == pytest.approx(0.4, abs=0.02)
+            (gap,) = body["gaps"]
+            assert gap["recorded_start_odo_km"] == pytest.approx(1000.0, abs=0.05)
+            assert gap["observed_odo_km"] == pytest.approx(999.6, abs=0.05)
+            assert "picked up too late to count" in body["note"]
+
+            # And with no readings it says it could not look, rather than clean.
+            with SessionLocal() as s:
+                for row in s.query(BatteryReading).all():
+                    s.delete(row)
+                s.commit()
+            blind = client.get("/api/departure-continuity?days=7").json()
+            assert blind["available"] is False
+            assert "nothing could be checked" in blind["note"]
+    finally:
+        settings.app_passcode = old_pass
+
+
 def test_repair_arrivals_fixes_the_tails_and_refuses_the_journeys():
     """Ten findings is ten hand-built URLs, and the check's whole problem was
     that nobody looked at its output — so making the fix tedious guarantees it
