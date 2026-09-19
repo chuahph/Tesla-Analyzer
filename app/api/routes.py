@@ -7243,6 +7243,25 @@ def repair_arrivals(
             continue
         repaired.append(plan)
 
+    unchecked = found.get("unchecked", [])
+    if not readings:
+        note = "No parked readings in this window — nothing could be checked."
+    elif repaired or manual:
+        note = "Dry run. Add &apply=true to write these." if not apply else None
+    elif unchecked:
+        # Not the same claim as "every trip stopped where the car was seen
+        # resting" — that would be true only of the trips actually compared.
+        # A trip with no parked reading before the next one started (see
+        # unchecked, below) was never compared at all, and saying nothing
+        # went wrong there would be the same silent zero this endpoint exists
+        # to catch everywhere else.
+        checked = found.get("trips_checked", 0) - len(unchecked)
+        note = (f"No gap found in the {checked} trip(s) with a parked reading "
+                f"to check against. {len(unchecked)} more had none before the "
+                f"next trip started, so nothing could be said about them "
+                f"either way — see unchecked.")
+    else:
+        note = "Every trip stopped where the car was seen resting."
     return {
         "days": days,
         "trips_checked": found.get("trips_checked", 0),
@@ -7253,11 +7272,8 @@ def repair_arrivals(
         "needs_a_human": len(manual),
         "repairs": repaired,
         "manual": manual,
-        "note": ("No parked readings in this window — nothing could be checked."
-                 if not readings else
-                 "Every trip stopped where the car was seen resting."
-                 if not repaired and not manual else
-                 ("Dry run. Add &apply=true to write these." if not apply else None)),
+        "unchecked": unchecked,
+        "note": note,
     }
 
 
@@ -9087,16 +9103,27 @@ def continuity(
     out = driving_analysis.odometer_continuity(list(drives), list(readings))
     out["days"] = days
     out["readings_checked"] = len(readings)
+    unchecked = out.get("unchecked") or []
     # Same discipline as trip-gaps: a verdict has to say what it could see.
-    # With no parked readings this check is blind, and blind is not clean.
-    out["note"] = (
-        "No parked readings in this window — nothing could be checked."
-        if not readings else
-        "Every trip stopped where the car was seen resting."
-        if not out.get("gaps") else
-        f"{len(out['gaps'])} trip(s) recorded a stop short of where the car was "
-        f"actually seen. The distance is not missing — the next trip most "
-        f"likely claimed it — so this is misattribution, not a hole.")
+    # With no parked readings this check is blind, and blind is not clean —
+    # and that applies per trip, not just to the window as a whole: a trip
+    # with no reading before the next one started was never compared, which
+    # is a different fact from one that was compared and matched.
+    if not readings:
+        out["note"] = "No parked readings in this window — nothing could be checked."
+    elif out.get("gaps"):
+        out["note"] = (
+            f"{len(out['gaps'])} trip(s) recorded a stop short of where the car was "
+            f"actually seen. The distance is not missing — the next trip most "
+            f"likely claimed it — so this is misattribution, not a hole.")
+    elif unchecked:
+        checked = out.get("trips_checked", 0) - len(unchecked)
+        out["note"] = (
+            f"No gap found in the {checked} trip(s) with a parked reading to check "
+            f"against. {len(unchecked)} more had none before the next trip started, "
+            f"so nothing could be said about them either way — see unchecked.")
+    else:
+        out["note"] = "Every trip stopped where the car was seen resting."
     return out
 
 

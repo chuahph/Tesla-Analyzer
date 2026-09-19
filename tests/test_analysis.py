@@ -1883,6 +1883,26 @@ def test_continuity_only_counts_readings_before_the_next_trip_sets_off():
     assert odometer_continuity(drives, readings)["unattributed_km"] == 0.0
 
 
+def test_continuity_separates_no_gap_from_no_evidence():
+    """A trip with no parked reading before the next one started was never
+    compared at all — folding that into the same silent "no gap" as a trip
+    that WAS compared and matched is the confident-zero failure this file
+    exists to avoid everywhere else."""
+    from app.analysis.driving import odometer_continuity
+
+    drives = [
+        _drv(1, "2026-07-01T08:00", "2026-07-01T09:00", 10000.0),
+        _drv(2, "2026-07-01T20:00", "2026-07-01T20:20", 10005.0),
+    ]
+    # Only trip 1 has a reading in its post-trip window; trip 2's car went
+    # to sleep before anything polled it, and there is no third trip to
+    # bound the window on the other side.
+    readings = [_rd("2026-07-01T09:05", 10000.0)]
+    out = odometer_continuity(drives, readings)
+    assert out["gaps"] == []
+    assert [u["drive_id"] for u in out["unchecked"]] == [2]
+
+
 def test_continuity_needs_odometer_anchors_and_readings():
     """Trips logged before end_odo_km was recorded can't be checked, and must
     not be silently counted as clean."""

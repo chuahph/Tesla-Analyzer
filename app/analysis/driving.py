@@ -81,6 +81,15 @@ def odometer_continuity(drives: list[Any], readings: list[Any]) -> dict[str, Any
     discontinuity, and only the parked readings between the two can expose it,
     which is why this compares against readings rather than chaining trip to
     trip.
+
+    A trip with no parked reading before the next one started cannot be
+    judged at all — there is nothing to compare ``end_odo_km`` against — and
+    that is a different fact from a trip that WAS compared and matched.
+    Folding both into the same silent "no gap" would be exactly the failure
+    this file keeps finding elsewhere: a missing case reported as a confident
+    zero. So the two are kept apart in the return value; a caller that only
+    reads ``gaps`` still behaves as before, but one that ignores ``unchecked``
+    is choosing to, not being unable to tell the difference.
     """
     ordered = [d for d in sorted(drives, key=lambda d: d.start_time)
                if getattr(d, "end_odo_km", None) is not None]
@@ -94,6 +103,7 @@ def odometer_continuity(drives: list[Any], readings: list[Any]) -> dict[str, Any
         return {"available": False, "gaps": [], "unattributed_km": 0.0}
 
     out: list[dict[str, Any]] = []
+    unchecked: list[dict[str, Any]] = []
     total = 0.0
     for i, d in enumerate(ordered):
         nxt = ordered[i + 1] if i + 1 < len(ordered) else None
@@ -104,6 +114,16 @@ def odometer_continuity(drives: list[Any], readings: list[Any]) -> dict[str, Any
         resting = [(t, o) for t, o in obs
                    if t >= d.end_time and (until is None or t <= until)]
         if not resting:
+            # No evidence either way — most often a short trip followed by the
+            # car sleeping before the next watchdog poll landed, which Fleet
+            # Telemetry made routine now that polling only happens at all to
+            # check on a car the stream has gone quiet on.
+            unchecked.append({
+                "drive_id": getattr(d, "id", None),
+                "route": f"{d.start_location} → {d.end_location}"
+                if d.start_location and d.end_location else "",
+                "end_time": d.end_time.isoformat(timespec="minutes"),
+            })
             continue
         seen = max(o for _, o in resting)
         missing = seen - d.end_odo_km - (getattr(d, "end_lost_km", None) or 0.0)
@@ -157,6 +177,7 @@ def odometer_continuity(drives: list[Any], readings: list[Any]) -> dict[str, Any
         "available": True,
         "gaps": out[-10:],
         "trips_checked": len(ordered),
+        "unchecked": unchecked[-10:],
         "unattributed_km": round(total, 2),
     }
 
