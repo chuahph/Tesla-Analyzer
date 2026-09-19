@@ -256,6 +256,22 @@ class Drive(Base):
     # still on the dashboard and the figure is still true of them.
     end_lost_km: Mapped[float | None] = mapped_column(Float, nullable=True)
 
+    # Ground given back to this trip at its own end by a DIFFERENT automatic
+    # recovery — see sync.recover_sleep_gap. Distinct from the arrival repair
+    # above (end_est_km): that one waits for a parked reading and only ever
+    # layers an estimate on top; this one fires the moment the NEXT trip
+    # starts moving, using its opening odometer as the boundary, and rewrites
+    # end_odo_km and distance_km directly rather than adding a separate
+    # field. It ran on the shadow dict, which is discarded at promotion — so
+    # without a column of its own, a trip this already corrected and one it
+    # never touched looked identical afterwards, and there was no way to
+    # tell a corrected figure from a raw one once it became a Drive row.
+    # None means the trip predates this column or the mechanism never fired
+    # on it; a fired correction is always > 0, since a zero gain refuses
+    # rather than writing.
+    recovered_km: Mapped[float | None] = mapped_column(Float, nullable=True)
+    recovered_kwh: Mapped[float | None] = mapped_column(Float, nullable=True)
+
     # Manually-entered cost, used only when the charge-layer cost model
     # (driving_analysis.layered_trip_costs) can't price this trip — every
     # charge session in the vehicle's history has already been fully

@@ -6295,6 +6295,72 @@ def test_a_trip_telemetry_alone_saw_is_added_rather_than_lost():
         settings.app_passcode = old_pc
 
 
+def test_recover_sleep_gap_survives_promotion():
+    """A correction recover_sleep_gap made on the shadow dict must not vanish
+    the moment the trip becomes a permanent Drive row.
+
+    Before this, the shadow-only `recovered_km`/`recovered_kwh` were read by
+    nothing at promotion — a trip recover_sleep_gap already rewrote and one
+    it never touched looked identical afterwards, with no column anywhere
+    saying which was which.
+    """
+    import json as _json
+
+    from app.database import SessionLocal
+    from app import state, sync as sync_mod
+    from app.models import Drive, Vehicle
+
+    settings = get_settings()
+    old_pc = settings.app_passcode
+    settings.app_passcode = ""
+    sess = SessionLocal()
+    prev = state.get(sess, state.TELEMETRY_TRIPS_KEY)
+    vehicle = None
+    try:
+        now = sync_mod.now_local()
+
+        def _epoch(local):
+            return local.replace(tzinfo=sync_mod.MYT).timestamp()
+
+        with TestClient(app) as client:
+            vehicle = Vehicle(vin="SLEEPGAP0000001", name="Test", model="Model 3")
+            sess.add(vehicle)
+            sess.commit()
+            at = now - timedelta(minutes=45)
+            state.put(sess, state.TELEMETRY_TRIPS_KEY, _json.dumps([{
+                "vin": "SLEEPGAP0000001",
+                "start_ts": _epoch(at), "end_ts": _epoch(at + timedelta(minutes=8)),
+                "start_time": at.isoformat(timespec="seconds"),
+                "end_time": (at + timedelta(minutes=8)).isoformat(timespec="seconds"),
+                "distance_km": 2.791, "duration_min": 8.3, "energy_kwh": 0.74,
+                "wh_per_km": 265.1, "ended_on": "stream_lost",
+                # As if recover_sleep_gap had already run on this shadow trip.
+                "recovered_km": 0.338, "recovered_kwh": 0.09,
+            }]))
+            sess.commit()
+            client.get("/api/telemetry/promote?apply=true")
+
+        with SessionLocal() as chk:
+            rows = chk.query(Drive).filter(Drive.vehicle_id == vehicle.id).all()
+            assert len(rows) == 1
+            assert rows[0].recovered_km == pytest.approx(0.338, abs=0.001)
+            assert rows[0].recovered_kwh == pytest.approx(0.09, abs=0.001)
+    finally:
+        with SessionLocal() as cleanup:
+            if vehicle is not None:
+                for d in cleanup.query(Drive).filter(
+                        Drive.vehicle_id == vehicle.id).all():
+                    cleanup.delete(d)
+                v = cleanup.get(Vehicle, vehicle.id)
+                if v is not None:
+                    cleanup.delete(v)
+            cleanup.commit()
+        state.put(sess, state.TELEMETRY_TRIPS_KEY, prev or "[]")
+        sess.commit()
+        sess.close()
+        settings.app_passcode = old_pc
+
+
 def test_a_trip_that_is_mostly_rounding_does_not_referee_the_others():
     """Two kinds of trip cannot judge, and averaging them in makes it worse.
 
@@ -10095,6 +10161,61 @@ def test_a_failing_promotion_is_recorded_instead_of_vanishing():
         routes._record_promote_result(broken, "sync", RuntimeError("x"))
     finally:
         state.put(sess, state.PROMOTE_FAIL_KEY, prev or "")
+        sess.commit()
+        sess.close()
+        settings.app_passcode = old_pc
+
+
+def test_health_reports_unchecked_arrivals_separately_from_gaps():
+    """The distinction odometer_continuity now draws — no gap vs no reading
+    to check — is invisible unless something automatic surfaces it. Before
+    this, /api/health had no continuity block at all, so a growing backlog
+    of unconfirmed arrivals had nowhere to show up short of calling
+    /api/repair-arrivals by hand, which nothing does on its own.
+    """
+    from app.database import SessionLocal
+    from app import state, sync as sync_mod
+    from app.models import Drive, Vehicle
+
+    settings = get_settings()
+    old_pc = settings.app_passcode
+    settings.app_passcode = ""
+    sess = SessionLocal()
+    prev_vin = state.get(sess, state.ACTIVE_VIN_KEY)
+    vehicle = None
+    try:
+        now = sync_mod.now_local()
+        vehicle = Vehicle(vin="HEALTHCONT00001", name="Test", model="Model 3")
+        sess.add(vehicle)
+        sess.commit()
+        # _first_vehicle prefers the active pick over "first by id" — needed
+        # here since a demo/seed vehicle with a lower id may already exist.
+        state.put(sess, state.ACTIVE_VIN_KEY, vehicle.vin)
+        # A recent trip with no parked reading anywhere near it — exactly the
+        # short-trip-then-sleep case Fleet Telemetry made common.
+        sess.add(Drive(vehicle_id=vehicle.id,
+                       start_time=now - timedelta(hours=1),
+                       end_time=now - timedelta(minutes=40),
+                       distance_km=5.0, duration_min=20.0,
+                       start_soc=60, end_soc=58, energy_used_kwh=1.0,
+                       end_odo_km=10000.0))
+        sess.commit()
+
+        with TestClient(app) as client:
+            health = client.get("/api/health").json()
+        assert health["continuity"]["unchecked"] == 1
+        assert health["continuity"]["gaps"] == 0
+    finally:
+        with SessionLocal() as cleanup:
+            if vehicle is not None:
+                for d in cleanup.query(Drive).filter(
+                        Drive.vehicle_id == vehicle.id).all():
+                    cleanup.delete(d)
+                v = cleanup.get(Vehicle, vehicle.id)
+                if v is not None:
+                    cleanup.delete(v)
+            cleanup.commit()
+        state.put(sess, state.ACTIVE_VIN_KEY, prev_vin or "")
         sess.commit()
         sess.close()
         settings.app_passcode = old_pc

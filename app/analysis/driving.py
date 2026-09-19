@@ -93,14 +93,35 @@ def odometer_continuity(drives: list[Any], readings: list[Any]) -> dict[str, Any
     """
     ordered = [d for d in sorted(drives, key=lambda d: d.start_time)
                if getattr(d, "end_odo_km", None) is not None]
-    if not ordered or not readings:
-        return {"available": False, "gaps": [], "unattributed_km": 0.0}
+    if not ordered:
+        return {"available": False, "gaps": [], "unchecked": [], "unattributed_km": 0.0}
+
+    def _unchecked_entry(d: Any) -> dict[str, Any]:
+        return {
+            "drive_id": getattr(d, "id", None),
+            "route": f"{d.start_location} → {d.end_location}"
+            if d.start_location and d.end_location else "",
+            "end_time": d.end_time.isoformat(timespec="minutes"),
+        }
+
+    if not readings:
+        # No readings anywhere in the window — every trip here is unchecked,
+        # not confirmed clean. The old version of this returned early with
+        # nothing in `unchecked` either, which was the same silent zero this
+        # function exists to avoid, one case earlier.
+        return {"available": False, "gaps": [],
+                "trips_checked": len(ordered),
+                "unchecked": [_unchecked_entry(d) for d in ordered][-10:],
+                "unattributed_km": 0.0}
     obs = sorted(
         ((r.ts, r.odo_km) for r in readings if getattr(r, "odo_km", None) is not None),
         key=lambda x: x[0],
     )
     if not obs:
-        return {"available": False, "gaps": [], "unattributed_km": 0.0}
+        return {"available": False, "gaps": [],
+                "trips_checked": len(ordered),
+                "unchecked": [_unchecked_entry(d) for d in ordered][-10:],
+                "unattributed_km": 0.0}
 
     out: list[dict[str, Any]] = []
     unchecked: list[dict[str, Any]] = []
@@ -118,12 +139,7 @@ def odometer_continuity(drives: list[Any], readings: list[Any]) -> dict[str, Any
             # car sleeping before the next watchdog poll landed, which Fleet
             # Telemetry made routine now that polling only happens at all to
             # check on a car the stream has gone quiet on.
-            unchecked.append({
-                "drive_id": getattr(d, "id", None),
-                "route": f"{d.start_location} → {d.end_location}"
-                if d.start_location and d.end_location else "",
-                "end_time": d.end_time.isoformat(timespec="minutes"),
-            })
+            unchecked.append(_unchecked_entry(d))
             continue
         seen = max(o for _, o in resting)
         missing = seen - d.end_odo_km - (getattr(d, "end_lost_km", None) or 0.0)

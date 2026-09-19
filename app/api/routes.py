@@ -1573,6 +1573,10 @@ def health(session: Session = Depends(get_session)):
         # indefinitely and the dashboard would look exactly like a car nobody
         # had driven.
         "promotion": _promotion_health(session),
+        # Counts only — see _continuity_health for what they mean and why
+        # this couldn't just reuse the dashboard's own (heavier, wider)
+        # continuity block.
+        "continuity": _continuity_health(session),
         # What wrote the rows that are actually in the history. The purge takes
         # drives and nothing else, so a database can be entirely streamed in
         # its trips while its charges and readings are still polling's.
@@ -3645,6 +3649,49 @@ def _promotion_health(session: Session) -> dict:
     }
 
 
+def _continuity_health(session: Session) -> dict[str, Any]:
+    """Whether the automatic arrival repair had anything it could check.
+
+    Scoped to the same window _repair_after_new_trips already scans after
+    every new trip, so this is a read of what that job just saw rather than a
+    fresh, heavier one — the cost is a bounded, recent, indexed query, the
+    same one the repair itself pays.
+
+    Exists because odometer_continuity's own fix (telling "no gap" apart
+    from "no reading to check") only helps a person who thinks to call
+    /api/repair-arrivals or /api/continuity by hand. Nothing did that
+    automatically, so the distinction it draws was invisible unless someone
+    went looking — the same shape of problem the fix itself was for, one
+    layer up. A rising ``unchecked`` here, on a car with plenty of trips,
+    says polling is too sparse to ever confirm an arrival, not that arrivals
+    have stopped needing confirmation.
+    """
+    try:
+        vehicle = _first_vehicle(session)
+    except HTTPException:
+        return {"unchecked": 0, "gaps": 0}
+    try:
+        since = sync_mod.now_local() - timedelta(days=ARRIVAL_REPAIR_RECENT_DAYS)
+        drives = session.scalars(
+            select(Drive).where(Drive.vehicle_id == vehicle.id,
+                                Drive.start_time >= since)
+            .order_by(Drive.start_time)
+        ).all()
+        readings = session.execute(
+            select(BatteryReading.ts, BatteryReading.odo_km).where(
+                BatteryReading.vehicle_id == vehicle.id,
+                BatteryReading.ts >= since,
+            ).order_by(BatteryReading.ts)
+        ).all()
+        out = driving_analysis.odometer_continuity(list(drives), list(readings))
+    except Exception:  # noqa: BLE001 — health must never itself fail to answer
+        return {"unchecked": None, "gaps": None}
+    return {
+        "unchecked": len(out.get("unchecked") or []),
+        "gaps": len(out.get("gaps") or []),
+    }
+
+
 def _record_promote_result(session: Session, where: str,
                            err: BaseException | None) -> None:
     """Remember that an automatic promotion failed, or that it stopped failing.
@@ -4308,6 +4355,15 @@ def _apply_shadow_to_drive(row, t: dict) -> None:
         row.speed_profile = _json_mod.dumps(t["speed_bands"])
     if t.get("stops") is not None:
         row.stop_count = int(t["stops"])
+    # recover_sleep_gap's own record of what it corrected, on the shadow dict
+    # only — discarded here otherwise, since nothing else ever reads t again
+    # after this call. Without it, a trip recover_sleep_gap already rewrote
+    # and one it never touched are the same row from here on: both just have
+    # a distance_km and an end_odo_km, with no way to tell which is raw.
+    if t.get("recovered_km") is not None:
+        row.recovered_km = float(t["recovered_km"])
+    if t.get("recovered_kwh") is not None:
+        row.recovered_kwh = float(t["recovered_kwh"])
 
 
 # The sweep that catches anything the prompt path missed. Daily, because it
