@@ -1171,17 +1171,46 @@ def _parked_readings(session: Session, vehicle_id: int):
         for ts, state, flag in rows)
 
 
+# The whole-history query below, held for a short while rather than re-run on
+# every request that wants a rate fit. It answers "what does this car
+# generally do", a figure that moves on the timescale of drives and charges,
+# not of dashboard loads — so a reader who checks the app five times in two
+# minutes was paying for the same few hundred rows five times over, off a
+# database billed on how many bytes it hands back. Keyed by vehicle_id,
+# module-level rather than per-request: the point is to survive BETWEEN
+# requests, which a cache built inside one (see _hist a few hundred lines
+# down, which only dedupes calls within a single response) cannot do.
+_FULL_HISTORY_CACHE: dict[int, tuple[float, list, list]] = {}
+_FULL_HISTORY_TTL_SEC = 120.0
+
+
 def _full_history(session: Session, vehicle_id: int) -> tuple[list, list]:
     """Every drive and charge this car has, for fitting rates that describe the
     CAR rather than whatever window is on screen — see
-    driving.vampire_drain's ``rate_history``."""
-    return (
-        list(session.scalars(
-            select(Drive).where(Drive.vehicle_id == vehicle_id)
-            .order_by(Drive.start_time))),
-        list(session.scalars(
-            select(Charge).where(Charge.vehicle_id == vehicle_id))),
-    )
+    driving.vampire_drain's ``rate_history``.
+
+    Cached for ``_FULL_HISTORY_TTL_SEC``: the rows returned are expunged from
+    the session before caching, so a later request holding them cannot touch
+    anything that would need one (a lazy ``.vehicle`` load, say) without SQLAlchemy
+    raising loudly — the callers here only ever read plain columns, all of
+    which loaded with the query, so expunging costs them nothing. A trip
+    promoted in the last two minutes can be briefly missing from the fit this
+    feeds; the fit describes a car's history, not its last two minutes, and
+    already tolerates far more slop than that.
+    """
+    now = time.monotonic()
+    cached = _FULL_HISTORY_CACHE.get(vehicle_id)
+    if cached is not None and now - cached[0] < _FULL_HISTORY_TTL_SEC:
+        return cached[1], cached[2]
+    drives = list(session.scalars(
+        select(Drive).where(Drive.vehicle_id == vehicle_id)
+        .order_by(Drive.start_time)))
+    charges = list(session.scalars(
+        select(Charge).where(Charge.vehicle_id == vehicle_id)))
+    for row in (*drives, *charges):
+        session.expunge(row)
+    _FULL_HISTORY_CACHE[vehicle_id] = (now, drives, charges)
+    return drives, charges
 
 
 

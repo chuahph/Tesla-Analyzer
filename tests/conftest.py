@@ -20,6 +20,27 @@ def session():
         yield s
 
 
+@pytest.fixture(autouse=True)
+def _clear_full_history_cache():
+    """_full_history() (app/api/routes.py) caches whole-history rows across
+    requests by vehicle_id, module-level, so a production instance does not
+    re-run that query on every dashboard load. Every test's ``session``
+    fixture is a fresh in-memory database that still numbers its first
+    vehicle 1, so a cache entry left standing by one test is a stale answer
+    handed to the next one that asks for the same id — silently, since
+    nothing about a hit looks different from a miss. Cleared before AND
+    after: before, because a previous test may have left one; after, so a
+    real (non-test) run started later in the same process — unlikely, but
+    the failure mode is a wrong number with no error — never inherits a
+    test's fixture data.
+    """
+    from app.api import routes
+
+    routes._FULL_HISTORY_CACHE.clear()
+    yield
+    routes._FULL_HISTORY_CACHE.clear()
+
+
 @pytest.fixture
 def seeded(session):
     generate(session, days=120, seed=7)
