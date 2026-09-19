@@ -11686,9 +11686,21 @@ def summary(
 # every batch the receiver posts — so its size is paid about 1,700 times a
 # day to hold a few minutes of records nobody is reading between diagnoses.
 TELEMETRY_RAW_MAX = 40
-# Shadow trips kept for comparison. Weeks of driving, which is the window in
-# which telemetry either earns the switch or does not.
-TELEMETRY_TRIPS_MAX = 400
+# Shadow trips kept for comparison. Was weeks of driving, sized for the
+# telemetry-vs-polling trial this blob was originally built to support — and
+# that trial is over (see the accuracy record: the polled path is gone, not
+# merely unused). Nothing since has ever trimmed a PROMOTED entry out of this
+# list, only the cap does, so at 400 it sits permanently near-full once an
+# account has driven that many trips — every one of them re-read and mostly
+# re-written on every batch the receiver posts, ~4,000 times a day, whether
+# or not the batch touched a single trip. Promotion only ever looks back
+# PROMOTE_MAX_DAYS (7), and the one caller asking for a deep look
+# (/api/telemetry/charges) defaults to 40 already — so 100 is chosen for
+# headroom against those, not against the old trial: several weeks at any
+# ordinary trip rate, comfortably wider than any promotion outage this
+# project's own incident history has produced, while the blob it bounds is a
+# quarter the size it was on every one of those 4,000 daily reads.
+TELEMETRY_TRIPS_MAX = 100
 # Fields that say what the car thinks it is doing, and how many of their
 # changes to keep. They stream only on change, so this is a log of moments
 # rather than a sample of values — a few hundred covers weeks.
