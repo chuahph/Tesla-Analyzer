@@ -1606,6 +1606,12 @@ function tripDiagnostics(t, ctx) {
       // Disambiguates a 0.0 start_lost_km: nothing to lose, or the departure
       // recovery reclaimed it. Without this the two look identical.
       start_recovered_km: t.start_recovered_km,
+      // What sync.recover_sleep_gap already pulled into THIS trip's own end
+      // using the next trip's opening odometer, before promotion. Null means
+      // either it never fired or the trip predates this column — those two
+      // cases are not distinguishable from here, which matters before
+      // treating a trip's current distance as the untouched raw stream figure.
+      recovered_km: t.recovered_km, recovered_kwh: t.recovered_kwh,
       // Parked minutes inside that departure gap whose standby drain was taken
       // back off this trip's energy. Nonzero means the energy is a measurement
       // minus a correction rather than a raw reading — which is exactly what an

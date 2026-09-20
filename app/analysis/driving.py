@@ -2474,6 +2474,17 @@ def analyze(drives: list[Drive], rated_wh_per_km: float = 150.0,
                 # tells a "nothing was lost" 0.0 apart from a "the recovery
                 # reclaimed it" 0.0 (see Drive.start_recovered_km).
                 "start_recovered_km": getattr(d, "start_recovered_km", None),
+                # What sync.recover_sleep_gap already pulled INTO this trip's
+                # own end, using the next trip's opening odometer — the ONE
+                # thing this field exists to answer: whether a trip's current
+                # distance/end_odo_km is the raw stream figure or one this
+                # mechanism already rewrote before promotion. None here means
+                # either it never fired, or the trip was promoted before this
+                # column existed to record it — the two are indistinguishable
+                # for any trip promoted before that, which is a real limit,
+                # not a 0.0 pretending to be an answer.
+                "recovered_km": getattr(d, "recovered_km", None),
+                "recovered_kwh": getattr(d, "recovered_kwh", None),
                 # Parked minutes inside the departure gap whose standby
                 # drain was taken back off this trip (see
                 # Drive.start_park_min).
