@@ -241,7 +241,7 @@ class Settings(BaseSettings):
     # instead. 0 fires on the first record that reports Aware, as it always
     # has; Panic is never held back by this, at any setting, because an
     # actual alarm must never wait to be confirmed.
-    sentry_aware_confirm_sec: float = 20.0
+    sentry_aware_confirm_sec: float = 40.0
 
     # Analysis parameters
     energy_price_per_kwh: float = 0.90
