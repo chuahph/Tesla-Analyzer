@@ -1531,6 +1531,7 @@ def health(session: Session = Depends(get_session)):
     source = state.data_source(session)
     mode = "live" if state.is_live(session) else ("imported" if source == "imported" else "demo")
     settings = get_settings()
+    promotion, continuity = _cached_health_checks(session)
     return {
         "status": "ok",
         "mode": mode,
@@ -1572,11 +1573,11 @@ def health(session: Session = Depends(get_session)):
         # alerts too) and was silent, which is not: a trip could sit staged
         # indefinitely and the dashboard would look exactly like a car nobody
         # had driven.
-        "promotion": _promotion_health(session),
+        "promotion": promotion,
         # Counts only — see _continuity_health for what they mean and why
         # this couldn't just reuse the dashboard's own (heavier, wider)
         # continuity block.
-        "continuity": _continuity_health(session),
+        "continuity": continuity,
         # What wrote the rows that are actually in the history. The purge takes
         # drives and nothing else, so a database can be entirely streamed in
         # its trips while its charges and readings are still polling's.
@@ -3557,6 +3558,7 @@ def _clear_promote_refused(session: Session) -> None:
     """Re-arm the refusal alert after a run that got through."""
     if state.get(session, state.PROMOTE_REFUSED_KEY) == "1":
         state.put(session, state.PROMOTE_REFUSED_KEY, "")
+        _invalidate_health_checks_cache()
 
 
 def _provenance(session: Session) -> dict:
@@ -3692,6 +3694,46 @@ def _continuity_health(session: Session) -> dict[str, Any]:
     }
 
 
+# Neither _promotion_health nor _continuity_health is the bare state read the
+# rest of /api/health is — each runs a real bounded query against `drives`
+# (continuity adds `battery_readings` too), the same ones a genuine promotion
+# or repair attempt pays. That was fine reasoning about /api/sync, which
+# already pays it every 30 minutes regardless — but /api/health is also hit
+# by a keep-alive cron with no reason to touch the car or the database at
+# all, on its OWN schedule (measured: every 10 minutes), which made this pair
+# of queries run three times as often as the job whose progress they report,
+# for no gain in freshness. Cached at roughly the /api/sync cadence: close
+# enough that nothing meaningfully stale is ever shown, on a clock a
+# keep-alive ping no longer controls.
+_HEALTH_CHECKS_CACHE: tuple[float, dict, dict] | None = None
+_HEALTH_CHECKS_TTL_SEC = 25 * 60.0
+
+
+def _invalidate_health_checks_cache() -> None:
+    """Drop a cached health snapshot the moment promotion's own state
+    actually changes — a refusal clearing, a failure starting or stopping —
+    rather than leaving it to age out. The TTL alone is fine for the ordinary
+    case of nothing new to report; it is wrong the moment something real just
+    happened, since that is exactly when a person or the next tick needs the
+    current answer, not one that predates the change by up to
+    _HEALTH_CHECKS_TTL_SEC.
+    """
+    global _HEALTH_CHECKS_CACHE
+    _HEALTH_CHECKS_CACHE = None
+
+
+def _cached_health_checks(session: Session) -> tuple[dict, dict]:
+    global _HEALTH_CHECKS_CACHE
+    now = time.monotonic()
+    if (_HEALTH_CHECKS_CACHE is not None
+            and now - _HEALTH_CHECKS_CACHE[0] < _HEALTH_CHECKS_TTL_SEC):
+        return _HEALTH_CHECKS_CACHE[1], _HEALTH_CHECKS_CACHE[2]
+    promotion = _promotion_health(session)
+    continuity = _continuity_health(session)
+    _HEALTH_CHECKS_CACHE = (now, promotion, continuity)
+    return promotion, continuity
+
+
 def _record_promote_result(session: Session, where: str,
                            err: BaseException | None) -> None:
     """Remember that an automatic promotion failed, or that it stopped failing.
@@ -3714,6 +3756,7 @@ def _record_promote_result(session: Session, where: str,
             if state.get(session, state.PROMOTE_FAIL_KEY):
                 state.put(session, state.PROMOTE_FAIL_KEY, "")
                 session.commit()
+                _invalidate_health_checks_cache()
             return
         state.put(session, state.PROMOTE_FAIL_KEY, _json.dumps({
             "at": sync_mod.now_local().isoformat(timespec="seconds"),
@@ -3721,6 +3764,7 @@ def _record_promote_result(session: Session, where: str,
             "error": f"{type(err).__name__}: {err}"[:400],
         }))
         session.commit()
+        _invalidate_health_checks_cache()
     except Exception:  # noqa: BLE001 — see the docstring
         session.rollback()
 

@@ -10227,6 +10227,49 @@ def test_health_reports_unchecked_arrivals_separately_from_gaps():
         settings.app_passcode = old_pc
 
 
+def test_health_checks_are_cached_against_a_keep_alive_ping(session):
+    """/api/promotion_health and _continuity_health each run a real bounded
+    query, and a keep-alive cron with no reason to touch the database hits
+    /api/health every ten minutes regardless — three times as often as the
+    30-minute job whose progress they report. Without a cache, that ping
+    alone triples the cost of two queries that only ever needed to be as
+    fresh as /api/sync's own cadence.
+    """
+    from app.api import routes
+
+    calls = {"n": 0}
+
+    def fake_promotion(sess):
+        calls["n"] += 1
+        return {"staged": 0}
+
+    def fake_continuity(sess):
+        return {"unchecked": 0, "gaps": 0}
+
+    routes._promotion_health, real_promotion = fake_promotion, routes._promotion_health
+    routes._continuity_health, real_continuity = fake_continuity, routes._continuity_health
+    try:
+        promotion, _ = routes._cached_health_checks(session)
+        assert promotion == {"staged": 0}
+        assert calls["n"] == 1
+
+        # A second call inside the TTL is a cache hit, not a second query —
+        # exactly what a ping ten minutes after the last one should get.
+        routes._cached_health_checks(session)
+        assert calls["n"] == 1
+
+        # Once the TTL has genuinely elapsed, it recomputes rather than
+        # serving a permanently stale answer.
+        cached_at, p, c = routes._HEALTH_CHECKS_CACHE
+        routes._HEALTH_CHECKS_CACHE = (
+            cached_at - routes._HEALTH_CHECKS_TTL_SEC - 1.0, p, c)
+        routes._cached_health_checks(session)
+        assert calls["n"] == 2
+    finally:
+        routes._promotion_health = real_promotion
+        routes._continuity_health = real_continuity
+
+
 def test_the_stream_retries_a_promotion_that_failed_on_an_earlier_batch():
     """A promotion that failed once used to be abandoned.
 
