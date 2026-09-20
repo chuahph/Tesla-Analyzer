@@ -3483,7 +3483,7 @@ def _rested_odo_between(session: Session, vin: str,
 
 
 def _append_trip(trips: list, finished: dict,
-                 session: Session | None = None) -> bool:
+                 session: Session | None = None, via: str = "close") -> bool:
     """Add a finished trip to the store, paying back the one before it.
 
     Both paths that close a trip come through here — the live one in
@@ -3503,7 +3503,7 @@ def _append_trip(trips: list, finished: dict,
                                      previous.get("end_ts"),
                                      finished.get("start_ts"))
     paid = previous is not None and sync_mod.recover_sleep_gap(
-        previous, finished, rested_odo_km=rested)
+        previous, finished, rested_odo_km=rested, via=via)
     trips.append(finished)
     return bool(paid)
 
@@ -4364,6 +4364,13 @@ def _apply_shadow_to_drive(row, t: dict) -> None:
         row.recovered_km = float(t["recovered_km"])
     if t.get("recovered_kwh") is not None:
         row.recovered_kwh = float(t["recovered_kwh"])
+    # Which of recover_sleep_gap's three call sites actually fired, and when
+    # — not used for anything, only for answering "did it fire at open or at
+    # close" directly instead of inferring it from wall-clock behaviour.
+    if t.get("recovered_via") is not None:
+        row.recovered_via = str(t["recovered_via"])[:20]
+    if t.get("recovered_at") is not None:
+        row.recovered_at = str(t["recovered_at"])[:32]
 
 
 # The sweep that catches anything the prompt path missed. Daily, because it
@@ -4525,7 +4532,7 @@ def _settle_shadows(session: Session) -> int:
     except ValueError:
         trips = []
     for done in finished:
-        _append_trip(trips, done, session=session)
+        _append_trip(trips, done, session=session, via="close-settled")
     state.put(session, state.TELEMETRY_TRIPS_KEY,
               _json.dumps(trips[-TELEMETRY_TRIPS_MAX:]))
     state.put(session, state.TELEMETRY_SHADOW_KEY, _json.dumps(shadows))
@@ -12626,7 +12633,7 @@ def telemetry_ingest(
                 # short by whatever the car drove after its last record. This
                 # trip's opening odometer is the first reading taken since,
                 # so it measures that ground.
-                if _append_trip(trips, finished, session=session):
+                if _append_trip(trips, finished, session=session, via="close-live"):
                     recovered += 1
                 closed += 1
             # And again the moment a trip OPENS, not only when it closes.
@@ -12647,7 +12654,7 @@ def telemetry_ingest(
                 previous = next((t for t in reversed(trips)
                                  if t.get("vin") == vin), None)
                 if previous is not None and sync_mod.recover_sleep_gap(
-                        previous, {"start_odo_km": opening["odo_km"]}):
+                        previous, {"start_odo_km": opening["odo_km"]}, via="open"):
                     recovered += 1
             elif not shadow.get("open"):
                 # No trip is running, so this record may be the arrival of the
@@ -13385,7 +13392,7 @@ def telemetry_recover_gaps(
     for run in by_vin.values():
         for previous, nxt in zip(run, run[1:]):
             before = previous.get("distance_km")
-            if sync_mod.recover_sleep_gap(previous, nxt):
+            if sync_mod.recover_sleep_gap(previous, nxt, via="backfill"):
                 changed.append({
                     "start": previous.get("start_time"),
                     "km": [before, previous.get("distance_km")],

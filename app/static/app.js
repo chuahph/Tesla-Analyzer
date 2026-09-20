@@ -1612,6 +1612,12 @@ function tripDiagnostics(t, ctx) {
       // cases are not distinguishable from here, which matters before
       // treating a trip's current distance as the untouched raw stream figure.
       recovered_km: t.recovered_km, recovered_kwh: t.recovered_kwh,
+      // Which of recover_sleep_gap's call sites actually fired, and when —
+      // "open" needs the next trip's very first telemetry record to already
+      // carry an odometer value, which is not guaranteed, so a miss there
+      // silently falls through to "close-live"/"close-settled" with no
+      // other way to tell which one it was.
+      recovered_via: t.recovered_via, recovered_at: t.recovered_at,
       // Parked minutes inside that departure gap whose standby drain was taken
       // back off this trip's energy. Nonzero means the energy is a measurement
       // minus a correction rather than a raw reading — which is exactly what an

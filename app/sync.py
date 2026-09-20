@@ -2278,7 +2278,8 @@ def _charge_close(shadow: dict[str, Any], end: dict[str, Any]) -> dict[str, Any]
 
 
 def recover_sleep_gap(prev: dict[str, Any], nxt: dict[str, Any],
-                      rested_odo_km: float | None = None) -> bool:
+                      rested_odo_km: float | None = None,
+                      via: str = "unknown") -> bool:
     """Give a trip back the metres it drove after its last transmission.
 
     The mechanism, measured rather than assumed. A car out of coverage
@@ -2311,6 +2312,16 @@ def recover_sleep_gap(prev: dict[str, Any], nxt: dict[str, Any],
     unseen metres were driven at the same Wh/km as the seen ones. That keeps
     distance, energy and Wh/km consistent with each other, which leaving it
     out would not.
+
+    ``via`` is recorded on the trip, not used for anything here — it exists
+    because there are three call sites (the moment the next trip opens, the
+    moment it closes, and the manual backfill) and, without a record of
+    which one actually fired, that was previously a guess from wall-clock
+    behaviour rather than a fact. "open" needs the next trip's very first
+    telemetry record to already carry an odometer value, which is not
+    guaranteed — Fleet Telemetry only streams a field when it is due — so
+    a miss there silently falls through to "close" and is otherwise
+    invisible.
     """
     if not prev or not nxt or prev.get("ended_on") != "stream_lost":
         return False
@@ -2376,6 +2387,8 @@ def recover_sleep_gap(prev: dict[str, Any], nxt: dict[str, Any],
     # car was slower than that, not faster. The figure measured before the
     # correction is the better estimate of the real average, because its
     # numerator and denominator are short by the same missing minutes.
+    prev["recovered_via"] = via
+    prev["recovered_at"] = now_local().isoformat(timespec="seconds")
     return True
 
 

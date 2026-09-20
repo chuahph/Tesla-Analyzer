@@ -2519,6 +2519,13 @@ def analyze(drives: list[Drive], rated_wh_per_km: float = 150.0,
                 # not a 0.0 pretending to be an answer.
                 "recovered_km": getattr(d, "recovered_km", None),
                 "recovered_kwh": getattr(d, "recovered_kwh", None),
+                # Which of recover_sleep_gap's call sites actually fired —
+                # "open" (the instant the next trip's shadow opened),
+                # "close-live"/"close-settled" (its close-time safety net,
+                # for whichever path closed it) or "backfill" (the manual
+                # endpoint). None for a trip promoted before this was tracked.
+                "recovered_via": getattr(d, "recovered_via", None),
+                "recovered_at": getattr(d, "recovered_at", None),
                 # Parked minutes inside the departure gap whose standby
                 # drain was taken back off this trip (see
                 # Drive.start_park_min).

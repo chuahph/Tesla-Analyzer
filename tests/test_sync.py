@@ -1590,6 +1590,28 @@ def test_a_whole_journey_driven_offline_is_not_glued_onto_the_last_arrival():
         assert clean["distance_km"] == 3.795
 
 
+def test_recover_sleep_gap_records_which_call_site_fired_and_when():
+    """Three call sites can credit the same trip, and only the code itself
+    ever knew which one actually did — "open" needs the next trip's very
+    first telemetry record to already carry an odometer value, which is not
+    guaranteed, so a miss there silently falls through to the close-time
+    safety net with nothing to tell the two apart afterwards."""
+    prev = {"start_odo_km": 31158.066, "end_odo_km": 31161.861,
+            "distance_km": 3.795, "energy_kwh": 0.88, "wh_per_km": 231.9,
+            "duration_min": 17.2, "ended_on": "stream_lost"}
+    assert "recovered_via" not in prev
+    assert recover_sleep_gap(prev, {"start_odo_km": 31162.199}, via="open") is True
+    assert prev["recovered_via"] == "open"
+    assert prev["recovered_at"]
+
+    # Idempotent, same as the distance and energy it guards: a second call
+    # finds no gap left and refuses, so it cannot overwrite "open" with
+    # whatever site happens to call it next.
+    assert recover_sleep_gap(prev, {"start_odo_km": 31162.199},
+                             via="close-live") is False
+    assert prev["recovered_via"] == "open"
+
+
 def test_shadow_ignores_records_replayed_from_the_car_s_buffer():
     """A car out of coverage buffers and resends; those arrive out of order.
 

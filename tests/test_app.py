@@ -6336,6 +6336,7 @@ def test_recover_sleep_gap_survives_promotion():
                 "wh_per_km": 265.1, "ended_on": "stream_lost",
                 # As if recover_sleep_gap had already run on this shadow trip.
                 "recovered_km": 0.338, "recovered_kwh": 0.09,
+                "recovered_via": "open", "recovered_at": "2026-09-20T14:37:05",
             }]))
             sess.commit()
             client.get("/api/telemetry/promote?apply=true")
@@ -6345,6 +6346,11 @@ def test_recover_sleep_gap_survives_promotion():
             assert len(rows) == 1
             assert rows[0].recovered_km == pytest.approx(0.338, abs=0.001)
             assert rows[0].recovered_kwh == pytest.approx(0.09, abs=0.001)
+            # Which call site fired, and when — otherwise indistinguishable
+            # from a correction that fell through to the close-time safety
+            # net, which is exactly the question this pair exists to answer.
+            assert rows[0].recovered_via == "open"
+            assert rows[0].recovered_at == "2026-09-20T14:37:05"
     finally:
         with SessionLocal() as cleanup:
             if vehicle is not None:
