@@ -82,6 +82,17 @@ def odometer_continuity(drives: list[Any], readings: list[Any]) -> dict[str, Any
     which is why this compares against readings rather than chaining trip to
     trip.
 
+    The same comparison also catches the opposite mistake. ``sync.recover_sleep_gap``
+    credits a trip's arrival blind, from the next trip's own opening odometer,
+    with no parked reading to check it against at the time — and roughly half
+    the time that guess is wrong, because the next trip's own departure had a
+    blind head of its own and the credit took ground that was never this
+    trip's to claim. Once a real reading lands, ``missing`` here comes out
+    negative by more than the credit that caused it, which is direct evidence
+    the blind guess overshot — see ``overcredit`` in the return value, kept
+    separate from ``gaps`` because it means the opposite thing: not ground
+    still owed, but ground already given that should be taken back.
+
     A trip with no parked reading before the next one started cannot be
     judged at all — there is nothing to compare ``end_odo_km`` against — and
     that is a different fact from a trip that WAS compared and matched.
@@ -126,6 +137,7 @@ def odometer_continuity(drives: list[Any], readings: list[Any]) -> dict[str, Any
     out: list[dict[str, Any]] = []
     checked: list[dict[str, Any]] = []
     unchecked: list[dict[str, Any]] = []
+    overcredit: list[dict[str, Any]] = []
     total = 0.0
     for i, d in enumerate(ordered):
         nxt = ordered[i + 1] if i + 1 < len(ordered) else None
@@ -157,6 +169,27 @@ def odometer_continuity(drives: list[Any], readings: list[Any]) -> dict[str, Any
             "end_time": d.end_time.isoformat(timespec="minutes"),
             "missing_km": round(missing, 3),
         })
+        recovered_km = getattr(d, "recovered_km", None) or 0.0
+        if recovered_km and missing < -CONTINUITY_TOLERANCE_KM:
+            # sync.recover_sleep_gap credited ground here blind — no parked
+            # reading existed yet to check it against — and one has landed
+            # since that disagrees. The car really rested at `seen`, short of
+            # where the blind credit moved this trip's own end to, so some or
+            # all of that credit was never this trip's to claim. Bounded by
+            # the credit itself: this can only give back what recover_sleep_gap
+            # actually added, never invent a new deficit beyond it — which
+            # would be the identical mistake pointed the other way.
+            overcredit.append({
+                "drive_id": getattr(d, "id", None),
+                "route": f"{d.start_location} → {d.end_location}"
+                if d.start_location and d.end_location else "",
+                "end_time": d.end_time.isoformat(timespec="minutes"),
+                "recorded_end_odo_km": round(d.end_odo_km, 3),
+                "observed_odo_km": round(seen, 3),
+                "recovered_km": round(recovered_km, 3),
+                "recovered_kwh": round(getattr(d, "recovered_kwh", None) or 0.0, 3),
+                "reverse_km": round(min(-missing, recovered_km), 3),
+            })
         if missing <= CONTINUITY_TOLERANCE_KM:
             continue
         total += missing
@@ -207,6 +240,7 @@ def odometer_continuity(drives: list[Any], readings: list[Any]) -> dict[str, Any
         "available": True,
         "gaps": out[-10:],
         "checked": checked[-200:],
+        "overcredit": overcredit[-10:],
         "trips_checked": len(ordered),
         "unchecked": unchecked[-10:],
         "unattributed_km": round(total, 2),

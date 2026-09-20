@@ -4676,6 +4676,74 @@ def test_repair_arrivals_fixes_the_tails_and_refuses_the_journeys():
         settings.app_passcode = old_pass
 
 
+def test_repair_overcredit_gives_back_a_blind_credit_a_reading_disagrees_with():
+    """sync.recover_sleep_gap credited this trip's arrival blind — 0.3 km,
+    with no parked reading yet to check it against — and a reading has since
+    landed that shows the car actually rested 0.3 km short of where that
+    credit put it. /api/repair-overcredit is the mechanism that gives it
+    back, on the same dry-run-then-apply shape as /api/repair-arrivals.
+    """
+    from datetime import timedelta
+
+    from app import sync as sync_mod
+    from app.models import BatteryReading, Drive
+
+    settings = get_settings()
+    old_pass = settings.app_passcode
+    settings.app_passcode = ""
+    try:
+        with TestClient(app) as client:
+            with SessionLocal() as s:
+                for row in s.query(Drive).all():
+                    s.delete(row)
+                for row in s.query(BatteryReading).all():
+                    s.delete(row)
+                s.flush()
+                veh = s.query(Vehicle).first()
+                base = sync_mod.now_local() - timedelta(days=1)
+
+                s.add(Drive(vehicle_id=veh.id, start_time=base,
+                            end_time=base + timedelta(minutes=20),
+                            distance_km=10.5, duration_min=20, start_soc=70,
+                            end_soc=68, energy_used_kwh=2.0, avg_speed_kmh=30,
+                            max_speed_kmh=60, outside_temp_c=30,
+                            start_location="A", end_location="Home",
+                            start_odo_km=1000.0, end_odo_km=1010.5,
+                            recovered_km=0.3, recovered_kwh=0.05))
+                s.add(BatteryReading(
+                    vehicle_id=veh.id, ts=base + timedelta(minutes=30),
+                    soc=68.0, range_km=250.0, odo_km=1010.2))
+                s.commit()
+
+            dry = client.get("/api/repair-overcredit?days=7").json()
+            assert dry["applied"] is False and dry["reversed"] == 1
+            (corr,) = dry["corrections"]
+            assert corr["reverse_km"] == pytest.approx(0.3, abs=0.005)
+            assert corr["reverse_kwh"] == pytest.approx(0.05, abs=0.005)
+            with SessionLocal() as s:
+                assert s.query(Drive).filter(Drive.end_odo_km == 1010.5).count() == 1
+
+            note = client.get("/api/continuity?days=7").json()["note"]
+            assert "repair-overcredit" in note
+
+            done = client.get("/api/repair-overcredit?days=7&apply=true").json()
+            assert done["applied"] is True and done["reversed"] == 1
+            with SessionLocal() as s:
+                row = s.query(Drive).one()
+                assert row.end_odo_km == pytest.approx(1010.2, abs=0.005)
+                assert row.distance_km == pytest.approx(10.2, abs=0.005)
+                assert row.energy_used_kwh == pytest.approx(1.95, abs=0.005)
+                assert row.recovered_km is None
+                assert row.recovered_kwh is None
+
+            # Idempotent: the credit given back once cannot be given back
+            # again, and the boundary now matches the reading.
+            again = client.get("/api/repair-overcredit?days=7&apply=true").json()
+            assert again["reversed"] == 0
+    finally:
+        settings.app_passcode = old_pass
+
+
 def test_capacity_evidence_reports_precision_rather_than_assuming_it():
     """Four screen readings disagreed with the constant the same way each time,
     which is thin ground for changing a number every kWh and every ringgit

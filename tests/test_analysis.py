@@ -1816,7 +1816,8 @@ def test_route_asymmetry_reports_each_pair_once():
 
 # --- Odometer continuity ----------------------------------------------------
 
-def _drv(did, start, end, end_odo, end_lost=0.0, start_odo=None):
+def _drv(did, start, end, end_odo, end_lost=0.0, start_odo=None,
+         recovered_km=None, recovered_kwh=None):
     from types import SimpleNamespace
     from datetime import datetime
     return SimpleNamespace(
@@ -1824,6 +1825,7 @@ def _drv(did, start, end, end_odo, end_lost=0.0, start_odo=None):
         end_time=datetime.fromisoformat(end),
         start_odo_km=start_odo, end_odo_km=end_odo, end_lost_km=end_lost,
         start_location="A", end_location="B",
+        recovered_km=recovered_km, recovered_kwh=recovered_kwh,
     )
 
 
@@ -1942,6 +1944,67 @@ def test_continuity_needs_odometer_anchors_and_readings():
     assert odometer_continuity(legacy, [_rd("2026-07-01T09:05", 10000.4)])["available"] is False
     good = [_drv(1, "2026-07-01T08:00", "2026-07-01T09:00", 10000.0)]
     assert odometer_continuity(good, [])["available"] is False
+
+
+def test_continuity_flags_a_blind_credit_a_later_reading_disagrees_with():
+    """recover_sleep_gap moved this trip's end from 10000.2 to 10000.5, blind,
+    with no parked reading yet to check it against. One has landed since and
+    shows the car actually rested at 10000.2 — the credit overshot by exactly
+    the 0.3 km it added, which is why `reverse_km` gives back all of it."""
+    from app.analysis.driving import odometer_continuity
+
+    drives = [_drv(1, "2026-07-01T08:00", "2026-07-01T09:00", 10000.5,
+                   recovered_km=0.3, recovered_kwh=0.05)]
+    readings = [_rd("2026-07-01T09:05", 10000.2)]
+    out = odometer_continuity(drives, readings)
+    assert out["gaps"] == []          # not a hole — the opposite finding
+    (oc,) = out["overcredit"]
+    assert oc["drive_id"] == 1
+    assert oc["recorded_end_odo_km"] == 10000.5
+    assert oc["observed_odo_km"] == 10000.2
+    assert oc["recovered_km"] == pytest.approx(0.3)
+    assert oc["reverse_km"] == pytest.approx(0.3, abs=0.001)
+
+
+def test_continuity_never_reverses_more_than_the_credit_it_gave():
+    """The reading disagrees by 0.5 km, but recover_sleep_gap only ever added
+    0.15 km to this trip — reverse_km is capped there, not at the full
+    disagreement, or this would just be the same blind mistake pointed the
+    other way."""
+    from app.analysis.driving import odometer_continuity
+
+    drives = [_drv(1, "2026-07-01T08:00", "2026-07-01T09:00", 10000.5,
+                   recovered_km=0.15)]
+    readings = [_rd("2026-07-01T09:05", 10000.0)]
+    out = odometer_continuity(drives, readings)
+    (oc,) = out["overcredit"]
+    assert oc["reverse_km"] == pytest.approx(0.15, abs=0.001)
+
+
+def test_continuity_leaves_an_uncredited_shortfall_as_an_ordinary_gap():
+    """No recover_sleep_gap credit was ever given here — this is just the
+    ordinary trip-closed-early finding, and must not be mistaken for a credit
+    to reverse."""
+    from app.analysis.driving import odometer_continuity
+
+    drives = [_drv(1, "2026-07-01T08:00", "2026-07-01T09:00", 10000.5)]
+    readings = [_rd("2026-07-01T09:05", 10000.0)]
+    out = odometer_continuity(drives, readings)
+    assert out["overcredit"] == []
+    assert out["gaps"] == []  # missing is negative, so it's not a gap either
+
+
+def test_continuity_ignores_a_credited_trip_that_still_checks_out():
+    """A blind credit that a later reading CONFIRMS, rather than contradicts,
+    is not overcredit — reversing it would break the case recover_sleep_gap
+    got right."""
+    from app.analysis.driving import odometer_continuity
+
+    drives = [_drv(1, "2026-07-01T08:00", "2026-07-01T09:00", 10000.3,
+                   recovered_km=0.3)]
+    readings = [_rd("2026-07-01T09:05", 10000.3)]
+    out = odometer_continuity(drives, readings)
+    assert out["overcredit"] == []
 
 
 def test_departure_continuity_flags_a_trip_that_started_after_the_car_moved():

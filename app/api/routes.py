@@ -4424,7 +4424,18 @@ def _auto_repair_arrivals(session: Session) -> int:
         state.put(session, state.ARRIVAL_REPAIR_AT_KEY, str(now_ts))
         session.commit()
         out = repair_arrivals(days=30, apply=True, session=session)
-        return int(round(float(out.get("reclaimed_km") or 0.0) * 1000))
+        reclaimed = int(round(float(out.get("reclaimed_km") or 0.0) * 1000))
+        # The other direction. A blind credit sync.recover_sleep_gap gave one
+        # trip on the day it was promoted has had, by now, a real chance for a
+        # parked reading to confirm or contradict it — this is where a
+        # contradicted one gets given back, on the same daily cadence rather
+        # than immediately, because the evidence to catch it did not exist any
+        # sooner than this.
+        overcredit_out = repair_overcredit(days=30, apply=True, session=session)
+        reclaimed -= int(round(
+            sum(c.get("reverse_km") or 0.0 for c in overcredit_out.get("corrections", []))
+            * 1000))
+        return reclaimed
     except Exception:  # noqa: BLE001 — never let this break the sync
         session.rollback()
         return 0
@@ -7333,6 +7344,101 @@ def repair_arrivals(
     }
 
 
+@router.api_route("/repair-overcredit", methods=["GET", "POST"])
+def repair_overcredit(
+    days: int = Query(30, ge=1, le=730),
+    apply: bool = Query(False),
+    session: Session = Depends(get_session),
+):
+    """Give back ground sync.recover_sleep_gap credited blind, now that a real
+    reading says it took too much.
+
+    recover_sleep_gap fires the moment a trip's arrival is bounded by the NEXT
+    trip's own opening odometer — the only evidence available at the time,
+    because no parked reading exists yet to check it against. That guess is
+    right roughly as often as it is wrong: measured live on the first four
+    trips this became checkable for, two came back within 0.1% of the car's
+    own screen and two overshot past it, because the "next trip" itself had a
+    blind departure head of its own and the credit took ground that belonged
+    there instead.
+
+    This is the other half of that same fact. odometer_continuity keeps
+    checking a trip's end against parked readings for as long as it stays in
+    the window, so a credit that looked like the best available answer on the
+    day can be caught and reversed the moment a real reading disagrees with
+    it — not by refusing the credit going forward, which would lose the cases
+    that turn out right, but by taking back the ones a later reading proves
+    wrong.
+
+    Bounded by the credit itself, never further: ``reverse_km`` can only give
+    back what recover_sleep_gap actually added to THIS trip. It cannot push a
+    trip short of where it was before that credit ever ran — that would be
+    the identical mistake, pointed the other way, on evidence no more solid
+    than the one being corrected.
+
+    Dry run by default.
+    """
+    vehicle = _first_vehicle(session)
+    since = sync_mod.now_local() - timedelta(days=days)
+    drives = session.scalars(
+        select(Drive).where(Drive.vehicle_id == vehicle.id,
+                            Drive.start_time >= since)
+        .order_by(Drive.start_time)
+    ).all()
+    readings = session.scalars(
+        select(BatteryReading).where(BatteryReading.vehicle_id == vehicle.id,
+                                     BatteryReading.ts >= since)
+        .order_by(BatteryReading.ts)
+    ).all()
+    found = driving_analysis.odometer_continuity(list(drives), list(readings))
+
+    corrections: list[dict[str, Any]] = []
+    for oc in found.get("overcredit", []):
+        drive_id = oc.get("drive_id")
+        reverse_km = oc.get("reverse_km") or 0.0
+        if not drive_id or reverse_km <= 0:
+            continue
+        drive = session.get(Drive, drive_id)
+        if drive is None or not drive.end_odo_km:
+            continue
+        recovered_km = drive.recovered_km or 0.0
+        recovered_kwh = drive.recovered_kwh or 0.0
+        frac = min(reverse_km / recovered_km, 1.0) if recovered_km else 0.0
+        reverse_kwh = round(recovered_kwh * frac, 3)
+        before = {"end_odo_km": drive.end_odo_km, "distance_km": drive.distance_km,
+                  "energy_used_kwh": drive.energy_used_kwh}
+        if apply:
+            drive.end_odo_km = round(drive.end_odo_km - reverse_km, 3)
+            if drive.start_odo_km is not None:
+                drive.distance_km = round(drive.end_odo_km - drive.start_odo_km, 3)
+            if drive.energy_used_kwh is not None:
+                drive.energy_used_kwh = round(
+                    max(drive.energy_used_kwh - reverse_kwh, 0.0), 3)
+            drive.recovered_km = round(recovered_km - reverse_km, 3) or None
+            drive.recovered_kwh = round(recovered_kwh - reverse_kwh, 3) or None
+        corrections.append({
+            "drive_id": drive_id,
+            "route": oc.get("route"),
+            "reverse_km": round(reverse_km, 3),
+            "reverse_kwh": reverse_kwh,
+            "before": before,
+        })
+    if apply and corrections:
+        session.commit()
+
+    return {
+        "days": days,
+        "trips_checked": found.get("trips_checked", 0),
+        "readings_checked": len(readings),
+        "applied": apply,
+        "reversed": len(corrections),
+        "corrections": corrections,
+        "note": ("Dry run. Add &apply=true to write these." if corrections and not apply
+                 else "No blind credit contradicted by a later reading right now."
+                 if not corrections else None),
+    }
+
+
 def _screen_capacity(session: Session) -> dict[str, Any]:
     """What the CAR says the pack holds, from readings typed off its screen.
 
@@ -9165,6 +9271,7 @@ def continuity(
     # and that applies per trip, not just to the window as a whole: a trip
     # with no reading before the next one started was never compared, which
     # is a different fact from one that was compared and matched.
+    overcredit = out.get("overcredit") or []
     if not readings:
         out["note"] = "No parked readings in this window — nothing could be checked."
     elif out.get("gaps"):
@@ -9172,6 +9279,11 @@ def continuity(
             f"{len(out['gaps'])} trip(s) recorded a stop short of where the car was "
             f"actually seen. The distance is not missing — the next trip most "
             f"likely claimed it — so this is misattribution, not a hole.")
+    elif overcredit:
+        out["note"] = (
+            f"{len(overcredit)} trip(s) were credited blind by recover_sleep_gap and a "
+            f"later reading disagrees with the credit — see overcredit, and "
+            f"/api/repair-overcredit to give the ground back.")
     elif unchecked:
         checked = out.get("trips_checked", 0) - len(unchecked)
         out["note"] = (
