@@ -39,6 +39,9 @@ def test_open_paths_with_passcode_set():
             assert pem.status_code == 200
             assert "BEGIN PUBLIC KEY" in pem.text
             assert client.get("/api/health").status_code == 200
+            # And Render's own platform probe must reach its path too — see
+            # ping()'s docstring for why that isn't /api/health.
+            assert client.get("/api/ping").status_code == 200
             # Everything else stays locked.
             assert client.get("/api/summary").status_code == 401
             resp = client.get("/", follow_redirects=False)
@@ -10268,6 +10271,37 @@ def test_health_checks_are_cached_against_a_keep_alive_ping(session):
     finally:
         routes._promotion_health = real_promotion
         routes._continuity_health = real_continuity
+
+
+def test_ping_never_touches_the_database():
+    """Measured live: Render's own platform health probe hits healthCheckPath
+    every ~5 seconds forever, regardless of any cron. /api/health still
+    queries Postgres on every call even with yesterday's caching (the
+    uncached parts: data_source, is_live, provenance, sync liveness), and at
+    that frequency it dwarfed every other source of egress combined — and
+    kept the compute permanently awake, since a probe every 5 seconds never
+    lets a 5-minute autosuspend timer elapse. render.yaml now points
+    healthCheckPath at this instead, so it has to be provably incapable of
+    reaching the database, not merely cheap today.
+
+    Provable, not just observed: ping() takes no Session dependency at all,
+    so FastAPI never opens one to serve it — checked directly on the
+    function signature rather than by watching for queries that happen not
+    to fire this time.
+    """
+    import inspect
+
+    from app.main import ping
+
+    sig = inspect.signature(ping)
+    assert not sig.parameters, (
+        "ping() grew a parameter — if it's a Session dependency, this "
+        "endpoint can reach Postgres again, defeating the reason it exists")
+
+    with TestClient(app) as client:
+        resp = client.get("/api/ping")
+    assert resp.status_code == 200
+    assert resp.json() == {"status": "ok"}
 
 
 def test_the_stream_retries_a_promotion_that_failed_on_an_earlier_batch():

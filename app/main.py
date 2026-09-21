@@ -102,7 +102,24 @@ LOGIN_HTML = """<!DOCTYPE html>
 TESLA_KEY_PATH = "/.well-known/appspecific/com.tesla.3p.public-key.pem"
 # /vm and /car join them: curl running on the receiver box has no passcode
 # cookie, and both only hand back a public GitHub URL.
-_OPEN_PATHS = {"/login", "/api/health", TESLA_KEY_PATH, "/vm", "/car"}
+_OPEN_PATHS = {"/login", "/api/health", "/api/ping", TESLA_KEY_PATH, "/vm", "/car"}
+
+
+# Measured live, September 2026: Render's own platform health probe — not any
+# cron we configured — hits healthCheckPath every ~5 seconds, forever, to
+# decide whether this instance is routable. render.yaml pointed that at
+# /api/health, which still touches Postgres on every call (state.data_source,
+# state.is_live, _provenance, _sync_liveness — none of that is cached, unlike
+# the promotion/continuity pair). At ~17,000 calls a day that dwarfed every
+# other source of Neon egress combined, cron-job.org's Warm Render included,
+# and kept the compute permanently awake: a probe every 5 seconds never lets
+# a 5-minute autosuspend timer elapse. /api/health stays as the rich,
+# human/dashboard-facing diagnostic it has become; this is what
+# healthCheckPath should point at instead — genuinely nothing, no session
+# dependency, so a request here can never reach the database at all.
+@app.get("/api/ping")
+def ping() -> dict:
+    return {"status": "ok"}
 
 
 @app.middleware("http")

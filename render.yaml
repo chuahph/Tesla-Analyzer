@@ -10,7 +10,10 @@ services:
     region: singapore
     plan: free
     branch: main
-    healthCheckPath: /api/health
+    # Genuinely zero-database — see app/main.py's ping() for why this isn't
+    # /api/health. Render's own probe hits this path every ~5 seconds,
+    # forever, and /api/health touches Postgres on every call even cached.
+    healthCheckPath: /api/ping
     envVars:
       - key: ENERGY_PRICE_PER_KWH
         value: "0.90"
