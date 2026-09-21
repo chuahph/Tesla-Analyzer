@@ -3,8 +3,9 @@ from __future__ import annotations
 
 import os
 from collections.abc import Iterator
+from contextvars import ContextVar
 
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, event
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 from sqlalchemy.pool import StaticPool
 
@@ -54,6 +55,30 @@ def _make_engine():
 
 engine = _make_engine()
 SessionLocal = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False, future=True)
+
+
+# Temporary instrumentation for the Sep 2026 Neon egress investigation. Table
+# sizes ruled out an oversized blob (largest table 576 kB) and the project has
+# only one branch, so the remaining candidate is that SOME query pulls far
+# more rows than its caller needs — invisible from Neon's own console, which
+# reports bytes moved but not which statement moved them. This is the one way
+# to find out directly: every request's actual row-count-per-query, logged
+# against the endpoint that caused it. Safe to leave running — it is a read of
+# ``cursor.rowcount``, adds no query of its own, and prints nothing for a
+# request that touches no query. Remove once the heavy one is found.
+_QUERY_LOG: ContextVar[list[tuple[int, str]] | None] = ContextVar("_QUERY_LOG", default=None)
+
+
+@event.listens_for(engine, "after_cursor_execute")
+def _log_query_rows(conn, cursor, statement, parameters, context, executemany):
+    log = _QUERY_LOG.get()
+    if log is None:
+        return
+    try:
+        rows = cursor.rowcount
+    except Exception:  # noqa: BLE001 — instrumentation must never break a query
+        rows = -1
+    log.append((rows if rows is not None else -1, statement[:160]))
 
 
 def _ensure_column(table: str, column: str, ddl_type: str, default_sql: str) -> None:

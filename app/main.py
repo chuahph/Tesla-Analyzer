@@ -160,6 +160,38 @@ async def _passcode_gate(request: Request, call_next):
     return RedirectResponse("/login", status_code=303)
 
 
+# Temporary instrumentation for the Sep 2026 Neon egress investigation — see
+# app/database.py's _QUERY_LOG for what this measures and why. Registered
+# after _passcode_gate so it wraps the whole request, including whatever that
+# gate itself touches. One line per request that actually queried the
+# database, naming the path and its heaviest single query — nothing for a
+# request that didn't. Cheap: no query of its own, just reading counts
+# SQLAlchemy already has. Remove once the heavy one is found.
+@app.middleware("http")
+async def _query_log_middleware(request: Request, call_next):
+    import time as _time
+
+    from .database import _QUERY_LOG
+
+    token = _QUERY_LOG.set([])
+    started = _time.monotonic()
+    try:
+        response = await call_next(request)
+    finally:
+        log = _QUERY_LOG.get()
+        _QUERY_LOG.reset(token)
+    if log:
+        total_rows = sum(max(r, 0) for r, _ in log)
+        worst_rows, worst_stmt = max(log, key=lambda x: x[0])
+        elapsed_ms = round((_time.monotonic() - started) * 1000)
+        print(
+            f"[qlog] {request.method} {request.url.path} "
+            f"queries={len(log)} rows={total_rows} {elapsed_ms}ms "
+            f"worst={worst_rows}rows:{worst_stmt!r}"
+        )
+    return response
+
+
 @app.get("/login")
 def login_page() -> HTMLResponse:
     return HTMLResponse(LOGIN_HTML.replace("{err}", ""))
