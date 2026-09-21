@@ -379,6 +379,47 @@ satisfy is declined rather than failed — a unique index that would conflict
 with existing duplicates leaves the app running and says so in
 `/api/health` under `schema`, rather than taking the deployment down.
 
+### Emergency fallback: switching provider under load
+
+Both Supabase and Neon's free tiers cap monthly network transfer at 5 GB, and
+either can be exhausted by the same thing: a query pulling more rows than its
+caller needs, run often enough. That happened on Neon in September 2026 — see
+`app/database.py`'s `_QUERY_LOG` for the instrumentation added to find it.
+Once a provider is actually near its cap, switching does not fix the
+underlying query cost — only the code does — but it buys a fresh monthly
+allowance to keep collecting data while that gets fixed.
+
+**Precondition**: a same-day mirror on the OTHER provider. `pg_dump` the live
+database, `pg_restore --clean --if-exists` it into the other one:
+
+```bash
+pg_dump "<LIVE_DB_DIRECT_URL>" --no-owner --no-acl -Fc -f backup.dump
+pg_restore --no-owner --no-acl --clean --if-exists -d "<OTHER_DB_URL>" backup.dump
+```
+
+Use each provider's **direct** connection string for this, not the pooler —
+Supabase's session pooler is the exception: its direct connection is
+IPv6-only, so a network that lacks an IPv6 route (this project's GCP VM did)
+has to go through the session pooler instead, whose username is
+`postgres.<project-ref>`, not plain `postgres`. `pg_restore` against a
+Supabase target will report a page of errors about `storage.*` and
+`extensions.*` objects it cannot own — that is Supabase's own
+platform-managed schema riding along in the dump, refusing to be
+overwritten by a non-superuser. Harmless; verify the actual application
+tables (`drives`, `charges`, `battery_readings`, `vehicles`) with a row
+count instead of reading into those.
+
+**The switch itself**, once the mirror is current: Render dashboard → this
+service → Environment → edit `DATABASE_URL` to the other provider's
+connection string → Save. That alone triggers a redeploy; no code change,
+no branch to push. Same for reverting once the original provider's monthly
+cap resets.
+
+Neither provider gives a grace period once its free-tier Fair Use Policy
+applies (Supabase's ended 21 Sep 2026) — over quota means the project is
+restricted immediately (402s), not warned first. So this buys one fresh
+monthly allowance, not an indefinite escape from fixing the query cost.
+
 ---
 
 ## Keeping it in sync (cron)
