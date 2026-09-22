@@ -83,14 +83,14 @@ def _log_query_rows(conn, cursor, statement, parameters, context, executemany):
     except Exception:  # noqa: BLE001 — instrumentation must never break a query
         rows = -1
     try:
-        if executemany:
-            param_bytes = sum(len(str(p)) for p in (parameters or []))
-        elif isinstance(parameters, dict):
-            param_bytes = sum(len(str(v)) for v in parameters.values())
-        elif parameters:
-            param_bytes = sum(len(str(v)) for v in parameters)
-        else:
-            param_bytes = 0
+        # str() on the whole structure rather than branching on dict vs.
+        # tuple vs. executemany's list-of-either: the first version of this
+        # branched, and on Postgres it measured 1 byte for an UPDATE that
+        # was actually writing a multi-KB JSON blob — the DBAPI-level shape
+        # SQLAlchemy hands the event for an ORM-flush UPDATE did not match
+        # what local testing against sqlite predicted. str() of the whole
+        # object is slower but cannot be fooled by a shape assumption.
+        param_bytes = len(str(parameters)) if parameters else 0
     except Exception:  # noqa: BLE001 — instrumentation must never break a query
         param_bytes = -1
     log.append((rows if rows is not None else -1, param_bytes, statement[:160]))
