@@ -9903,6 +9903,81 @@ def test_a_park_that_arms_sentry_writes_a_reading_saying_so():
             sess.close()
 
 
+def test_telemetry_battery_reading_does_not_scan_the_whole_table():
+    """Regression for the Sep 2026 Neon egress investigation: this used
+    session.scalars(select(...).order_by(...)).first() with no .limit(1).
+    The 2.0-style API does not implicitly add LIMIT the way the legacy
+    Query.first() does, so Postgres returned every reading this vehicle ever
+    had — measured live at 3,451+ full rows — every time this ran, which is
+    on every telemetry batch while driving.
+
+    Checked against the compiled SQL rather than a runtime row count:
+    cursor.rowcount for a SELECT is meaningful on psycopg2 (production;
+    that is how this was found and measured), but sqlite3 always reports -1
+    for one regardless of LIMIT, which the test suite's engine is. A local,
+    untruncated listener sidesteps both that and the app's own diagnostic
+    logging, which caps statement text at 160 chars — short enough that this
+    table's own column list runs past it before "LIMIT" would appear.
+    """
+    from sqlalchemy import event as sa_event
+
+    from app.api import routes
+    from app.database import SessionLocal, engine
+    from app.models import BatteryReading, Vehicle
+
+    with TestClient(app):
+        sess = SessionLocal()
+        vin = sess.scalars(select(Vehicle.vin)).first()
+        vid = sess.scalar(select(Vehicle.id).where(Vehicle.vin == vin))
+        made = []
+        statements: list[str] = []
+
+        def capture(conn, cursor, statement, parameters, context, executemany):
+            statements.append(statement)
+
+        try:
+            base = datetime(2026, 8, 3, 4, 0, 0)
+            # Many existing readings — the exact condition that made the
+            # missing .limit(1) expensive rather than merely wrong.
+            for i in range(30):
+                row = BatteryReading(
+                    vehicle_id=vid, ts=base + timedelta(minutes=i),
+                    soc=70.0, range_km=290.0, odo_km=39000.0 + i)
+                sess.add(row)
+                made.append(row)
+            sess.commit()
+
+            sa_event.listen(engine, "before_cursor_execute", capture)
+            try:
+                routes._telemetry_battery_reading(sess, vin, {
+                    "ts": (base + timedelta(minutes=45)).timestamp(),
+                    "soc": 71.0, "range_km": 289.0, "odo_km": 39030.0,
+                    "sentry_mode": False, "sentry_state": "SentryModeStateOff",
+                    "climate_on": False, "cabin_overheat_protection": None,
+                    "cabin_overheat_protection_actively_cooling": None,
+                })
+            finally:
+                sa_event.remove(engine, "before_cursor_execute", capture)
+
+            # Full, untruncated text this time — an INSERT (if this snap
+            # triggered a write) starts "INSERT INTO", never matching a
+            # SELECT filter, so this can only be the lookup query.
+            lookups = [s for s in statements if s.startswith("SELECT")
+                       and "battery_readings" in s]
+            assert lookups, "expected the lookup query to run at all"
+            assert "LIMIT" in lookups[0], (
+                "the lookup query has no LIMIT — .limit(1) regressed, and "
+                "Postgres will return every reading this vehicle has ever "
+                "had instead of one")
+        finally:
+            for row in sess.scalars(select(BatteryReading).where(
+                    BatteryReading.vehicle_id == vid,
+                    BatteryReading.ts >= base)):
+                sess.delete(row)
+            sess.commit()
+            sess.close()
+
+
 def test_the_car_park_screen_is_recorded_as_pk_id_and_se():
     """The car already does the decomposition, better than this app can.
 

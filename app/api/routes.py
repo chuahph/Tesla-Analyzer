@@ -8944,7 +8944,7 @@ def driving_matrix(days: int = Query(30, ge=1, le=730),
     if since_charge:
         last_charge = session.scalar(
             select(Charge).where(Charge.vehicle_id == vehicle.id)
-            .order_by(Charge.end_time.desc()))
+            .order_by(Charge.end_time.desc()).limit(1))
         if last_charge:
             bounds.append((last_charge.end_time, "charge"))
     since, limited_by = max(bounds, key=lambda pair: pair[0])
@@ -9430,6 +9430,7 @@ def energy_reconcile(session: Session = Depends(get_session)):
     last_charge = session.scalar(
         select(Charge).where(Charge.vehicle_id == vehicle.id)
         .order_by(Charge.end_time.desc())
+        .limit(1)
     )
     if last_charge is None or not capacity_kwh:
         raise HTTPException(
@@ -11506,6 +11507,7 @@ def summary(
     last_charge = session.scalar(
         select(Charge).where(Charge.vehicle_id == vehicle.id)
         .order_by(Charge.end_time.desc())
+        .limit(1)
     )
     if last_charge is not None:
         # kWh used since this charge ended — independent of whatever window
@@ -12355,9 +12357,19 @@ def _telemetry_battery_reading(session: Session, vin: str, snap: dict) -> bool:
     vehicle = session.scalars(select(Vehicle).where(Vehicle.vin == vin)).first()
     if vehicle is None:
         return False
+    # .limit(1) is load-bearing, not cosmetic. Without it this ran once per
+    # telemetry batch — every ~6-20 seconds while driving — and the 2.0-style
+    # session.scalars(select(...)) API does not implicitly add LIMIT the way
+    # the legacy Query.first() does: Postgres returned every reading this
+    # vehicle has ever had (measured: 3,451+ full rows) and .first() only then
+    # picked one in Python, after all of them had already crossed the wire.
+    # Found via per-request query logging during the Sep 2026 Neon egress
+    # investigation — a single drive's worth of these dwarfed everything else
+    # that investigation had found combined.
     last = session.scalars(
         select(BatteryReading).where(BatteryReading.vehicle_id == vehicle.id)
         .order_by(BatteryReading.ts.desc())
+        .limit(1)
     ).first()
     sentry_now = snap.get("sentry_mode")
     sentry_state_now = snap.get("sentry_state")
