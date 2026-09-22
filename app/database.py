@@ -90,10 +90,21 @@ def _log_query_rows(conn, cursor, statement, parameters, context, executemany):
         # SQLAlchemy hands the event for an ORM-flush UPDATE did not match
         # what local testing against sqlite predicted. str() of the whole
         # object is slower but cannot be fooled by a shape assumption.
+        #
+        # That fix ALSO still measured 1 byte in production against the
+        # exact same statement, which means ``parameters`` itself is not
+        # what it's assumed to be here — not a formatting bug, a wrong
+        # assumption about what this event hands over. type()+repr() below
+        # is a one-shot diagnostic to see the actual object instead of
+        # guessing a third time; remove alongside the rest of this
+        # instrumentation once that's understood.
         param_bytes = len(str(parameters)) if parameters else 0
+        param_shape = f"{type(parameters).__name__}:{executemany}:{parameters!r:.120}"
     except Exception:  # noqa: BLE001 — instrumentation must never break a query
         param_bytes = -1
-    log.append((rows if rows is not None else -1, param_bytes, statement[:160]))
+        param_shape = "ERR"
+    log.append((rows if rows is not None else -1, param_bytes,
+               f"{statement[:160]} <<{param_shape}>>"))
 
 
 def _ensure_column(table: str, column: str, ddl_type: str, default_sql: str) -> None:
