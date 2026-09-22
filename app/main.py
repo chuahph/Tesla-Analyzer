@@ -201,7 +201,7 @@ async def _query_log_middleware(request: Request, call_next):
         total_rows = sum(max(r, 0) for r, _, _ in log)
         total_bytes = sum(max(b, 0) for _, b, _ in log)
         worst_rows, _, worst_row_stmt = max(log, key=lambda x: x[0])
-        worst_bytes, _, worst_byte_stmt = max(log, key=lambda x: x[1])
+        _, worst_bytes, worst_byte_stmt = max(log, key=lambda x: x[1])
         elapsed_ms = round((_time.monotonic() - started) * 1000)
         print(
             f"[qlog] {request.method} {request.url.path} "
