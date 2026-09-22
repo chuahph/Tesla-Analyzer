@@ -198,13 +198,16 @@ async def _query_log_middleware(request: Request, call_next):
         log = _QUERY_LOG.get()
         _QUERY_LOG.reset(token)
     if log:
-        total_rows = sum(max(r, 0) for r, _ in log)
-        worst_rows, worst_stmt = max(log, key=lambda x: x[0])
+        total_rows = sum(max(r, 0) for r, _, _ in log)
+        total_bytes = sum(max(b, 0) for _, b, _ in log)
+        worst_rows, _, worst_row_stmt = max(log, key=lambda x: x[0])
+        worst_bytes, _, worst_byte_stmt = max(log, key=lambda x: x[1])
         elapsed_ms = round((_time.monotonic() - started) * 1000)
         print(
             f"[qlog] {request.method} {request.url.path} "
-            f"queries={len(log)} rows={total_rows} {elapsed_ms}ms "
-            f"worst={worst_rows}rows:{worst_stmt!r}"
+            f"queries={len(log)} rows={total_rows} bytes={total_bytes} {elapsed_ms}ms "
+            f"worst_rows={worst_rows}rows:{worst_row_stmt!r} "
+            f"worst_bytes={worst_bytes}b:{worst_byte_stmt!r}"
         )
     return response
 

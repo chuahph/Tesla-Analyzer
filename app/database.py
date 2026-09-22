@@ -57,16 +57,20 @@ engine = _make_engine()
 SessionLocal = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False, future=True)
 
 
-# Temporary instrumentation for the Sep 2026 Neon egress investigation. Table
-# sizes ruled out an oversized blob (largest table 576 kB) and the project has
-# only one branch, so the remaining candidate is that SOME query pulls far
-# more rows than its caller needs — invisible from Neon's own console, which
-# reports bytes moved but not which statement moved them. This is the one way
-# to find out directly: every request's actual row-count-per-query, logged
-# against the endpoint that caused it. Safe to leave running — it is a read of
-# ``cursor.rowcount``, adds no query of its own, and prints nothing for a
-# request that touches no query. Remove once the heavy one is found.
-_QUERY_LOG: ContextVar[list[tuple[int, str]] | None] = ContextVar("_QUERY_LOG", default=None)
+# Temporary instrumentation for the Sep 2026 Neon/Supabase egress investigation.
+# Table sizes ruled out an oversized blob (largest table 576 kB) and the
+# project has only one branch, so the remaining candidates are that SOME
+# query pulls far more rows than its caller needs, or that a write sends far
+# more bytes than its caller needs — both invisible from the provider's own
+# console, which reports bytes moved but not which statement moved them.
+# rowcount alone found the first kind (a missing LIMIT) but is blind to the
+# second: an UPDATE that overwrites a large JSON blob reports rowcount=1,
+# identical to one that changes a single flag. param_bytes closes that gap —
+# an approximation of what's actually sent over the wire for this statement's
+# bound values, cheap (str() of what SQLAlchemy already built, no query of its
+# own) but sized correctly relative to other statements in the same batch.
+# Safe to leave running. Remove once the heavy one is found.
+_QUERY_LOG: ContextVar[list[tuple[int, int, str]] | None] = ContextVar("_QUERY_LOG", default=None)
 
 
 @event.listens_for(engine, "after_cursor_execute")
@@ -78,7 +82,18 @@ def _log_query_rows(conn, cursor, statement, parameters, context, executemany):
         rows = cursor.rowcount
     except Exception:  # noqa: BLE001 — instrumentation must never break a query
         rows = -1
-    log.append((rows if rows is not None else -1, statement[:160]))
+    try:
+        if executemany:
+            param_bytes = sum(len(str(p)) for p in (parameters or []))
+        elif isinstance(parameters, dict):
+            param_bytes = sum(len(str(v)) for v in parameters.values())
+        elif parameters:
+            param_bytes = sum(len(str(v)) for v in parameters)
+        else:
+            param_bytes = 0
+    except Exception:  # noqa: BLE001 — instrumentation must never break a query
+        param_bytes = -1
+    log.append((rows if rows is not None else -1, param_bytes, statement[:160]))
 
 
 def _ensure_column(table: str, column: str, ddl_type: str, default_sql: str) -> None:
