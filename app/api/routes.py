@@ -11983,11 +11983,15 @@ def summary(
 # UPDATE when a value is unchanged, and trips, mode changes and gaps are
 # unchanged on almost every batch — and they are now skipped outright rather
 # than re-read and re-committed to discover that.
-# Back to 40 from 120. It was raised to read a charging session field by
-# field, that question is answered, and this blob is rewritten in full on
-# every batch the receiver posts — so its size is paid about 1,700 times a
-# day to hold a few minutes of records nobody is reading between diagnoses.
-TELEMETRY_RAW_MAX = 40
+# Cut again, from 40 to 10, once param-byte instrumentation (Sep 2026
+# Supabase egress round) measured this specific write rather than guessing
+# at it: 7.4 KB, every batch, continuously — the single largest write in a
+# parked car's ~14 KB/batch telemetry cost, and batches do not stop while
+# the car is parked (Tesla still posts one every 20-30s). At 40 records that
+# was ~750 MB/month on its own. Ten records is still enough to catch a bug
+# mid-batch — the case this buffer exists for — just less runway to look
+# back after the fact than 40 gave.
+TELEMETRY_RAW_MAX = 10
 # Shadow trips kept for comparison. Was weeks of driving, sized for the
 # telemetry-vs-polling trial this blob was originally built to support — and
 # that trial is over (see the accuracy record: the polled path is gone, not
@@ -13052,7 +13056,7 @@ def telemetry_fields(session: Session = Depends(get_session)):
 
 @router.get("/telemetry/recent")
 def telemetry_recent(
-    limit: int = Query(30, ge=1, le=TELEMETRY_RAW_MAX),
+    limit: int = Query(TELEMETRY_RAW_MAX, ge=1, le=TELEMETRY_RAW_MAX),
     keys_only: bool = Query(False),
     session: Session = Depends(get_session),
 ):
