@@ -69,8 +69,61 @@ SessionLocal = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False
 # an approximation of what's actually sent over the wire for this statement's
 # bound values, cheap (str() of what SQLAlchemy already built, no query of its
 # own) but sized correctly relative to other statements in the same batch.
+#
+# Both of those are blind to a third kind: a SELECT's bound params are tiny
+# (a vehicle_id, a timestamp) no matter how much data comes back, so a query
+# returning thousands of narrow rows — e.g. /api/driving-matrix's 90-day
+# Sentry history — looked cheap by every earlier measure while still moving
+# real bytes on the wire. result_bytes estimates that side: cursor.description
+# gives each column's Postgres type OID without fetching a single row, so a
+# fixed-width type (int, bool, timestamp) is sized exactly and a variable one
+# (text, json, numeric) gets a conservative flat estimate — not exact, but
+# enough to tell "a few KB" from "a few hundred KB" per page load, which
+# nothing else here can currently do.
 # Safe to leave running. Remove once the heavy one is found.
-_QUERY_LOG: ContextVar[list[tuple[int, int, str]] | None] = ContextVar("_QUERY_LOG", default=None)
+_QUERY_LOG: ContextVar[list[tuple[int, int, int, str]] | None] = ContextVar("_QUERY_LOG", default=None)
+
+# Postgres type OID -> wire size in bytes, for the fixed-width types worth
+# telling apart. Anything not listed (text, varchar, json/jsonb, numeric,
+# arrays, ...) is variable-length and falls back to _DEFAULT_COL_BYTES —
+# genuinely unknowable without fetching the row, which this must not do.
+_PG_FIXED_COL_BYTES = {
+    16: 1,     # bool
+    20: 8,     # int8 / bigint
+    21: 2,     # int2 / smallint
+    23: 4,     # int4 / integer
+    700: 4,    # float4 / real
+    701: 8,    # float8 / double precision
+    1082: 4,   # date
+    1083: 8,   # time
+    1114: 8,   # timestamp
+    1184: 8,   # timestamptz
+}
+# A short state string ("Idle", "Armed"), a name, a small JSON fragment — 20
+# bytes undercounts a big blob and overcounts a short flag, but it is the same
+# flat guess for every variable-length column, so totals stay comparable
+# across queries rather than precise for any one of them.
+_DEFAULT_COL_BYTES = 20
+# Per-row wire overhead: a 4-byte row length plus a 4-byte length prefix per
+# column value, matching libpq's row/column framing closely enough to matter
+# on a query that returns thousands of narrow rows.
+_ROW_OVERHEAD_BYTES = 4
+
+
+def _estimate_result_bytes(cursor, rows: int) -> int:
+    if rows <= 0:
+        return 0
+    try:
+        description = cursor.description
+    except Exception:  # noqa: BLE001 — instrumentation must never break a query
+        return 0
+    if not description:
+        return 0
+    row_bytes = _ROW_OVERHEAD_BYTES
+    for col in description:
+        type_code = col[1] if len(col) > 1 else None
+        row_bytes += 4 + _PG_FIXED_COL_BYTES.get(type_code, _DEFAULT_COL_BYTES)
+    return row_bytes * rows
 
 
 @event.listens_for(engine, "after_cursor_execute")
@@ -103,7 +156,11 @@ def _log_query_rows(conn, cursor, statement, parameters, context, executemany):
     except Exception:  # noqa: BLE001 — instrumentation must never break a query
         param_bytes = -1
         param_shape = "ERR"
-    log.append((rows if rows is not None else -1, param_bytes,
+    try:
+        result_bytes = _estimate_result_bytes(cursor, rows)
+    except Exception:  # noqa: BLE001 — instrumentation must never break a query
+        result_bytes = -1
+    log.append((rows if rows is not None else -1, param_bytes, result_bytes,
                f"{statement[:160]} <<{param_shape}>>"))
 
 

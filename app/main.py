@@ -198,16 +198,31 @@ async def _query_log_middleware(request: Request, call_next):
         log = _QUERY_LOG.get()
         _QUERY_LOG.reset(token)
     if log:
-        total_rows = sum(max(r, 0) for r, _, _ in log)
-        total_bytes = sum(max(b, 0) for _, b, _ in log)
-        worst_rows, _, worst_row_stmt = max(log, key=lambda x: x[0])
-        _, worst_bytes, worst_byte_stmt = max(log, key=lambda x: x[1])
+        # Tuple shape is (rows, param_bytes, result_bytes, statement). A
+        # previous version of this line unpacked the wrong index of the
+        # max()-selected tuple into worst_bytes (rows instead of bytes) —
+        # every variable below is named for the INDEX it reads, not just the
+        # metric, specifically to make that class of mistake obvious on
+        # review: worst_rows reads index 0 of the by-rows max, worst_bytes
+        # reads index 1 of the by-bytes max, worst_result reads index 2 of
+        # the by-result max.
+        total_rows = sum(max(e[0], 0) for e in log)
+        total_bytes = sum(max(e[1], 0) for e in log)
+        total_result = sum(max(e[2], 0) for e in log)
+        by_rows = max(log, key=lambda e: e[0])
+        by_bytes = max(log, key=lambda e: e[1])
+        by_result = max(log, key=lambda e: e[2])
+        worst_rows, worst_row_stmt = by_rows[0], by_rows[3]
+        worst_bytes, worst_byte_stmt = by_bytes[1], by_bytes[3]
+        worst_result, worst_result_stmt = by_result[2], by_result[3]
         elapsed_ms = round((_time.monotonic() - started) * 1000)
         print(
             f"[qlog] {request.method} {request.url.path} "
-            f"queries={len(log)} rows={total_rows} bytes={total_bytes} {elapsed_ms}ms "
+            f"queries={len(log)} rows={total_rows} bytes={total_bytes} "
+            f"result_bytes={total_result} {elapsed_ms}ms "
             f"worst_rows={worst_rows}rows:{worst_row_stmt!r} "
-            f"worst_bytes={worst_bytes}b:{worst_byte_stmt!r}"
+            f"worst_bytes={worst_bytes}b:{worst_byte_stmt!r} "
+            f"worst_result={worst_result}b:{worst_result_stmt!r}"
         )
     return response
 
