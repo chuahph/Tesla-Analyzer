@@ -1130,6 +1130,18 @@ def _place_parked_rates(session: Session) -> dict[str, float]:
 # spring is not evidence about this month's standby.
 SENTRY_HISTORY_DAYS = 90
 
+# Same pattern as _FULL_HISTORY_CACHE just above the dashboard read paths
+# below, and for the same reason: this is a read-only classification of
+# history that "already tolerates far more slop than" a couple of minutes
+# (see _full_history's own docstring), not a figure any write path decides
+# from. Found mattering via param/result-byte instrumentation (Sep 2026
+# egress round): ten call sites read this per request in places, each one
+# re-querying up to 90 days of battery_readings — narrow columns, but at
+# ~3,400 rows that is a meaningful chunk of a single dashboard load, paid
+# again on every reload even when nothing in that window could have changed.
+_PARKED_READINGS_CACHE: dict[int, tuple[float, object]] = {}
+_PARKED_READINGS_TTL_SEC = 120.0
+
 
 def _parked_readings(session: Session, vehicle_id: int):
     """Every battery reading, for telling which parks had Sentry armed.
@@ -1150,8 +1162,15 @@ def _parked_readings(session: Session, vehicle_id: int):
 
     Returning the index rather than a list also stops it being rebuilt: the
     summary asks three separate analyses about the same readings, and each of
-    them sorted the whole history again to do it.
+    them sorted the whole history again to do it. Cached for
+    _PARKED_READINGS_TTL_SEC on top of that, so the ten call sites across a
+    dashboard load — and a page reloaded a minute later — share one query
+    instead of paying for it again each time.
     """
+    now = time.monotonic()
+    cached = _PARKED_READINGS_CACHE.get(vehicle_id)
+    if cached is not None and now - cached[0] < _PARKED_READINGS_TTL_SEC:
+        return cached[1]
     rows = session.execute(
         select(BatteryReading.ts, BatteryReading.sentry_state,
                BatteryReading.sentry_mode)
@@ -1166,9 +1185,11 @@ def _parked_readings(session: Session, vehicle_id: int):
                or_(BatteryReading.sentry_state.is_not(None),
                    BatteryReading.sentry_mode.is_not(None)))
         .order_by(BatteryReading.ts)).all()
-    return driving_analysis.SentryIndex.from_sorted(
+    index = driving_analysis.SentryIndex.from_sorted(
         (ts, driving_analysis.sentry_armed(state, flag))
         for ts, state, flag in rows)
+    _PARKED_READINGS_CACHE[vehicle_id] = (now, index)
+    return index
 
 
 # The whole-history query below, held for a short while rather than re-run on
