@@ -1953,6 +1953,9 @@ def test_road_lookup_places_a_point_on_or_off_the_expressway(tmp_path, monkeypat
     calls = []
     monkeypatch.setattr("httpx.post", lambda *a, **k: calls.append(1) or R())
     monkeypatch.setattr(roads, "CACHE_PATH", str(tmp_path / "roads.json"))
+    # Not the real app/road_network.json.gz: this test wants a clean slate,
+    # download included, regardless of whether the app ships a bundle.
+    monkeypatch.setattr(roads, "BUNDLE_PATH", str(tmp_path / "no-bundle.json.gz"))
     monkeypatch.setattr(roads, "_last_attempt", 0.0)
     monkeypatch.setattr(roads, "_TILE_PAUSE_SEC", 0.0)
     one_tile = (5.0, 100.0, 6.0, 101.0)
