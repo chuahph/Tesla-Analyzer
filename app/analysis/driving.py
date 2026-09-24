@@ -2320,6 +2320,11 @@ def analyze(drives: list[Drive], rated_wh_per_km: float = 150.0,
             if window_price and total_distance else None
         )
 
+    # Each mode's own efficient/typical/inefficient Wh/km cuts, computed once
+    # against this same window's drives rather than per trip below — see
+    # efficiency_band_explained for what each recent_trips entry does with it.
+    eff_bands = _efficiency_bands_by_mode(drives, mode_cuts)
+
     return {
         "available": True,
         "total_drives": len(drives),
@@ -2468,6 +2473,14 @@ def analyze(drives: list[Drive], rated_wh_per_km: float = 150.0,
                 "matrix_mode": (_dme := drive_mode_explained(d, mode_cuts))["mode"],
                 "matrix_mode_why": _dme.get("why"),
                 "conditions": _trip_conditions(_dme["mode"], d),
+                # This trip's own Wh/km against its own mode's peers — a
+                # second, independent axis from matrix_mode, not a restatement
+                # of it (see efficiency_band's docstring for why the two are
+                # kept apart). None when unbanded: no measured energy, no
+                # mode, or that mode has too few priced trips of its own yet.
+                "efficiency_band": (
+                    _ebe := efficiency_band_explained(d, _dme["mode"], eff_bands))["band"],
+                "efficiency_band_why": _ebe.get("why"),
                 # "measured" (real tracked idle) / "estimated" (heuristic
                 # fallback) / "incomplete" (no valid energy) — how much to
                 # trust this trip's efficiency figures.
@@ -2974,6 +2987,104 @@ def drive_mode(d: Any, cuts: dict[str, float] | None = None) -> str | None:
     return "SC" if ratio >= slow else "HC"
 
 
+# How a trip's own Wh/km compares to its PEERS' — other trips sorted into the
+# same driving-condition mode — rather than to one fixed number across every
+# mode. FH and SC do not share a baseline: sustained highway speed pays an
+# aerodynamic cost slow traffic never sees, and stop-go traffic recovers a
+# share of its own cost through regen that a steady cruise has no chance to.
+# A single Wh/km yardstick across modes would call every highway trip "worse"
+# than every city trip regardless of how well either was actually driven — so
+# a trip is judged against the OTHER trips in its own mode, not the whole
+# fleet of drives. This is deliberately a second, independent axis rather
+# than folded into drive_mode's own criteria: drive_mode has to stay a pure
+# description of conditions for condition_matrix's per-mode Wh/km to mean
+# anything, since a mode partly decided by efficiency could no longer be used
+# to measure efficiency by mode without circularity.
+EFFICIENCY_BAND_MIN_PEERS = 5  # Below this a mode's own distribution is noise,
+# not a baseline — three trips define a "typical" range only by accident.
+# Below it every trip in that mode reads as unbanded (None) rather than
+# confidently wrong from too few examples — the same "None rather than guess"
+# drive_mode itself takes when it cannot say.
+
+
+def _efficiency_bands_by_mode(
+        drives: list[Any], cuts: dict[str, float] | None = None,
+) -> dict[str, tuple[float, float]]:
+    """Each mode's own (efficient/typical, typical/inefficient) Wh/km cuts.
+
+    Tertiles of the GROSS Wh/km — d.wh_per_km, not the driving-only figure —
+    of every whole-trip member of that mode. Gross, to match what a full
+    battery is actually worth, the same quantity condition_matrix's own
+    wh_per_km column reports. Computed fresh from whichever drives list is
+    passed in, so a weekday-only or weekend-only matrix bands its trips
+    against weekday-only or weekend-only peers rather than borrowing another
+    window's baseline.
+    """
+    by_mode: dict[str, list[float]] = {}
+    for d in drives:
+        if not has_valid_energy(d):
+            continue
+        code = drive_mode(d, cuts)
+        if code is None:
+            continue
+        by_mode.setdefault(code, []).append(float(d.wh_per_km))
+    bands: dict[str, tuple[float, float]] = {}
+    for code, values in by_mode.items():
+        if len(values) < EFFICIENCY_BAND_MIN_PEERS:
+            continue
+        bands[code] = (percentile(values, 1 / 3), percentile(values, 2 / 3))
+    return bands
+
+
+def efficiency_band(
+        wh_per_km: float | None, mode: str | None,
+        bands_by_mode: dict[str, tuple[float, float]],
+) -> str | None:
+    """Where this trip's Wh/km sits against its own mode's peers.
+
+    None when the trip itself cannot be priced (wh_per_km), was not sortable
+    into a mode at all (mode), or that mode does not yet have
+    EFFICIENCY_BAND_MIN_PEERS trips of its own to compare against — never a
+    guess dressed as an answer.
+    """
+    if wh_per_km is None or mode is None or mode not in bands_by_mode:
+        return None
+    low, high = bands_by_mode[mode]
+    if wh_per_km <= low:
+        return "efficient"
+    if wh_per_km >= high:
+        return "inefficient"
+    return "typical"
+
+
+def efficiency_band_explained(
+        d: Any, mode: str | None, bands_by_mode: dict[str, tuple[float, float]],
+) -> dict[str, Any]:
+    """One trip's efficiency band and the peer range that decided it.
+
+    Same shape as drive_mode_explained, and for the same reason: a label
+    nobody can check the working behind is a label people stop trusting the
+    first time it looks wrong.
+    """
+    wh = float(d.wh_per_km) if has_valid_energy(d) else None
+    band = efficiency_band(wh, mode, bands_by_mode)
+    out: dict[str, Any] = {"band": band}
+    if band is None:
+        if wh is None:
+            out["why"] = "no measured energy for this trip"
+        elif mode is None:
+            out["why"] = "not sortable into a driving condition — see matrix_mode_why"
+        else:
+            out["why"] = (
+                f"{mode} has fewer than {EFFICIENCY_BAND_MIN_PEERS} priced trips "
+                "of its own yet to compare against")
+        return out
+    low, high = bands_by_mode[mode]
+    out["why"] = (f"{wh:.0f} Wh/km against {MODE_NAMES.get(mode, mode)}'s own "
+                  f"typical {low:.0f}-{high:.0f}")
+    return out
+
+
 def condition_matrix(drives: list[Any], capacity_kwh: float,
                      baseline_range_km: float | None = None,
                      cuts: dict[str, float] | None = None) -> dict[str, Any]:
@@ -3021,6 +3132,13 @@ def condition_matrix(drives: list[Any], capacity_kwh: float,
             for k in ("km", "min", "kwh"):
                 slot[k] += got_part[k]
             members.setdefault(code, []).append(d)
+
+    # Each mode's own efficient/typical/inefficient Wh/km cuts, from the SAME
+    # drives list this matrix was built from — a weekday-only or weekend-only
+    # call bands against weekday-only or weekend-only peers, not a borrowed
+    # baseline. See efficiency_band's own docstring for why this is a second
+    # axis rather than folded into drive_mode.
+    eff_bands = _efficiency_bands_by_mode(drives, cuts)
 
     rows = []
     for code in ("FH", "CH", "CC", "SC", "HC"):
@@ -3102,6 +3220,26 @@ def condition_matrix(drives: list[Any], capacity_kwh: float,
             #     CC + CH + SC + HC + PK = the window's consumption
             # something the report can show rather than something to work out.
             "pct": round(kwh / capacity_kwh * 100.0, 2) if capacity_kwh else None,
+            # How many of this mode's WHOLE-TRIP members (buckets, not the
+            # split-weighted members list "trips" above counts) read
+            # efficient/typical/inefficient against their own mode's peers.
+            # Can undercount "trips" by the split trips that touched this
+            # mode only partly, since a split trip's overall Wh/km is not a
+            # fair reading of the SHARE it contributed here. "unbanded" is a
+            # trip with no measured energy, or a mode still under
+            # EFFICIENCY_BAND_MIN_PEERS trips of its own.
+            "efficiency_bands": {
+                # Zero-filled rather than sparse, so a reader (or a chart)
+                # can trust every row has all four keys rather than treating
+                # an absent one as ambiguous between "zero" and "not counted".
+                **dict.fromkeys(("efficient", "typical", "inefficient", "unbanded"), 0),
+                **Counter(
+                    efficiency_band(
+                        float(d.wh_per_km) if has_valid_energy(d) else None,
+                        code, eff_bands) or "unbanded"
+                    for d in (buckets.get(code) or [])
+                ),
+            },
         })
     # Each mode's share of the driving, on the modes' OWN totals so they sum to
     # 100%. The share_* fields the endpoint adds are of driving PLUS parked,

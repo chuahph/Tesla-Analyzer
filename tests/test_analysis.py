@@ -964,6 +964,54 @@ def test_recent_trips_report_data_quality():
     assert driving_analysis.analyze([incomplete], 150.0, 75.0)["recent_trips"][0]["data_quality"] == "incomplete"
 
 
+def test_recent_trips_report_an_efficiency_band_against_their_own_mode():
+    """Each recent_trips entry carries efficiency_band/efficiency_band_why
+    alongside matrix_mode/matrix_mode_why — a second, independent verdict
+    (see efficiency_band's docstring for why it is not folded into the mode
+    itself), wired through analyze() the same way the mode explanation is.
+    """
+    from datetime import datetime, timedelta
+
+    from app.analysis import driving as driving_analysis
+    from app.models import Drive
+
+    def sc_trip(day, wh_per_km):
+        # 20 km in 40 min against a peak of 70 km/h: ratio 0.43, squarely SC
+        # (see the SC fixture in the condition-matrix test above).
+        return Drive(
+            start_time=datetime(2026, 7, 1, 8, 0) + timedelta(days=day),
+            end_time=datetime(2026, 7, 1, 8, 40) + timedelta(days=day),
+            distance_km=20.0, duration_min=40.0, avg_speed_kmh=30.0,
+            max_speed_kmh=70.0, start_soc=80, end_soc=70,
+            energy_used_kwh=wh_per_km * 20.0 / 1000.0, outside_temp_c=31.0,
+            idle_min=2.0, idle_tracked=True,
+        )
+
+    trips = [sc_trip(i, wh) for i, wh in enumerate((100, 110, 120, 130, 140, 150))]
+    # recent_trips_limit=None: the default of 5 would silently drop the
+    # oldest of these six trips, and this test needs all of them present.
+    rows = driving_analysis.analyze(
+        trips, 150.0, 68.6, recent_trips_limit=None)["recent_trips"]
+    # These trips are never added to a session, so none of them has a real
+    # id (None for all six) — matched back by start_time instead, which
+    # recent_trips reports and every trip here sets to something distinct.
+    by_start = {r["start_time"]: r for r in rows}
+    got = [by_start[t.start_time.isoformat(timespec="minutes")]["efficiency_band"]
+          for t in trips]
+    assert got == ["efficient", "efficient", "typical", "typical",
+                   "inefficient", "inefficient"]
+    assert all(by_start[t.start_time.isoformat(timespec="minutes")]["efficiency_band_why"]
+              for t in trips)
+    assert all(by_start[t.start_time.isoformat(timespec="minutes")]["matrix_mode"] == "SC"
+              for t in trips)
+
+    # A single trip has no peers in its own mode at all, so it is unbanded
+    # rather than a guess from a sample of one.
+    lone = driving_analysis.analyze([trips[0]], 150.0, 68.6)["recent_trips"][0]
+    assert lone["efficiency_band"] is None
+    assert lone["efficiency_band_why"]
+
+
 def test_distance_flag_catches_implausibly_short_odometer_distance():
     """A trip whose logged distance is shorter than the straight-line
     distance between its own stored endpoints is flagged — physically that
@@ -2901,6 +2949,70 @@ def test_the_condition_matrix_sorts_on_constancy_not_on_idle_time():
     out = condition_matrix([cc, nopeak], capacity_kwh=68.6)
     assert out["unclassified_trips"] == 1
     assert sum(r["trips"] for r in out["modes"]) == 1
+
+
+def test_efficiency_band_judges_a_trip_against_its_own_modes_peers():
+    """Wh/km is banded against OTHER trips in the same driving condition, not
+    a fixed number and not the whole fleet — a highway trip and a slow-city
+    trip do not share a baseline (see efficiency_band's own docstring), so
+    comparing across modes with one yardstick would call every highway trip
+    "worse" regardless of how well it was actually driven.
+
+    Six SC trips spanning 100-150 Wh/km in steps of 10: tertile cuts land at
+    ~116.7 and ~133.3, so the two lowest read efficient, the two highest read
+    inefficient, and the two in the middle read typical.
+    """
+    from app.analysis.driving import (
+        EFFICIENCY_BAND_MIN_PEERS, _efficiency_bands_by_mode, condition_matrix,
+        drive_mode, efficiency_band, efficiency_band_explained)
+
+    class D:
+        def __init__(self, wh):
+            # Same km/mins/idle/mx as the "sc" fixture above: 20 km in 40
+            # min against a peak of 70 (ratio 0.43) lands squarely in SC.
+            self.distance_km = 20.0; self.duration_min = 40.0
+            self.idle_min = 2.0; self.max_speed_kmh = 70.0
+            self.idle_tracked = True; self.energy_estimated = False
+            self.outside_temp_c = 31.0
+            self.energy_used_kwh = wh * self.distance_km / 1000.0
+            self.wh_per_km = wh
+
+    trips = [D(wh) for wh in (100, 110, 120, 130, 140, 150)]
+    for t in trips:
+        assert drive_mode(t) == "SC"
+
+    bands = _efficiency_bands_by_mode(trips)
+    low, high = bands["SC"]
+    assert low == pytest.approx(116.67, abs=0.1)
+    assert high == pytest.approx(133.33, abs=0.1)
+
+    got = [efficiency_band(t.wh_per_km, "SC", bands) for t in trips]
+    assert got == ["efficient", "efficient", "typical", "typical",
+                   "inefficient", "inefficient"]
+
+    # The explained form carries the same verdict plus a checkable "why",
+    # mirroring drive_mode_explained.
+    exp = efficiency_band_explained(trips[0], "SC", bands)
+    assert exp["band"] == "efficient"
+    assert "100" in exp["why"] and "SC" not in exp["why"]  # names it "slow city"
+
+    # Fewer than EFFICIENCY_BAND_MIN_PEERS trips in a mode: unbanded rather
+    # than a guess from too small a sample.
+    few = [D(wh) for wh in (100, 200)]
+    assert len(few) < EFFICIENCY_BAND_MIN_PEERS
+    few_bands = _efficiency_bands_by_mode(few)
+    assert "SC" not in few_bands
+    assert efficiency_band(few[0].wh_per_km, "SC", few_bands) is None
+    unbanded = efficiency_band_explained(few[0], "SC", few_bands)
+    assert unbanded["band"] is None
+    assert str(EFFICIENCY_BAND_MIN_PEERS) in unbanded["why"]
+
+    # And the matrix row carries the same breakdown, zero-filled across all
+    # four keys rather than sparse.
+    row = {r["code"]: r for r in condition_matrix(trips, capacity_kwh=68.6)
+          ["modes"]}["SC"]
+    assert row["efficiency_bands"] == {
+        "efficient": 2, "typical": 2, "inefficient": 2, "unbanded": 0}
 
 
 def test_the_matrix_splits_into_weekdays_and_weekends():
