@@ -3535,6 +3535,19 @@ def _append_trip(trips: list, finished: dict,
 # could see anything, and reaching further only risks disturbing history
 # nobody asked to be disturbed.
 PROMOTE_MAX_DAYS = 7
+# How far back the INGEST call site looks — every telemetry batch, not every
+# tick. Its whole reason to exist is a trip that closed moments ago, not
+# reconciliation against drift from days back; that full-depth sweep already
+# runs every ~30 minutes from /api/sync and on every dashboard load from
+# summary(), both still at PROMOTE_MAX_DAYS. Scoping THIS call to a day keeps
+# the self-healing intact — it fires again within half an hour, not never —
+# while cutting the Vehicle/Drive re-select this function does, on every
+# single batch while driving or charging, from a week of rows to about a
+# day's. A trip closed while badly out of coverage still lands within the
+# next /api/sync tick rather than instantly, exactly the tradeoff promotion
+# already made for every trip before this call site was added to shorten it
+# for the ordinary case.
+PROMOTE_INGEST_RECENT_DAYS = 1
 
 
 # The most rows an UNATTENDED promotion may add before it refuses to do
@@ -11445,8 +11458,12 @@ def summary(
         # for a missing trip could therefore delay it, which is the worst
         # property a diagnostic can have.
         #
-        # Costs one state read when there is nothing staged:
-        # _promote_shadow_trips returns immediately on an empty staging area.
+        # NOT one state read on the ordinary path, despite the empty-staging
+        # early return this leans on — see the note on the /api/telemetry
+        # call site, which is the same function at the same PROMOTE_MAX_DAYS
+        # depth. Left at full depth here deliberately: this IS one of the two
+        # places the full reconciliation belongs, since a dashboard load
+        # should be able to trust what it is about to read.
         _settle_shadows(session)
         _repair_after_new_trips(
             session,
@@ -12885,9 +12902,16 @@ def telemetry_ingest(
     # later batch. It stays staged, the dashboard looks like a car nobody
     # drove, and every subsequent batch skips the code that would fix it.
     #
-    # Cheap on the ordinary path. _promote_shadow_trips returns immediately on
-    # an empty staging area, so a car streaming every twenty seconds while
-    # driving costs one state read a batch.
+    # NOT cheap on the ordinary path the way it looks. TELEMETRY_TRIPS_KEY is
+    # a capped rolling buffer of every trip ever closed, not a staging area
+    # that empties once promoted, so it is essentially never "[]" once the
+    # first trip ever closed — the one-state-read early return almost never
+    # fires, and every other batch runs the real Vehicle/Drive re-select.
+    # Scoped to PROMOTE_INGEST_RECENT_DAYS rather than PROMOTE_MAX_DAYS for
+    # exactly that reason: this call's job is a trip that closed moments ago,
+    # so it does not need a week of drives to check against, and the full
+    # depth still runs from /api/sync and from summary() (see their own call
+    # sites) to catch anything this narrower window is too recent to reach.
     #
     # It does NOT make the cron unnecessary. A trip closed by the settle
     # TIMEOUT — a car that parks and goes quiet — is closed by no batch at all,
@@ -12899,7 +12923,8 @@ def telemetry_ingest(
         # land reported that one had.
         promoted = sum(
             1 for c in _promote_shadow_trips(
-                session, apply=True, max_add=PROMOTE_AUTO_MAX_ADD)
+                session, apply=True, max_add=PROMOTE_AUTO_MAX_ADD,
+                days=PROMOTE_INGEST_RECENT_DAYS)
             if c.get("action") in ("add", "correct"))
         _record_promote_result(session, "ingest", None)
     except Exception as exc:  # noqa: BLE001 — never let this reject the batch
