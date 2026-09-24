@@ -806,6 +806,10 @@ canvas { max-height: 260px; }
    language tag — same weight and spacing as the matrix table's mx-code so
    the two read as the same code shown in two places. */
 .trip-cond-mode { letter-spacing: .04em; }
+.trip-eff { font-weight: 600; }
+.trip-eff-efficient { color: #3fb950; }
+.trip-eff-typical { color: inherit; }
+.trip-eff-inefficient { color: #f0883e; }
 /* Recent charges: location/type on the first line, kWh/cost/rate below —
    same two-line shape as a trip row. */
 .plain-list li.charge { flex-direction: column; align-items: flex-start; gap: 2px; }

@@ -1531,6 +1531,11 @@ function tripConditionWhy(t) {
   }
   bits.push("Peak hour (7–9am, 5–7pm) and hot (33°C+) are added afterwards " +
     "as extra context, not part of the classification.");
+  if (t.efficiency_band_why) {
+    bits.push(`<strong>Efficiency${t.efficiency_band ? `: ${t.efficiency_band}` : ""}</strong>` +
+      ` — ${t.efficiency_band_why}. Judged only against this car's other ` +
+      `${t.matrix_mode || ""} trips, so a highway trip isn't marked down for drag a city trip never pays.`);
+  }
   return bits.join("<br>");
 }
 
@@ -1644,6 +1649,7 @@ function tripDiagnostics(t, ctx) {
       ended_on: t.ended_on,
       conditions: t.conditions,
       matrix_mode: t.matrix_mode, matrix_mode_why: t.matrix_mode_why,
+      efficiency_band: t.efficiency_band, efficiency_band_why: t.efficiency_band_why,
       cost: t.cost, cost_parts: t.cost_parts, cost_source: t.cost_source,
       start_coords: t.start_coords, end_coords: t.end_coords,
       tag: t.tag,
@@ -1801,8 +1807,13 @@ function renderLists(d) {
       // so the code says which matrix row this trip's numbers landed in
       // before the sentence describes what the drive looked like.
       const modeTag = t.matrix_mode ? `<b class="trip-cond-mode">${t.matrix_mode}</b> · ` : "";
+      // Wh/km against this car's own history of trips in the SAME mode — a
+      // second verdict beside the mode, not part of it (see
+      // driving_analysis.efficiency_band).
+      const effTag = t.efficiency_band
+        ? ` · <span class="trip-eff trip-eff-${t.efficiency_band}">${t.efficiency_band}</span>` : "";
       const cond = t.conditions
-        ? `<span class="trip-cond">🚦 ${modeTag}${t.conditions}` +
+        ? `<span class="trip-cond">🚦 ${modeTag}${t.conditions}${effTag}` +
           `<button class="info-btn" data-info="${condId}">!</button></span>` +
           `<span id="${condId}" class="info-pop hidden">${tripConditionWhy(t)}</span>`
         : "";

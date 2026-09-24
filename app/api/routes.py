@@ -11652,7 +11652,8 @@ def summary(
         vampire_place_rates=_hist("place_rates", _place_parked_rates, session),
         vampire_readings=_hist("parked_readings", _parked_readings, session, vehicle.id),
         vampire_frozen=_hist("frozen_rates", _frozen_rates, session),
-        mode_cuts=_mode_cuts(session))
+        mode_cuts=_mode_cuts(session),
+        efficiency_peers=_hist("full_history", _full_history, session, vehicle.id)[0])
     _mark("driving")
     # A since-charge window's own `charges` list is always empty by
     # definition (it starts right where last_charge ends, so no charge can

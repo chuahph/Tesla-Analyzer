@@ -1011,6 +1011,12 @@ def test_recent_trips_report_an_efficiency_band_against_their_own_mode():
     assert lone["efficiency_band"] is None
     assert lone["efficiency_band_why"]
 
+    # ...unless the caller hands over the car's history as the peer group,
+    # which is what a since-charge window of one or two trips needs.
+    peered = driving_analysis.analyze(
+        [trips[0]], 150.0, 68.6, efficiency_peers=trips)["recent_trips"][0]
+    assert peered["efficiency_band"] == "efficient"
+
 
 def test_distance_flag_catches_implausibly_short_odometer_distance():
     """A trip whose logged distance is shorter than the straight-line

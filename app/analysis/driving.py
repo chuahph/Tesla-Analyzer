@@ -2026,6 +2026,7 @@ def analyze(drives: list[Drive], rated_wh_per_km: float = 150.0,
             vampire_readings: list[Any] | None = None,
             vampire_frozen: dict[str, Any] | None = None,
             mode_cuts: dict[str, float] | None = None,
+            efficiency_peers: list[Any] | None = None,
             ) -> dict[str, Any]:
     """``energy_price`` is either a flat RM/kWh float, or a
     ``datetime -> RM/kWh`` callable (time-of-use pricing — see app.tariff) for
@@ -2321,9 +2322,12 @@ def analyze(drives: list[Drive], rated_wh_per_km: float = 150.0,
         )
 
     # Each mode's own efficient/typical/inefficient Wh/km cuts, computed once
-    # against this same window's drives rather than per trip below — see
-    # efficiency_band_explained for what each recent_trips entry does with it.
-    eff_bands = _efficiency_bands_by_mode(drives, mode_cuts)
+    # rather than per trip below. Against ``efficiency_peers`` (the car's
+    # whole history) when given, not this window: a since-charge window of
+    # two trips has no mode with enough peers to band anything, and "typical
+    # for this car" is a property of its history, not of whatever is on screen.
+    eff_bands = _efficiency_bands_by_mode(
+        efficiency_peers if efficiency_peers is not None else drives, mode_cuts)
 
     return {
         "available": True,
