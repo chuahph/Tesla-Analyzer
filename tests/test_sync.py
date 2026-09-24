@@ -2044,3 +2044,31 @@ def test_the_shadow_files_each_kilometre_under_the_road_it_was_driven_on():
         assert done["road_bands"]["_stops"].get("highway", 0) >= 1
     finally:
         roads.clear()
+
+
+def test_a_bundled_road_network_loads_without_any_download(tmp_path, monkeypatch):
+    """app/road_network.json.gz ships in the image: a fresh process loads it
+    and asks Overpass for nothing — the point of bundling it, since a
+    restart on Render's free plan wipes the downloaded cache."""
+    import gzip
+    import json as _json
+
+    from app import roads
+
+    bundle = tmp_path / "road_network.json.gz"
+    with gzip.open(bundle, "wt") as f:
+        _json.dump({"classes": list(roads.ROAD_CLASSES),
+                    "tiles": {"5,100": [[[5.30, 100.20], [5.30, 100.60]]]}}, f)
+    monkeypatch.setattr(roads, "BUNDLE_PATH", str(bundle))
+    monkeypatch.setattr(roads, "CACHE_PATH", str(tmp_path / "none.json"))
+    monkeypatch.setattr(roads, "_last_attempt", 0.0)
+    monkeypatch.setattr("httpx.post", lambda *a, **k: (_ for _ in ()).throw(
+        AssertionError("the bundle should have answered")))
+    roads.clear()
+    try:
+        roads.ensure_loaded((5.0, 100.0, 6.0, 101.0), background=False)
+        st = roads.status()
+        assert st["state"] == "loaded" and st["source"] == "bundled", st
+        assert roads.road_class(5.30, 100.30) == "highway"
+    finally:
+        roads.clear()

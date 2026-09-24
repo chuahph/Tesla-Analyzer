@@ -45,6 +45,12 @@ OVERPASS_URLS = (
     "https://overpass-api.de/api/interpreter",
     "https://overpass.kumi.systems/api/interpreter",
 )
+# The network built ahead of time (scripts/build_road_network.py, run by the
+# "Build road network" GitHub Action) and shipped inside the image, so a
+# restart — which on Render's free plan wipes CACHE_PATH — never has to
+# download it again. Gzipped JSON in the same shape as the cache file.
+BUNDLE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                           "road_network.json.gz")
 CACHE_PATH = os.environ.get(
     "ROAD_CACHE_PATH",
     os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
@@ -229,9 +235,29 @@ def _fetch(bbox: tuple[float, float, float, float]) -> list[list[list[float]]]:
     raise RuntimeError(f"no Overpass mirror answered: {last}")
 
 
+def _read_tiles(path: str) -> dict[str, list] | None:
+    """Tiles from a saved network (plain or gzipped JSON), or None."""
+    import gzip
+
+    try:
+        opener = gzip.open if path.endswith(".gz") else open
+        with opener(path, "rt") as f:
+            data = json.load(f)
+    except (OSError, ValueError, EOFError):
+        return None
+    if data.get("classes") != list(ROAD_CLASSES) or not isinstance(data.get("tiles"), dict):
+        return None
+    return data["tiles"]
+
+
 def _load_cache_file() -> dict[str, list] | None:
-    """Tiles from the cache file, or None. The older whole-network form
-    (one "lines" list) reads as a single tile covering everything."""
+    """Tiles from the bundled network and the cache file together, or None.
+    The older whole-network cache form (one "lines" list) reads as a single
+    tile covering everything."""
+    tiles = dict(_read_tiles(BUNDLE_PATH) or {})
+    tiles.update(_read_tiles(CACHE_PATH) or {})
+    if tiles:
+        return tiles
     try:
         with open(CACHE_PATH) as f:
             data = json.load(f)
@@ -277,7 +303,8 @@ def ensure_loaded(bbox: tuple[float, float, float, float] = DEFAULT_BBOX,
             return
         if cached:
             _install_tiles({k: v for k, v in cached.items() if k in wanted},
-                           len(wanted), source="cache")
+                           len(wanted), source="bundled" if os.path.exists(BUNDLE_PATH)
+                           else "cache")
     have = dict(_tiles or {})
     missing = [k for k in wanted if k not in have]
     if not missing:
