@@ -11178,3 +11178,42 @@ def test_the_promotion_sweep_runs_only_when_due():
         state.put(sess, state.PROMOTE_FAIL_KEY, "")
         sess.close()
         settings.app_passcode = old_pc
+
+
+def test_the_full_history_cache_is_dropped_when_drives_or_charges_change():
+    """_FULL_HISTORY_CACHE lives an hour now instead of two minutes, which is
+    only safe because any commit touching a drive or a charge clears it —
+    through the unit of work, or an ORM bulk statement like services.py's."""
+    from datetime import datetime as _dt
+
+    from sqlalchemy import create_engine, delete
+    from sqlalchemy.orm import sessionmaker
+
+    from app.api import routes
+    from app.database import Base
+    from app.models import Drive, Vehicle
+
+    engine = create_engine("sqlite:///:memory:", connect_args={"check_same_thread": False})
+    Base.metadata.create_all(engine)
+    S = sessionmaker(bind=engine, expire_on_commit=False)
+    with S() as s:
+        v = Vehicle(vin="CACHETEST0000001", name="t", model="m")
+        s.add(v)
+        s.commit()
+        routes._full_history(s, v.id)
+        assert v.id in routes._FULL_HISTORY_CACHE
+
+        s.add(Drive(vehicle_id=v.id, start_time=_dt(2026, 9, 1, 8), end_time=_dt(2026, 9, 1, 9)))
+        s.commit()
+        assert v.id not in routes._FULL_HISTORY_CACHE
+        assert len(routes._full_history(s, v.id)[0]) == 1
+
+        s.execute(delete(Drive).where(Drive.vehicle_id == v.id))
+        s.commit()
+        assert v.id not in routes._FULL_HISTORY_CACHE
+        assert routes._full_history(s, v.id)[0] == []
+
+        # A commit that touched neither leaves it alone.
+        v.name = "renamed"
+        s.commit()
+        assert v.id in routes._FULL_HISTORY_CACHE

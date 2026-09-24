@@ -679,9 +679,9 @@ def _measured_capacity(session: Session, vehicle: Vehicle) -> tuple[float | None
     Median, not mean: a single mis-recorded session should not shift the figure
     every kWh and every ringgit is derived from.
     """
-    charges = session.scalars(
-        select(Charge).where(Charge.vehicle_id == vehicle.id)
-    ).all()
+    # The cached whole history (see _FULL_HISTORY_CACHE) rather than its own
+    # full-width read of every charge on every dashboard load.
+    _, charges = _full_history(session, vehicle.id)
     vals: list[float] = []
     for c in charges:
         gain = (c.end_soc or 0) - (c.start_soc or 0)
@@ -828,13 +828,35 @@ def _trip_cost_map(session: Session, vehicle_id: int) -> dict[int, dict]:
     — an old trip's correct layer can depend on a charge from well before
     the window starts. A manual per-trip override (Drive.cost_override, set
     via /api/data/set-drive-cost for a trip the charge history can't reach)
-    always wins over the computed figure."""
-    drives_all = session.scalars(
-        select(Drive).where(Drive.vehicle_id == vehicle_id).order_by(Drive.start_time)
-    ).all()
-    charges_all = session.scalars(
-        select(Charge).where(Charge.vehicle_id == vehicle_id).order_by(Charge.start_time)
-    ).all()
+    always wins over the computed figure.
+
+    Only the columns the pricing reads. This runs on every dashboard load
+    over the car's WHOLE history, so it grows with every trip, and whole Drive
+    rows carry place names, coordinates and a speed-profile blob — most of
+    each row, none of it needed to price anything.
+    """
+    from types import SimpleNamespace
+
+    class _D(SimpleNamespace):
+        # has_valid_energy() reads wh_per_km, which is a property on Drive.
+        @property
+        def wh_per_km(self) -> float:
+            return (self.energy_used_kwh * 1000.0 / self.distance_km
+                    if self.distance_km and self.distance_km > 0 else 0.0)
+
+    drives_all = [
+        _D(id=r.id, start_time=r.start_time, energy_used_kwh=r.energy_used_kwh or 0.0,
+           distance_km=r.distance_km or 0.0, cost_override=r.cost_override)
+        for r in session.execute(
+            select(Drive.id, Drive.start_time, Drive.energy_used_kwh,
+                   Drive.distance_km, Drive.cost_override)
+            .where(Drive.vehicle_id == vehicle_id).order_by(Drive.start_time))]
+    charges_all = [
+        SimpleNamespace(id=r.id, end_time=r.end_time,
+                        energy_added_kwh=r.energy_added_kwh, cost=r.cost)
+        for r in session.execute(
+            select(Charge.id, Charge.end_time, Charge.energy_added_kwh, Charge.cost)
+            .where(Charge.vehicle_id == vehicle_id).order_by(Charge.start_time))]
     costs = driving_analysis.layered_trip_costs(drives_all, charges_all)
     for d in drives_all:
         if d.cost_override is not None:
@@ -1209,7 +1231,49 @@ def _parked_readings(session: Session, vehicle_id: int):
 # requests, which a cache built inside one (see _hist a few hundred lines
 # down, which only dedupes calls within a single response) cannot do.
 _FULL_HISTORY_CACHE: dict[int, tuple[float, list, list]] = {}
-_FULL_HISTORY_TTL_SEC = 120.0
+# An hour, because the cache is now dropped the moment a commit touches drives
+# or charges (below), so the TTL is only a backstop for a write that goes
+# around the ORM entirely. At 120 s nearly every dashboard visit refilled it,
+# which is the car's entire drive history, full width, growing with every trip.
+_FULL_HISTORY_TTL_SEC = 3600.0
+
+
+def _register_history_invalidation() -> None:
+    """Clear _FULL_HISTORY_CACHE after any commit that changed a drive or a
+    charge — through the unit of work (add/edit/delete) or an ORM bulk
+    UPDATE/DELETE, which is how services.py resets and purges. One process
+    serves this app (run.py starts a single uvicorn worker), so clearing it
+    here clears it everywhere it is read."""
+    from sqlalchemy import event
+    from sqlalchemy.orm import Session as _OrmSession
+
+    def touched(session) -> None:
+        session.info["history_dirty"] = True
+
+    @event.listens_for(_OrmSession, "after_flush")
+    def _flushed(session, _ctx):
+        if any(isinstance(o, (Drive, Charge))
+               for o in (*session.new, *session.dirty, *session.deleted)):
+            touched(session)
+
+    @event.listens_for(_OrmSession, "do_orm_execute")
+    def _bulk(state_):
+        mapper = state_.bind_mapper
+        if ((state_.is_update or state_.is_delete or state_.is_insert)
+                and mapper is not None and mapper.class_ in (Drive, Charge)):
+            touched(state_.session)
+
+    @event.listens_for(_OrmSession, "after_commit")
+    def _committed(session):
+        if session.info.pop("history_dirty", False):
+            _FULL_HISTORY_CACHE.clear()
+
+    @event.listens_for(_OrmSession, "after_rollback")
+    def _rolled_back(session):
+        session.info.pop("history_dirty", None)
+
+
+_register_history_invalidation()
 
 
 def _efficiency_peers(drives: list) -> list:
@@ -12016,9 +12080,8 @@ def summary(
     # trip reads a few percent off. Whole history, not the display window —
     # charges big enough to calibrate from are rare, so a short window would
     # usually have none.
-    all_charges = session.scalars(
-        select(Charge).where(Charge.vehicle_id == vehicle.id).order_by(Charge.start_time)
-    ).all()
+    all_charges = sorted(_hist("full_history", _full_history, session, vehicle.id)[1],
+                         key=lambda c: c.start_time)
     _mark("all_charges")
     _marks.append(("rows_all_charges", len(all_charges)))
     vehicle_out["capacity_check"] = battery_analysis.implied_capacity(list(all_charges))
