@@ -105,6 +105,12 @@ TELEMETRY_TRIP_ENDS_KEY = "telemetry_trip_ends"  # JSON {vin: end_ts} of each
 # car's newest trip in TELEMETRY_TRIPS_KEY — a few bytes the telemetry ingest
 # reads instead of the whole trips store on a parked batch. Only
 # routes._put_trips writes the trips key, and it writes this beside it.
+TELEMETRY_TRIPS_STAMP_KEY = "telemetry_trips_stamp"  # Changes on every write
+# of TELEMETRY_TRIPS_KEY (also only by routes._put_trips), so whether the
+# store moved can be asked without reading it.
+PROMOTE_SWEPT_KEY = "promote_swept"  # JSON {stamp, at}: the trips stamp the
+# last complete promotion sweep saw, and when it ran — see
+# routes._promotion_sweep_due.
 TELEMETRY_CHARGE_SHADOW_KEY = "telemetry_charge_shadow"  # JSON {vin: state}
 # of the charge in progress, the counterpart to TELEMETRY_SHADOW_KEY.
 TELEMETRY_CHARGES_KEY = "telemetry_charges"  # JSON list of finished shadow
@@ -288,16 +294,37 @@ def get(session: Session, key: str, default: str = "") -> str:
 
 
 def put(session: Session, key: str, value: str) -> None:
-    row = _row(session, key)
+    """Write one key, without first reading what it held.
+
+    Loading the row to assign to it downloaded the OLD value in full before
+    every write — for the JSON stores, tens of kilobytes to overwrite with
+    tens of kilobytes — because the identity map had already dropped the row
+    the caller's own get() loaded a moment earlier. A row this session still
+    holds is assigned directly; otherwise a plain UPDATE, and an INSERT only
+    when it touched nothing.
+    """
+    from sqlalchemy import update
+
+    c = session.info.get(_CACHE)
+    row = None
+    if c is not None and key not in c["absent"]:
+        row = c["rows"].get(key)
     if row is None:
+        row = session.identity_map.get(session.identity_key(Setting, key))
+    if row is not None:
+        row.value = value
+        session.commit()
+        return
+    known_absent = c is not None and key in c["absent"]
+    hit = 0 if known_absent else session.execute(
+        update(Setting).where(Setting.key == key).values(value=value)
+        .execution_options(synchronize_session=False)).rowcount
+    if not hit:
         row = Setting(key=key, value=value)
         session.add(row)
-        c = session.info.get(_CACHE)
         if c is not None:
             c["absent"].discard(key)
             c["rows"][key] = row
-    else:
-        row.value = value
     session.commit()
 
 

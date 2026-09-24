@@ -3546,6 +3546,44 @@ def _put_trips(session: Session, trips: list) -> None:
 
     state.put(session, state.TELEMETRY_TRIPS_KEY, _json.dumps(trips))
     state.put(session, state.TELEMETRY_TRIP_ENDS_KEY, _json.dumps(_trip_ends(trips)))
+    state.put(session, state.TELEMETRY_TRIPS_STAMP_KEY, str(time.time_ns()))
+
+
+# How often the full promotion sweep runs even when nothing in the trips store
+# changed. The sweep is what repairs a Drive row that drifted from its shadow
+# trip — edited, deleted, restored — and that needs no trip to have closed.
+# It used to run on every sync tick and every dashboard load, reading the
+# whole trips store (~60 KB) each time to find, almost always, nothing.
+PROMOTE_SWEEP_EVERY_SEC = 6 * 3600.0
+
+
+def _promotion_sweep_due(session: Session) -> bool:
+    """Whether /api/sync or a dashboard load should run the full promotion.
+
+    Yes when the trips store changed since the last complete sweep, when the
+    last attempt anywhere failed or was refused, or when PROMOTE_SWEEP_EVERY_SEC
+    has passed — so drift is still repaired, within hours rather than minutes.
+    """
+    import json as _json
+
+    if (state.get(session, state.PROMOTE_FAIL_KEY)
+            or state.get(session, state.PROMOTE_REFUSED_KEY) == "1"):
+        return True
+    try:
+        swept = _json.loads(state.get(session, state.PROMOTE_SWEPT_KEY) or "{}") or {}
+    except ValueError:
+        return True
+    if swept.get("stamp") != state.get(session, state.TELEMETRY_TRIPS_STAMP_KEY):
+        return True
+    return time.time() - float(swept.get("at") or 0.0) >= PROMOTE_SWEEP_EVERY_SEC
+
+
+def _mark_swept(session: Session) -> None:
+    import json as _json
+
+    state.put(session, state.PROMOTE_SWEPT_KEY, _json.dumps({
+        "stamp": state.get(session, state.TELEMETRY_TRIPS_STAMP_KEY),
+        "at": time.time()}))
 
 
 def _append_trip(trips: list, finished: dict,
@@ -4693,11 +4731,15 @@ def sync_now(wake: bool = Query(False), session: Session = Depends(get_session))
     # read back as another, failing into a confident wrong answer.
     promoted_drives = 0
     try:
-        changed = _promote_shadow_trips(session, apply=True,
-                                        max_add=PROMOTE_AUTO_MAX_ADD)
-        promoted_drives = sum(1 for c in changed if c.get("action") == "add")
-        _repair_after_new_trips(session, changed)
-        _record_promote_result(session, "sync", None)
+        # The full sweep, when due — see _promotion_sweep_due. A refusal or a
+        # failure keeps it due on every tick until one gets through.
+        if _promotion_sweep_due(session):
+            changed = _promote_shadow_trips(session, apply=True,
+                                            max_add=PROMOTE_AUTO_MAX_ADD)
+            promoted_drives = sum(1 for c in changed if c.get("action") == "add")
+            _repair_after_new_trips(session, changed)
+            _record_promote_result(session, "sync", None)
+            _mark_swept(session)
     except Exception as exc:  # noqa: BLE001 — never let this break the sync
         # A correction that cannot be made is a stale figure on the
         # dashboard. A sync that dies here is no figures at all, plus no
@@ -11508,18 +11550,20 @@ def summary(
         # for a missing trip could therefore delay it, which is the worst
         # property a diagnostic can have.
         #
-        # NOT one state read on the ordinary path, despite the empty-staging
-        # early return this leans on — see the note on the /api/telemetry
-        # call site, which is the same function at the same PROMOTE_MAX_DAYS
-        # depth. Left at full depth here deliberately: this IS one of the two
+        # Full depth (PROMOTE_MAX_DAYS) when it runs: this is one of the two
         # places the full reconciliation belongs, since a dashboard load
         # should be able to trust what it is about to read.
         _settle_shadows(session)
-        _repair_after_new_trips(
-            session,
-            _promote_shadow_trips(session, apply=True,
-                                  max_add=PROMOTE_AUTO_MAX_ADD))
-        _record_promote_result(session, "summary", None)
+        # Only when due (see _promotion_sweep_due): a trip _settle_shadows
+        # just closed moved the trips stamp, so it is promoted on this very
+        # load, which is what this block exists to guarantee.
+        if _promotion_sweep_due(session):
+            _repair_after_new_trips(
+                session,
+                _promote_shadow_trips(session, apply=True,
+                                      max_add=PROMOTE_AUTO_MAX_ADD))
+            _record_promote_result(session, "summary", None)
+            _mark_swept(session)
     except Exception as exc:  # noqa: BLE001
         # Rolled back rather than only swallowed: on Postgres the failed
         # statement aborts the transaction, and every query the rest of this

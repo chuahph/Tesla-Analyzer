@@ -931,8 +931,11 @@ def test_a_trip_settled_by_the_diagnostic_still_reaches_the_dashboard():
         end = at + timedelta(minutes=22)
         odo = 90000.0
         # A trip already CLOSED and staged — settled by an earlier request,
-        # exactly as compare would have left it.
-        state.put(sess, state.TELEMETRY_TRIPS_KEY, _json.dumps([{
+        # exactly as compare would have left it. Written the way every real
+        # writer writes it (see test_only_put_trips_writes_the_trips_store),
+        # which is what moves the stamp the dashboard's sweep keys on.
+        from app.api import routes
+        routes._put_trips(sess, [{
             "vin": vin,
             "start_ts": at.timestamp(), "end_ts": end.timestamp(),
             "start_time": at.isoformat(timespec="seconds"),
@@ -940,7 +943,7 @@ def test_a_trip_settled_by_the_diagnostic_still_reaches_the_dashboard():
             "distance_km": 9.078, "duration_min": 22.2, "energy_kwh": 1.3,
             "wh_per_km": 143.2, "start_odo_km": odo, "end_odo_km": odo + 9.078,
             "soc_start": 56.0, "soc_end": 54.0, "out_temp": 27.5,
-        }]))
+        }])
         sess.commit()
 
         with TestClient(app) as client:
@@ -11091,5 +11094,87 @@ def test_a_parked_batch_reads_the_history_stores_only_when_it_needs_them():
         for k, v in prev.items():
             state.put(sess, k, v or "")
         sess.commit()
+        sess.close()
+        settings.app_passcode = old_pc
+
+
+def test_state_put_does_not_download_the_value_it_overwrites():
+    """put() used to load the row before assigning to it, which fetched the
+    OLD value in full — tens of KB for the JSON stores — on every write."""
+    from sqlalchemy import create_engine, event
+    from sqlalchemy.orm import sessionmaker
+    from sqlalchemy.pool import StaticPool
+
+    from app import state
+    from app.database import Base
+
+    engine = create_engine("sqlite://", poolclass=StaticPool,
+                           connect_args={"check_same_thread": False})
+    Base.metadata.create_all(engine)
+    Session = sessionmaker(bind=engine, expire_on_commit=False)
+    with Session() as s:
+        state.put(s, "big", "x" * 50_000)
+    selects = []
+    event.listen(engine, "before_cursor_execute",
+                 lambda c, cur, st, p, ctx, many: selects.append(st)
+                 if st.lstrip().upper().startswith("SELECT") else None)
+    with Session() as s:
+        state.put(s, "big", "y" * 50_000)   # existing key
+        state.put(s, "new", "z")            # new key
+    assert selects == [], selects
+    with Session() as s:
+        assert state.get(s, "big") == "y" * 50_000
+        assert state.get(s, "new") == "z"
+
+
+def test_the_promotion_sweep_runs_only_when_due():
+    """/api/sync and every dashboard load ran the full promotion sweep, which
+    reads the whole trips store (~60 KB), and almost always found nothing.
+    It now runs when the store changed, when a previous attempt failed or was
+    refused, or when PROMOTE_SWEEP_EVERY_SEC has passed — the last so a Drive
+    row that drifted from its shadow trip is still repaired."""
+    import json as _json
+
+    from app import state
+    from app.api import routes
+    from app.database import SessionLocal
+
+    settings = get_settings()
+    old_pc = settings.app_passcode
+    settings.app_passcode = ""
+    calls = []
+    real = routes._promote_shadow_trips
+    sess = SessionLocal()
+    try:
+        with TestClient(app) as client:
+            def counting(session, **kw):
+                calls.append(kw)
+                return real(session, **kw)
+            routes._promote_shadow_trips = counting
+            state.put(sess, state.PROMOTE_FAIL_KEY, "")
+            sess.commit()
+
+            client.get("/api/summary?days=30")          # due: never swept
+            n = len(calls)
+            client.get("/api/summary?days=30")          # nothing changed
+            assert len(calls) == n
+
+            routes._put_trips(sess, _json.loads(
+                state.get(sess, state.TELEMETRY_TRIPS_KEY) or "[]"))
+            client.get("/api/summary?days=30")          # store changed
+            assert len(calls) == n + 1
+
+            state.put(sess, state.PROMOTE_FAIL_KEY, '{"error": "x"}')
+            client.get("/api/summary?days=30")          # a failure to retry
+            assert len(calls) == n + 2
+
+            swept = _json.loads(state.get(sess, state.PROMOTE_SWEPT_KEY))
+            swept["at"] -= routes.PROMOTE_SWEEP_EVERY_SEC
+            state.put(sess, state.PROMOTE_SWEPT_KEY, _json.dumps(swept))
+            client.get("/api/summary?days=30")          # six hours on
+            assert len(calls) == n + 3
+    finally:
+        routes._promote_shadow_trips = real
+        state.put(sess, state.PROMOTE_FAIL_KEY, "")
         sess.close()
         settings.app_passcode = old_pc
