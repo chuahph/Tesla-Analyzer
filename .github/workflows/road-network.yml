@@ -20,7 +20,9 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    # The public Overpass servers can take a minute or more per tile when
+    # busy, and there are 36 tiles plus retries.
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5

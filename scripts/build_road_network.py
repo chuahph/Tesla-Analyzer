@@ -40,9 +40,15 @@ def main() -> int:
             break
         time.sleep(ROUND_PAUSE_SEC)
     tiles = roads._tiles or {}
-    if len(tiles) < len(wanted):
-        print(f"incomplete: {len(tiles)}/{len(wanted)} tiles", file=sys.stderr)
+    if not tiles:
+        print("no tile answered; nothing to write", file=sys.stderr)
         return 1
+    if len(tiles) < len(wanted):
+        # Written anyway: the app loads what the bundle has and downloads
+        # only the tiles it lacks, so a partial bundle still spares every
+        # restart most of the download. Run the workflow again to fill it.
+        print(f"incomplete: {len(tiles)}/{len(wanted)} tiles — writing what there is",
+              flush=True)
     out = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                        "app", "road_network.json.gz")
     body = {"classes": list(roads.ROAD_CLASSES), "bbox": list(roads.DEFAULT_BBOX),
