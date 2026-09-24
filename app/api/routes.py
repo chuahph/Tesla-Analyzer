@@ -1277,6 +1277,19 @@ def _register_history_invalidation() -> None:
 _register_history_invalidation()
 
 
+def _home_country(session: Session, vehicle_id: int) -> str:
+    """The country most of this car's trips started in — the prefix a trip
+    whose own country is not known yet borrows. "" when none is known."""
+    from collections import Counter
+
+    counts = Counter(
+        (getattr(d, "country", "") or "").upper()
+        for d in _full_history(session, vehicle_id)[0])
+    counts.pop("", None)
+    counts.pop("??", None)
+    return counts.most_common(1)[0][0] if counts else ""
+
+
 def _efficiency_peers(drives: list) -> list:
     """The trips efficiency is judged against: the streamed ones when there
     are any. Polled trips' boundaries are the ones the telemetry work spent
@@ -1402,6 +1415,73 @@ def _place_and_area(coords: str, session: Session | None = None) -> tuple[str, s
     if result != (coords, coords):
         _PLACE_CACHE[coords] = result
     return result
+
+
+# Country answers, keyed by coordinates rounded to 0.01 degree (~1 km): a
+# car's trips start from the same handful of places, so after the first week
+# almost every lookup is answered here. Process memory only, which is fine —
+# the answer is stored on the drive, so a restart never re-asks for old trips.
+_COUNTRY_CACHE: dict[tuple[float, float], str] = {}
+
+
+def _country_at(coords: str) -> str | None:
+    """Two-letter country code at a "lat, lon", upper case; "??" when the
+    lookup answered but named no country; None when it could not answer
+    (no coordinates, or the geocoder failed) — so the caller retries later.
+
+    A country-level (zoom 3) Nominatim reverse, which is light for the
+    service and all this needs, behind the same one-request-per-second limit
+    every other Nominatim call here respects.
+    """
+    try:
+        lat, lon = (float(p.strip()) for p in (coords or "").split(",", 1))
+    except ValueError:
+        return None
+    key = (round(lat, 2), round(lon, 2))
+    if key in _COUNTRY_CACHE:
+        return _COUNTRY_CACHE[key]
+    global _last_nominatim_at
+    wait = _NOMINATIM_MIN_INTERVAL_SEC - (time.monotonic() - _last_nominatim_at)
+    if wait > 0:
+        time.sleep(wait)
+    _last_nominatim_at = time.monotonic()
+    try:
+        resp = httpx.get(
+            "https://nominatim.openstreetmap.org/reverse",
+            params={"format": "jsonv2", "lat": lat, "lon": lon, "zoom": 3,
+                    "addressdetails": 1},
+            headers={"User-Agent": "tesla-analyzer/0.1"}, timeout=4.0)
+        resp.raise_for_status()
+        code = ((resp.json().get("address") or {}).get("country_code") or "").upper()
+    except Exception:  # noqa: BLE001 — a missing prefix, never a failed trip
+        return None
+    code = code[:2] if len(code) >= 2 else "??"
+    _COUNTRY_CACHE[key] = code
+    return code
+
+
+# How many drives one /api/sync tick may look a country up for. Enough to fill
+# a history of a few hundred trips within a day of ticks, few enough that a
+# tick never spends more than a few seconds on it at one request a second.
+COUNTRY_BACKFILL_PER_TICK = 5
+
+
+def _backfill_countries(session: Session, limit: int = COUNTRY_BACKFILL_PER_TICK) -> int:
+    """Look up the country for a few drives that have coordinates and none
+    yet. Newest first, so the trips on screen get their prefix soonest."""
+    rows = session.scalars(
+        select(Drive).where(Drive.country == "", Drive.start_coords != "")
+        .order_by(Drive.start_time.desc()).limit(limit)).all()
+    done = 0
+    for d in rows:
+        code = _country_at(d.start_coords)
+        if code is None:
+            break  # the geocoder is not answering; try again next tick
+        d.country = code
+        done += 1
+    if done:
+        session.commit()
+    return done
 
 
 def _place(coords: str, session: Session | None = None) -> str:
@@ -4516,6 +4596,10 @@ def _geocode_shadow_drive(session: Session, row, t: dict) -> None:
         coords = f"{float(lat):.4f}, {float(lon):.4f}"
         if not (getattr(row, f"{end}_coords", "") or ""):
             setattr(row, f"{end}_coords", coords)
+        if end == "start" and not (getattr(row, "country", "") or ""):
+            # The country the trip started in, for the matrix code's prefix.
+            # None (geocoder down) leaves it for the sync-tick backfill.
+            row.country = _country_at(coords) or ""
         if (getattr(row, f"{end}_location", "") or ""):
             continue
         # Same resolver polling uses — geofence first, then the network
@@ -4783,6 +4867,11 @@ def sync_now(wake: bool = Query(False), session: Session = Depends(get_session))
     # hours, in a background thread — the tick never waits on it.
     if not os.environ.get("PYTEST_CURRENT_TEST"):
         roads.ensure_loaded()
+        # A few drives' countries at a time, for the matrix code prefix.
+        try:
+            _backfill_countries(session)
+        except Exception:  # noqa: BLE001 — a missing prefix, not a failed tick
+            session.rollback()
     # Before anything else, since it needs no network and a failure to reach
     # Tesla must not also cost the trip the car already streamed.
     _settle_shadows(session)
@@ -9063,8 +9152,15 @@ def driving_matrix_trips(days: int = Query(30, ge=1, le=730),
     drives, _ = _window(session, vehicle.id, days, since=since)
     cuts = _classify_cuts(session, vehicle.id)
     rows = []
+    home = _home_country(session, vehicle.id)
     for d in drives:
         row = driving_analysis.drive_mode_explained(d, cuts)
+        # The matrix's own code for this trip, country first (MYSC), as the
+        # rows of the matrix carry it.
+        cc = driving_analysis.country_of(d, home)
+        row["country"] = cc or None
+        if row["mode"]:
+            row["mode"] = cc + row["mode"]
         row["route"] = f"{d.start_location or '?'} → {d.end_location or '?'}"
         row["wh_per_km"] = (round(d.energy_used_kwh * 1000.0 / d.distance_km, 1)
                             if d.distance_km else None)
@@ -9073,7 +9169,7 @@ def driving_matrix_trips(days: int = Query(30, ge=1, le=730),
         # where its kilometres happened. One entry means it was one thing —
         # either genuinely, or because it predates the speed profile.
         split = driving_analysis.mode_split(d, cuts)
-        row["split"] = {k: {"km": round(v["km"], 2),
+        row["split"] = {cc + k: {"km": round(v["km"], 2),
                             "min": round(v["min"], 1),
                             "wh_per_km": (round(v["kwh"] / v["km"] * 1000.0, 1)
                                           if v["km"] else None)}
@@ -9184,7 +9280,8 @@ def driving_matrix(days: int = Query(30, ge=1, le=730),
                 if settings.rated_wh_per_km else None)
     cuts = _classify_cuts(session, vehicle.id)
     split = driving_analysis.split_matrices(
-        list(drives), capacity_kwh, baseline_range_km=baseline, cuts=cuts)
+        list(drives), capacity_kwh, baseline_range_km=baseline, cuts=cuts,
+        home_country=_home_country(session, vehicle.id))
     # The overall figures stay at the top level, where they were, and the two
     # splits sit beside them. A reader who wants the whole picture should not
     # have to know the word "overall" to find it.
@@ -11857,7 +11954,8 @@ def summary(
         vampire_frozen=_hist("frozen_rates", _frozen_rates, session),
         mode_cuts=_classify_cuts(session, vehicle.id),
         efficiency_peers=_efficiency_peers(
-            _hist("full_history", _full_history, session, vehicle.id)[0]))
+            _hist("full_history", _full_history, session, vehicle.id)[0]),
+        home_country=_home_country(session, vehicle.id))
     _mark("driving")
     # A since-charge window's own `charges` list is always empty by
     # definition (it starts right where last_charge ends, so no charge can

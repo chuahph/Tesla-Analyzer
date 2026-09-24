@@ -151,6 +151,12 @@ class Drive(Base):
     # city, which speed alone cannot tell. Null on trips from before road
     # lookup existed, or driven before the road network had loaded.
     road_profile: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # ISO 3166 two-letter code of the country the trip STARTED in ("MY",
+    # "SG", ...), from a country-level reverse geocode of start_coords. Prefixes
+    # the driving-matrix code (MYCC, SGSH) so conditions in different countries
+    # are not averaged together. "" until looked up; "??" where the lookup
+    # answered but named no country (the sea).
+    country: Mapped[str] = mapped_column(String(2), default="")
 
     # User-assigned category ("work" / "personal", or any free text) for
     # expense-claim/cost-splitting purposes. "" = untagged.

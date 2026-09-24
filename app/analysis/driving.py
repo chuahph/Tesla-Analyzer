@@ -1818,6 +1818,16 @@ MODE_NAMES = {
 _COND_BASE = {code: name.lower() for code, name in MODE_NAMES.items()}
 
 
+def country_of(d: Any, home: str = "") -> str:
+    """The two-letter country prefix for a trip's matrix code: its own
+    (Drive.country, where it started) when known, else ``home`` — the car's
+    most common country — else "" and the code goes unprefixed."""
+    code = (getattr(d, "country", "") or "").upper()
+    if len(code) != 2 or code == "??":
+        code = (home or "").upper()
+    return code if len(code) == 2 else ""
+
+
 def _trip_conditions(mode: str | None, d: Drive) -> str:
     """Route/traffic character, in the SAME words the Driving matrix uses.
 
@@ -2031,6 +2041,7 @@ def analyze(drives: list[Drive], rated_wh_per_km: float = 150.0,
             vampire_frozen: dict[str, Any] | None = None,
             mode_cuts: dict[str, float] | None = None,
             efficiency_peers: list[Any] | None = None,
+            home_country: str = "",
             ) -> dict[str, Any]:
     """``energy_price`` is either a flat RM/kWh float, or a
     ``datetime -> RM/kWh`` callable (time-of-use pricing — see app.tariff) for
@@ -2482,7 +2493,11 @@ def analyze(drives: list[Drive], rated_wh_per_km: float = 150.0,
                 # these words rather than its own separate guess (see
                 # _trip_conditions). None when the trip lacks a duration,
                 # distance or peak speed to sort by (see drive_mode).
-                "matrix_mode": (_dme := drive_mode_explained(d, mode_cuts))["mode"],
+                # Prefixed with the country the trip started in (MYSC), the
+                # same code the matrix row carries; the bare mode beside it.
+                "matrix_country": (_cc := country_of(d, home_country)) or None,
+                "matrix_mode": (_cc + _m if (_m := (
+                    _dme := drive_mode_explained(d, mode_cuts))["mode"]) else None),
                 "matrix_mode_why": _dme.get("why"),
                 "conditions": _trip_conditions(_dme["mode"], d),
                 # This trip's own Wh/km against its own mode's peers — a
@@ -3668,7 +3683,8 @@ def trip_efficiency(d: Any, mode: str | None, model: dict[str, Any] | None,
 
 def condition_matrix(drives: list[Any], capacity_kwh: float,
                      baseline_range_km: float | None = None,
-                     cuts: dict[str, float] | None = None) -> dict[str, Any]:
+                     cuts: dict[str, float] | None = None,
+                     home_country: str = "") -> dict[str, Any]:
     """Per-condition efficiency, as a range rather than a rate.
 
     Wh/km is weighted by DISTANCE, not averaged across trips. A mean of means
@@ -3704,8 +3720,12 @@ def condition_matrix(drives: list[Any], capacity_kwh: float,
             unclassified += 1
             unclassified_kwh += float(d.energy_used_kwh)
             continue
-        buckets.setdefault(m, []).append(d)
-        share = mode_split(d, cuts)
+        # Keyed by country AND mode (MYCC, SGSH): conditions in two countries
+        # are different roads and different climates, and averaging them
+        # together would describe neither.
+        cc = country_of(d, home_country)
+        buckets.setdefault(cc + m, []).append(d)
+        share = {cc + k: v for k, v in mode_split(d, cuts).items()}
         if len(share) > 1:
             split_trips += 1
         for code, got_part in share.items():
@@ -3715,7 +3735,15 @@ def condition_matrix(drives: list[Any], capacity_kwh: float,
             members.setdefault(code, []).append(d)
 
     rows = []
-    for code in ("FH", "CH", "SH", "CC", "SC", "HC"):
+    # Countries by distance driven, busiest first; within each, the six modes
+    # in their fixed order — highway three, then city three.
+    order = ("FH", "CH", "SH", "CC", "SC", "HC")
+    km_by_country: dict[str, float] = {}
+    for key, share_ in parts.items():
+        km_by_country[key[:-2]] = km_by_country.get(key[:-2], 0.0) + share_["km"]
+    codes = [cc + m for cc in sorted(km_by_country, key=lambda k: -km_by_country[k])
+             for m in order]
+    for code in codes:
         # Driven by the members list, not the whole-trip bucket: a mode can now
         # be reached by a journey whose whole-trip verdict was something else —
         # the motorway share of a mixed trip.
@@ -3736,7 +3764,8 @@ def condition_matrix(drives: list[Any], capacity_kwh: float,
         peaks = [float(d.max_speed_kmh) for d in got
                  if getattr(d, "max_speed_kmh", None)]
         rows.append({
-            "code": code, "name": MODE_NAMES[code], "trips": len(got),
+            "code": code, "mode": code[-2:], "country": code[:-2] or None,
+            "name": MODE_NAMES[code[-2:]], "trips": len(got),
             "km": round(km, 1), "hours": round(mins / 60.0, 1),
             "avg_speed_kmh": round(km / (mins / 60.0), 1) if mins else None,
             # The two figures the classifier actually keyed on, and the ratio
@@ -3914,6 +3943,13 @@ MATRIX_DEFINITIONS = {
                   "state went unrecorded to Sentry as well."},
     ],
     "columns": [
+        {"name": "Country prefix (MY, SG, TH …)",
+         "means": "Each driving code starts with the two-letter code of the "
+                  "country the trip started in — MYCC, SGSH — found from the "
+                  "trip's start point on the map. Conditions in two countries "
+                  "are different roads and climates, so they get separate rows "
+                  "rather than one average. A trip not looked up yet borrows "
+                  "the country most of the car's trips start in."},
         {"name": "ID and SE as a range",
          "means": "Sentry is on or off; there is no third state. Where a park "
                   "went by with nothing recording which it was, that is a gap "
@@ -4009,7 +4045,8 @@ MATRIX_DEFINITIONS = {
 
 def split_matrices(drives: list[Any], capacity_kwh: float,
                    baseline_range_km: float | None = None,
-                   cuts: dict[str, float] | None = None) -> dict[str, Any]:
+                   cuts: dict[str, float] | None = None,
+                   home_country: str = "") -> dict[str, Any]:
     """The matrix whole, and split into weekdays and weekends.
 
     Kept as one call because the three share every threshold and baseline, and
@@ -4021,9 +4058,10 @@ def split_matrices(drives: list[Any], capacity_kwh: float,
         return d.start_time.weekday() < 5
 
     return {
-        "overall": condition_matrix(drives, capacity_kwh, baseline_range_km, cuts),
+        "overall": condition_matrix(drives, capacity_kwh, baseline_range_km, cuts,
+                                    home_country),
         "weekday": condition_matrix([d for d in drives if weekday(d)],
-                                    capacity_kwh, baseline_range_km, cuts),
+                                    capacity_kwh, baseline_range_km, cuts, home_country),
         "weekend": condition_matrix([d for d in drives if not weekday(d)],
-                                    capacity_kwh, baseline_range_km, cuts),
+                                    capacity_kwh, baseline_range_km, cuts, home_country),
     }

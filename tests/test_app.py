@@ -11217,3 +11217,59 @@ def test_the_full_history_cache_is_dropped_when_drives_or_charges_change():
         v.name = "renamed"
         s.commit()
         assert v.id in routes._FULL_HISTORY_CACHE
+
+
+def test_a_drives_country_is_looked_up_once_and_backfilled(monkeypatch):
+    """The country prefix comes from a country-level reverse geocode of the
+    trip's start point, cached by ~1 km cell and backfilled a few drives per
+    sync tick; a geocoder that does not answer leaves the drive for later."""
+    from datetime import datetime as _dt
+
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import sessionmaker
+
+    from app.api import routes
+    from app.database import Base
+    from app.models import Drive, Vehicle
+
+    calls = []
+
+    class R:
+        def __init__(self, cc): self.cc = cc
+        def raise_for_status(self): pass
+        def json(self): return {"address": {"country_code": self.cc}}
+
+    def fake_get(url, params=None, **kw):
+        calls.append((params["lat"], params["lon"], params["zoom"]))
+        return R("sg" if params["lat"] < 1.4 else "my")
+
+    monkeypatch.setattr(routes.httpx, "get", fake_get)
+    monkeypatch.setattr(routes, "_NOMINATIM_MIN_INTERVAL_SEC", 0.0)
+    routes._COUNTRY_CACHE.clear()
+
+    assert routes._country_at("5.3401, 100.3102") == "MY"
+    assert routes._country_at("5.3404, 100.3099") == "MY"   # same ~1 km cell
+    assert len(calls) == 1 and calls[0][2] == 3             # country level
+    assert routes._country_at("1.3000, 103.8000") == "SG"
+    assert routes._country_at("") is None
+
+    engine = create_engine("sqlite:///:memory:", connect_args={"check_same_thread": False})
+    Base.metadata.create_all(engine)
+    S = sessionmaker(bind=engine, expire_on_commit=False)
+    with S() as s:
+        v = Vehicle(vin="COUNTRY000000001", name="t", model="m")
+        s.add(v)
+        s.commit()
+        for i, coords in enumerate(("5.34, 100.31", "1.30, 103.80", "")):
+            s.add(Drive(vehicle_id=v.id, start_time=_dt(2026, 9, 1 + i, 8),
+                        end_time=_dt(2026, 9, 1 + i, 9), start_coords=coords))
+        s.commit()
+        assert routes._backfill_countries(s) == 2
+        got = sorted(d.country for d in s.query(Drive).all())
+        assert got == ["", "MY", "SG"]    # the one without coordinates waits
+        assert routes._backfill_countries(s) == 0
+
+    # A geocoder that fails answers None, and nothing is written for it.
+    routes._COUNTRY_CACHE.clear()
+    monkeypatch.setattr(routes.httpx, "get", lambda *a, **k: (_ for _ in ()).throw(OSError()))
+    assert routes._country_at("5.34, 100.31") is None

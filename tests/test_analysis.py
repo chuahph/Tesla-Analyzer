@@ -4376,3 +4376,34 @@ def test_the_map_decides_highway_and_a_slow_expressway_is_sh():
     # The matrix lists all six, highway three first.
     codes = [m["code"] for m in MATRIX_DEFINITIONS["modes"]][:6]
     assert codes == ["FH", "CH", "SH", "CC", "SC", "HC"]
+
+
+def test_matrix_codes_carry_the_country_the_trip_started_in():
+    """MYCC, SGCC: rows are split by country as well as mode, a trip without
+    a country borrows the home one, and with no country anywhere the codes
+    stay bare — exactly as before countries existed."""
+    from app.analysis.driving import condition_matrix, country_of
+
+    class D:
+        def __init__(self, country):
+            self.distance_km = 30.0; self.duration_min = 26.0
+            self.max_speed_kmh = 84.0; self.idle_min = 1.0
+            self.idle_tracked = True; self.energy_estimated = False
+            self.outside_temp_c = 31.0
+            self.energy_used_kwh = 30.0 * 0.124; self.wh_per_km = 124.0
+            self.country = country
+
+    trips = [D("MY"), D("MY"), D(""), D("SG"), D("??")]
+    assert country_of(trips[2], "MY") == "MY"      # unknown -> home
+    assert country_of(trips[4], "MY") == "MY"      # sea / no answer -> home
+    assert country_of(trips[2], "") == ""          # nothing known -> bare
+
+    rows = condition_matrix(trips, capacity_kwh=68.6, home_country="MY")["modes"]
+    by = {r["code"]: r for r in rows}
+    assert set(by) == {"MYCC", "SGCC"}
+    assert by["MYCC"]["trips"] == 4 and by["SGCC"]["trips"] == 1
+    assert by["MYCC"]["mode"] == "CC" and by["MYCC"]["country"] == "MY"
+    assert rows[0]["code"] == "MYCC"               # busiest country first
+
+    bare = condition_matrix([D("")], capacity_kwh=68.6)["modes"]
+    assert [r["code"] for r in bare] == ["CC"]
