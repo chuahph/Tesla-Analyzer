@@ -184,19 +184,42 @@ async def _passcode_gate(request: Request, call_next):
 # database, naming the path and its heaviest single query — nothing for a
 # request that didn't. Cheap: no query of its own, just reading counts
 # SQLAlchemy already has. Remove once the heavy one is found.
+def _count_setting_load(target, _ctx) -> None:
+    from .database import _SETTINGS_READ
+
+    counter = _SETTINGS_READ.get()
+    if counter is not None:
+        counter[0] += len(target.value or "")
+
+
+def _register_setting_load_counter() -> None:
+    from sqlalchemy import event
+
+    from .models import Setting
+
+    event.listen(Setting, "load", _count_setting_load)
+    event.listen(Setting, "refresh", _count_setting_load)
+
+
+_register_setting_load_counter()
+
+
 @app.middleware("http")
 async def _query_log_middleware(request: Request, call_next):
     import time as _time
 
-    from .database import _QUERY_LOG
+    from .database import _QUERY_LOG, _SETTINGS_READ
 
     token = _QUERY_LOG.set([])
+    settings_read = [0]
+    s_token = _SETTINGS_READ.set(settings_read)
     started = _time.monotonic()
     try:
         response = await call_next(request)
     finally:
         log = _QUERY_LOG.get()
         _QUERY_LOG.reset(token)
+        _SETTINGS_READ.reset(s_token)
     if log:
         # Tuple shape is (rows, param_bytes, result_bytes, statement). A
         # previous version of this line unpacked the wrong index of the
@@ -219,7 +242,8 @@ async def _query_log_middleware(request: Request, call_next):
         print(
             f"[qlog] {request.method} {request.url.path} "
             f"queries={len(log)} rows={total_rows} bytes={total_bytes} "
-            f"result_bytes={total_result} {elapsed_ms}ms "
+            f"result_bytes={total_result} settings_read={settings_read[0]} "
+            f"{elapsed_ms}ms "
             f"worst_rows={worst_rows}rows:{worst_row_stmt!r} "
             f"worst_bytes={worst_bytes}b:{worst_byte_stmt!r} "
             f"worst_result={worst_result}b:{worst_result_stmt!r}"

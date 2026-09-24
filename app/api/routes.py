@@ -99,7 +99,14 @@ UNREACHABLE_CLOSE_MIN = 3.0
 # polling burns runs fast. That is useless for diagnosing anything reported
 # later the same day, which is the normal case. A quiet car compresses to
 # almost nothing, so this is generous only in the window where it has to be.
-SYNC_LOG_MAX_CHARS = 40000
+#
+# 40000 was sized for the one-minute cron. At thirty minutes the worst case —
+# every tick its own ~85-character run — is about 4 KB a day, so 40000 held
+# ten days, and the whole value is read and rewritten on every tick: ~80 KB of
+# database traffic a tick, ~115 MB a month for a log whose readers use three
+# days (sync_cost needs one whole day between two partial ones). 16000 keeps
+# four days at the worst case and more whenever ticks coalesce.
+SYNC_LOG_MAX_CHARS = 16000
 
 # A hole between two runs longer than this means no tick ran at all — the app
 # never got the request. That is a different fault from every outcome the log
@@ -2221,7 +2228,7 @@ def _purge_drives_before(session: Session, vehicle, cutover: datetime,
             plan["backup_replaced"] = len(existing["rows"])
         state.put(session, backup_key, _json_mod.dumps(backup))
     if drop_staged:
-        state.put(session, state.TELEMETRY_TRIPS_KEY, _json_mod.dumps(keep_staged))
+        _put_trips(session, keep_staged)
         plan["shadow_trips_dropped"] = len(drop_staged)
     session.commit()
     deleted = services.delete_drives(session, [d.id for d in doomed])
@@ -2428,7 +2435,7 @@ def _restore_drives_from(session: Session, key: str, apply: bool) -> dict:
         merged = now_staged + [t for t in staged_back
                                if t.get("start_ts") not in have]
         merged.sort(key=lambda t: float(t.get("start_ts") or 0.0))
-        state.put(session, state.TELEMETRY_TRIPS_KEY, _json_mod.dumps(merged))
+        _put_trips(session, merged)
         plan["shadow_trips_restored"] = len(merged) - len(now_staged)
     session.commit()
     plan["applied"] = True
@@ -3513,6 +3520,32 @@ def _rested_odo_between(session: Session, vin: str,
             BatteryReading.odo_km.is_not(None),
             BatteryReading.ts >= sync_mod._dt(a),
             BatteryReading.ts <= sync_mod._dt(b)))
+
+
+def _trip_ends(trips: list) -> dict:
+    """{vin: end_ts of its newest trip} — newest meaning last in the store,
+    which is the trip the ingest's late-arrival fold (amend_closed_trip)
+    considers. Recomputed from the stored list, never patched."""
+    ends: dict = {}
+    for t in trips:
+        if t.get("vin") and t.get("end_ts") is not None:
+            ends[t["vin"]] = t["end_ts"]
+    return ends
+
+
+def _put_trips(session: Session, trips: list) -> None:
+    """The one way to write TELEMETRY_TRIPS_KEY.
+
+    Writes TELEMETRY_TRIP_ENDS_KEY beside it, which the ingest reads INSTEAD
+    of the trips store on a parked batch — so a writer that skipped this
+    would leave that index describing a trip that is no longer the newest,
+    and a late arrival for the real newest trip would be quietly dropped.
+    tests/test_app.py checks that no other code writes the trips key.
+    """
+    import json as _json
+
+    state.put(session, state.TELEMETRY_TRIPS_KEY, _json.dumps(trips))
+    state.put(session, state.TELEMETRY_TRIP_ENDS_KEY, _json.dumps(_trip_ends(trips)))
 
 
 def _append_trip(trips: list, finished: dict,
@@ -4622,8 +4655,7 @@ def _settle_shadows(session: Session) -> int:
         trips = []
     for done in finished:
         _append_trip(trips, done, session=session, via="close-settled")
-    state.put(session, state.TELEMETRY_TRIPS_KEY,
-              _json.dumps(trips[-TELEMETRY_TRIPS_MAX:]))
+    _put_trips(session, trips[-TELEMETRY_TRIPS_MAX:])
     state.put(session, state.TELEMETRY_SHADOW_KEY, _json.dumps(shadows))
     session.commit()
     return len(finished)
@@ -12506,6 +12538,22 @@ def telemetry_ingest(
     if not isinstance(records, list):
         raise HTTPException(400, "Expected {'records': [...]}.")
 
+    # One query for every store this batch reads, and none for re-reading
+    # them — see state.enable_cache. Safe here because this is a short request
+    # that already reads each store once and writes it back at the end.
+    vins = {r.get("vin") for r in records if isinstance(r, dict) and r.get("vin")}
+    state.enable_cache(
+        session,
+        # Not the four history stores (trips, charges, modes, gaps): those
+        # are the big values, and most batches do not read them at all.
+        state.TELEMETRY_RAW_KEY, state.TELEMETRY_LATEST_KEY,
+        state.TELEMETRY_SHADOW_KEY, state.TELEMETRY_TRIP_ENDS_KEY,
+        state.TELEMETRY_CHARGE_SHADOW_KEY,
+        state.TELEMETRY_SEEN_KEY, state.STORE_UNREADABLE_KEY,
+        state.PROMOTE_REFUSED_KEY, state.PROMOTE_FAIL_KEY,
+        *(state.scoped(k, v) for v in vins
+          for k in (state.LAST_STATUS_KEY, state.SENTRY_AWARE_PENDING_KEY)))
+
     settings = get_settings()
     now = sync_mod.now_local()
     kept = []
@@ -12576,32 +12624,52 @@ def telemetry_ingest(
     # be read is therefore tracked, and an unreadable one is left exactly as
     # it is — corrupt and inspectable — rather than quietly replaced.
     unreadable: list[str] = []
-    stored_trips = state.get(session, state.TELEMETRY_TRIPS_KEY)
+    # The four history stores are loaded only when this batch touches them.
+    #
+    # They were loaded on every batch, and they are the biggest values this
+    # app reads: ~60 KB of trips and ~70 KB of mode changes at their caps,
+    # plus gaps and charges — re-read every 6-13 seconds while the car
+    # streams, to append to them perhaps a few times a day. qlog never showed
+    # it because it prices a text value at a flat 20 bytes. Modes, gaps and
+    # charges are append-only here, so their new entries are collected and
+    # the store is read once, at the end, and only if there is something to
+    # add. Trips are also read by the loop, so they load on first use — and a
+    # parked batch uses them only to fold a late arrival into the newest trip,
+    # which TELEMETRY_TRIP_ENDS_KEY says in a few bytes whether it could.
+    checked: set[str] = set()
+    trips_box: dict[str, Any] = {"list": None, "raw": None}
+
+    def load_trips() -> list:
+        if trips_box["list"] is None:
+            raw = state.get(session, state.TELEMETRY_TRIPS_KEY)
+            checked.add("trips")
+            try:
+                lst = _json.loads(raw or "[]") or []
+            except ValueError:
+                lst = []
+                unreadable.append("trips")
+            trips_box.update(list=lst, raw=raw)
+            if "trips" not in unreadable and not trip_ends_raw:
+                # First load since the index existed: build it once, so later
+                # parked batches can consult it instead of this read.
+                state.put(session, state.TELEMETRY_TRIP_ENDS_KEY,
+                          _json.dumps(_trip_ends(lst)))
+        return trips_box["list"]
+
+    trip_ends_raw = state.get(session, state.TELEMETRY_TRIP_ENDS_KEY)
     try:
-        trips = _json.loads(stored_trips or "[]") or []
+        trip_ends = _json.loads(trip_ends_raw or "{}") or {}
     except ValueError:
-        trips, _ = [], unreadable.append("trips")
-    stored_charges = state.get(session, state.TELEMETRY_CHARGES_KEY)
-    try:
-        charges = _json.loads(stored_charges or "[]") or []
-    except ValueError:
-        charges, _ = [], unreadable.append("charges")
+        trip_ends, trip_ends_raw = {}, ""
+    new_charges: list[dict] = []
+    new_modes: list[dict] = []
+    new_gaps: list[dict] = []
     stored_charge_shadows = state.get(session, state.TELEMETRY_CHARGE_SHADOW_KEY)
     try:
         charge_shadows = _json.loads(
             stored_charge_shadows or "{}") or {}
     except ValueError:
         charge_shadows = {}
-    stored_modes = state.get(session, state.TELEMETRY_MODES_KEY)
-    try:
-        modes = _json.loads(stored_modes or "[]") or []
-    except ValueError:
-        modes = []
-    stored_gaps = state.get(session, state.TELEMETRY_GAPS_KEY)
-    try:
-        gaps = _json.loads(stored_gaps or "[]") or []
-    except ValueError:
-        gaps = []
     try:
         seen_so_far = _json.loads(state.get(session, state.TELEMETRY_SEEN_KEY) or "{}") or {}
     except ValueError:
@@ -12645,7 +12713,7 @@ def telemetry_ingest(
         # it cannot be trusted.
         prev_record_ts = float(last_seen_by_vin.get(vin) or 0.0)
         if ts and prev_record_ts and ts - prev_record_ts > TELEMETRY_GAP_MIN_SEC:
-            gaps.append({
+            new_gaps.append({
                 "vin": vin,
                 "from": sync_mod._dt(prev_record_ts).isoformat(timespec="seconds"),
                 "to": sync_mod._dt(ts).isoformat(timespec="seconds"),
@@ -12679,7 +12747,7 @@ def telemetry_ingest(
                 # Without both, a gear shifted to Park at 17:39 and heard at
                 # 17:50 is indistinguishable from one shifted at 17:50, and a
                 # trip's end is eleven minutes wrong with nothing to show it.
-                modes.append({
+                new_modes.append({
                     "ts": (sync_mod._dt(ts).isoformat(timespec="seconds")
                            if ts else None),
                     "seen": now.isoformat(timespec="seconds"),
@@ -12741,7 +12809,7 @@ def telemetry_ingest(
                 charge_shadows.setdefault(vin, {}), snap)
             if finished_charge:
                 finished_charge["vin"] = vin
-                charges.append(finished_charge)
+                new_charges.append(finished_charge)
                 charged += 1
             was_open = bool(shadow.get("open"))
             finished = sync_mod.advance_shadow(shadow, snap)
@@ -12751,8 +12819,10 @@ def telemetry_ingest(
                 # short by whatever the car drove after its last record. This
                 # trip's opening odometer is the first reading taken since,
                 # so it measures that ground.
-                if _append_trip(trips, finished, session=session, via="close-live"):
+                if _append_trip(load_trips(), finished, session=session, via="close-live"):
                     recovered += 1
+                if finished.get("end_ts") is not None:
+                    trip_ends[vin] = finished["end_ts"]
                 closed += 1
             # And again the moment a trip OPENS, not only when it closes.
             # The opening odometer is the whole input to the correction, so
@@ -12769,7 +12839,7 @@ def telemetry_ingest(
             # takes nothing.
             opening = shadow.get("open")
             if opening and not was_open and opening.get("odo_km"):
-                previous = next((t for t in reversed(trips)
+                previous = next((t for t in reversed(load_trips())
                                  if t.get("vin") == vin), None)
                 if previous is not None and sync_mod.recover_sleep_gap(
                         previous, {"start_odo_km": opening["odo_km"]}, via="open"):
@@ -12787,8 +12857,16 @@ def telemetry_ingest(
                 # newest trip for adding nothing, then accepted by the one
                 # before, which swallowed the newer trip whole and counted its
                 # distance twice.
-                newest_trip = next((t for t in reversed(trips)
-                                    if t.get("vin") == vin), None)
+                # Loaded only when the index says the newest trip ended close
+                # enough before this reading for amend_closed_trip to take it
+                # — its own window test, applied to one number instead of to
+                # the whole store. No index entry: load and let it decide.
+                end = trip_ends.get(vin)
+                reach = (trips_box["list"] is not None or end is None
+                         or 0.0 <= float(snap.get("ts") or 0.0) - float(end)
+                         <= sync_mod.SHADOW_TAIL_SEC)
+                newest_trip = next((t for t in reversed(load_trips())
+                                    if t.get("vin") == vin), None) if reach else None
                 if newest_trip is not None and sync_mod.amend_closed_trip(
                         newest_trip, snap):
                     amended += 1
@@ -12840,18 +12918,38 @@ def telemetry_ingest(
         if value != (was or ""):
             state.put(session, key, value)
 
-    put_if_changed(state.TELEMETRY_GAPS_KEY,
-                   _json.dumps(gaps[-TELEMETRY_GAPS_MAX:]), stored_gaps)
-    put_if_changed(state.TELEMETRY_MODES_KEY,
-                   _json.dumps(modes[-TELEMETRY_MODES_MAX:]), stored_modes)
+    def append_store(key: str, new: list, cap: int, guarded: bool = False) -> None:
+        # Read-extend-write, and only when there is something to add. A
+        # guarded store that will not parse is left as it is — corrupt and
+        # inspectable — rather than replaced by this batch alone; the two
+        # unguarded ones fall back to empty, as they always did.
+        if not new:
+            return
+        raw = state.get(session, key)
+        try:
+            old = _json.loads(raw or "[]") or []
+        except ValueError:
+            if guarded:
+                unreadable.append(key_names[key])
+                return
+            old = []
+        state.put(session, key, _json.dumps((old + new)[-cap:]))
+
+    key_names = {state.TELEMETRY_CHARGES_KEY: "charges"}
+    append_store(state.TELEMETRY_GAPS_KEY, new_gaps, TELEMETRY_GAPS_MAX)
+    append_store(state.TELEMETRY_MODES_KEY, new_modes, TELEMETRY_MODES_MAX)
     state.put(session, state.TELEMETRY_LATEST_KEY, _json.dumps(latest))
     state.put(session, state.TELEMETRY_SHADOW_KEY, _json.dumps(shadows))
-    if "trips" not in unreadable:
-        put_if_changed(state.TELEMETRY_TRIPS_KEY,
-                       _json.dumps(trips[-TELEMETRY_TRIPS_MAX:]), stored_trips)
-    if "charges" not in unreadable:
-        put_if_changed(state.TELEMETRY_CHARGES_KEY,
-                       _json.dumps(charges[-TELEMETRY_TRIPS_MAX:]), stored_charges)
+    trips_written = False
+    if trips_box["list"] is not None and "trips" not in unreadable:
+        value = _json.dumps(trips_box["list"][-TELEMETRY_TRIPS_MAX:])
+        if value != (trips_box["raw"] or ""):
+            _put_trips(session, trips_box["list"][-TELEMETRY_TRIPS_MAX:])
+            trips_written = True
+    if new_charges:
+        checked.add("charges")
+    append_store(state.TELEMETRY_CHARGES_KEY, new_charges, TELEMETRY_TRIPS_MAX,
+                 guarded=True)
     if unreadable:
         # Said once, and not per batch: a parked car posts one every twenty
         # seconds, and an alert that repeats three thousand times a day is an
@@ -12866,7 +12964,11 @@ def telemetry_ingest(
                 "alone. Streaming continues; the shadow record of finished "
                 "journeys is not being updated.",
                 tag="store-unreadable")
-    elif state.get(session, state.STORE_UNREADABLE_KEY) == "1":
+    elif ({"trips", "charges"} <= checked
+          and state.get(session, state.STORE_UNREADABLE_KEY) == "1"):
+        # Cleared only by a batch that actually read both stores and found
+        # them sound. Most batches now read neither, and one that skipped the
+        # broken store has no business declaring it fixed.
         state.put(session, state.STORE_UNREADABLE_KEY, "")
     put_if_changed(state.TELEMETRY_CHARGE_SHADOW_KEY,
                    _json.dumps(charge_shadows), stored_charge_shadows)
@@ -12914,7 +13016,7 @@ def telemetry_ingest(
             # promotions race.
             session.rollback()
             charges_promoted = 0
-    # Attempted on every batch, not only when THIS one closed a trip.
+    # Not gated on whether THIS batch closed a trip.
     #
     # Gating it on ``closed`` was the same mistake the summary path already
     # fixed: it makes whichever call closed a journey the only call allowed to
@@ -12937,25 +13039,35 @@ def telemetry_ingest(
     # TIMEOUT — a car that parks and goes quiet — is closed by no batch at all,
     # because there are no more batches; that one still waits for a sync tick
     # or a dashboard load to settle it.
-    try:
-        # Only the rows actually written. len() counted a refusal as a
-        # promotion, so the one number that says the journeys did NOT
-        # land reported that one had.
-        promoted = sum(
-            1 for c in _promote_shadow_trips(
-                session, apply=True, max_add=PROMOTE_AUTO_MAX_ADD,
-                days=PROMOTE_INGEST_RECENT_DAYS)
-            if c.get("action") in ("add", "correct"))
-        _record_promote_result(session, "ingest", None)
-    except Exception as exc:  # noqa: BLE001 — never let this reject the batch
-        # The records are already stored. A promotion that fails costs a
-        # late dashboard row, which the next sync tick will write; losing
-        # the batch would cost the journey itself. Rolled back so the rest
-        # of this request still has a usable session — a race against the
-        # drives unique constraint lands here.
-        session.rollback()
-        _record_promote_result(session, "ingest", exc)
-        promoted = 0
+    #
+    # Attempted when there is something new to carry — this batch changed the
+    # trips store — or when the last attempt anywhere did not land: a failure
+    # (PROMOTE_FAIL_KEY) or a refusal (PROMOTE_REFUSED_KEY). That keeps the
+    # retry property the paragraph above is about, without reading the whole
+    # trips store on every batch that changed nothing. The full, unconditional
+    # sweep still runs from /api/sync and summary().
+    retry = (bool(state.get(session, state.PROMOTE_FAIL_KEY))
+             or state.get(session, state.PROMOTE_REFUSED_KEY) == "1")
+    if trips_written or retry:
+        try:
+            # Only the rows actually written. len() counted a refusal as a
+            # promotion, so the one number that says the journeys did NOT
+            # land reported that one had.
+            promoted = sum(
+                1 for c in _promote_shadow_trips(
+                    session, apply=True, max_add=PROMOTE_AUTO_MAX_ADD,
+                    days=PROMOTE_INGEST_RECENT_DAYS)
+                if c.get("action") in ("add", "correct"))
+            _record_promote_result(session, "ingest", None)
+        except Exception as exc:  # noqa: BLE001 — never let this reject the batch
+            # The records are already stored. A promotion that fails costs a
+            # late dashboard row, which the next sync tick will write; losing
+            # the batch would cost the journey itself. Rolled back so the rest
+            # of this request still has a usable session — a race against the
+            # drives unique constraint lands here.
+            session.rollback()
+            _record_promote_result(session, "ingest", exc)
+            promoted = 0
 
     try:
         seen = _json.loads(state.get(session, state.TELEMETRY_SEEN_KEY) or "{}") or {}
@@ -13478,7 +13590,7 @@ def telemetry_drop_trips(
                 "trips": listing,
                 "how": "Add &apply=true to this URL to delete them."}
 
-    state.put(session, state.TELEMETRY_TRIPS_KEY, _json.dumps(kept))
+    _put_trips(session, kept)
     session.commit()
     return {"dropped": len(doomed), "kept": len(kept), "trips": listing}
 
@@ -13535,7 +13647,7 @@ def telemetry_recover_gaps(
                 "note": "Nothing written. Add &apply=true to keep these.",
                 "how": "Add &apply=true to this URL to apply them."}
 
-    state.put(session, state.TELEMETRY_TRIPS_KEY, _json.dumps(trips))
+    _put_trips(session, trips)
     session.commit()
     return {"recovered": len(changed), "trips": changed}
 

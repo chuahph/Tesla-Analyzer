@@ -101,6 +101,10 @@ TELEMETRY_MODES_KEY = "telemetry_modes"  # JSON list of {ts, vin, field, from,
 TELEMETRY_TRIPS_KEY = "telemetry_trips"  # JSON list of finished shadow trips.
 # Kept out of the Drive table on purpose — these are unverified, and a wrong
 # row in the real history is a repair job while a wrong row here is a delete.
+TELEMETRY_TRIP_ENDS_KEY = "telemetry_trip_ends"  # JSON {vin: end_ts} of each
+# car's newest trip in TELEMETRY_TRIPS_KEY — a few bytes the telemetry ingest
+# reads instead of the whole trips store on a parked batch. Only
+# routes._put_trips writes the trips key, and it writes this beside it.
 TELEMETRY_CHARGE_SHADOW_KEY = "telemetry_charge_shadow"  # JSON {vin: state}
 # of the charge in progress, the counterpart to TELEMETRY_SHADOW_KEY.
 TELEMETRY_CHARGES_KEY = "telemetry_charges"  # JSON list of finished shadow
@@ -226,15 +230,72 @@ DEFAULT_PRICE_SOURCE_KEY = "default_price_source"  # "public" | "home" | "office
 PRICE_UPDATED_AT_KEY = "price_updated_at"
 
 
-def get(session: Session, key: str, default: str = "") -> str:
+# Request-scoped read cache, opt-in via enable_cache().
+#
+# Without it every get() is a SELECT, even for a key this same request read a
+# moment ago: the session's identity map holds rows WEAKLY, and get() hands
+# back row.value and drops the row, so it is collected before the next read
+# can find it. A key that does not exist is never in the identity map at all.
+# Measured on one telemetry batch: 25 of its 33 statements were these reads,
+# including one per RECORD for a sentry key that did not exist.
+#
+# Opt-in rather than always on, because a long request must still see what a
+# concurrent one wrote. /api/sync can sit in a wake loop for half a minute
+# while telemetry batches rewrite the shadow stores underneath it; cached,
+# it would write its stale copy back over theirs.
+_CACHE = "state_cache"
+
+
+def enable_cache(session: Session, *preload: str) -> None:
+    """Cache state reads for the rest of this session, loading ``preload``
+    in one query instead of one query each."""
+    from sqlalchemy import select
+
+    c = session.info.setdefault(_CACHE, {"rows": {}, "absent": set()})
+    if preload:
+        found = session.scalars(select(Setting).where(Setting.key.in_(preload))).all()
+        for row in found:
+            c["rows"][row.key] = row
+        c["absent"].update(set(preload) - {row.key for row in found})
+
+
+def _row(session: Session, key: str) -> Setting | None:
+    c = session.info.get(_CACHE)
+    if c is None:
+        return session.get(Setting, key)
+    if key in c["absent"]:
+        return None
+    row = c["rows"].get(key)
+    if row is not None:
+        from sqlalchemy.orm.exc import ObjectDeletedError
+
+        try:
+            row.value  # noqa: B018 — refreshes after a rollback expired it
+            return row
+        except ObjectDeletedError:
+            c["rows"].pop(key, None)
     row = session.get(Setting, key)
+    if row is None:
+        c["absent"].add(key)
+    else:
+        c["rows"][key] = row
+    return row
+
+
+def get(session: Session, key: str, default: str = "") -> str:
+    row = _row(session, key)
     return row.value if row else default
 
 
 def put(session: Session, key: str, value: str) -> None:
-    row = session.get(Setting, key)
+    row = _row(session, key)
     if row is None:
-        session.add(Setting(key=key, value=value))
+        row = Setting(key=key, value=value)
+        session.add(row)
+        c = session.info.get(_CACHE)
+        if c is not None:
+            c["absent"].discard(key)
+            c["rows"][key] = row
     else:
         row.value = value
     session.commit()
@@ -242,10 +303,14 @@ def put(session: Session, key: str, value: str) -> None:
 
 def delete(session: Session, *keys: str) -> None:
     """Remove one or more runtime state keys (e.g. when unlinking an account)."""
+    c = session.info.get(_CACHE)
     for key in keys:
-        row = session.get(Setting, key)
+        row = _row(session, key)
         if row is not None:
             session.delete(row)
+        if c is not None:
+            c["rows"].pop(key, None)
+            c["absent"].add(key)
     session.commit()
 
 
@@ -261,6 +326,8 @@ def delete_scoped(session: Session, *base_keys: str) -> None:
     ).all()
     for row in rows:
         session.delete(row)
+    if _CACHE in session.info:
+        session.info[_CACHE] = {"rows": {}, "absent": set()}
     session.commit()
 
 

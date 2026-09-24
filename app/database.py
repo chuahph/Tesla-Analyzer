@@ -82,6 +82,13 @@ SessionLocal = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False
 # nothing else here can currently do.
 # Safe to leave running. Remove once the heavy one is found.
 _QUERY_LOG: ContextVar[list[tuple[int, int, int, str]] | None] = ContextVar("_QUERY_LOG", default=None)
+# Actual bytes of Setting.value loaded from the database during a request.
+# result_bytes above prices every text column at _DEFAULT_COL_BYTES, which is
+# exactly wrong for the settings table: its values are the JSON stores, up to
+# ~70 KB each, and they were the largest thing the telemetry ingest read. A
+# one-element list so the count survives Starlette copying the context into
+# the threadpool — the list is shared, only the ContextVar binding is copied.
+_SETTINGS_READ: ContextVar[list[int] | None] = ContextVar("_SETTINGS_READ", default=None)
 
 # Postgres type OID -> wire size in bytes, for the fixed-width types worth
 # telling apart. Anything not listed (text, varchar, json/jsonb, numeric,

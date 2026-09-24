@@ -10389,9 +10389,14 @@ def test_the_stream_retries_a_promotion_that_failed_on_an_earlier_batch():
     code that would have fixed it, and the dashboard looked like a car nobody
     had driven until a sync tick happened by.
 
-    Same shape as the bug already fixed in the summary path, where reading the
-    comparison consumed the settle the dashboard needed.
+    The fix was to promote on every batch, which read the whole trips store
+    every 6-13 seconds. What the fix needed was narrower: a later batch must
+    retry after a failure. PROMOTE_FAIL_KEY and PROMOTE_REFUSED_KEY already
+    say exactly that, so a batch that changed nothing promotes only when one
+    of them is set.
     """
+    import json as _json
+
     from app import state
     from app.api import routes
     from app.database import SessionLocal
@@ -10401,6 +10406,7 @@ def test_the_stream_retries_a_promotion_that_failed_on_an_earlier_batch():
     settings.app_passcode = ""
     sess = SessionLocal()
     prev = state.get(sess, state.TELEMETRY_TRIPS_KEY)
+    prev_fail = state.get(sess, state.PROMOTE_FAIL_KEY)
     calls = []
     real = routes._promote_shadow_trips
     try:
@@ -10410,18 +10416,30 @@ def test_the_stream_retries_a_promotion_that_failed_on_an_earlier_batch():
                 return real(session, **kw)
             routes._promote_shadow_trips = counting
 
-            # A batch that closes nothing at all — the shape that used to skip
-            # promotion entirely.
-            r = client.post("/api/telemetry", json={"records": []})
-            assert r.status_code == 200
-            assert calls, "a batch that closed no trip must still try to promote"
+            # Nothing new and nothing failed: nothing to do.
+            state.put(sess, state.PROMOTE_FAIL_KEY, "")
+            sess.commit()
+            assert client.post("/api/telemetry", json={"records": []}).status_code == 200
+            assert not calls
+
+            # An earlier attempt failed: the next batch — one that closes
+            # nothing at all — retries it.
+            state.put(sess, state.PROMOTE_FAIL_KEY, _json.dumps(
+                {"at": "x", "where": "ingest", "error": "IntegrityError"}))
+            sess.commit()
+            assert client.post("/api/telemetry", json={"records": []}).status_code == 200
+            assert calls, "a batch after a failed promotion must retry it"
             # Capped the same way the sync path is: an unattended write to real
             # records earns a limit on how wrong one run can go.
             assert calls[-1]["max_add"] == routes.PROMOTE_AUTO_MAX_ADD
             assert calls[-1]["apply"] is True
+            # And a retry that gets through clears the flag, so the batches
+            # after it go quiet again.
+            assert state.get(SessionLocal(), state.PROMOTE_FAIL_KEY) == ""
     finally:
         routes._promote_shadow_trips = real
         state.put(sess, state.TELEMETRY_TRIPS_KEY, prev or "")
+        state.put(sess, state.PROMOTE_FAIL_KEY, prev_fail or "")
         sess.commit()
         sess.close()
         settings.app_passcode = old_pc
@@ -10924,4 +10942,154 @@ def test_health_says_what_wrote_the_rows_in_the_history():
             finally:
                 sess.close()
     finally:
+        settings.app_passcode = old_pc
+
+
+def test_state_cache_reads_each_key_once_and_only_where_enabled():
+    """state.get() used to be a SELECT every call, even for a key the same
+    request had just read — the identity map holds rows weakly — and a key
+    that did not exist was re-queried per telemetry RECORD. enable_cache()
+    makes a request read each key once. It is opt-in because a long request
+    must still see what another one wrote in the meantime.
+    """
+    from sqlalchemy import create_engine, event
+    from sqlalchemy.orm import sessionmaker
+    from sqlalchemy.pool import StaticPool
+
+    from app import state
+    from app.database import Base
+
+    engine = create_engine("sqlite://", poolclass=StaticPool,
+                           connect_args={"check_same_thread": False})
+    Base.metadata.create_all(engine)
+    Session = sessionmaker(bind=engine, expire_on_commit=False)
+    selects = []
+    event.listen(engine, "before_cursor_execute",
+                 lambda c, cur, st, p, ctx, many: selects.append(st)
+                 if st.lstrip().upper().startswith("SELECT") else None)
+
+    with Session() as a:
+        state.put(a, "k1", "v1")
+
+    with Session() as s:
+        state.enable_cache(s, "k1", "missing")
+        selects.clear()
+        for _ in range(5):
+            assert state.get(s, "k1") == "v1"
+            assert state.get(s, "missing", "d") == "d"
+        assert selects == [], selects
+        # Writes land in the cache: a new key and an existing one.
+        state.put(s, "missing", "now")
+        state.put(s, "k1", "v2")
+        assert state.get(s, "missing") == "now"
+        assert state.get(s, "k1") == "v2"
+        state.delete(s, "k1")
+        assert state.get(s, "k1", "gone") == "gone"
+
+    # Not enabled: another session's write is seen on the next read.
+    with Session() as reader, Session() as writer:
+        assert state.get(reader, "missing") == "now"
+        state.put(writer, "missing", "changed")
+        assert state.get(reader, "missing") == "changed"
+
+
+def test_only_put_trips_writes_the_trips_store():
+    """The ingest trusts TELEMETRY_TRIP_ENDS_KEY instead of reading the trips
+    store on a parked batch, so that index must be written with every change
+    to the store. _put_trips does both; this fails if anything else writes the
+    trips key directly and could leave the index describing the wrong trip."""
+    import pathlib
+    import re
+
+    src = (pathlib.Path(__file__).resolve().parents[1] / "app").rglob("*.py")
+    direct = [f"{p.name}:{i}" for p in src
+              for i, line in enumerate(p.read_text().splitlines(), 1)
+              if re.search(r"state\.put\([^)]*TELEMETRY_TRIPS_KEY", line)]
+    assert len(direct) == 1 and direct[0].startswith("routes.py"), direct
+
+
+def test_a_parked_batch_reads_the_history_stores_only_when_it_needs_them():
+    """The trips, modes, gaps and charges stores are the biggest values this
+    app reads, and every telemetry batch used to read all four — every 6-13
+    seconds while the car streams — to append to them a few times a day.
+
+    A parked reading long after the last trip reads none of them. One inside
+    the fifteen-minute tail window still loads the trips store and folds the
+    late arrival into the trip, as amend_closed_trip always did.
+    """
+    import json as _json
+
+    from sqlalchemy import event
+
+    from app import state
+    from app.database import SessionLocal, engine
+
+    settings = get_settings()
+    old_pc = settings.app_passcode
+    settings.app_passcode = ""
+    sess = SessionLocal()
+    keys = (state.TELEMETRY_TRIPS_KEY, state.TELEMETRY_TRIP_ENDS_KEY,
+            state.TELEMETRY_SHADOW_KEY, state.TELEMETRY_LATEST_KEY,
+            state.TELEMETRY_SEEN_KEY)
+    prev = {k: state.get(sess, k) for k in keys}
+    vin = "TESTVIN0000000002"
+    read = []
+
+    def spy(conn, cur, stmt, params, ctx, many):
+        if stmt.lstrip().upper().startswith("SELECT") and "settings" in stmt:
+            read.extend(v for v in (params if isinstance(params, (list, tuple))
+                                    else (params or {}).values()) if isinstance(v, str))
+
+    try:
+        end = 1_788_800_000.0  # 2026-09-07T16:53:20Z
+        trip = {"vin": vin, "start_ts": end - 600, "end_ts": end,
+                "start_odo_km": 31110.0, "end_odo_km": 31119.297,
+                "distance_km": 9.297, "duration_min": 10.0,
+                "start_energy_kwh": 55.0, "end_energy_kwh": 54.0}
+        from app.api import routes
+        routes._put_trips(sess, [trip])
+        # Already in Park, so the readings below change no mode field and
+        # have nothing to append to the modes log.
+        in_park = _json.dumps({vin: {"Gear": "ShiftStateP"}})
+        state.put(sess, state.TELEMETRY_SHADOW_KEY, _json.dumps({vin: {}}))
+        state.put(sess, state.TELEMETRY_LATEST_KEY, in_park)
+        sess.commit()
+
+        def parked(when, miles):
+            return {"records": [{"vin": vin, "createdAt": when, "data": [
+                {"key": "Odometer", "value": {"doubleValue": miles}},
+                {"key": "VehicleSpeed", "value": {"doubleValue": 0}},
+                {"key": "Gear", "value": {"stringValue": "ShiftStateP"}}]}]}
+
+        event.listen(engine, "before_cursor_execute", spy)
+        with TestClient(app) as client:
+            # Two hours after the trip ended: outside the window, reads nothing.
+            read.clear()
+            r = client.post("/api/telemetry",
+                            json=parked("2026-09-07T18:53:20.000Z", 19337.2))
+            assert r.status_code == 200
+            for big in (state.TELEMETRY_TRIPS_KEY, state.TELEMETRY_MODES_KEY,
+                        state.TELEMETRY_GAPS_KEY, state.TELEMETRY_CHARGES_KEY):
+                assert big not in read, (big, read)
+
+            # A fresh shadow, then a reading 60 s after the end, 0.2 km on:
+            # inside the window, so the trips store loads and the tail folds in.
+            state.put(sess, state.TELEMETRY_SHADOW_KEY, _json.dumps({vin: {}}))
+            state.put(sess, state.TELEMETRY_LATEST_KEY, in_park)
+            sess.commit()
+            read.clear()
+            miles = (31119.297 + 0.2) / 1.609344
+            r = client.post("/api/telemetry",
+                            json=parked("2026-09-07T16:54:20.000Z", miles))
+            assert r.status_code == 200
+            assert state.TELEMETRY_TRIPS_KEY in read
+            stored = _json.loads(state.get(SessionLocal(), state.TELEMETRY_TRIPS_KEY))
+            assert stored[-1]["end_odo_km"] > 31119.297
+            assert stored[-1].get("tail_amended_km")
+    finally:
+        event.remove(engine, "before_cursor_execute", spy)
+        for k, v in prev.items():
+            state.put(sess, k, v or "")
+        sess.commit()
+        sess.close()
         settings.app_passcode = old_pc
