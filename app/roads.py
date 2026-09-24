@@ -49,13 +49,28 @@ CACHE_PATH = os.environ.get(
     "ROAD_CACHE_PATH",
     os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                  "data", "roads_cache.json"))
-# How long to wait after a failed download before trying again.
-_RETRY_SEC = 6 * 3600.0
+# How long to wait after a download that left tiles missing before trying the
+# missing ones again. Short, because every trip driven meanwhile falls back to
+# the speed rule; the sync tick is what calls back in.
+_RETRY_SEC = 30 * 60.0
+# The network is fetched in tiles of this many degrees (~110 km), one Overpass
+# request each: a single query for the whole peninsula is exactly the kind
+# the public servers time out on when busy, and one timeout then cost the
+# whole download. Tiles that answered are kept; only the rest are retried.
+TILE_DEG = 1.0
+# Pause between tile requests — the Overpass servers are a shared, free
+# service and ask for sequential, unhurried clients.
+_TILE_PAUSE_SEC = 1.0
 
 _lock = threading.Lock()
 _grid: dict[tuple[int, int], list[tuple[float, float, float, float]]] | None = None
 _meta: dict[str, Any] = {"state": "not loaded"}
 _last_attempt = 0.0
+# Tiles fetched so far, "lat,lon" of their south-west corner -> their lines.
+# None when the network was installed whole (set_network): every point is
+# then covered.
+_tiles: dict[str, list] | None = None
+_cache_tried = False
 
 
 def _metres(lat1: float, lon1: float, lat2: float, lon2: float) -> tuple[float, float]:
@@ -113,22 +128,55 @@ def _build(lines: list[list[list[float]]]) -> dict:
 
 
 def set_network(lines: list[list[list[float]]], source: str = "given") -> None:
-    """Install a road network: a list of polylines of [lat, lon] points."""
-    global _grid
+    """Install a whole road network: a list of polylines of [lat, lon] points.
+    Every point counts as covered."""
+    global _grid, _tiles
     grid = _build(lines)
     with _lock:
-        _grid = grid
+        _grid, _tiles = grid, None
         _meta.update(state="loaded", source=source, lines=len(lines),
+                     segments=sum(max(len(line) - 1, 0) for line in lines),
+                     classes=list(ROAD_CLASSES))
+        _meta.pop("error", None)
+
+
+def _install_tiles(tiles: dict[str, list], total: int, source: str) -> None:
+    global _grid, _tiles
+    lines = [line for tile_lines in tiles.values() for line in tile_lines]
+    grid = _build(lines)
+    with _lock:
+        _grid, _tiles = grid, dict(tiles)
+        _meta.update(state="loaded" if len(tiles) >= total else "partial",
+                     source=source, tiles=f"{len(tiles)}/{total}", lines=len(lines),
                      segments=sum(max(len(line) - 1, 0) for line in lines),
                      classes=list(ROAD_CLASSES))
 
 
 def clear() -> None:
-    global _grid
+    global _grid, _tiles, _cache_tried
     with _lock:
-        _grid = None
+        _grid, _tiles, _cache_tried = None, None, False
         _meta.clear()
         _meta["state"] = "not loaded"
+
+
+def _tile_of(lat: float, lon: float) -> str:
+    return f"{math.floor(lat / TILE_DEG) * TILE_DEG:g},{math.floor(lon / TILE_DEG) * TILE_DEG:g}"
+
+
+def _tiles_for(bbox: tuple[float, float, float, float]) -> dict[str, tuple]:
+    """{tile key: its bbox, clipped to ``bbox``} for every tile ``bbox`` touches."""
+    s, w, n, e = bbox
+    out = {}
+    lat = math.floor(s / TILE_DEG) * TILE_DEG
+    while lat < n:
+        lon = math.floor(w / TILE_DEG) * TILE_DEG
+        while lon < e:
+            out[_tile_of(lat, lon)] = (max(lat, s), max(lon, w),
+                                       min(lat + TILE_DEG, n), min(lon + TILE_DEG, e))
+            lon += TILE_DEG
+        lat += TILE_DEG
+    return out
 
 
 def status() -> dict[str, Any]:
@@ -138,10 +186,14 @@ def status() -> dict[str, Any]:
 def road_class(lat: Any, lon: Any) -> str | None:
     """"highway" or "city" for this position; None when unknown — no network
     loaded yet, or no position — so the caller falls back to the speed rule."""
-    grid = _grid
+    grid, tiles = _grid, _tiles
     if grid is None or lat is None or lon is None:
         return None
     lat, lon = float(lat), float(lon)
+    if tiles is not None and _tile_of(lat, lon) not in tiles:
+        # This tile has not downloaded yet: unknown, never "city" — a road
+        # the map has not got must not read as the absence of one.
+        return None
     for seg in grid.get((int(math.floor(lat / _CELL)), int(math.floor(lon / _CELL))), ()):
         if _seg_dist_m(lat, lon, seg) <= MATCH_M:
             return "highway"
@@ -151,7 +203,7 @@ def road_class(lat: Any, lon: Any) -> str | None:
 def _query(bbox: tuple[float, float, float, float]) -> str:
     classes = "|".join(ROAD_CLASSES)
     s, w, n, e = bbox
-    return (f'[out:json][timeout:240];way["highway"~"^({classes})$"]'
+    return (f'[out:json][timeout:90];way["highway"~"^({classes})$"]'
             f"({s},{w},{n},{e});out geom;")
 
 
@@ -161,7 +213,7 @@ def _fetch(bbox: tuple[float, float, float, float]) -> list[list[list[float]]]:
     last: Exception | None = None
     for url in OVERPASS_URLS:
         try:
-            r = httpx.post(url, data={"data": _query(bbox)}, timeout=300.0,
+            r = httpx.post(url, data={"data": _query(bbox)}, timeout=120.0,
                            headers={"User-Agent": "ev-drive-analyzer (road type lookup)"})
             r.raise_for_status()
             lines = []
@@ -177,25 +229,58 @@ def _fetch(bbox: tuple[float, float, float, float]) -> list[list[list[float]]]:
     raise RuntimeError(f"no Overpass mirror answered: {last}")
 
 
-def load_cached() -> bool:
+def _load_cache_file() -> dict[str, list] | None:
+    """Tiles from the cache file, or None. The older whole-network form
+    (one "lines" list) reads as a single tile covering everything."""
     try:
         with open(CACHE_PATH) as f:
             data = json.load(f)
-        if data.get("classes") != list(ROAD_CLASSES):
-            return False
+    except (OSError, ValueError):
+        return None
+    if data.get("classes") != list(ROAD_CLASSES):
+        return None
+    if isinstance(data.get("tiles"), dict):
+        return data["tiles"]
+    if isinstance(data.get("lines"), list):
         set_network(data["lines"], source=f"cache {data.get('fetched_at', '?')}")
-        return True
-    except (OSError, ValueError, KeyError):
-        return False
+        return None
+    return None
+
+
+def _save_cache_file(tiles: dict[str, list], bbox: tuple) -> None:
+    try:
+        os.makedirs(os.path.dirname(CACHE_PATH), exist_ok=True)
+        tmp = CACHE_PATH + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump({"classes": list(ROAD_CLASSES), "bbox": list(bbox),
+                       "fetched_at": time.strftime("%Y-%m-%d"), "tiles": tiles},
+                      f, separators=(",", ":"))
+        os.replace(tmp, CACHE_PATH)
+    except OSError:
+        pass  # memory-only this run; the next start fetches again
 
 
 def ensure_loaded(bbox: tuple[float, float, float, float] = DEFAULT_BBOX,
                   background: bool = True) -> None:
-    """Load the network if it is not already: from the cache file, else by
-    downloading it — in a background thread by default, so the request that
-    asked does not wait minutes for Overpass."""
-    global _last_attempt
-    if _grid is not None or load_cached():
+    """Make sure every tile of ``bbox`` is loaded: from the cache file first,
+    then by downloading only the tiles still missing — in a background thread
+    by default, so the request that asked never waits on Overpass. A download
+    that leaves tiles missing is retried after _RETRY_SEC."""
+    global _last_attempt, _cache_tried
+    wanted = _tiles_for(bbox)
+    if _grid is not None and _tiles is None:
+        return  # installed whole (set_network, or the older cache form)
+    if not _cache_tried:
+        _cache_tried = True
+        cached = _load_cache_file()
+        if _grid is not None and _tiles is None:
+            return
+        if cached:
+            _install_tiles({k: v for k, v in cached.items() if k in wanted},
+                           len(wanted), source="cache")
+    have = dict(_tiles or {})
+    missing = [k for k in wanted if k not in have]
+    if not missing:
         return
     now = time.time()
     with _lock:
@@ -205,22 +290,41 @@ def ensure_loaded(bbox: tuple[float, float, float, float] = DEFAULT_BBOX,
         _meta.update(state="downloading", started=now)
 
     def run() -> None:
-        try:
-            lines = _fetch(bbox)
+        tiles = dict(have)
+        error = None
+        for i, key in enumerate(missing):
+            if i:
+                time.sleep(_TILE_PAUSE_SEC)
             try:
-                os.makedirs(os.path.dirname(CACHE_PATH), exist_ok=True)
-                with open(CACHE_PATH, "w") as f:
-                    json.dump({"classes": list(ROAD_CLASSES), "bbox": list(bbox),
-                               "fetched_at": time.strftime("%Y-%m-%d"),
-                               "lines": lines}, f, separators=(",", ":"))
-            except OSError:
-                pass  # memory-only this run; the next start fetches again
-            set_network(lines, source="overpass")
-        except Exception as exc:  # noqa: BLE001 — speed rule stays in force
-            with _lock:
-                _meta.update(state="failed", error=f"{type(exc).__name__}: {exc}"[:300])
+                tiles[key] = _fetch(wanted[key])
+            except Exception as exc:  # noqa: BLE001 — keep the rest, retry this later
+                error = f"{type(exc).__name__}: {exc}"[:300]
+                continue
+            # Installed and saved after every tile, so a restart halfway
+            # through keeps what already arrived.
+            _install_tiles(tiles, len(wanted), source="overpass")
+            _save_cache_file(tiles, bbox)
+        with _lock:
+            if len(tiles) < len(wanted):
+                _meta.update(state="partial" if tiles else "failed",
+                             tiles=f"{len(tiles)}/{len(wanted)}",
+                             error=error, retry_after_min=round(_RETRY_SEC / 60))
+            else:
+                _meta.pop("error", None)
+                _meta.pop("retry_after_min", None)
 
     if background:
         threading.Thread(target=run, name="road-network", daemon=True).start()
     else:
         run()
+
+
+def load_cached() -> bool:
+    """Whether a usable network came from the cache file (tests, tooling)."""
+    tiles = _load_cache_file()
+    if _grid is not None and _tiles is None:
+        return True
+    if tiles:
+        _install_tiles(tiles, len(tiles), source="cache")
+        return True
+    return False

@@ -1954,16 +1954,49 @@ def test_road_lookup_places_a_point_on_or_off_the_expressway(tmp_path, monkeypat
     monkeypatch.setattr("httpx.post", lambda *a, **k: calls.append(1) or R())
     monkeypatch.setattr(roads, "CACHE_PATH", str(tmp_path / "roads.json"))
     monkeypatch.setattr(roads, "_last_attempt", 0.0)
+    monkeypatch.setattr(roads, "_TILE_PAUSE_SEC", 0.0)
+    one_tile = (5.0, 100.0, 6.0, 101.0)
     roads.clear()
-    roads.ensure_loaded(background=False)
-    assert calls and roads.road_class(5.30, 100.30) == "highway"
+    roads.ensure_loaded(one_tile, background=False)
+    assert len(calls) == 1 and roads.road_class(5.30, 100.30) == "highway"
     # A straight line of 201 nodes simplifies to its two ends.
     assert roads.status()["segments"] == 1
+    assert roads.status()["state"] == "loaded"
     roads.clear()
     calls.clear()
-    roads.ensure_loaded(background=False)
+    roads.ensure_loaded(one_tile, background=False)
     assert not calls, "the cache should have answered"
     assert roads.road_class(5.30, 100.30) == "highway"
+
+    # Two tiles, one of which times out: the other is kept, the failed one
+    # reads as unknown (never "city"), and only it is fetched on the retry.
+    roads.clear()
+    (tmp_path / "roads.json").unlink()
+    monkeypatch.setattr(roads, "_last_attempt", 0.0)
+    two_tiles = (5.0, 100.0, 6.0, 102.0)
+
+    down = [True]   # the 101-102 tile times out until this is cleared
+
+    def flaky(url, data=None, **k):
+        calls.append(data["data"])
+        if down[0] and "(5.0,101.0," in data["data"]:
+            raise RuntimeError("504 Gateway Timeout")
+        return R()
+    calls.clear()
+    monkeypatch.setattr("httpx.post", flaky)
+    roads.ensure_loaded(two_tiles, background=False)
+    st = roads.status()
+    assert st["state"] == "partial" and st["tiles"] == "1/2" and "504" in st["error"]
+    assert roads.road_class(5.30, 100.30) == "highway"
+    assert roads.road_class(5.30, 101.50) is None
+    calls.clear()
+    down[0] = False
+    monkeypatch.setattr(roads, "_last_attempt", 0.0)   # the retry is due
+    roads.ensure_loaded(two_tiles, background=False)
+    # Only the missing tile was requested again; the loaded one was kept.
+    assert len(calls) == 1 and "(5.0,101.0,6.0,102.0)" in calls[0], calls
+    assert roads.status()["state"] == "loaded"
+    assert roads.road_class(5.30, 101.50) == "city"
     roads.clear()
 
 
