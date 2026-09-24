@@ -2689,6 +2689,20 @@ MODE_HEAT_REF_C = 25.0
 # Trips of a road type needed before its reference Wh/km is trusted; below
 # this the efficiency term stays neutral for that road type.
 MODE_REFERENCE_MIN_TRIPS = 5
+# What makes an expressway trip Slow Highway rather than CH/FH — any one is
+# enough, each measured on the HIGHWAY stretch only (the map's, see
+# app/roads.py), never on the town either side of it:
+#   an average under the highway_avg_kmh bar (70);
+#   stop-and-go — this many times coming to rest on the expressway, or this
+#     share of its time spent under SH_CRAWL_KMH, which catches stop-start
+#     traffic between the 30-second position samples that a stop count misses;
+#   repeated idling — this many minutes standing still on it in all.
+# Three stops rather than one or two: a toll plaza or a single merge can
+# stop a car on an otherwise free-flowing run.
+MODE_SH_MIN_STOPS = 3.0
+MODE_SH_CRAWL_SHARE = 0.25
+MODE_SH_IDLE_MIN = 5.0
+SH_CRAWL_KMH = 20.0
 
 
 def resolved_cuts(cuts: dict[str, float] | None = None) -> dict[str, float]:
@@ -2712,6 +2726,9 @@ def resolved_cuts(cuts: dict[str, float] | None = None) -> dict[str, float]:
         "fast_avg_kmh": MODE_FAST_AVG_KMH,
         "efficiency_weight": MODE_EFFICIENCY_WEIGHT,
         "heat_pct_per_c": MODE_HEAT_PCT_PER_C,
+        "sh_min_stops": MODE_SH_MIN_STOPS,
+        "sh_crawl_share": MODE_SH_CRAWL_SHARE,
+        "sh_idle_min": MODE_SH_IDLE_MIN,
     }
     out = {k: float(c.get(k, v)) for k, v in defaults.items()}
     # Measured from the car's history (mode_references), not configured, so
@@ -2760,7 +2777,9 @@ def road_totals(d: Any) -> dict[str, dict[str, float]]:
     peak is the upper edge of the fastest band that road used."""
     out: dict[str, dict[str, float]] = {}
     for road, bands in (road_profile_of(d) or {}).items():
-        t = {"km": 0.0, "min": 0.0, "kwh": 0.0, "peak": 0.0}
+        if road.startswith("_"):
+            continue  # _stops, _idle_min — per-road counts, not bands
+        t = {"km": 0.0, "min": 0.0, "kwh": 0.0, "peak": 0.0, "crawl_min": 0.0}
         for edge, part in (bands or {}).items():
             try:
                 lower = float(edge)
@@ -2769,8 +2788,37 @@ def road_totals(d: Any) -> dict[str, dict[str, float]]:
             for k in ("km", "min", "kwh"):
                 t[k] += float((part or {}).get(k) or 0.0)
             t["peak"] = max(t["peak"], lower + 10.0)
+            if lower < SH_CRAWL_KMH:
+                t["crawl_min"] += float((part or {}).get("min") or 0.0)
         out[road] = t
+    prof = road_profile_of(d) or {}
+    for road, t in out.items():
+        t["stops"] = float((prof.get("_stops") or {}).get(road) or 0.0)
+        t["idle_min"] = float((prof.get("_idle_min") or {}).get(road) or 0.0)
     return out
+
+
+def highway_congestion(d: Any, cuts: dict[str, float] | None = None) -> list[str]:
+    """Why the highway stretch of this trip was congested — empty when it was
+    not, or when there is no highway stretch to judge. See MODE_SH_*."""
+    c = resolved_cuts(cuts)
+    hw = road_totals(d).get("highway")
+    if not hw or hw["km"] <= 0 or hw["min"] <= 0:
+        return []
+    why = []
+    avg = hw["km"] / (hw["min"] / 60.0)
+    if avg < c["highway_avg_kmh"]:
+        why.append(f"averaged {avg:.0f} km/h on the expressway, under "
+                   f"{c['highway_avg_kmh']:.0f}")
+    if hw["stops"] >= c["sh_min_stops"]:
+        why.append(f"stopped {hw['stops']:.0f} times on it (stop-and-go)")
+    crawl = hw["crawl_min"] / hw["min"]
+    if crawl >= c["sh_crawl_share"]:
+        why.append(f"{crawl * 100:.0f}% of its time on it under "
+                   f"{SH_CRAWL_KMH:.0f} km/h (stop-and-go)")
+    if hw["idle_min"] >= c["sh_idle_min"]:
+        why.append(f"stood still {hw['idle_min']:.0f} min on it (repeated idling)")
+    return why
 
 
 def road_verdict(d: Any) -> str | None:
@@ -2938,10 +2986,15 @@ def mode_split(d: Any, cuts: dict[str, float] | None = None) -> dict[str, dict[s
             if road == "unknown":
                 add(whole, part)
                 continue
+            prof = road_profile_of(d) or {}
             mode = drive_mode(SimpleTrip(
                 km=t["km"], mins=t["min"], mx=min(t["peak"], mx) if mx else t["peak"],
                 idle=idle if (road == "city") == city_first else 0.0,
-                kwh=t["kwh"], temp=getattr(d, "outside_temp_c", None), road=road), cuts)
+                kwh=t["kwh"], temp=getattr(d, "outside_temp_c", None), road=road,
+                road_profile={road: prof.get(road) or {},
+                              "_stops": {road: (prof.get("_stops") or {}).get(road, 0)},
+                              "_idle_min": {road: (prof.get("_idle_min") or {}).get(road, 0)}}),
+                cuts)
             add(mode or whole, part)
     else:
         bands = speed_profile_of(d)
@@ -2977,11 +3030,11 @@ class SimpleTrip:
     """
 
     __slots__ = ("distance_km", "duration_min", "max_speed_kmh", "idle_min",
-                 "energy_used_kwh", "outside_temp_c", "road")
+                 "energy_used_kwh", "outside_temp_c", "road", "road_profile")
 
     def __init__(self, km: float, mins: float, mx: float, idle: float = 0.0,
                  kwh: float = 0.0, temp: float | None = None,
-                 road: str | None = None):
+                 road: str | None = None, road_profile: dict | None = None):
         self.distance_km = km
         self.duration_min = mins
         self.max_speed_kmh = mx
@@ -2993,6 +3046,9 @@ class SimpleTrip:
         # The road this part was driven on, when the map said — see
         # road_verdict. None leaves it to the speed rule.
         self.road = road
+        # This part's own slice of the trip's road profile, so the congestion
+        # tests (highway_congestion) see its bands, stops and idle.
+        self.road_profile = road_profile
 
 
 def speed_profile_of(d: Any) -> dict[str, dict[str, float]] | None:
@@ -3114,6 +3170,9 @@ def drive_mode_explained(d: Any, cuts: dict[str, float] | None = None) -> dict[s
     else:
         where = "no road data, so speed decided the road"
     pace = _is_highway(avg, mx, c)
+    congested = highway_congestion(d, c) if highway and road is not None else []
+    if road is not None and highway:
+        pace = not congested
 
     if (idle / dur if dur else 0.0) >= heavy_idle:
         jam = highway and road is not None
@@ -3122,9 +3181,8 @@ def drive_mode_explained(d: Any, cuts: dict[str, float] | None = None) -> dict[s
                       + ("a jammed highway" if jam else
                          "heavy whatever the speeds looked like"))
     elif highway and not pace:
-        out["why"] = (f"{where}, but never at highway pace — the highway stretch "
-                      f"averaged {avg:.0f} with a peak of {mx:.0f}, under the "
-                      f"{hw_avg:.0f} average / {hw_max:.0f} peak bars: congestion")
+        out["congestion"] = congested
+        out["why"] = (f"{where}, but congested — " + "; ".join(congested))
     else:
         w = c["efficiency_weight"]
         e = _energy_vs_expected(d, highway, c)
@@ -3202,13 +3260,18 @@ def drive_mode(d: Any, cuts: dict[str, float] | None = None) -> str | None:
     road = road_verdict(d)
     highway_pace = _is_highway(avg, mx, c2)
     on_highway = highway_pace if road is None else road == "highway"
+    congested: list[str] = []
     if on_highway and road is not None:
         # The highway stretch's own average, not the whole trip's: town at
         # either end must not make a steady motorway run look congested.
         hw = road_totals(d).get("highway") or {}
         if hw.get("km") and hw.get("min"):
             avg = hw["km"] / (hw["min"] / 60.0)
-        highway_pace = _is_highway(avg, mx, c2)
+        # On a road the map calls an expressway, pace is the AVERAGE alone —
+        # the peak bar exists to tell a highway from a city burst by speed,
+        # which the map has already done. Congestion is what decides SH.
+        congested = highway_congestion(d, c2)
+        highway_pace = not congested
     # Genuine waiting outranks the ratio: a trip that spent a third of itself
     # stopped is heavy whatever the moving part looked like — and on a road
     # the map calls an expressway, that is a jammed highway, not the city.
@@ -3808,12 +3871,13 @@ MATRIX_DEFINITIONS = {
                   "rises faster than the speed saves."},
         {"code": "SH", "name": "Slow Highway",
          "means": "On an expressway or trunk road by the map (OpenStreetMap), "
-                  "but never at highway pace — under a 99 km/h peak or a 70 "
-                  "average on the highway stretch — or 45% or more of it spent "
-                  "waiting. Congestion on the highway: without the map these "
-                  "trips read as city, which is exactly what they are not. Only "
-                  "trips recorded after road lookup was switched on can land "
-                  "here."},
+                  "and congested there — any one of: an average under 70 km/h "
+                  "on the highway stretch; stop-and-go (3 or more stops on the "
+                  "expressway, or a quarter of its time under 20 km/h); or "
+                  "repeated idling (5 minutes or more standing still on it). "
+                  "Without the map these trips read as city, which is exactly "
+                  "what they are not. Only trips recorded after road lookup was "
+                  "switched on can land here."},
         {"code": "CC", "name": "Constant City",
          "means": "Below the highway bars, but held 0.55 or more of its own "
                   "peak — open roads, few interruptions, typically 60-80 km/h. "

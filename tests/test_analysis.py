@@ -4321,7 +4321,29 @@ def test_the_map_decides_highway_and_a_slow_expressway_is_sh():
     assert drive_mode(D(12.0, 24.0, 55.0)) in ("CC", "SC")
     assert drive_mode(jam) == "SH"
     why = drive_mode_explained(jam)["why"]
-    assert "expressway" in why and "congestion" in why
+    assert "expressway" in why and "congested" in why
+
+    # SH is congestion on the highway stretch, any one of three signals:
+    def hw(bands, stops=0, idle=0.0, mx=110.0, km=None, mins=None):
+        km = km or sum(b["km"] for b in bands.values())
+        mins = mins or sum(b["min"] for b in bands.values())
+        return D(km, mins, mx, {"highway": bands, "_stops": {"highway": stops},
+                                "_idle_min": {"highway": idle}})
+    # A steady 80 with a 95 peak: no peak bar on a mapped expressway -> CH.
+    assert drive_mode(hw({"80": band(20.0, 15.0, 3.0)}, mx=95.0)) == "CH"
+    # ... the same run with 3 stops on the expressway (stop-and-go) -> SH,
+    # but 2 (a toll plaza and a merge) is still CH.
+    assert drive_mode(hw({"80": band(20.0, 15.0, 3.0)}, stops=3)) == "SH"
+    assert drive_mode(hw({"80": band(20.0, 15.0, 3.0)}, stops=2)) == "CH"
+    # ... 30% of its time crawling under 20 km/h -> SH, though it averages 70+.
+    crawly = hw({"100": band(19.0, 10.5, 3.0), "10": band(1.0, 4.5, 0.2)})
+    assert crawly.distance_km / (crawly.duration_min / 60) >= 70
+    assert drive_mode(crawly) == "SH"
+    assert "stop-and-go" in drive_mode_explained(crawly)["why"]
+    # ... 6 minutes standing still on it in all -> SH (repeated idling).
+    assert drive_mode(hw({"80": band(20.0, 15.0, 3.0)}, idle=6.0)) == "SH"
+    assert "idling" in drive_mode_explained(
+        hw({"80": band(20.0, 15.0, 3.0)}, idle=6.0))["why"]
 
     # The same bridge at 100 with a 110 peak: CH.
     open_road = D(20.0, 12.0, 110.0, {"highway": {"100": band(20.0, 12.0, 3.2)}})

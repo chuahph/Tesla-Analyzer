@@ -2826,6 +2826,9 @@ function setupMatrixModal() {
     fast_avg_kmh: document.getElementById("cut-fastavg"),
     efficiency_weight: document.getElementById("cut-effweight"),
     heat_pct_per_c: document.getElementById("cut-heatpct"),
+    sh_min_stops: document.getElementById("cut-shstops"),
+    sh_crawl_share: document.getElementById("cut-shcrawl"),
+    sh_idle_min: document.getElementById("cut-shidle"),
   };
   // Which days the table is showing. Held here rather than re-fetched per tab:
   // all three splits arrive in one payload, computed against one set of

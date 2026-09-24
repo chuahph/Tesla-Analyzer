@@ -8817,7 +8817,8 @@ def self_check(days: int = Query(30, ge=1, le=730),
 MODE_CUT_KEYS = ("constant_ratio_min", "slow_ratio_min", "heavy_idle_share_max",
                  "highway_max_kmh", "highway_avg_kmh",
                  "fast_max_kmh", "fast_avg_kmh",
-                 "efficiency_weight", "heat_pct_per_c")
+                 "efficiency_weight", "heat_pct_per_c",
+                 "sh_min_stops", "sh_crawl_share", "sh_idle_min")
 
 
 def _mode_cuts(session: Session) -> dict[str, float]:
@@ -8897,6 +8898,12 @@ def set_mode_thresholds(payload: dict = Body(...),
             raise HTTPException(422, "efficiency_weight must be between 0 (off) and 2")
         if k == "heat_pct_per_c" and not 0.0 <= v <= 10.0:
             raise HTTPException(422, "heat_pct_per_c must be between 0 and 10")
+        if k == "sh_min_stops" and not 1.0 <= v <= 50.0:
+            raise HTTPException(422, "sh_min_stops must be between 1 and 50")
+        if k == "sh_crawl_share" and not 0.0 < v <= 1.0:
+            raise HTTPException(422, "sh_crawl_share is a share, between 0 and 1")
+        if k == "sh_idle_min" and not 0.0 < v <= 120.0:
+            raise HTTPException(422, "sh_idle_min must be between 0 and 120 minutes")
         cuts[k] = v
     con = cuts.get("constant_ratio_min", driving_analysis.MODE_CONSTANT_RATIO)
     slo = cuts.get("slow_ratio_min", driving_analysis.MODE_SLOW_RATIO)

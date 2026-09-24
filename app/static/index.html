@@ -573,6 +573,12 @@
               <input id="cut-effweight" type="number" step="0.1" min="0" max="2" required></label>
             <label>Extra energy expected per °C above 25°C (%)
               <input id="cut-heatpct" type="number" step="0.1" min="0" max="10" required></label>
+            <label>Slow Highway: stops on the expressway, at least
+              <input id="cut-shstops" type="number" step="1" min="1" max="50" required></label>
+            <label>…or share of highway time under 20 km/h (0–1)
+              <input id="cut-shcrawl" type="number" step="0.05" min="0.05" max="1" required></label>
+            <label>…or minutes standing still on it
+              <input id="cut-shidle" type="number" step="1" min="1" max="120" required></label>
             <button type="submit" class="btn">Redraw</button>
           </form>
           <p id="matrix-msg" class="modal-sub"></p>

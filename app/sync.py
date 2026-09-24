@@ -1838,11 +1838,24 @@ def advance_shadow(shadow: dict[str, Any], snap: dict[str, Any]) -> dict[str, An
                 # recorded zero idle. This is the count that says otherwise.
                 shadow["stops"] = int(shadow.get("stops") or 0) + 1
                 shadow["idle_run_since"] = float(last["ts"])
+                # And on which kind of road it stopped (app/roads.py), so a
+                # jam on the expressway can be told from lights in town —
+                # what makes a highway trip Slow Highway rather than city.
+                from . import roads as _roads
+
+                where = _roads.road_class(last.get("lat"), last.get("lon")) or "unknown"
+                road_stops = shadow.setdefault("road_stops", {})
+                road_stops[where] = int(road_stops.get(where) or 0) + 1
+                shadow["idle_run_road"] = where
             elif not stopped and run_since is not None:
                 span = float(last["ts"]) - float(run_since)
                 if span >= IDLE_STREAK_MIN * 60.0:
                     shadow["idle_sec"] = float(shadow.get("idle_sec") or 0.0) + span
+                    where = shadow.get("idle_run_road") or "unknown"
+                    road_idle = shadow.setdefault("road_idle_sec", {})
+                    road_idle[where] = float(road_idle.get(where) or 0.0) + span
                 shadow["idle_run_since"] = None
+                shadow.pop("idle_run_road", None)
         else:
             # A blackout, or two records sharing a timestamp. The band anchor
             # must not reach across it: the car drove somewhere in there and
@@ -1895,6 +1908,9 @@ def advance_shadow(shadow: dict[str, Any], snap: dict[str, Any]) -> dict[str, An
             shadow.pop("temp_sum", None)
             shadow.pop("bands", None)
             shadow.pop("road_bands", None)
+            shadow.pop("road_stops", None)
+            shadow.pop("road_idle_sec", None)
+            shadow.pop("idle_run_road", None)
             # The band anchor starts where the journey does — odometer, clock
             # and energy counter together, so the first stretch is measured
             # from the trip's own beginning rather than from wherever the
@@ -2450,6 +2466,9 @@ def _shadow_close(shadow: dict[str, Any], end: dict[str, Any],
     temp_sum = float(shadow.pop("temp_sum", 0.0) or 0.0)
     bands = shadow.pop("bands", None)
     road_bands = shadow.pop("road_bands", None) or {}
+    road_stops = shadow.pop("road_stops", None) or {}
+    road_idle_sec = shadow.pop("road_idle_sec", None) or {}
+    shadow.pop("idle_run_road", None)
     # The anchor goes with the histogram it feeds, for the same reason e_ts
     # does: left behind, the next trip's first step would be measured from
     # this one's last odometer reading, across the park in between.
@@ -2559,10 +2578,16 @@ def _shadow_close(shadow: dict[str, Any], end: dict[str, Any],
         # numbers can be put in one box, and cannot be described as partly one
         # thing and partly another.
         "speed_bands": _bands_out(bands),
-        # The same, per kind of road: {"highway"|"city"|"unknown": bands}.
-        # None when the road network was never loaded during the trip.
-        "road_bands": ({road: out for road, b in road_bands.items()
-                        if (out := _bands_out(b))} or None)
+        # The same, per kind of road: {"highway"|"city"|"unknown": bands},
+        # plus "_stops" and "_idle_min" per road — how many times the car came
+        # to rest, and how long it stood still (stops of IDLE_STREAK_MIN or
+        # more), on each. None when the road network was never loaded during
+        # the trip.
+        "road_bands": ({**{road: out for road, b in road_bands.items()
+                           if (out := _bands_out(b))},
+                        "_stops": dict(road_stops),
+                        "_idle_min": {r: round(v / 60.0, 1)
+                                      for r, v in road_idle_sec.items()}})
         if any(r != "unknown" for r in road_bands) else None,
         "stops": stops,
         "climate_min": round(climate_sec / 60.0, 1),

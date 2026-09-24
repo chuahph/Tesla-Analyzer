@@ -1979,7 +1979,9 @@ def test_the_shadow_files_each_kilometre_under_the_road_it_was_driven_on():
         ts, odo, energy = 1_789_000_000.0, 1000.0, 60.0
         # 12 steps at 100 km/h on the expressway, 12 crawling at 20 on it,
         # then 12 at 40 in town 1 km north of it.
-        plan = [(100.0, 5.30, 12), (20.0, 5.30, 12), (40.0, 5.31, 12)]
+        # A full stop on the expressway in the middle of the jam.
+        plan = [(100.0, 5.30, 12), (20.0, 5.30, 6), (0.0, 5.30, 3),
+                (20.0, 5.30, 6), (40.0, 5.31, 12)]
         lon = 100.21
         for kmh, lat, steps in plan:
             for _ in range(steps):
@@ -1989,6 +1991,7 @@ def test_the_shadow_files_each_kilometre_under_the_road_it_was_driven_on():
                 lon += step_km / 111.0
                 sync_mod.advance_shadow(shadow, {
                     "ts": ts, "shift": "D", "speed_kmh": kmh, "odo_km": odo,
+                    "seat_occupied": True,
                     "energy_kwh": energy, "soc": 80.0, "range_km": 300.0,
                     "out_temp": 30.0, "climate_on": False, "sentry_mode": False,
                     "lat": lat, "lon": lon})
@@ -2002,7 +2005,9 @@ def test_the_shadow_files_each_kilometre_under_the_road_it_was_driven_on():
         assert any(float(k) < 30 for k in rb["highway"]), "the jam was banded slow"
 
         # And the finished trip carries it out as road_bands.
+        assert shadow.get("road_stops", {}).get("highway", 0) >= 1, shadow.get("road_stops")
         done = sync_mod.settle_shadow(shadow, ts + 7200)
-        assert done and set(done["road_bands"]) >= {"highway", "city"}
+        assert done and set(done["road_bands"]) >= {"highway", "city", "_stops"}
+        assert done["road_bands"]["_stops"].get("highway", 0) >= 1
     finally:
         roads.clear()
