@@ -2394,6 +2394,47 @@ function renderMatrixSummary(d) {
       : `<p class="modal-sub">No trips in this window yet.</p>`}`;
 }
 
+// Range = capacity ÷ (baseline × road × traffic × environment × style). The
+// server fits the multipliers (driving_analysis.range_model); this only lays
+// out the factor table and the range grid it produced.
+function renderRangeModel(m) {
+  const box = document.getElementById("range-model");
+  if (!box) return;
+  if (!m || !m.available) {
+    box.innerHTML = `<p class="modal-sub">Not enough trips yet — ${(m && m.why) || "no fit"}.</p>`;
+    return;
+  }
+  const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+  const names = { road: "Road", traffic: "Traffic", env: "Temperature" };
+  const sign = (v) => (v > 0 ? `+${v}` : `${v}`);
+  const factorRows = Object.entries(m.factors).map(([k, levels]) => levels.map((l) => `
+      <tr>
+        <td>${names[k]} · <strong>${esc(l.level)}</strong></td>
+        <td>${l.reference ? `<span class="mx-sub">reference</span>` : `${sign(l.pct)}%${l.pm_pct != null ? `<span class="mx-sub">±${l.pm_pct}</span>` : ""}`}</td>
+        <td>${l.trips}</td>
+      </tr>`).join("")).join("");
+  const s = m.style;
+  const ref = m.reference;
+  const pct = (x) => sign(Math.round((x - 1) * 1000) / 10);
+  const cells = m.grid.map((g) => `
+      <tr>
+        <td>${esc(g.road)} · ${esc(g.traffic)} · ${esc(g.env)}<span class="mx-sub">${g.wh_per_km} Wh/km</span></td>
+        <td><strong>${g.range_km ?? "—"}</strong><span class="mx-sub">${g.range_inefficient_km ?? "—"}–${g.range_efficient_km ?? "—"}</span></td>
+        <td>${g.trips ? `${g.trips}<span class="mx-sub">${g.measured_wh_per_km} Wh/km</span>` : `<span class="mx-sub">estimated</span>`}</td>
+      </tr>`).join("");
+  box.innerHTML = `
+    <p class="modal-sub">Baseline (${esc(ref.road)} · ${esc(ref.traffic)} traffic · ${esc(ref.env)}):
+      <strong>${m.baseline_wh_per_km} Wh/km</strong> ≈ ${m.baseline_range_km} km, fitted from ${m.trips} trips
+      (±${m.fit_error_pct}% per trip).</p>
+    <table class="rm-table"><thead><tr><th>Factor</th><th>Cost</th><th>Trips</th></tr></thead>
+      <tbody>${factorRows}
+      <tr><td>Your driving · <strong>efficient / inefficient</strong></td>
+        <td>${pct(s.efficient)}% / ${pct(s.inefficient)}%</td><td><span class="mx-sub">${s.spread_pct}% spread</span></td></tr>
+      </tbody></table>
+    <table class="rm-table"><thead><tr><th>Conditions</th><th>Range km<span class="mx-sub">worst–best day</span></th><th>Your trips</th></tr></thead>
+      <tbody>${cells}</tbody></table>`;
+}
+
 function renderMatrix(d) {
   const box = document.getElementById("matrix-body");
   if (!box) return;
@@ -2794,6 +2835,7 @@ function setupMatrixModal() {
     latest = d;
     draw();
     renderMatrixSummary(d);
+    renderRangeModel(d.range_model);
     renderGlossary(d.definitions);
     const t = d.thresholds || {};
     Object.entries(fields).forEach(([k, el]) => {

@@ -1205,6 +1205,17 @@ _FULL_HISTORY_CACHE: dict[int, tuple[float, list, list]] = {}
 _FULL_HISTORY_TTL_SEC = 120.0
 
 
+def _efficiency_peers(drives: list) -> list:
+    """The trips efficiency is judged against: the streamed ones when there
+    are any. Polled trips' boundaries are the ones the telemetry work spent
+    months correcting — the same reason /api/driving-matrix starts at the
+    cutover — so they would fit multipliers to figures already known wrong.
+    All of them only when nothing was ever streamed (demo data, a new car).
+    """
+    streamed = [d for d in drives if (getattr(d, "source", "") or "") == "telemetry"]
+    return streamed or list(drives)
+
+
 def _full_history(session: Session, vehicle_id: int) -> tuple[list, list]:
     """Every drive and charge this car has, for fitting rates that describe the
     CAR rather than whatever window is on screen — see
@@ -8997,6 +9008,13 @@ def driving_matrix(days: int = Query(30, ge=1, le=730),
     out = dict(split["overall"])
     out["weekday"] = split["weekday"]
     out["weekend"] = split["weekend"]
+    # Range as road × traffic × environment × driving style, fitted on the
+    # car's whole streamed history rather than this window: a multiplier is a
+    # property of the car, and a week's trips cannot separate four factors.
+    model = driving_analysis.range_model(
+        _efficiency_peers(_full_history(session, vehicle.id)[0]), capacity_kwh, cuts)
+    model.pop("_coef", None)
+    out["range_model"] = model
 
     readings = _parked_readings(session, vehicle.id)
 
@@ -11653,7 +11671,8 @@ def summary(
         vampire_readings=_hist("parked_readings", _parked_readings, session, vehicle.id),
         vampire_frozen=_hist("frozen_rates", _frozen_rates, session),
         mode_cuts=_mode_cuts(session),
-        efficiency_peers=_hist("full_history", _full_history, session, vehicle.id)[0])
+        efficiency_peers=_efficiency_peers(
+            _hist("full_history", _full_history, session, vehicle.id)[0]))
     _mark("driving")
     # A since-charge window's own `charges` list is always empty by
     # definition (it starts right where last_charge ends, so no charge can

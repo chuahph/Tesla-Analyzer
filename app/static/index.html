@@ -490,6 +490,15 @@
     <section class="card matrix-card" id="matrix-card" style="display:none">
       <h2>📊 Driving matrix</h2>
       <div id="matrix-summary"></div>
+      <details id="range-model-details" class="matrix-details">
+        <summary>Range: road × traffic × temperature × your driving</summary>
+        <p class="modal-sub">
+          Wh/km split into multipliers learned from all your streamed trips at once —
+          what the road, the traffic and the heat each cost, and what's left over,
+          which is your driving. Range is the pack divided by the result.
+        </p>
+        <div id="range-model"></div>
+      </details>
       <details id="matrix-details" class="matrix-details">
         <summary>The full table, the parked rows and what the names mean</summary>
 

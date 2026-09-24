@@ -2326,8 +2326,12 @@ def analyze(drives: list[Drive], rated_wh_per_km: float = 150.0,
     # whole history) when given, not this window: a since-charge window of
     # two trips has no mode with enough peers to band anything, and "typical
     # for this car" is a property of its history, not of whatever is on screen.
-    eff_bands = _efficiency_bands_by_mode(
-        efficiency_peers if efficiency_peers is not None else drives, mode_cuts)
+    peers = efficiency_peers if efficiency_peers is not None else drives
+    eff_bands = _efficiency_bands_by_mode(peers, mode_cuts)
+    # The same peers fit the range model, which judges each trip against its
+    # own conditions rather than only against its mode; the tertile bands
+    # above are its fallback while the model has too few trips to fit.
+    eff_model = range_model(peers, capacity_kwh, mode_cuts)
 
     return {
         "available": True,
@@ -2483,8 +2487,12 @@ def analyze(drives: list[Drive], rated_wh_per_km: float = 150.0,
                 # kept apart). None when unbanded: no measured energy, no
                 # mode, or that mode has too few priced trips of its own yet.
                 "efficiency_band": (
-                    _ebe := efficiency_band_explained(d, _dme["mode"], eff_bands))["band"],
+                    _ebe := trip_efficiency(d, _dme["mode"], eff_model, eff_bands))["band"],
                 "efficiency_band_why": _ebe.get("why"),
+                # What this trip's road, traffic and heat predict, and how far
+                # the actual figure landed from it — the driving-style term.
+                "expected_wh_per_km": _ebe.get("expected_wh_per_km"),
+                "vs_expected_pct": _ebe.get("vs_expected_pct"),
                 # "measured" (real tracked idle) / "estimated" (heuristic
                 # fallback) / "incomplete" (no valid energy) — how much to
                 # trust this trip's efficiency figures.
@@ -3089,6 +3097,254 @@ def efficiency_band_explained(
     return out
 
 
+# The range model: Wh/km = baseline × road × traffic × environment × style.
+#
+# Each factor is a multiplier learned from every trip at once (a log-linear
+# least-squares fit), not a cell average. That is what lets a combination you
+# have driven twice still get an honest figure — the heat's cost is learned
+# from ALL your hot trips, city and highway alike, rather than only from the
+# two that happen to share every other condition too.
+#
+# Wh/km is the thing predicted, so it cannot also be an input. Efficiency
+# enters as the fifth term, STYLE: what is left of a trip's Wh/km once road,
+# traffic and heat have been accounted for. That is the part of a trip's
+# consumption that was the driving rather than the drive.
+RANGE_TEMP_BANDS = ((None, 30.0, "<30°C"), (30.0, 33.0, "30–33°C"), (33.0, None, "33°C+"))
+RANGE_ROADS = ("city", "highway")
+RANGE_TRAFFIC = ("flowing", "slow", "heavy")
+# Six coefficients are fitted; below this many trips the fit mostly measures
+# which trips happened to be in it.
+RANGE_MODEL_MIN_TRIPS = 15
+# A level (say "heavy") seen on fewer trips than this is left out of the fit,
+# trips and all, rather than given a multiplier two journeys decided.
+RANGE_MODEL_MIN_LEVEL = 3
+
+
+def trip_factors(d: Any, cuts: dict[str, float] | None = None) -> dict[str, str] | None:
+    """Road, traffic and environment for one trip, or None when unsortable.
+
+    Road is decided by absolute speed, the same bars drive_mode uses for CH.
+    Traffic is how steadily the trip held its own peak, plus real waiting —
+    but on the highway ONLY the waiting counts: drive_mode's own note on
+    trip 735 is why, a single 160 km/h burst drags the peak ratio of a steady
+    motorway run down into "slow", and averaging 70+ is itself the evidence
+    the traffic was moving.
+    """
+    dur = float(getattr(d, "duration_min", 0.0) or 0.0)
+    dist = float(getattr(d, "distance_km", 0.0) or 0.0)
+    mx = float(getattr(d, "max_speed_kmh", 0.0) or 0.0)
+    temp = getattr(d, "outside_temp_c", None)
+    if dur <= 0 or dist <= 0 or mx <= 0 or temp is None:
+        return None
+    c = resolved_cuts(cuts)
+    avg = dist / (dur / 60.0)
+    ratio = avg / mx
+    waited = float(getattr(d, "idle_min", 0.0) or 0.0) / dur >= c["heavy_idle_share_max"]
+    road = "highway" if mx >= c["highway_max_kmh"] and avg >= c["highway_avg_kmh"] else "city"
+    if waited:
+        traffic = "heavy"
+    elif road == "highway":
+        traffic = "flowing"
+    elif ratio >= c["constant_ratio_min"]:
+        traffic = "flowing"
+    elif ratio >= c["slow_ratio_min"]:
+        traffic = "slow"
+    else:
+        traffic = "heavy"
+    t = float(temp)
+    env = next(label for lo, hi, label in RANGE_TEMP_BANDS
+               if (lo is None or t >= lo) and (hi is None or t < hi))
+    return {"road": road, "traffic": traffic, "env": env}
+
+
+def _invert(m: list[list[float]]) -> list[list[float]] | None:
+    """Gauss-Jordan inverse, or None when singular. No numpy here by design."""
+    n = len(m)
+    a = [row[:] + [1.0 if i == j else 0.0 for j in range(n)] for i, row in enumerate(m)]
+    for c in range(n):
+        p = max(range(c, n), key=lambda r: abs(a[r][c]))
+        if abs(a[p][c]) < 1e-12:
+            return None
+        a[c], a[p] = a[p], a[c]
+        piv = a[c][c]
+        a[c] = [v / piv for v in a[c]]
+        for r in range(n):
+            if r != c and a[r][c]:
+                f = a[r][c]
+                a[r] = [vr - f * vc for vr, vc in zip(a[r], a[c])]
+    return [row[n:] for row in a]
+
+
+def range_model(drives: list[Any], capacity_kwh: float,
+                cuts: dict[str, float] | None = None) -> dict[str, Any]:
+    """Fit Wh/km = baseline × road × traffic × environment, and read style
+    off what is left.
+
+    Distance-weighted, like condition_matrix: a 2 km crawl's Wh/km is mostly
+    noise, and letting it pull the fit as hard as a 40 km run would make the
+    multipliers describe short trips.
+
+    Each factor's reference level is its MOST COMMON one, not a fixed choice.
+    A fixed "under 30°C" reference would be undefined for a car that has never
+    been driven below 30, which in this climate is most of them.
+    """
+    import math
+
+    rows = []
+    for d in drives:
+        if not has_valid_energy(d):
+            continue
+        f = trip_factors(d, cuts)
+        if f is None:
+            continue
+        rows.append((d, f))
+
+    # Drop sparse levels, trips and all, until nothing left is sparse — one
+    # pass can thin another level below the bar.
+    while True:
+        counts = Counter((k, f[k]) for _, f in rows for k in ("road", "traffic", "env"))
+        sparse = {kv for kv, n in counts.items() if n < RANGE_MODEL_MIN_LEVEL}
+        if not sparse:
+            break
+        rows = [(d, f) for d, f in rows
+                if not any((k, f[k]) in sparse for k in ("road", "traffic", "env"))]
+
+    if len(rows) < RANGE_MODEL_MIN_TRIPS:
+        return {"available": False, "trips": len(rows),
+                "why": (f"{len(rows)} trips with measured energy and a temperature "
+                        f"so far; the fit needs {RANGE_MODEL_MIN_TRIPS}")}
+
+    order = {"road": RANGE_ROADS, "traffic": RANGE_TRAFFIC,
+             "env": tuple(label for *_, label in RANGE_TEMP_BANDS)}
+    present = {k: [lv for lv in order[k] if counts.get((k, lv))] for k in order}
+    ref = {k: max(present[k], key=lambda lv: counts[(k, lv)]) for k in order}
+    # Column 0 is the intercept; then one column per non-reference level.
+    cols = [(k, lv) for k in order for lv in present[k] if lv != ref[k]]
+
+    def xrow(f: dict[str, str]) -> list[float]:
+        return [1.0] + [1.0 if f[k] == lv else 0.0 for k, lv in cols]
+
+    X = [xrow(f) for _, f in rows]
+    y = [math.log(float(d.wh_per_km)) for d, _ in rows]
+    raw_w = [float(d.distance_km) for d, _ in rows]
+    mean_w = sum(raw_w) / len(raw_w)
+    w = [v / mean_w for v in raw_w]
+    k = len(cols) + 1
+    xtx = [[sum(wi * r[i] * r[j] for r, wi in zip(X, w)) for j in range(k)] for i in range(k)]
+    xty = [sum(wi * r[i] * yi for r, yi, wi in zip(X, y, w)) for i in range(k)]
+    inv = _invert(xtx)
+    if inv is None or len(rows) <= k:
+        return {"available": False, "trips": len(rows),
+                "why": "the trips so far do not separate the factors from each "
+                       "other (every hot trip was also a highway trip, say)"}
+    b = [sum(inv[i][j] * xty[j] for j in range(k)) for i in range(k)]
+    resid = [yi - sum(bi * xi for bi, xi in zip(b, r)) for r, yi in zip(X, y)]
+    sigma2 = sum(wi * e * e for wi, e in zip(w, resid)) / (len(rows) - k)
+    se = [math.sqrt(max(inv[i][i] * sigma2, 0.0)) for i in range(k)]
+
+    coef = {kv: (b[i + 1], se[i + 1]) for i, kv in enumerate(cols)}
+    factors = {}
+    for key in order:
+        levels = []
+        for lv in present[key]:
+            if lv == ref[key]:
+                levels.append({"level": lv, "trips": counts[(key, lv)],
+                               "multiplier": 1.0, "pct": 0.0, "pm_pct": None,
+                               "reference": True})
+                continue
+            bi, sei = coef[(key, lv)]
+            levels.append({"level": lv, "trips": counts[(key, lv)],
+                           "multiplier": round(math.exp(bi), 3),
+                           "pct": round((math.exp(bi) - 1.0) * 100.0, 1),
+                           # ±1 standard error, in the same percent units.
+                           "pm_pct": round(math.exp(bi) * sei * 100.0, 1),
+                           "reference": False})
+        factors[key] = levels
+
+    style = sorted(math.exp(e) for e in resid)
+    p33, p50, p67 = (percentile(style, q) for q in (1 / 3, 0.5, 2 / 3))
+    base_wh = math.exp(b[0])
+
+    def rng(wh: float) -> int | None:
+        return round(capacity_kwh * 1000.0 / wh) if wh and capacity_kwh else None
+
+    measured: dict[tuple, list] = {}
+    for d, f in rows:
+        measured.setdefault((f["road"], f["traffic"], f["env"]), []).append(d)
+    grid = []
+    for road in present["road"]:
+        for traffic in present["traffic"]:
+            if road == "highway" and traffic == "slow":
+                continue  # never assigned — see trip_factors
+            for env in present["env"]:
+                f = {"road": road, "traffic": traffic, "env": env}
+                wh = math.exp(sum(bi * xi for bi, xi in zip(b, xrow(f))))
+                got = measured.get((road, traffic, env)) or []
+                km = sum(float(d.distance_km) for d in got)
+                grid.append({
+                    "road": road, "traffic": traffic, "env": env,
+                    "wh_per_km": round(wh * p50, 1),
+                    "range_km": rng(wh * p50),
+                    "range_efficient_km": rng(wh * p33),
+                    "range_inefficient_km": rng(wh * p67),
+                    "trips": len(got),
+                    "measured_wh_per_km": (
+                        round(sum(float(d.energy_used_kwh) for d in got) * 1000.0 / km, 1)
+                        if km else None),
+                })
+    return {
+        "available": True, "trips": len(rows),
+        "reference": ref,
+        "baseline_wh_per_km": round(base_wh, 1),
+        "baseline_range_km": rng(base_wh),
+        "factors": factors,
+        "style": {"efficient": round(p33, 3), "typical": round(p50, 3),
+                  "inefficient": round(p67, 3),
+                  "spread_pct": round((p67 - p33) * 100.0, 1)},
+        "fit_error_pct": round(math.sqrt(sigma2) * 100.0, 1),
+        "grid": grid,
+        # The fitted pieces, for trip_efficiency to reuse rather than refit.
+        "_coef": {"b": b, "cols": cols, "cuts": cuts},
+    }
+
+
+def trip_efficiency(d: Any, mode: str | None, model: dict[str, Any] | None,
+                    bands_by_mode: dict[str, tuple[float, float]]) -> dict[str, Any]:
+    """This trip's driving style: its Wh/km against what its road, traffic and
+    heat predict. Falls back to the within-mode tertile band when the model
+    cannot be fitted yet or cannot place this trip.
+    """
+    import math
+
+    fitted = (model or {}).get("_coef")
+    f = trip_factors(d, fitted["cuts"]) if fitted else None
+    if fitted and f is not None and has_valid_energy(d):
+        present = {lv for lv in (lv for levels in model["factors"].values()
+                                 for lv in (x["level"] for x in levels))}
+        if all(f[k] in present for k in f):
+            x = [1.0] + [1.0 if f[k] == lv else 0.0 for k, lv in fitted["cols"]]
+            expected = math.exp(sum(bi * xi for bi, xi in zip(fitted["b"], x)))
+            actual = float(d.wh_per_km)
+            ratio = actual / expected
+            s = model["style"]
+            band = ("efficient" if ratio <= s["efficient"]
+                    else "inefficient" if ratio >= s["inefficient"] else "typical")
+            pct = (ratio - 1.0) * 100.0
+            return {
+                "band": band,
+                "expected_wh_per_km": round(expected, 1),
+                "vs_expected_pct": round(pct, 1),
+                "why": (f"{actual:.0f} Wh/km against {expected:.0f} expected for "
+                        f"{f['road']} · {f['traffic']} traffic · {f['env']} — "
+                        f"{abs(pct):.0f}% {'better' if pct < 0 else 'worse'} "
+                        f"than those conditions predict"),
+            }
+    out = efficiency_band_explained(d, mode, bands_by_mode)
+    out["expected_wh_per_km"] = None
+    out["vs_expected_pct"] = None
+    return out
+
+
 def condition_matrix(drives: list[Any], capacity_kwh: float,
                      baseline_range_km: float | None = None,
                      cuts: dict[str, float] | None = None) -> dict[str, Any]:
@@ -3136,13 +3392,6 @@ def condition_matrix(drives: list[Any], capacity_kwh: float,
             for k in ("km", "min", "kwh"):
                 slot[k] += got_part[k]
             members.setdefault(code, []).append(d)
-
-    # Each mode's own efficient/typical/inefficient Wh/km cuts, from the SAME
-    # drives list this matrix was built from — a weekday-only or weekend-only
-    # call bands against weekday-only or weekend-only peers, not a borrowed
-    # baseline. See efficiency_band's own docstring for why this is a second
-    # axis rather than folded into drive_mode.
-    eff_bands = _efficiency_bands_by_mode(drives, cuts)
 
     rows = []
     for code in ("FH", "CH", "CC", "SC", "HC"):
@@ -3224,26 +3473,6 @@ def condition_matrix(drives: list[Any], capacity_kwh: float,
             #     CC + CH + SC + HC + PK = the window's consumption
             # something the report can show rather than something to work out.
             "pct": round(kwh / capacity_kwh * 100.0, 2) if capacity_kwh else None,
-            # How many of this mode's WHOLE-TRIP members (buckets, not the
-            # split-weighted members list "trips" above counts) read
-            # efficient/typical/inefficient against their own mode's peers.
-            # Can undercount "trips" by the split trips that touched this
-            # mode only partly, since a split trip's overall Wh/km is not a
-            # fair reading of the SHARE it contributed here. "unbanded" is a
-            # trip with no measured energy, or a mode still under
-            # EFFICIENCY_BAND_MIN_PEERS trips of its own.
-            "efficiency_bands": {
-                # Zero-filled rather than sparse, so a reader (or a chart)
-                # can trust every row has all four keys rather than treating
-                # an absent one as ambiguous between "zero" and "not counted".
-                **dict.fromkeys(("efficient", "typical", "inefficient", "unbanded"), 0),
-                **Counter(
-                    efficiency_band(
-                        float(d.wh_per_km) if has_valid_energy(d) else None,
-                        code, eff_bands) or "unbanded"
-                    for d in (buckets.get(code) or [])
-                ),
-            },
         })
     # Each mode's share of the driving, on the modes' OWN totals so they sum to
     # 100%. The share_* fields the endpoint adds are of driving PLUS parked,

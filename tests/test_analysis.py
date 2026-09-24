@@ -2969,7 +2969,7 @@ def test_efficiency_band_judges_a_trip_against_its_own_modes_peers():
     inefficient, and the two in the middle read typical.
     """
     from app.analysis.driving import (
-        EFFICIENCY_BAND_MIN_PEERS, _efficiency_bands_by_mode, condition_matrix,
+        EFFICIENCY_BAND_MIN_PEERS, _efficiency_bands_by_mode,
         drive_mode, efficiency_band, efficiency_band_explained)
 
     class D:
@@ -3013,12 +3013,77 @@ def test_efficiency_band_judges_a_trip_against_its_own_modes_peers():
     assert unbanded["band"] is None
     assert str(EFFICIENCY_BAND_MIN_PEERS) in unbanded["why"]
 
-    # And the matrix row carries the same breakdown, zero-filled across all
-    # four keys rather than sparse.
-    row = {r["code"]: r for r in condition_matrix(trips, capacity_kwh=68.6)
-          ["modes"]}["SC"]
-    assert row["efficiency_bands"] == {
-        "efficient": 2, "typical": 2, "inefficient": 2, "unbanded": 0}
+
+def test_range_model_recovers_the_multipliers_it_was_built_from():
+    """Wh/km = baseline × road × traffic × environment × style.
+
+    Trips are generated from known multipliers — highway +15%, slow traffic
+    +10%, 30-33°C +3%, 33°C+ +6% — with every trip then driven 5% better or
+    5% worse than its conditions. The fit has to hand the multipliers back,
+    read the ±5% as style rather than folding it into a factor, and say
+    per trip how far it landed from what its conditions predicted.
+    """
+    from app.analysis.driving import (
+        RANGE_MODEL_MIN_TRIPS, range_model, trip_efficiency, trip_factors)
+
+    class D:
+        def __init__(self, km, mins, mx, temp, wh):
+            self.distance_km = km; self.duration_min = mins
+            self.max_speed_kmh = mx; self.idle_min = 0.0
+            self.idle_tracked = True; self.energy_estimated = False
+            self.outside_temp_c = temp
+            self.energy_used_kwh = wh * km / 1000.0
+            self.wh_per_km = wh
+
+    shapes = {  # km, min, peak: flowing city / slow city / highway
+        ("city", "flowing"): (30.0, 30.0, 90.0),
+        ("city", "slow"): (20.0, 40.0, 70.0),
+        ("highway", "flowing"): (80.0, 48.0, 118.0),
+    }
+    road_x = {"city": 1.0, "highway": 1.15}
+    traffic_x = {"flowing": 1.0, "slow": 1.10}
+    temps = {28.0: 1.0, 31.0: 1.03, 34.0: 1.06}
+    trips = []
+    for (road, traffic), (km, mins, mx) in shapes.items():
+        for temp, tx in temps.items():
+            for style in (0.95, 1.05):
+                wh = 130.0 * road_x[road] * traffic_x[traffic] * tx * style
+                trips.append(D(km, mins, mx, temp, wh))
+    assert trip_factors(trips[0]) == {"road": "city", "traffic": "flowing", "env": "<30°C"}
+    assert trip_factors(trips[-1])["road"] == "highway"
+
+    m = range_model(trips, capacity_kwh=68.6)
+    assert m["available"], m
+    lv = {(k, x["level"]): x for k, levels in m["factors"].items() for x in levels}
+    # Every level holds equal trips, so the reference is the first most-common
+    # one: city, flowing, <30°C.
+    assert m["reference"] == {"road": "city", "traffic": "flowing", "env": "<30°C"}
+    assert lv[("road", "highway")]["pct"] == pytest.approx(15.0, abs=0.5)
+    assert lv[("traffic", "slow")]["pct"] == pytest.approx(10.0, abs=0.5)
+    assert lv[("env", "30–33°C")]["pct"] == pytest.approx(3.0, abs=0.5)
+    assert lv[("env", "33°C+")]["pct"] == pytest.approx(6.0, abs=0.5)
+    # The ±5% was driving, not conditions — it lands in style.
+    assert m["style"]["efficient"] == pytest.approx(0.95, abs=0.01)
+    assert m["style"]["inefficient"] == pytest.approx(1.05, abs=0.01)
+    # Range is the pack over the predicted Wh/km, per combination.
+    cell = next(g for g in m["grid"] if (g["road"], g["traffic"], g["env"])
+                == ("city", "slow", "33°C+"))
+    assert cell["range_km"] == pytest.approx(
+        68.6 * 1000 / (130 * 1.10 * 1.06), rel=0.02)
+    assert cell["range_efficient_km"] > cell["range_km"] > cell["range_inefficient_km"]
+    # highway × slow is never assigned (see trip_factors), so it has no cell.
+    assert not any(g["road"] == "highway" and g["traffic"] == "slow" for g in m["grid"])
+
+    # Per trip: the 5%-better trip reads 5% better than its conditions.
+    good = next(t for t in trips if t.outside_temp_c == 34.0 and t.distance_km == 20.0)
+    e = trip_efficiency(good, "SC", m, {})
+    assert e["vs_expected_pct"] == pytest.approx(-5.0, abs=0.5)
+    assert e["expected_wh_per_km"] == pytest.approx(130 * 1.10 * 1.06, rel=0.01)
+
+    # Too few trips: no fit, and the trip falls back to the tertile band.
+    small = range_model(trips[:RANGE_MODEL_MIN_TRIPS - 1], capacity_kwh=68.6)
+    assert small["available"] is False
+    assert trip_efficiency(good, "SC", small, {})["expected_wh_per_km"] is None
 
 
 def test_the_matrix_splits_into_weekdays_and_weekends():

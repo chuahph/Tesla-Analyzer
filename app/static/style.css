@@ -1595,3 +1595,10 @@ footer { padding: 18px 28px; color: var(--muted); font-size: 12px; border-top: 1
   cursor: pointer; font-size: .84rem; color: var(--muted);
   padding: .35rem 0;
 }
+/* Range model: sized to fit a phone without sideways scrolling, unlike the
+   wider .mx-table — three columns, the conditions folded into one cell. */
+.rm-table { width: 100%; border-collapse: collapse; margin-top: 8px; font-size: 13px; }
+.rm-table th { text-align: right; font-size: 11px; font-weight: 600; opacity: .6; padding: 4px 6px; }
+.rm-table td { text-align: right; padding: 5px 6px; border-top: 1px solid rgba(255,255,255,.08); vertical-align: top; }
+.rm-table th:first-child, .rm-table td:first-child { text-align: left; }
+#range-model .mx-sub { display: block; font-size: 11px; opacity: .6; }
