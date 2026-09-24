@@ -11,7 +11,10 @@ from typing import Any
 
 from .. import sync as sync_mod
 from ..models import Charge, Drive
-from . import has_valid_energy, haversine_km, linregress, mean, percentile, safe_div
+from . import (
+    MIN_PLAUSIBLE_WH_PER_KM, has_valid_energy, haversine_km, linregress, mean,
+    percentile, safe_div,
+)
 
 # Minimum parked gap (hours) between two consecutive drives worth counting as
 # vampire drain — long enough to read as "parked/idle," not a quick errand
@@ -2665,6 +2668,26 @@ MODE_FAST_MAX_KMH = 130.0
 # pair, and falling through to it: a trip that touched 130 but averaged 75 is a
 # highway drive that was briefly fast, not a fast one.
 MODE_FAST_AVG_KMH = 91.0
+# Wh/km's share of the verdict. After speed has split highway from city, each
+# group is decided by one blended score: its speed or steadiness figure times
+# (energy against what was expected) to this power. 0 switches efficiency off
+# and gives back the pure speed/steadiness rules; 1 lets a trip that used a
+# third less energy than expected score a third higher.
+#
+# "Expected" is this car's own typical Wh/km for that road type
+# (mode_references), adjusted for the trip's temperature — so an ordinary trip
+# scores exactly as it would with efficiency off, and only an unusually frugal
+# or thirsty one moves. On the highway, MORE energy than expected pushes toward
+# FH (that is what driving fast costs); in the city, LESS pushes toward CC.
+MODE_EFFICIENCY_WEIGHT = 0.5
+# How much more a trip is expected to use per degree above MODE_HEAT_REF_C,
+# in percent — the air conditioning working harder. Applied both when the
+# road-type reference is measured and when a trip is compared against it.
+MODE_HEAT_PCT_PER_C = 1.0
+MODE_HEAT_REF_C = 25.0
+# Trips of a road type needed before its reference Wh/km is trusted; below
+# this the efficiency term stays neutral for that road type.
+MODE_REFERENCE_MIN_TRIPS = 5
 
 
 def resolved_cuts(cuts: dict[str, float] | None = None) -> dict[str, float]:
@@ -2686,8 +2709,64 @@ def resolved_cuts(cuts: dict[str, float] | None = None) -> dict[str, float]:
         "highway_avg_kmh": MODE_HIGHWAY_AVG_KMH,
         "fast_max_kmh": MODE_FAST_MAX_KMH,
         "fast_avg_kmh": MODE_FAST_AVG_KMH,
+        "efficiency_weight": MODE_EFFICIENCY_WEIGHT,
+        "heat_pct_per_c": MODE_HEAT_PCT_PER_C,
     }
-    return {k: float(c.get(k, v)) for k, v in defaults.items()}
+    out = {k: float(c.get(k, v)) for k, v in defaults.items()}
+    # Measured from the car's history (mode_references), not configured, so
+    # they have no default: absent means the efficiency term stays neutral.
+    for k in ("city_wh_ref", "highway_wh_ref"):
+        if c.get(k):
+            out[k] = float(c[k])
+    return out
+
+
+def _heat(temp: Any, c: dict[str, float]) -> float:
+    """Expected consumption multiplier for this outside temperature."""
+    t = float(temp) if temp is not None else MODE_HEAT_REF_C
+    return 1.0 + c["heat_pct_per_c"] / 100.0 * max(0.0, t - MODE_HEAT_REF_C)
+
+
+def _is_highway(avg: float, mx: float, c: dict[str, float]) -> bool:
+    return mx >= c["highway_max_kmh"] and avg >= c["highway_avg_kmh"]
+
+
+def _energy_vs_expected(d: Any, highway: bool, c: dict[str, float]) -> float | None:
+    """This trip's Wh/km over what its road type and temperature predict, or
+    None when either side is unknown (no energy, no reference yet)."""
+    ref = c.get("highway_wh_ref" if highway else "city_wh_ref")
+    km = float(getattr(d, "distance_km", 0.0) or 0.0)
+    kwh = float(getattr(d, "energy_used_kwh", 0.0) or 0.0)
+    if not ref or km <= 0 or kwh <= 0:
+        return None
+    wh = kwh * 1000.0 / km
+    if wh < MIN_PLAUSIBLE_WH_PER_KM:
+        return None
+    return wh / (ref * _heat(getattr(d, "outside_temp_c", None), c))
+
+
+def mode_references(drives: list[Any], cuts: dict[str, float] | None = None) -> dict[str, float]:
+    """This car's typical Wh/km per road type, normalised to MODE_HEAT_REF_C —
+    the "expected" the blended mode score compares each trip against.
+
+    Split by road type on speed alone (the same bars drive_mode splits on
+    first), never by mode, so the reference cannot depend on the verdict it
+    feeds. Median, so one broken energy reading cannot move it.
+    """
+    c = resolved_cuts(cuts)
+    by_road: dict[str, list[float]] = {"city_wh_ref": [], "highway_wh_ref": []}
+    for d in drives:
+        if not has_valid_energy(d):
+            continue
+        dur = float(getattr(d, "duration_min", 0.0) or 0.0)
+        dist = float(getattr(d, "distance_km", 0.0) or 0.0)
+        mx = float(getattr(d, "max_speed_kmh", 0.0) or 0.0)
+        if dur <= 0 or dist <= 0 or mx <= 0:
+            continue
+        key = "highway_wh_ref" if _is_highway(dist / (dur / 60.0), mx, c) else "city_wh_ref"
+        by_road[key].append(float(d.wh_per_km) / _heat(getattr(d, "outside_temp_c", None), c))
+    return {k: round(percentile(v, 0.5), 1) for k, v in by_road.items()
+            if len(v) >= MODE_REFERENCE_MIN_TRIPS}
 
 
 def mode_split(d: Any, cuts: dict[str, float] | None = None) -> dict[str, dict[str, float]]:
@@ -2771,7 +2850,9 @@ def mode_split(d: Any, cuts: dict[str, float] | None = None) -> dict[str, dict[s
         city = whole if whole in ("CC", "SC", "HC") else drive_mode(
             SimpleTrip(km=leftover["km"], mins=leftover["min"],
                        mx=city_peak,
-                       idle=float(getattr(d, "idle_min", 0.0) or 0.0)), cuts)
+                       idle=float(getattr(d, "idle_min", 0.0) or 0.0),
+                       kwh=leftover["kwh"],
+                       temp=getattr(d, "outside_temp_c", None)), cuts)
         add(city or "HC", leftover)
 
     # The profile is sampled from records and the trip's own totals come from
@@ -2801,13 +2882,19 @@ class SimpleTrip:
     silently.
     """
 
-    __slots__ = ("distance_km", "duration_min", "max_speed_kmh", "idle_min")
+    __slots__ = ("distance_km", "duration_min", "max_speed_kmh", "idle_min",
+                 "energy_used_kwh", "outside_temp_c")
 
-    def __init__(self, km: float, mins: float, mx: float, idle: float = 0.0):
+    def __init__(self, km: float, mins: float, mx: float, idle: float = 0.0,
+                 kwh: float = 0.0, temp: float | None = None):
         self.distance_km = km
         self.duration_min = mins
         self.max_speed_kmh = mx
         self.idle_min = idle
+        # The part's own energy and the trip's temperature, so the blended
+        # score can weigh a part's efficiency as it does a whole trip's.
+        self.energy_used_kwh = kwh
+        self.outside_temp_c = temp
 
 
 def speed_profile_of(d: Any) -> dict[str, dict[str, float]] | None:
@@ -2914,34 +3001,47 @@ def drive_mode_explained(d: Any, cuts: dict[str, float] | None = None) -> dict[s
         out["why"] = (f"{idle / dur * 100:.0f}% of it was spent genuinely "
                       f"waiting, past the {heavy_idle * 100:.0f}% mark — heavy "
                       f"whatever the speeds looked like")
-    elif mx >= fast_max and avg >= fast_avg:
-        out["why"] = (f"peaked at {mx:.0f} and AVERAGED {avg:.0f} — clears "
-                      f"both fast bars ({fast_max:.0f} peak, {fast_avg:.0f} "
-                      f"average)")
-    elif mx >= hw_max and avg >= hw_avg:
-        missed = []
-        if mx < fast_max:
-            missed.append(f"peaked at {mx:.0f}, under the {fast_max:.0f} FH bar")
-        if avg < fast_avg:
-            missed.append(f"averaged {avg:.0f}, under the {fast_avg:.0f} FH bar")
-        out["why"] = (f"over the highway bars ({hw_max:.0f} peak, "
-                      f"{hw_avg:.0f} average) — but " + " and ".join(missed))
-    elif ratio < slow:
-        out["why"] = (f"held only {ratio:.2f} of its own peak, under the "
-                      f"{slow:.2f} slow cut — repeatedly stopped")
-    elif ratio < constant:
-        out["why"] = (f"held {ratio:.2f} of its peak, between the {slow:.2f} "
-                      f"and {constant:.2f} cuts — moving, but well under "
-                      f"itself a fair part of the time")
     else:
-        missed = []
-        if mx < hw_max:
-            missed.append(f"peaked at {mx:.0f}, under the {hw_max:.0f} bar")
-        if avg < hw_avg:
-            missed.append(f"averaged {avg:.0f}, under the {hw_avg:.0f} bar")
-        out["why"] = (f"held {ratio:.2f} of its peak, at or above the "
-                      f"{constant:.2f} constant cut, but not at highway pace — "
-                      + " and ".join(missed))
+        w = c["efficiency_weight"]
+        highway = _is_highway(avg, mx, c)
+        e = _energy_vs_expected(d, highway, c)
+        ref = c.get("highway_wh_ref" if highway else "city_wh_ref")
+        if e is not None:
+            out["energy_vs_expected"] = round(e, 3)
+            # The energy half of the score, said in the same breath as the
+            # speed half — a label that moved because of it has to say so.
+            energy = (f"; used {abs(e - 1) * 100:.0f}% "
+                      f"{'more' if e > 1 else 'less'} than this car's typical "
+                      f"{'highway' if highway else 'city'} "
+                      f"{ref * _heat(getattr(d, 'outside_temp_c', None), c):.0f} Wh/km "
+                      f"at {float(getattr(d, 'outside_temp_c', 0) or 0):.0f}°C, "
+                      f"×{(e if highway else 1 / e) ** w:.2f} at weight {w:g}")
+        else:
+            energy = "; no energy reference yet, so speed alone decided"
+        if highway:
+            base = min(avg / fast_avg, mx / fast_max)
+            score = base * ((e ** w) if e else 1.0)
+            out["score"] = round(score, 3)
+            missed = []
+            if mx < fast_max:
+                missed.append(f"peaked at {mx:.0f}, under the {fast_max:.0f} FH bar")
+            if avg < fast_avg:
+                missed.append(f"averaged {avg:.0f}, under the {fast_avg:.0f} FH bar")
+            bars = (" and ".join(missed) if missed else
+                    f"peaked at {mx:.0f} and AVERAGED {avg:.0f} — clears both "
+                    f"fast bars ({fast_max:.0f} peak, {fast_avg:.0f} average)")
+            out["why"] = (f"over the highway bars ({hw_max:.0f} peak, "
+                          f"{hw_avg:.0f} average); {bars}, {base:.2f} of the way"
+                          f"{energy} — score {score:.2f}, "
+                          f"{'at or over' if score >= 1 else 'under'} 1.00 for FH")
+        else:
+            score = ratio * (((1.0 / e) ** w) if e else 1.0)
+            out["score"] = round(score, 3)
+            band = ("at or above the constant cut" if score >= constant
+                    else "between the cuts" if score >= slow
+                    else "under the slow cut")
+            out["why"] = (f"city pace; held {ratio:.2f} of its peak{energy} — "
+                          f"score {score:.2f}, {band} ({slow:.2f} / {constant:.2f})")
     return out
 
 
@@ -2990,13 +3090,23 @@ def drive_mode(d: Any, cuts: dict[str, float] | None = None) -> str | None:
     # whole trip in city traffic, however variable the trip was. So averaging
     # up there IS the evidence of a highway, and how steady it felt is a
     # separate question that only becomes interesting below that speed.
-    if mx >= fast_max and avg >= fast_avg:
-        return "FH"
-    if mx >= hw_max and avg >= hw_avg:
-        return "CH"
-    if ratio >= constant:
+    c2 = resolved_cuts(c)
+    w = c2["efficiency_weight"]
+    if _is_highway(avg, mx, c2):
+        # One score for the highway: how far up the fast bars it got — min()
+        # of the two, so it takes BOTH to reach 1, exactly as the old pair of
+        # tests did — times its energy against expected. Thirstier than
+        # expected reads faster, because that is what speed costs.
+        e = _energy_vs_expected(d, True, c2)
+        score = min(avg / fast_avg, mx / fast_max) * ((e ** w) if e else 1.0)
+        return "FH" if score >= 1.0 else "CH"
+    # And one for the city: steadiness times expected over actual energy, so
+    # a frugal trip reads steadier and a thirsty one heavier.
+    e = _energy_vs_expected(d, False, c2)
+    score = ratio * (((1.0 / e) ** w) if e else 1.0)
+    if score >= constant:
         return "CC"
-    return "SC" if ratio >= slow else "HC"
+    return "SC" if score >= slow else "HC"
 
 
 # How a trip's own Wh/km compares to its PEERS' — other trips sorted into the

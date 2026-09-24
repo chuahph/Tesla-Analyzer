@@ -2824,6 +2824,8 @@ function setupMatrixModal() {
     highway_avg_kmh: document.getElementById("cut-hwavg"),
     fast_max_kmh: document.getElementById("cut-fastmax"),
     fast_avg_kmh: document.getElementById("cut-fastavg"),
+    efficiency_weight: document.getElementById("cut-effweight"),
+    heat_pct_per_c: document.getElementById("cut-heatpct"),
   };
   // Which days the table is showing. Held here rather than re-fetched per tab:
   // all three splits arrive in one payload, computed against one set of

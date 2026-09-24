@@ -569,6 +569,10 @@
               <input id="cut-fastmax" type="number" step="1" min="1" max="300" required></label>
             <label>…and an average of at least (km/h)
               <input id="cut-fastavg" type="number" step="1" min="1" max="300" required></label>
+            <label>How much Wh/km counts (0 = speed and steadiness only)
+              <input id="cut-effweight" type="number" step="0.1" min="0" max="2" required></label>
+            <label>Extra energy expected per °C above 25°C (%)
+              <input id="cut-heatpct" type="number" step="0.1" min="0" max="10" required></label>
             <button type="submit" class="btn">Redraw</button>
           </form>
           <p id="matrix-msg" class="modal-sub"></p>

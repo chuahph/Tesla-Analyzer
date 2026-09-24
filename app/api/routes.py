@@ -5294,7 +5294,7 @@ def compare_vehicles(days: int = Query(30, ge=1, le=730), session: Session = Dep
             vampire_rate_history=_full_history(session, vehicle.id),
         vampire_place_rates=_place_parked_rates(session),
         vampire_readings=_parked_readings(session, vehicle.id),
-        vampire_frozen=_frozen_rates(session), mode_cuts=_mode_cuts(session))
+        vampire_frozen=_frozen_rates(session), mode_cuts=_classify_cuts(session, vehicle.id))
         charging = charging_analysis.analyze(charges, drives)
         readings = _newest_readings(
             session, vehicle.id,
@@ -8804,7 +8804,8 @@ def self_check(days: int = Query(30, ge=1, le=730),
 # disappears.
 MODE_CUT_KEYS = ("constant_ratio_min", "slow_ratio_min", "heavy_idle_share_max",
                  "highway_max_kmh", "highway_avg_kmh",
-                 "fast_max_kmh", "fast_avg_kmh")
+                 "fast_max_kmh", "fast_avg_kmh",
+                 "efficiency_weight", "heat_pct_per_c")
 
 
 def _mode_cuts(session: Session) -> dict[str, float]:
@@ -8836,6 +8837,26 @@ def _mode_cuts(session: Session) -> dict[str, float]:
     return out
 
 
+def _classify_cuts(session: Session, vehicle_id: int | None = None) -> dict[str, float]:
+    """The saved cut-points plus this car's measured reference Wh/km per road
+    type — what every CLASSIFYING caller passes to drive_mode.
+
+    Kept apart from _mode_cuts because set_mode_thresholds starts from that
+    one and saves what it returns: measured references would be frozen into
+    the settings there and never move again as the car's history grows.
+    Measured from the cached streamed history (_efficiency_peers), so this
+    costs no query of its own on a warm cache.
+    """
+    cuts = dict(_mode_cuts(session))
+    if vehicle_id is None:
+        vehicle = session.scalars(select(Vehicle)).first()
+        vehicle_id = vehicle.id if vehicle else None
+    if vehicle_id is not None:
+        cuts.update(driving_analysis.mode_references(
+            _efficiency_peers(_full_history(session, vehicle_id)[0]), cuts))
+    return cuts
+
+
 @router.post("/driving-matrix/thresholds")
 def set_mode_thresholds(payload: dict = Body(...),
                         session: Session = Depends(get_session)):
@@ -8860,6 +8881,10 @@ def set_mode_thresholds(payload: dict = Body(...),
                 422, f"{k} is a share, so it must be between 0 and 1")
         if k.endswith("_kmh") and not 0.0 < v <= 300.0:
             raise HTTPException(422, f"{k} must be a plausible speed")
+        if k == "efficiency_weight" and not 0.0 <= v <= 2.0:
+            raise HTTPException(422, "efficiency_weight must be between 0 (off) and 2")
+        if k == "heat_pct_per_c" and not 0.0 <= v <= 10.0:
+            raise HTTPException(422, "heat_pct_per_c must be between 0 and 10")
         cuts[k] = v
     con = cuts.get("constant_ratio_min", driving_analysis.MODE_CONSTANT_RATIO)
     slo = cuts.get("slow_ratio_min", driving_analysis.MODE_SLOW_RATIO)
@@ -9017,7 +9042,7 @@ def driving_matrix_trips(days: int = Query(30, ge=1, le=730),
     if drawn and drawn[0] > since:
         since = drawn[0]
     drives, _ = _window(session, vehicle.id, days, since=since)
-    cuts = _mode_cuts(session)
+    cuts = _classify_cuts(session, vehicle.id)
     rows = []
     for d in drives:
         row = driving_analysis.drive_mode_explained(d, cuts)
@@ -9137,7 +9162,7 @@ def driving_matrix(days: int = Query(30, ge=1, le=730),
     # cannot drift away from the rated figure the eco score already uses.
     baseline = (capacity_kwh * 1000.0 / settings.rated_wh_per_km
                 if settings.rated_wh_per_km else None)
-    cuts = _mode_cuts(session)
+    cuts = _classify_cuts(session, vehicle.id)
     split = driving_analysis.split_matrices(
         list(drives), capacity_kwh, baseline_range_km=baseline, cuts=cuts)
     # The overall figures stay at the top level, where they were, and the two
@@ -11810,7 +11835,7 @@ def summary(
         vampire_place_rates=_hist("place_rates", _place_parked_rates, session),
         vampire_readings=_hist("parked_readings", _parked_readings, session, vehicle.id),
         vampire_frozen=_hist("frozen_rates", _frozen_rates, session),
-        mode_cuts=_mode_cuts(session),
+        mode_cuts=_classify_cuts(session, vehicle.id),
         efficiency_peers=_efficiency_peers(
             _hist("full_history", _full_history, session, vehicle.id)[0]))
     _mark("driving")

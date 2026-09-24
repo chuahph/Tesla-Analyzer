@@ -4230,3 +4230,61 @@ def test_a_streamed_trips_measured_energy_is_not_overridden_by_its_soc_drop():
     blank = trip(3, 0.0, 3.0, "telemetry")
     assert driving_analysis.analyze([blank], capacity_kwh=cap)[
         "trip_energy_used_kwh"] == pytest.approx(2.06, abs=0.05)
+
+
+def test_wh_per_km_blends_into_the_mode_after_speed_splits_the_road():
+    """Speed first decides highway vs city; then one score per road type,
+    with Wh/km against this car's own typical for that road type (adjusted
+    for temperature) blended in. A typical trip classifies exactly as the
+    speed/steadiness rules alone would; a frugal city trip moves toward CC,
+    a thirsty highway trip toward FH.
+    """
+    from app.analysis.driving import (
+        drive_mode, drive_mode_explained, mode_references, resolved_cuts)
+
+    class D:
+        def __init__(self, km, mins, mx, wh, temp=25.0, idle=0.0):
+            self.distance_km = km; self.duration_min = mins
+            self.max_speed_kmh = mx; self.idle_min = idle
+            self.idle_tracked = True; self.energy_estimated = False
+            self.outside_temp_c = temp
+            self.energy_used_kwh = wh * km / 1000.0
+            self.wh_per_km = wh
+
+    # City history averaging 140 Wh/km at 25°C; highway history at 160.
+    history = ([D(20.0, 40.0, 70.0, wh) for wh in (130, 135, 140, 145, 150)]
+               + [D(80.0, 48.0, 118.0, wh) for wh in (150, 155, 160, 165, 170)])
+    refs = mode_references(history)
+    assert refs == {"city_wh_ref": 140.0, "highway_wh_ref": 160.0}
+    cuts = {**refs}
+
+    # Trip 3008's shape: 9.4 km in 13 min, peak 89 — steadiness 0.49, SC.
+    def trip(wh, temp=25.0):
+        return D(9.4, 13.0, 89.0, wh, temp)
+    assert drive_mode(trip(140)) == "SC"              # no references: speed only
+    assert drive_mode(trip(140), cuts) == "SC"        # exactly typical: unchanged
+    assert drive_mode(trip(105), cuts) == "CC"        # 25% under typical -> CC
+    assert drive_mode(trip(115), cuts) == "SC"        # 18% under: not enough
+    assert drive_mode(trip(250), cuts) == "SC"        # 79% over: still SC
+    assert drive_mode(trip(450), cuts) == "HC"        # over 3x typical -> HC
+    # Heat raises "typical": 140 at 35°C is 10% under what 35°C predicts.
+    assert drive_mode(trip(140, temp=35.0), cuts) == "SC"
+    e = drive_mode_explained(trip(140, temp=35.0), cuts)
+    assert e["energy_vs_expected"] == pytest.approx(140 / (140 * 1.10), abs=0.001)
+
+    # Weight 0 switches efficiency off entirely.
+    assert drive_mode(trip(105), {**cuts, "efficiency_weight": 0.0}) == "SC"
+
+    # Highway: 80 km/h average, peak 125 — CH on speed alone (under both
+    # fast bars). Much thirstier than this car's highway typical pushes it
+    # over into FH; a typical one stays CH.
+    hw = D(80.0, 60.0, 125.0, 160)
+    assert drive_mode(hw, cuts) == "CH"
+    thirsty = D(80.0, 60.0, 125.0, 300)
+    assert drive_mode(thirsty, cuts) == "FH"
+    why = drive_mode_explained(thirsty, cuts)["why"]
+    assert "more than this car's typical highway" in why and "score" in why
+
+    # Genuine waiting still overrides everything.
+    assert drive_mode(D(30.0, 60.0, 40.0, 100, idle=32.0), cuts) == "HC"
+    assert resolved_cuts(cuts)["city_wh_ref"] == 140.0
