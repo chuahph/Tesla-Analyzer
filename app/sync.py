@@ -1789,8 +1789,22 @@ def advance_shadow(shadow: dict[str, Any], snap: dict[str, Any]) -> dict[str, An
                     band = str(int(min(kmh // 10.0 * 10.0, 160.0)))
                     bands = shadow.setdefault("bands", {})
                     slot = bands.setdefault(band, [0.0, 0.0, 0.0])
+                    # The same step again, filed under the kind of ROAD it was
+                    # driven on (app/roads.py): "highway" for an expressway or
+                    # trunk road on the map, "city" for anything else, and
+                    # "unknown" before the road network has loaded. Kept
+                    # beside the speed bands rather than instead of them, so
+                    # a trip can be split by the road it used and still
+                    # describe the traffic on each part by its speeds.
+                    from . import roads as _roads
+
+                    road = _roads.road_class(snap.get("lat"), snap.get("lon")) or "unknown"
+                    rslot = (shadow.setdefault("road_bands", {})
+                             .setdefault(road, {}).setdefault(band, [0.0, 0.0, 0.0]))
                     slot[0] += step_km
                     slot[1] += band_span
+                    rslot[0] += step_km
+                    rslot[1] += band_span
                     e_a, e_b = shadow.get("band_e"), snap.get("energy_kwh")
                     if e_a is not None and e_b is not None:
                         used = float(e_a) - float(e_b)
@@ -1800,6 +1814,7 @@ def advance_shadow(shadow: dict[str, Any], snap: dict[str, Any]) -> dict[str, An
                         # car.
                         if abs(used) < 5.0:
                             slot[2] += used
+                            rslot[2] += used
                     shadow["band_odo"] = float(odo_now)
                     shadow["band_ts"] = ts
                     shadow["band_e"] = snap.get("energy_kwh")
@@ -1879,6 +1894,7 @@ def advance_shadow(shadow: dict[str, Any], snap: dict[str, Any]) -> dict[str, An
             shadow.pop("temp_sec", None)
             shadow.pop("temp_sum", None)
             shadow.pop("bands", None)
+            shadow.pop("road_bands", None)
             # The band anchor starts where the journey does — odometer, clock
             # and energy counter together, so the first stretch is measured
             # from the trip's own beginning rather than from wherever the
@@ -2433,6 +2449,7 @@ def _shadow_close(shadow: dict[str, Any], end: dict[str, Any],
     temp_sec = float(shadow.pop("temp_sec", 0.0) or 0.0)
     temp_sum = float(shadow.pop("temp_sum", 0.0) or 0.0)
     bands = shadow.pop("bands", None)
+    road_bands = shadow.pop("road_bands", None) or {}
     # The anchor goes with the histogram it feeds, for the same reason e_ts
     # does: left behind, the next trip's first step would be measured from
     # this one's last odometer reading, across the park in between.
@@ -2542,6 +2559,11 @@ def _shadow_close(shadow: dict[str, Any], end: dict[str, Any],
         # numbers can be put in one box, and cannot be described as partly one
         # thing and partly another.
         "speed_bands": _bands_out(bands),
+        # The same, per kind of road: {"highway"|"city"|"unknown": bands}.
+        # None when the road network was never loaded during the trip.
+        "road_bands": ({road: out for road, b in road_bands.items()
+                        if (out := _bands_out(b))} or None)
+        if any(r != "unknown" for r in road_bands) else None,
         "stops": stops,
         "climate_min": round(climate_sec / 60.0, 1),
         "soc_start": start.get("soc"),

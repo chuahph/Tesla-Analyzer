@@ -1925,3 +1925,84 @@ def test_the_bands_survive_the_odometer_arriving_slower_than_the_records():
         if km > 0.5:
             assert 40.0 <= float(edge) <= 90.0, f"{km:.1f} km filed at {edge} km/h"
             assert kwh * 1000.0 / km == pytest.approx(150.0, abs=30.0), bands
+
+
+def test_road_lookup_places_a_point_on_or_off_the_expressway(tmp_path, monkeypatch):
+    """app/roads.py: an expressway polyline, a point on it, a point 200 m off
+    it, and the answer None before any network has loaded — the signal every
+    caller uses to fall back to the speed rule."""
+    from app import roads
+
+    roads.clear()
+    assert roads.road_class(5.30, 100.30) is None
+    # An east-west expressway along latitude 5.30.
+    roads.set_network([[[5.30, 100.20], [5.30, 100.40]]])
+    assert roads.road_class(5.30, 100.30) == "highway"
+    assert roads.road_class(5.3001, 100.30) == "highway"       # ~11 m off
+    assert roads.road_class(5.3018, 100.30) == "city"          # ~200 m off
+    assert roads.road_class(None, None) is None
+    assert roads.status()["state"] == "loaded"
+
+    # Download path, with Overpass mocked: parsed, simplified, cached, and
+    # loaded back from the cache on the next start without a download.
+    class R:
+        def raise_for_status(self): pass
+        def json(self):
+            geom = [{"lat": 5.30, "lon": 100.20 + i * 0.001} for i in range(201)]
+            return {"elements": [{"type": "way", "geometry": geom}]}
+    calls = []
+    monkeypatch.setattr("httpx.post", lambda *a, **k: calls.append(1) or R())
+    monkeypatch.setattr(roads, "CACHE_PATH", str(tmp_path / "roads.json"))
+    monkeypatch.setattr(roads, "_last_attempt", 0.0)
+    roads.clear()
+    roads.ensure_loaded(background=False)
+    assert calls and roads.road_class(5.30, 100.30) == "highway"
+    # A straight line of 201 nodes simplifies to its two ends.
+    assert roads.status()["segments"] == 1
+    roads.clear()
+    calls.clear()
+    roads.ensure_loaded(background=False)
+    assert not calls, "the cache should have answered"
+    assert roads.road_class(5.30, 100.30) == "highway"
+    roads.clear()
+
+
+def test_the_shadow_files_each_kilometre_under_the_road_it_was_driven_on():
+    """Kilometres on the expressway go under "highway" whatever the speed —
+    a jam included — and kilometres off it under "city", so a trip can later
+    be split by the road it used as well as by its speeds."""
+    from app import roads, sync as sync_mod
+
+    roads.set_network([[[5.30, 100.20], [5.30, 100.60]]])
+    try:
+        shadow: dict = {}
+        ts, odo, energy = 1_789_000_000.0, 1000.0, 60.0
+        # 12 steps at 100 km/h on the expressway, 12 crawling at 20 on it,
+        # then 12 at 40 in town 1 km north of it.
+        plan = [(100.0, 5.30, 12), (20.0, 5.30, 12), (40.0, 5.31, 12)]
+        lon = 100.21
+        for kmh, lat, steps in plan:
+            for _ in range(steps):
+                step_km = kmh * 30.0 / 3600.0
+                odo += step_km
+                energy -= step_km * 0.15
+                lon += step_km / 111.0
+                sync_mod.advance_shadow(shadow, {
+                    "ts": ts, "shift": "D", "speed_kmh": kmh, "odo_km": odo,
+                    "energy_kwh": energy, "soc": 80.0, "range_km": 300.0,
+                    "out_temp": 30.0, "climate_on": False, "sentry_mode": False,
+                    "lat": lat, "lon": lon})
+                ts += 30.0
+        rb = shadow.get("road_bands") or {}
+        hw = sum(v[0] for v in (rb.get("highway") or {}).values())
+        town = sum(v[0] for v in (rb.get("city") or {}).values())
+        # Both the fast and the crawling stretch were on the expressway.
+        assert hw == pytest.approx(12 * 100 / 120 + 12 * 20 / 120, rel=0.15)
+        assert town == pytest.approx(12 * 40 / 120, rel=0.2)
+        assert any(float(k) < 30 for k in rb["highway"]), "the jam was banded slow"
+
+        # And the finished trip carries it out as road_bands.
+        done = sync_mod.settle_shadow(shadow, ts + 7200)
+        assert done and set(done["road_bands"]) >= {"highway", "city"}
+    finally:
+        roads.clear()

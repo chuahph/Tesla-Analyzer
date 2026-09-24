@@ -4288,3 +4288,69 @@ def test_wh_per_km_blends_into_the_mode_after_speed_splits_the_road():
     # Genuine waiting still overrides everything.
     assert drive_mode(D(30.0, 60.0, 40.0, 100, idle=32.0), cuts) == "HC"
     assert resolved_cuts(cuts)["city_wh_ref"] == 140.0
+
+
+def test_the_map_decides_highway_and_a_slow_expressway_is_sh():
+    """With a road profile the ROAD comes from the map and speed only
+    describes the traffic: highway = FH / CH / SH, city = CC / SC / HC.
+
+    SH is what speed alone could never produce — an expressway driven below
+    highway pace, which the speed rule calls city.
+    """
+    import json as _json
+
+    from app.analysis.driving import (
+        MATRIX_DEFINITIONS, drive_mode, drive_mode_explained, mode_split)
+
+    def band(km, mins, kwh):
+        return {"km": km, "min": mins, "kwh": kwh}
+
+    class D:
+        def __init__(self, km, mins, mx, profile=None, idle=0.0, wh=150.0):
+            self.distance_km = km; self.duration_min = mins
+            self.max_speed_kmh = mx; self.idle_min = idle
+            self.idle_tracked = True; self.energy_estimated = False
+            self.outside_temp_c = 30.0
+            self.energy_used_kwh = wh * km / 1000.0
+            self.wh_per_km = wh
+            self.road_profile = _json.dumps(profile) if profile else None
+
+    # 12 km on the Penang Bridge at 30 km/h: the speed rule says city (SC or
+    # CC); the map says highway, below pace -> SH.
+    jam = D(12.0, 24.0, 55.0, {"highway": {"20": band(12.0, 24.0, 1.8)}})
+    assert drive_mode(D(12.0, 24.0, 55.0)) in ("CC", "SC")
+    assert drive_mode(jam) == "SH"
+    why = drive_mode_explained(jam)["why"]
+    assert "expressway" in why and "congestion" in why
+
+    # The same bridge at 100 with a 110 peak: CH.
+    open_road = D(20.0, 12.0, 110.0, {"highway": {"100": band(20.0, 12.0, 3.2)}})
+    assert drive_mode(open_road) == "CH"
+
+    # A fast ordinary road the map does not list: the speed rule would call it
+    # highway (avg 80, peak 105); the map says city.
+    fast_trunkless = D(20.0, 15.0, 105.0, {"city": {"80": band(20.0, 15.0, 3.0)}})
+    assert drive_mode(D(20.0, 15.0, 105.0)) == "CH"
+    assert drive_mode(fast_trunkless) in ("CC", "SC", "HC")
+
+    # A long wait on the expressway is a jammed highway, not heavy city.
+    stuck = D(10.0, 60.0, 60.0, {"highway": {"10": band(10.0, 60.0, 1.5)}}, idle=30.0)
+    assert drive_mode(stuck) == "SH"
+
+    # Too little of the trip placed on the map: the speed rule decides.
+    unplaced = D(20.0, 12.0, 110.0, {"unknown": {"100": band(18.0, 11.0, 2.9)},
+                                      "highway": {"100": band(2.0, 1.0, 0.3)}})
+    assert drive_mode(unplaced) == "CH"
+
+    # A mixed trip splits by road: the expressway part on its own speeds (a
+    # jam -> SH), the town part on its own (-> a city mode).
+    mixed = D(20.0, 40.0, 70.0, {
+        "highway": {"20": band(8.0, 24.0, 1.3)},
+        "city": {"40": band(12.0, 16.0, 1.7)}})
+    parts = mode_split(mixed)
+    assert set(parts) & {"SH"} and set(parts) & {"CC", "SC", "HC"}, parts
+    assert sum(p["km"] for p in parts.values()) == pytest.approx(20.0)
+
+    # The matrix lists all six, highway three first.
+    codes = [m["code"] for m in MATRIX_DEFINITIONS["modes"]][:6]
+    assert codes == ["FH", "CH", "SH", "CC", "SC", "HC"]

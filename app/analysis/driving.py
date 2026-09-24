@@ -1810,6 +1810,7 @@ def score_grade(score: int) -> str:
 MODE_NAMES = {
     "FH": "Fast Highway",
     "CH": "Constant Highway",
+    "SH": "Slow Highway",
     "CC": "Constant City",
     "SC": "Slow City",
     "HC": "Heavy City",
@@ -2731,6 +2732,65 @@ def _is_highway(avg: float, mx: float, c: dict[str, float]) -> bool:
     return mx >= c["highway_max_kmh"] and avg >= c["highway_avg_kmh"]
 
 
+# Road lookup (app/roads.py) has to have placed at least this share of a
+# trip's banded kilometres before the trip is judged by the map; below it the
+# speed rule decides, as for every trip before road lookup existed.
+ROAD_KNOWN_MIN_SHARE = 0.5
+# And a trip is a highway one when at least this share of its placed
+# kilometres were on an expressway or trunk road.
+ROAD_HIGHWAY_MIN_SHARE = 0.5
+
+
+def road_profile_of(d: Any) -> dict[str, dict[str, dict[str, float]]] | None:
+    """A trip's stored road profile, parsed: {road: {band: {km, min, kwh}}}."""
+    raw = getattr(d, "road_profile", None)
+    if not raw:
+        return None
+    if isinstance(raw, dict):
+        return raw
+    try:
+        got = _json.loads(raw)
+    except (TypeError, ValueError):
+        return None
+    return got if isinstance(got, dict) else None
+
+
+def road_totals(d: Any) -> dict[str, dict[str, float]]:
+    """{road: {km, min, kwh, peak}} summed over each road's speed bands.
+    peak is the upper edge of the fastest band that road used."""
+    out: dict[str, dict[str, float]] = {}
+    for road, bands in (road_profile_of(d) or {}).items():
+        t = {"km": 0.0, "min": 0.0, "kwh": 0.0, "peak": 0.0}
+        for edge, part in (bands or {}).items():
+            try:
+                lower = float(edge)
+            except (TypeError, ValueError):
+                continue
+            for k in ("km", "min", "kwh"):
+                t[k] += float((part or {}).get(k) or 0.0)
+            t["peak"] = max(t["peak"], lower + 10.0)
+        out[road] = t
+    return out
+
+
+def road_verdict(d: Any) -> str | None:
+    """"highway", "city", or None to fall back to the speed rule.
+
+    A part-trip (SimpleTrip) can carry its road already decided; a whole trip
+    is judged by where its kilometres were driven, once enough of them were
+    placed on the map to judge by."""
+    forced = getattr(d, "road", None)
+    if forced in ("highway", "city"):
+        return forced
+    totals = road_totals(d)
+    known = sum(totals.get(r, {}).get("km", 0.0) for r in ("highway", "city"))
+    total = known + totals.get("unknown", {}).get("km", 0.0)
+    if total <= 0 or known / total < ROAD_KNOWN_MIN_SHARE:
+        return None
+    hw = totals.get("highway", {}).get("km", 0.0)
+    return "highway" if hw / known >= ROAD_HIGHWAY_MIN_SHARE else "city"
+
+
 def _energy_vs_expected(d: Any, highway: bool, c: dict[str, float]) -> float | None:
     """This trip's Wh/km over what its road type and temperature predict, or
     None when either side is unknown (no energy, no reference yet)."""
@@ -2763,57 +2823,20 @@ def mode_references(drives: list[Any], cuts: dict[str, float] | None = None) -> 
         mx = float(getattr(d, "max_speed_kmh", 0.0) or 0.0)
         if dur <= 0 or dist <= 0 or mx <= 0:
             continue
-        key = "highway_wh_ref" if _is_highway(dist / (dur / 60.0), mx, c) else "city_wh_ref"
+        road = road_verdict(d)
+        highway = (road == "highway") if road else _is_highway(dist / (dur / 60.0), mx, c)
+        key = "highway_wh_ref" if highway else "city_wh_ref"
         by_road[key].append(float(d.wh_per_km) / _heat(getattr(d, "outside_temp_c", None), c))
     return {k: round(percentile(v, 0.5), 1) for k, v in by_road.items()
             if len(v) >= MODE_REFERENCE_MIN_TRIPS}
 
 
-def mode_split(d: Any, cuts: dict[str, float] | None = None) -> dict[str, dict[str, float]]:
-    """How one trip divides across the modes: {mode: {km, min, kwh}}.
-
-    A trip is not necessarily one thing. Trip 735 covered 28 km at an average
-    of 75 with a peak of 160 — a motorway run with town at either end — and
-    whole-trip classification has to call that one category and be wrong about
-    most of it.
-
-    Where the stream recorded a speed profile, the highway share is split out
-    by MEASURED distance: the bands at or above each speed bar carry their own
-    kilometres, minutes and kWh, all three accumulated from the odometer and
-    the car's own EnergyRemaining over the stretches they happened in. Nothing
-    is apportioned — apportioning energy by distance would hand highway and
-    city the same Wh/km, which is the one distinction this whole table exists
-    to draw.
-
-    What is left over is city, and the city share keeps the whole-trip verdict
-    that drive_mode already reaches. That part is unchanged on purpose: telling
-    CC from SC from HC is a question about stopping rather than speed, and the
-    thresholds for doing it per-stretch would be invented rather than measured.
-    Measured where it can be measured, unchanged where it cannot.
-
-    A trip with no profile — everything written before the accumulator existed,
-    and anything polling wrote — comes back whole under its own mode, so the
-    two kinds live in one table without either pretending to be the other.
-    """
-    whole = drive_mode(d, cuts)
-    km = float(getattr(d, "distance_km", 0.0) or 0.0)
-    mins = float(getattr(d, "duration_min", 0.0) or 0.0)
-    kwh = float(getattr(d, "energy_used_kwh", 0.0) or 0.0)
-    if whole is None:
-        return {}
-    bands = speed_profile_of(d)
-    if not bands:
-        return {whole: {"km": km, "min": mins, "kwh": kwh}}
-
+def _split_by_speed(d: Any, bands: dict, whole: str, cuts: dict[str, float] | None,
+                    add: Any) -> None:
+    """mode_split for a trip with speed bands but no road profile: highway
+    parts by the speed bars, the remainder as one city part."""
     c = resolved_cuts(cuts)
     hw_max, fast_max = c["highway_max_kmh"], c["fast_max_kmh"]
-    out: dict[str, dict[str, float]] = {}
-
-    def add(mode: str, part: dict[str, float]) -> None:
-        slot = out.setdefault(mode, {"km": 0.0, "min": 0.0, "kwh": 0.0})
-        for k in ("km", "min", "kwh"):
-            slot[k] += part[k]
-
     leftover = {"km": 0.0, "min": 0.0, "kwh": 0.0}
     city_peak = 0.0
     for edge, part in bands.items():
@@ -2855,6 +2878,77 @@ def mode_split(d: Any, cuts: dict[str, float] | None = None) -> dict[str, dict[s
                        temp=getattr(d, "outside_temp_c", None)), cuts)
         add(city or "HC", leftover)
 
+
+
+def mode_split(d: Any, cuts: dict[str, float] | None = None) -> dict[str, dict[str, float]]:
+    """How one trip divides across the modes: {mode: {km, min, kwh}}.
+
+    A trip is not necessarily one thing. Trip 735 covered 28 km at an average
+    of 75 with a peak of 160 — a motorway run with town at either end — and
+    whole-trip classification has to call that one category and be wrong about
+    most of it.
+
+    Where the stream recorded a speed profile, the highway share is split out
+    by MEASURED distance: the bands at or above each speed bar carry their own
+    kilometres, minutes and kWh, all three accumulated from the odometer and
+    the car's own EnergyRemaining over the stretches they happened in. Nothing
+    is apportioned — apportioning energy by distance would hand highway and
+    city the same Wh/km, which is the one distinction this whole table exists
+    to draw.
+
+    What is left over is city, and the city share keeps the whole-trip verdict
+    that drive_mode already reaches. That part is unchanged on purpose: telling
+    CC from SC from HC is a question about stopping rather than speed, and the
+    thresholds for doing it per-stretch would be invented rather than measured.
+    Measured where it can be measured, unchanged where it cannot.
+
+    A trip with no profile — everything written before the accumulator existed,
+    and anything polling wrote — comes back whole under its own mode, so the
+    two kinds live in one table without either pretending to be the other.
+    """
+    whole = drive_mode(d, cuts)
+    km = float(getattr(d, "distance_km", 0.0) or 0.0)
+    mins = float(getattr(d, "duration_min", 0.0) or 0.0)
+    kwh = float(getattr(d, "energy_used_kwh", 0.0) or 0.0)
+    if whole is None:
+        return {}
+    out: dict[str, dict[str, float]] = {}
+
+    def add(mode: str, part: dict[str, float]) -> None:
+        slot = out.setdefault(mode, {"km": 0.0, "min": 0.0, "kwh": 0.0})
+        for k in ("km", "min", "kwh"):
+            slot[k] += part[k]
+
+    if road_verdict(d) is not None:
+        # Split by the ROAD each stretch was on, and let each part's own speeds
+        # and energy decide its mode — the motorway part of a mixed trip can be
+        # CH or SH on its own merits, and the town either side CC/SC/HC. Any
+        # stretch the map could not place goes with the trip's own verdict.
+        # Waiting belongs to the city part when there is one: a trip's idle
+        # minutes are not recorded per road, and the town is where it happens.
+        totals = road_totals(d)
+        idle = float(getattr(d, "idle_min", 0.0) or 0.0)
+        mx = float(getattr(d, "max_speed_kmh", 0.0) or 0.0)
+        city_first = bool(totals.get("city", {}).get("km"))
+        for road in ("highway", "city", "unknown"):
+            t = totals.get(road)
+            if not t or (t["km"] <= 0 and t["min"] <= 0):
+                continue
+            part = {"km": t["km"], "min": t["min"], "kwh": t["kwh"]}
+            if road == "unknown":
+                add(whole, part)
+                continue
+            mode = drive_mode(SimpleTrip(
+                km=t["km"], mins=t["min"], mx=min(t["peak"], mx) if mx else t["peak"],
+                idle=idle if (road == "city") == city_first else 0.0,
+                kwh=t["kwh"], temp=getattr(d, "outside_temp_c", None), road=road), cuts)
+            add(mode or whole, part)
+    else:
+        bands = speed_profile_of(d)
+        if not bands:
+            return {whole: {"km": km, "min": mins, "kwh": kwh}}
+        _split_by_speed(d, bands, whole, cuts, add)
+
     # The profile is sampled from records and the trip's own totals come from
     # its endpoints, so the two differ by whatever the stream missed. Scaled to
     # the trip rather than left short: the row totals are what the rest of the
@@ -2883,10 +2977,11 @@ class SimpleTrip:
     """
 
     __slots__ = ("distance_km", "duration_min", "max_speed_kmh", "idle_min",
-                 "energy_used_kwh", "outside_temp_c")
+                 "energy_used_kwh", "outside_temp_c", "road")
 
     def __init__(self, km: float, mins: float, mx: float, idle: float = 0.0,
-                 kwh: float = 0.0, temp: float | None = None):
+                 kwh: float = 0.0, temp: float | None = None,
+                 road: str | None = None):
         self.distance_km = km
         self.duration_min = mins
         self.max_speed_kmh = mx
@@ -2895,6 +2990,9 @@ class SimpleTrip:
         # score can weigh a part's efficiency as it does a whole trip's.
         self.energy_used_kwh = kwh
         self.outside_temp_c = temp
+        # The road this part was driven on, when the map said — see
+        # road_verdict. None leaves it to the speed rule.
+        self.road = road
 
 
 def speed_profile_of(d: Any) -> dict[str, dict[str, float]] | None:
@@ -2997,13 +3095,38 @@ def drive_mode_explained(d: Any, cuts: dict[str, float] | None = None) -> dict[s
     out["constancy"] = round(ratio, 3)
     out["idle_share"] = round(idle / dur, 3) if dur else None
 
+    # The road, exactly as drive_mode decides it — the map when the trip
+    # carries road data, speed otherwise — said first, because it decides
+    # which half of the explanation follows.
+    road = road_verdict(d)
+    totals = road_totals(d)
+    highway = _is_highway(avg, mx, c) if road is None else road == "highway"
+    if road is not None:
+        known = sum(totals.get(r, {}).get("km", 0.0) for r in ("highway", "city"))
+        hw_km = totals.get("highway", {}).get("km", 0.0)
+        out["road"] = road
+        out["highway_share"] = round(hw_km / known, 3) if known else None
+        where = (f"on expressway/trunk roads for {hw_km / known * 100:.0f}% of the "
+                 f"kilometres the map could place")
+        if highway and hw_km and totals["highway"].get("min"):
+            avg = hw_km / (totals["highway"]["min"] / 60.0)
+            out["avg_kmh"] = round(avg, 1)
+    else:
+        where = "no road data, so speed decided the road"
+    pace = _is_highway(avg, mx, c)
+
     if (idle / dur if dur else 0.0) >= heavy_idle:
-        out["why"] = (f"{idle / dur * 100:.0f}% of it was spent genuinely "
-                      f"waiting, past the {heavy_idle * 100:.0f}% mark — heavy "
-                      f"whatever the speeds looked like")
+        jam = highway and road is not None
+        out["why"] = (f"{where}; {idle / dur * 100:.0f}% of it was spent genuinely "
+                      f"waiting, past the {heavy_idle * 100:.0f}% mark — "
+                      + ("a jammed highway" if jam else
+                         "heavy whatever the speeds looked like"))
+    elif highway and not pace:
+        out["why"] = (f"{where}, but never at highway pace — the highway stretch "
+                      f"averaged {avg:.0f} with a peak of {mx:.0f}, under the "
+                      f"{hw_avg:.0f} average / {hw_max:.0f} peak bars: congestion")
     else:
         w = c["efficiency_weight"]
-        highway = _is_highway(avg, mx, c)
         e = _energy_vs_expected(d, highway, c)
         ref = c.get("highway_wh_ref" if highway else "city_wh_ref")
         if e is not None:
@@ -3030,7 +3153,7 @@ def drive_mode_explained(d: Any, cuts: dict[str, float] | None = None) -> dict[s
             bars = (" and ".join(missed) if missed else
                     f"peaked at {mx:.0f} and AVERAGED {avg:.0f} — clears both "
                     f"fast bars ({fast_max:.0f} peak, {fast_avg:.0f} average)")
-            out["why"] = (f"over the highway bars ({hw_max:.0f} peak, "
+            out["why"] = (f"{where}; over the highway bars ({hw_max:.0f} peak, "
                           f"{hw_avg:.0f} average); {bars}, {base:.2f} of the way"
                           f"{energy} — score {score:.2f}, "
                           f"{'at or over' if score >= 1 else 'under'} 1.00 for FH")
@@ -3040,7 +3163,8 @@ def drive_mode_explained(d: Any, cuts: dict[str, float] | None = None) -> dict[s
             band = ("at or above the constant cut" if score >= constant
                     else "between the cuts" if score >= slow
                     else "under the slow cut")
-            out["why"] = (f"city pace; held {ratio:.2f} of its peak{energy} — "
+            lead = where if road is not None else "city pace"
+            out["why"] = (f"{lead}; held {ratio:.2f} of its peak{energy} — "
                           f"score {score:.2f}, {band} ({slow:.2f} / {constant:.2f})")
     return out
 
@@ -3069,10 +3193,27 @@ def drive_mode(d: Any, cuts: dict[str, float] | None = None) -> str | None:
     fast_avg = float(c.get("fast_avg_kmh", MODE_FAST_AVG_KMH))
     avg = dist / (dur / 60.0)
     ratio = avg / mx
+    c2 = resolved_cuts(c)
+    w = c2["efficiency_weight"]
+    # Which road first. From the map when the trip carries a road profile
+    # (app/roads.py): an expressway is a highway however slowly it was driven,
+    # and a fast ordinary road is not one. From absolute speed otherwise — the
+    # rule below, which is all the history before road lookup has.
+    road = road_verdict(d)
+    highway_pace = _is_highway(avg, mx, c2)
+    on_highway = highway_pace if road is None else road == "highway"
+    if on_highway and road is not None:
+        # The highway stretch's own average, not the whole trip's: town at
+        # either end must not make a steady motorway run look congested.
+        hw = road_totals(d).get("highway") or {}
+        if hw.get("km") and hw.get("min"):
+            avg = hw["km"] / (hw["min"] / 60.0)
+        highway_pace = _is_highway(avg, mx, c2)
     # Genuine waiting outranks the ratio: a trip that spent a third of itself
-    # stopped is heavy whatever the moving part looked like.
+    # stopped is heavy whatever the moving part looked like — and on a road
+    # the map calls an expressway, that is a jammed highway, not the city.
     if (float(getattr(d, "idle_min", 0.0) or 0.0) / dur) >= heavy_idle:
-        return "HC"
+        return "SH" if on_highway and road is not None else "HC"
     # The highway classes are decided by ABSOLUTE speed, before constancy is
     # consulted at all. Constancy then sorts only what is left, which is the
     # city.
@@ -3090,9 +3231,11 @@ def drive_mode(d: Any, cuts: dict[str, float] | None = None) -> str | None:
     # whole trip in city traffic, however variable the trip was. So averaging
     # up there IS the evidence of a highway, and how steady it felt is a
     # separate question that only becomes interesting below that speed.
-    c2 = resolved_cuts(c)
-    w = c2["efficiency_weight"]
-    if _is_highway(avg, mx, c2):
+    if on_highway:
+        if not highway_pace:
+            # On the expressway by the map, but never at highway pace: the
+            # congestion the speed rule alone would have called city.
+            return "SH"
         # One score for the highway: how far up the fast bars it got — min()
         # of the two, so it takes BOTH to reach 1, exactly as the old pair of
         # tests did — times its energy against expected. Thirstier than
@@ -3250,11 +3393,14 @@ def trip_factors(d: Any, cuts: dict[str, float] | None = None) -> dict[str, str]
     avg = dist / (dur / 60.0)
     ratio = avg / mx
     waited = float(getattr(d, "idle_min", 0.0) or 0.0) / dur >= c["heavy_idle_share_max"]
-    road = "highway" if mx >= c["highway_max_kmh"] and avg >= c["highway_avg_kmh"] else "city"
+    mapped = road_verdict(d)
+    road = mapped or ("highway" if _is_highway(avg, mx, c) else "city")
     if waited:
         traffic = "heavy"
     elif road == "highway":
-        traffic = "flowing"
+        # By speed, a highway trip is at highway pace by definition. By the
+        # map it need not be: an expressway below highway pace is congestion.
+        traffic = "flowing" if mapped is None or _is_highway(avg, mx, c) else "slow"
     elif ratio >= c["constant_ratio_min"]:
         traffic = "flowing"
     elif ratio >= c["slow_ratio_min"]:
@@ -3381,11 +3527,13 @@ def range_model(drives: list[Any], capacity_kwh: float,
     measured: dict[tuple, list] = {}
     for d, f in rows:
         measured.setdefault((f["road"], f["traffic"], f["env"]), []).append(d)
+        measured.setdefault((f["road"], f["traffic"], "_any"), []).append(d)
     grid = []
     for road in present["road"]:
         for traffic in present["traffic"]:
-            if road == "highway" and traffic == "slow":
-                continue  # never assigned — see trip_factors
+            if (road == "highway" and traffic == "slow"
+                    and not measured.get((road, traffic, "_any"))):
+                continue  # only by the map, and only once a trip has shown it
             for env in present["env"]:
                 f = {"road": road, "traffic": traffic, "env": env}
                 wh = math.exp(sum(bi * xi for bi, xi in zip(b, xrow(f))))
@@ -3504,7 +3652,7 @@ def condition_matrix(drives: list[Any], capacity_kwh: float,
             members.setdefault(code, []).append(d)
 
     rows = []
-    for code in ("FH", "CH", "CC", "SC", "HC"):
+    for code in ("FH", "CH", "SH", "CC", "SC", "HC"):
         # Driven by the members list, not the whole-trip bucket: a mode can now
         # be reached by a journey whose whole-trip verdict was something else —
         # the motorway share of a mixed trip.
@@ -3644,17 +3792,28 @@ def condition_matrix(drives: list[Any], capacity_kwh: float,
 MATRIX_DEFINITIONS = {
     "modes": [
         {"code": "FH", "name": "Fast Highway",
-         "means": "Constancy 0.55 or above, with a peak of at least 130 km/h AND "
+         "means": "On a highway — an expressway or trunk road by the map when the "
+                  "trip carries road data, otherwise highway pace by speed — "
+                  "with a peak of at least 130 km/h AND "
                   "an average of at least 91. Above the 110 band entirely — drag "
                   "goes as the square of speed, so these kilometres cost "
                   "materially more than CH's and averaging the two together "
                   "hides exactly that."},
         {"code": "CH", "name": "Constant Highway",
-         "means": "Constancy 0.55 or above, with a peak of at least 99 km/h — "
+         "means": "On a highway (by the map when the trip carries road data, "
+                  "else by speed), at highway pace: a peak of at least 99 km/h — "
                   "110 minus 10%, the bottom of the reference band — AND an "
                   "average of at least 70. Fast and it stayed fast, but not "
                   "into FH territory. More expensive per hour than CC: drag "
                   "rises faster than the speed saves."},
+        {"code": "SH", "name": "Slow Highway",
+         "means": "On an expressway or trunk road by the map (OpenStreetMap), "
+                  "but never at highway pace — under a 99 km/h peak or a 70 "
+                  "average on the highway stretch — or 45% or more of it spent "
+                  "waiting. Congestion on the highway: without the map these "
+                  "trips read as city, which is exactly what they are not. Only "
+                  "trips recorded after road lookup was switched on can land "
+                  "here."},
         {"code": "CC", "name": "Constant City",
          "means": "Below the highway bars, but held 0.55 or more of its own "
                   "peak — open roads, few interruptions, typically 60-80 km/h. "

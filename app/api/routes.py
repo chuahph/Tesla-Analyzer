@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json as _json_mod
 import math
+import os
 import re
 import time
 from datetime import datetime, timedelta
@@ -16,7 +17,7 @@ from sqlalchemy import inspect as sa_inspect
 from sqlalchemy import text as sa_text
 from sqlalchemy.orm import Session
 
-from .. import alerts, auth, notifications, pricing_prefs, services, state, tariff, vin as vin_mod
+from .. import alerts, auth, notifications, pricing_prefs, roads, services, state, tariff, vin as vin_mod
 # sync imports nothing from the app, so this is safe at module level (several
 # functions below still import it locally; those bindings are just local names
 # for the same module). Needed up here for now_local/to_epoch, which anything
@@ -1641,6 +1642,10 @@ def health(session: Session = Depends(get_session)):
         "source": source,
         "oauth_available": auth.oauth_configured(),
         "build": _build_info(),
+        # Whether trips are being placed on the map yet (app/roads.py): the
+        # expressway network is downloaded by the server after start-up, and
+        # until it has loaded every trip falls back to the speed rule.
+        "road_network": roads.status(),
         # What the polling tick is for on this deployment. Reported because it
         # is set as an environment variable on the host, which means there is
         # otherwise no way to tell from here whether it took — and the two
@@ -4579,6 +4584,8 @@ def _apply_shadow_to_drive(row, t: dict) -> None:
         row.speed_profile = _json_mod.dumps(t["speed_bands"])
     if t.get("stops") is not None:
         row.stop_count = int(t["stops"])
+    if t.get("road_bands"):
+        row.road_profile = _json_mod.dumps(t["road_bands"])
     # recover_sleep_gap's own record of what it corrected, on the shadow dict
     # only — discarded here otherwise, since nothing else ever reads t again
     # after this call. Without it, a trip recover_sleep_gap already rewrote
@@ -4771,6 +4778,11 @@ def sync_now(wake: bool = Query(False), session: Session = Depends(get_session))
     ``wake=1`` (the manual Sync button) nudges a sleeping car online first.
     The cron never wakes the car, so it can't drain the battery overnight.
     """
+    # The road network, if start-up could not fetch it (Overpass down, say).
+    # A no-op once loaded, and rate-limited inside to one attempt per six
+    # hours, in a background thread — the tick never waits on it.
+    if not os.environ.get("PYTEST_CURRENT_TEST"):
+        roads.ensure_loaded()
     # Before anything else, since it needs no network and a failure to reach
     # Tesla must not also cost the trip the car already streamed.
     _settle_shadows(session)
@@ -9086,7 +9098,8 @@ def driving_matrix(days: int = Query(30, ge=1, le=730),
                    session: Session = Depends(get_session)):
     """Efficiency by driving condition, plus what the car costs standing still.
 
-    Four driving conditions and two parked ones, each answered as a RANGE
+    Six driving conditions — three highway, three city — and the parked ones,
+    each answered as a RANGE
     rather than a rate, because that is the form the question gets asked in:
     what is a full battery worth driven like this, and what does one percent
     buy.

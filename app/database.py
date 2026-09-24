@@ -326,6 +326,7 @@ def init_db() -> None:
     # profile and never will.
     _ensure_column("drives", "speed_profile", "TEXT", "NULL")
     _ensure_column("drives", "stop_count", "INTEGER", "NULL")
+    _ensure_column("drives", "road_profile", "TEXT", "NULL")
     _ensure_column("drives", "start_gap_sec", "FLOAT", "NULL")
     _ensure_column("drives", "end_gap_sec", "FLOAT", "NULL")
     _ensure_column("drives", "end_est_km", "FLOAT", "NULL")

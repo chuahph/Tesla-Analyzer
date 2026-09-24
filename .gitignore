@@ -27,3 +27,6 @@ site/
 .pytest_cache/
 .coverage
 htmlcov/
+
+# Road network cache fetched at runtime by app/roads.py
+data/roads_cache.json

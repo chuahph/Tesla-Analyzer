@@ -145,6 +145,12 @@ class Drive(Base):
     # traffic at all. Trip 744 crawled 9.7 km at 18.5 km/h through peak hour
     # and recorded zero idle.
     stop_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # The same bands again, per kind of ROAD the car was on (app/roads.py):
+    # JSON of {"highway"|"city"|"unknown": {"<lower edge>": {km, min, kwh}}}.
+    # What lets a jammed expressway read as a slow HIGHWAY rather than as
+    # city, which speed alone cannot tell. Null on trips from before road
+    # lookup existed, or driven before the road network had loaded.
+    road_profile: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     # User-assigned category ("work" / "personal", or any free text) for
     # expense-claim/cost-splitting purposes. "" = untagged.

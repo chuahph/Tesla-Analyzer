@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import os
 import secrets
 from pathlib import Path
 
@@ -300,6 +301,13 @@ async def _report_failure(request: Request, exc: Exception) -> JSONResponse:
 def _startup() -> None:
     init_db()
     settings = get_settings()
+    # The expressway/trunk network for road-type lookup — from its cache file,
+    # else downloaded from OpenStreetMap in the background. Never under test:
+    # a suite should not depend on, or wait for, a third-party download.
+    if not os.environ.get("PYTEST_CURRENT_TEST"):
+        from . import roads
+
+        roads.ensure_loaded()
     if settings.demo_mode:
         # Seed sample data so the dashboard is usable out of the box.
         seed_demo_if_empty()

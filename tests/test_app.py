@@ -10168,9 +10168,9 @@ def test_the_fast_highway_band_is_stored_and_ordered_against_the_highway_one():
             assert t["highway_max_kmh"] == pytest.approx(99.0)
             assert t["fast_max_kmh"] == pytest.approx(130.0)
             assert t["fast_avg_kmh"] == pytest.approx(91.0)
-            # FH is in the glossary, ahead of CH.
+            # The three highway classes, then the three city ones.
             codes = [m["code"] for m in base["definitions"]["modes"]]
-            assert codes[:3] == ["FH", "CH", "CC"]
+            assert codes[:6] == ["FH", "CH", "SH", "CC", "SC", "HC"]
 
             moved = client.post("/api/driving-matrix/thresholds",
                                 json={"fast_max_kmh": 140.0}).json()
