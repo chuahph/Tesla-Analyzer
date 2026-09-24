@@ -13204,8 +13204,12 @@ def telemetry_ingest(
         # Said once, and not per batch: a parked car posts one every twenty
         # seconds, and an alert that repeats three thousand times a day is an
         # alert nobody reads.
-        if state.get(session, state.STORE_UNREADABLE_KEY) != "1":
-            state.put(session, state.STORE_UNREADABLE_KEY, "1")
+        flagged = state.get(session, state.STORE_UNREADABLE_KEY)
+        if not flagged:
+            # WHICH stores, not just "1": most batches read neither store now,
+            # so the flag can only be cleared by a batch that read back the
+            # very store that was broken — see the branch below.
+            state.put(session, state.STORE_UNREADABLE_KEY, ",".join(sorted(set(unreadable))))
             session.commit()
             notifications.notify(
                 session, "A telemetry store cannot be read",
@@ -13214,12 +13218,15 @@ def telemetry_ingest(
                 "alone. Streaming continues; the shadow record of finished "
                 "journeys is not being updated.",
                 tag="store-unreadable")
-    elif ({"trips", "charges"} <= checked
-          and state.get(session, state.STORE_UNREADABLE_KEY) == "1"):
-        # Cleared only by a batch that actually read both stores and found
-        # them sound. Most batches now read neither, and one that skipped the
-        # broken store has no business declaring it fixed.
-        state.put(session, state.STORE_UNREADABLE_KEY, "")
+    elif (flagged := state.get(session, state.STORE_UNREADABLE_KEY)):
+        # Cleared by a batch that read back the store(s) that were broken and
+        # found them sound. A batch that never read them — most of them, now —
+        # has no business declaring them fixed. "1" is the older form of the
+        # flag, which did not say which store; it meant either.
+        broken = ({"trips", "charges"} if flagged == "1"
+                  else set(flagged.split(",")))
+        if broken <= checked or (flagged == "1" and checked):
+            state.put(session, state.STORE_UNREADABLE_KEY, "")
     put_if_changed(state.TELEMETRY_CHARGE_SHADOW_KEY,
                    _json.dumps(charge_shadows), stored_charge_shadows)
 

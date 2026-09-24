@@ -11273,3 +11273,52 @@ def test_a_drives_country_is_looked_up_once_and_backfilled(monkeypatch):
     routes._COUNTRY_CACHE.clear()
     monkeypatch.setattr(routes.httpx, "get", lambda *a, **k: (_ for _ in ()).throw(OSError()))
     assert routes._country_at("5.34, 100.31") is None
+
+
+def test_the_unreadable_store_flag_clears_only_when_that_store_reads_back():
+    """The flag names the broken store, and only a batch that actually read
+    that store back — sound — clears it. Most batches read no history store
+    at all now, and must not declare one fixed."""
+    import json as _json
+
+    from app import state
+    from app.api import routes
+    from app.database import SessionLocal
+
+    settings = get_settings()
+    old_pc = settings.app_passcode
+    settings.app_passcode = ""
+    sess = SessionLocal()
+    keys = (state.TELEMETRY_TRIPS_KEY, state.TELEMETRY_TRIP_ENDS_KEY,
+            state.TELEMETRY_SHADOW_KEY, state.TELEMETRY_LATEST_KEY,
+            state.STORE_UNREADABLE_KEY)
+    prev = {k: state.get(sess, k) for k in keys}
+    vin = "TESTVIN0000000003"
+    try:
+        end = 1_788_800_000.0  # 2026-09-07T16:53:20Z
+        routes._put_trips(sess, [{"vin": vin, "start_ts": end - 600, "end_ts": end,
+                                  "start_odo_km": 31110.0, "end_odo_km": 31119.297,
+                                  "distance_km": 9.297}])
+        state.put(sess, state.STORE_UNREADABLE_KEY, "trips")
+        in_park = _json.dumps({vin: {"Gear": "ShiftStateP"}})
+
+        def parked(when):
+            state.put(sess, state.TELEMETRY_SHADOW_KEY, _json.dumps({vin: {}}))
+            state.put(sess, state.TELEMETRY_LATEST_KEY, in_park)
+            return {"records": [{"vin": vin, "createdAt": when, "data": [
+                {"key": "Odometer", "value": {"doubleValue": 19337.2}},
+                {"key": "VehicleSpeed", "value": {"doubleValue": 0}},
+                {"key": "Gear", "value": {"stringValue": "ShiftStateP"}}]}]}
+
+        with TestClient(app) as client:
+            # Hours after the trip: the trips store is never read, flag stays.
+            client.post("/api/telemetry", json=parked("2026-09-07T18:53:20.000Z"))
+            assert state.get(SessionLocal(), state.STORE_UNREADABLE_KEY) == "trips"
+            # Inside the tail window: the store is read, parses, flag clears.
+            client.post("/api/telemetry", json=parked("2026-09-07T16:54:20.000Z"))
+            assert state.get(SessionLocal(), state.STORE_UNREADABLE_KEY) == ""
+    finally:
+        for k, v in prev.items():
+            state.put(sess, k, v or "")
+        sess.close()
+        settings.app_passcode = old_pc

@@ -2888,6 +2888,11 @@ def mode_references(drives: list[Any], cuts: dict[str, float] | None = None) -> 
             continue
         road = road_verdict(d)
         highway = (road == "highway") if road else _is_highway(dist / (dur / 60.0), mx, c)
+        if highway and road and highway_congestion(d, c):
+            # A jammed expressway trip (SH) is not what FH/CH are measured
+            # against: congestion costs differently, and folding it in would
+            # move "typical highway" toward the jams.
+            continue
         key = "highway_wh_ref" if highway else "city_wh_ref"
         by_road[key].append(float(d.wh_per_km) / _heat(getattr(d, "outside_temp_c", None), c))
     return {k: round(percentile(v, 0.5), 1) for k, v in by_road.items()
@@ -3477,8 +3482,9 @@ def trip_factors(d: Any, cuts: dict[str, float] | None = None) -> dict[str, str]
         traffic = "heavy"
     elif road == "highway":
         # By speed, a highway trip is at highway pace by definition. By the
-        # map it need not be: an expressway below highway pace is congestion.
-        traffic = "flowing" if mapped is None or _is_highway(avg, mx, c) else "slow"
+        # map it need not be — and whether it was congested is the same test
+        # drive_mode uses for SH, so the two never disagree about a trip.
+        traffic = "slow" if mapped is not None and highway_congestion(d, c) else "flowing"
     elif ratio >= c["constant_ratio_min"]:
         traffic = "flowing"
     elif ratio >= c["slow_ratio_min"]:
@@ -3698,7 +3704,6 @@ def condition_matrix(drives: list[Any], capacity_kwh: float,
     parts: dict[str, dict[str, float]] = {}
     members: dict[str, list[Any]] = {}
     split_trips = 0
-    buckets: dict[str, list[Any]] = {}
     unclassified = 0
     # The energy that does NOT reach a row, kept apart by reason. Without these
     # the table looks like it accounts for the window's driving and quietly does
@@ -3724,7 +3729,6 @@ def condition_matrix(drives: list[Any], capacity_kwh: float,
         # are different roads and different climates, and averaging them
         # together would describe neither.
         cc = country_of(d, home_country)
-        buckets.setdefault(cc + m, []).append(d)
         share = {cc + k: v for k, v in mode_split(d, cuts).items()}
         if len(share) > 1:
             split_trips += 1

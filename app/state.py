@@ -315,8 +315,11 @@ def put(session: Session, key: str, value: str) -> None:
         row.value = value
         session.commit()
         return
-    known_absent = c is not None and key in c["absent"]
-    hit = 0 if known_absent else session.execute(
+    # UPDATE even for a key the cache believes absent: that belief dates from
+    # the start of this request, and INSERTing on it would hit the unique key
+    # if another request created it since — failing the whole batch. One
+    # statement, and only the first time a key is ever written.
+    hit = session.execute(
         update(Setting).where(Setting.key == key).values(value=value)
         .execution_options(synchronize_session=False)).rowcount
     if not hit:
