@@ -25,6 +25,42 @@ ROUNDS = 8           # full passes over the missing tiles before giving up
 ROUND_PAUSE_SEC = 60  # between passes, to let a busy server recover
 
 
+# Printed after the build: what the map calls the roads through one corridor
+# the owner knows (Jelutong -> Bayan Lepas), and which of them the rule keeps
+# as expressway — so a rule change can be judged against a known answer from
+# the action's log, without anyone reaching Overpass by hand.
+CHECK_BBOX = (5.33, 100.29, 5.38, 100.33)
+
+
+def report_corridor() -> None:
+    import httpx
+    from collections import Counter
+
+    s, w, n, e = CHECK_BBOX
+    q = (f'[out:json][timeout:60];way["highway"~"^({"|".join(roads.ROAD_CLASSES)})$"]'
+         f"({s},{w},{n},{e});out tags;")
+    for url in roads.OVERPASS_URLS:
+        try:
+            r = httpx.post(url, data={"data": q}, timeout=90.0,
+                           headers={"User-Agent": "ev-drive-analyzer (road type lookup)"})
+            r.raise_for_status()
+            break
+        except Exception as exc:  # noqa: BLE001
+            print(f"corridor check: {url} failed: {exc}", flush=True)
+    else:
+        return
+    seen = Counter()
+    for el in r.json().get("elements", []):
+        t = el.get("tags") or {}
+        keep = t.get("highway") == "motorway" or roads.is_expressway(t)
+        seen[(t.get("highway"), t.get("ref", "-"), t.get("name", "-"),
+              "EXPRESSWAY" if keep else "city")] += 1
+    print("corridor check (Jelutong -> Bayan Lepas): ways by highway/ref/name -> verdict",
+          flush=True)
+    for (hw, ref, name, verdict), n_ways in sorted(seen.items()):
+        print(f"  {n_ways:3d} x {hw:8s} ref={ref:10s} {name:40s} -> {verdict}", flush=True)
+
+
 def main() -> int:
     roads.CACHE_PATH = os.path.join(tempfile.mkdtemp(), "roads.json")
     roads.BUNDLE_PATH = os.path.join(tempfile.mkdtemp(), "none.json.gz")  # start empty
@@ -61,6 +97,7 @@ def main() -> int:
         gz.write(json.dumps(body, separators=(",", ":")).encode())
     print(f"wrote {out}: {roads.status().get('segments')} segments, "
           f"{os.path.getsize(out) / 1e6:.2f} MB", flush=True)
+    report_corridor()
     return 0
 
 

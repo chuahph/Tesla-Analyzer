@@ -2089,7 +2089,7 @@ def test_a_trunk_road_with_traffic_lights_is_city_near_them(monkeypatch):
         def json(self):
             line = [{"lat": 5.30, "lon": 100.20 + i * 0.001} for i in range(201)]
             return {"elements": [
-                {"type": "way", "tags": {"highway": "trunk"}, "geometry": line},
+                {"type": "way", "tags": {"highway": "trunk", "ref": "E36"}, "geometry": line},
                 {"type": "way", "tags": {"highway": "motorway"},
                  "geometry": [{"lat": 5.40, "lon": p["lon"]} for p in line]},
                 # A traffic light on the trunk road, and one beside the motorway.
@@ -2104,4 +2104,54 @@ def test_a_trunk_road_with_traffic_lights_is_city_near_them(monkeypatch):
     assert roads.road_class(5.30, 100.25) == "highway"    # 5.5 km clear
     assert roads.road_class(5.40, 100.30) == "highway"    # motorway: whole
     assert "signals" in roads._query((5.0, 100.0, 6.0, 101.0)).replace("traffic_signals", "signals")
+    roads.clear()
+
+
+def test_a_trunk_road_counts_as_expressway_only_by_its_number_or_name(monkeypatch):
+    """Malaysia numbers expressways E1, E36 ... and names them Lebuhraya /
+    Expressway; Jalan Sultan Azlan Shah is tagged trunk too, and is a street."""
+    from app import roads
+
+    class R:
+        def raise_for_status(self): pass
+        def json(self):
+            return {"elements": [
+                {"type": "way", "tags": {"highway": "trunk", "name": "Jalan Sultan Azlan Shah"},
+                 "geometry": [{"lat": 5.30, "lon": 100.20 + i * 0.01} for i in range(21)]},
+                {"type": "way", "tags": {"highway": "trunk", "ref": "E36",
+                                         "name": "Lebuhraya Lim Chong Eu"},
+                 "geometry": [{"lat": 5.40, "lon": 100.20 + i * 0.01} for i in range(21)]},
+            ]}
+    monkeypatch.setattr("httpx.post", lambda *a, **k: R())
+    roads.clear()
+    roads.set_network(roads._fetch((5.0, 100.0, 6.0, 101.0)))
+    assert roads.road_class(5.30, 100.30) == "city"
+    assert roads.road_class(5.40, 100.30) == "highway"
+    assert not roads.is_expressway({"highway": "trunk", "ref": "FT6", "name": "Jalan Tun Dr Awang"})
+    assert roads.is_expressway({"highway": "trunk", "motorroad": "yes"})
+    roads.clear()
+
+
+def test_a_spot_the_car_stops_at_on_three_days_is_learned_as_a_traffic_light():
+    """A jam stops the car somewhere different each time; a traffic light the
+    map never mapped stops it at the same line, day after day."""
+    from app import roads
+
+    roads.clear()
+    roads.set_network([[[5.30, 100.20], [5.30, 100.40]]])
+    light = (5.30, 100.30)
+    two_days = [[5.30, 100.30, "2026-09-20"], [5.30002, 100.30003, "2026-09-21"],
+                [5.30, 100.3001, "2026-09-21"],
+                [5.30, 100.35, "2026-09-22"]]                     # a jam, once
+    assert roads.learned_signals(two_days) == []
+    three = two_days + [[5.30001, 100.29998, "2026-09-23"]]
+    got = roads.learned_signals(three)
+    assert len(got) == 1 and abs(got[0][1] - 100.30) < 0.0003
+    roads.set_learned_signals(got)
+    assert roads.road_class(*light) == "city"
+    assert roads.road_class(5.30, 100.302) == "city"      # ~220 m on
+    assert roads.road_class(5.30, 100.304) == "highway"   # ~440 m on
+    assert roads.road_class(5.30, 100.35) == "highway"    # the one-off jam
+    assert roads.status()["learned_signals"] == 1
+    roads.set_learned_signals([])
     roads.clear()

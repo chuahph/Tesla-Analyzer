@@ -1847,6 +1847,16 @@ def advance_shadow(shadow: dict[str, Any], snap: dict[str, Any]) -> dict[str, An
                 road_stops = shadow.setdefault("road_stops", {})
                 road_stops[where] = int(road_stops.get(where) or 0) + 1
                 shadow["idle_run_road"] = where
+                # Where, too, when the map calls it expressway: a spot the car
+                # comes to rest at on day after day is a traffic light the map
+                # never mapped, and that is how roads.py learns one (see
+                # routes._learn_road_stops). Capped: a jammed trip stops many
+                # times, and this rides in the shadow on every batch.
+                if where == "highway" and last.get("lat") is not None:
+                    pts = shadow.setdefault("hw_stops", [])
+                    if len(pts) < HW_STOP_PTS_MAX:
+                        pts.append([round(float(last["lat"]), 4),
+                                    round(float(last["lon"]), 4), int(float(last["ts"]))])
             elif not stopped and run_since is not None:
                 span = float(last["ts"]) - float(run_since)
                 if span >= IDLE_STREAK_MIN * 60.0:
@@ -1911,6 +1921,7 @@ def advance_shadow(shadow: dict[str, Any], snap: dict[str, Any]) -> dict[str, An
             shadow.pop("road_stops", None)
             shadow.pop("road_idle_sec", None)
             shadow.pop("idle_run_road", None)
+            shadow.pop("hw_stops", None)
             # The band anchor starts where the journey does — odometer, clock
             # and energy counter together, so the first stretch is measured
             # from the trip's own beginning rather than from wherever the
@@ -1982,6 +1993,8 @@ def advance_shadow(shadow: dict[str, Any], snap: dict[str, Any]) -> dict[str, An
 # coverage and replays on reconnect, so the reading that measures where a trip
 # truly ended can arrive minutes — or a night — after the trip was closed.
 SHADOW_TAIL_SEC = 900.0
+# Most expressway stop positions one trip keeps for traffic-light learning.
+HW_STOP_PTS_MAX = 30
 # Tightened from 1.0 km on the driver's own account of the thing being
 # measured: entering a carpark without signal costs 200 to 400 metres. Every
 # gap this app has recorded agrees — 0.004, 0.061, 0.082, 0.161, 0.338, and
@@ -2468,6 +2481,7 @@ def _shadow_close(shadow: dict[str, Any], end: dict[str, Any],
     road_bands = shadow.pop("road_bands", None) or {}
     road_stops = shadow.pop("road_stops", None) or {}
     road_idle_sec = shadow.pop("road_idle_sec", None) or {}
+    hw_stops = shadow.pop("hw_stops", None) or []
     shadow.pop("idle_run_road", None)
     # The anchor goes with the histogram it feeds, for the same reason e_ts
     # does: left behind, the next trip's first step would be measured from
@@ -2590,6 +2604,9 @@ def _shadow_close(shadow: dict[str, Any], end: dict[str, Any],
                                       for r, v in road_idle_sec.items()}})
         if any(r != "unknown" for r in road_bands) else None,
         "stops": stops,
+        # [lat, lon, epoch] of each time the car came to rest on a road the
+        # map calls expressway — what the traffic-light learning reads.
+        "highway_stop_pts": hw_stops,
         "climate_min": round(climate_sec / 60.0, 1),
         "soc_start": start.get("soc"),
         "soc_end": end.get("soc"),

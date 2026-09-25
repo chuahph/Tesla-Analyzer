@@ -1527,6 +1527,37 @@ def _load_city_overrides(session: Session) -> list[dict]:
     return items
 
 
+# Most stop observations kept for traffic-light learning, oldest dropped
+# first. A few months of daily commuting; ~30 bytes each.
+LEARNED_STOPS_MAX = 1500
+
+
+def _learned_stops(session: Session) -> list:
+    try:
+        obs = _json_mod.loads(state.get(session, state.ROAD_LEARNED_STOPS_KEY) or "[]") or []
+    except ValueError:
+        return []
+    return obs if isinstance(obs, list) else []
+
+
+def _load_learned_signals(session: Session) -> int:
+    signals = roads.learned_signals(_learned_stops(session))
+    roads.set_learned_signals(signals)
+    return len(signals)
+
+
+def _learn_road_stops(session: Session, stops: list) -> None:
+    """Add a closed trip's expressway stop positions to the learning store,
+    and re-derive the learned traffic lights. Runs once per trip that stopped
+    on an expressway-tagged road — never per batch."""
+    obs = _learned_stops(session)
+    for lat, lon, ts in stops:
+        obs.append([lat, lon, sync_mod._dt(float(ts)).date().isoformat()])
+    obs = obs[-LEARNED_STOPS_MAX:]
+    state.put(session, state.ROAD_LEARNED_STOPS_KEY, _json_mod.dumps(obs, separators=(",", ":")))
+    roads.set_learned_signals(roads.learned_signals(obs))
+
+
 # How far "mark the road here as city" reaches from the point given.
 CITY_OVERRIDE_RADIUS_DEFAULT_M = 400.0
 
@@ -1537,7 +1568,9 @@ def road_overrides(session: Session = Depends(get_session)):
     city within roads.CITY_OVERRIDE_M of its lines — for new trips only: a
     trip's road split is fixed when it is recorded."""
     items = _load_city_overrides(session)
-    return {"overrides": [{"id": it.get("id"), "name": it.get("name"),
+    learned = roads.learned_signals(_learned_stops(session))
+    return {"learned_signals": [{"lat": round(a, 5), "lon": round(b, 5)} for a, b in learned],
+            "overrides": [{"id": it.get("id"), "name": it.get("name"),
                            "added": it.get("added"),
                            "segments": sum(max(len(l) - 1, 0) for l in it.get("lines") or [])}
                           for it in items],
@@ -3933,6 +3966,14 @@ def _append_trip(trips: list, finished: dict,
 
     Returns whether the previous trip got anything back.
     """
+    # Learning input, not trip data: taken off before the trip is stored, so
+    # the trips store — read on every promotion — does not carry it.
+    stops = finished.pop("highway_stop_pts", None)
+    if stops and session is not None:
+        try:
+            _learn_road_stops(session, stops)
+        except Exception:  # noqa: BLE001 — a lost observation, never a lost trip
+            pass
     previous = next((t for t in reversed(trips)
                      if t.get("vin") == finished.get("vin")), None)
     rested = None

@@ -355,11 +355,12 @@ def _startup() -> None:
     # The owner's city stretches, which apply on top of whichever network
     # loads. One small read at start, and again whenever they are edited.
     try:
-        from .api.routes import _load_city_overrides
+        from .api.routes import _load_city_overrides, _load_learned_signals
         from .database import SessionLocal
 
         with SessionLocal() as s:
             _load_city_overrides(s)
+            _load_learned_signals(s)
     except Exception:  # noqa: BLE001 — a missing override, never a failed start
         pass
     if settings.demo_mode:

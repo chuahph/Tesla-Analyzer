@@ -106,6 +106,9 @@ TELEMETRY_MODES_TAIL_KEY = "telemetry_modes_tail"  # The newest few entries of
 ROAD_CITY_OVERRIDES_KEY = "road_city_overrides"  # JSON list of {id, name,
 # added, lines}: road stretches the owner has marked as city whatever the map
 # says (see roads.set_city_overrides). Seeded once from roads.SEED_PATH.
+ROAD_LEARNED_STOPS_KEY = "road_learned_stops"  # JSON list of [lat, lon,
+# "YYYY-MM-DD"]: where the car came to rest on roads the map calls
+# expressway. roads.learned_signals turns repeats into traffic lights.
 TELEMETRY_TRIPS_KEY = "telemetry_trips"  # JSON list of finished shadow trips.
 # Kept out of the Drive table on purpose — these are unverified, and a wrong
 # row in the real history is a repair job while a wrong row here is a delete.

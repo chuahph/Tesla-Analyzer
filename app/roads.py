@@ -17,6 +17,7 @@ from __future__ import annotations
 import json
 import math
 import os
+import re
 import threading
 import time
 from typing import Any
@@ -71,7 +72,7 @@ TILE_DEG = 1.0
 SIGNAL_CLEAR_M = float(os.environ.get("ROAD_SIGNAL_CLEAR_M", "400"))
 # Bumped whenever what counts as a highway changes, so a network saved under
 # the old rule is replaced rather than trusted (see _read_tiles).
-NETWORK_RULE = f"signal-clear-{SIGNAL_CLEAR_M:g}m"
+NETWORK_RULE = f"expressway-ref+signal-clear-{SIGNAL_CLEAR_M:g}m"
 # Pause between tile requests — the Overpass servers are a shared, free
 # service and ask for sequential, unhurried clients.
 _TILE_PAUSE_SEC = 1.0
@@ -248,8 +249,51 @@ def network_lines_near(lat: float, lon: float, radius_m: float) -> list:
     return out
 
 
+# Traffic lights learned from the car itself. A spot where it comes to rest
+# on day after day, on a road the map calls expressway, is a signal the map
+# never mapped: a jam stops a car somewhere different each time, a traffic
+# light stops it at the same line. Within LEARNED_CLEAR_M of one is city.
+# Narrower than SIGNAL_CLEAR_M: a toll plaza on a real expressway stops the
+# car at the same place daily too, and must cost it only a short stretch.
+LEARNED_CLEAR_M = 250.0
+# The same spot, on at least this many different days.
+LEARNED_MIN_DAYS = 3
+# Stops this close together are the same spot (the queue at one light).
+LEARNED_SAME_SPOT_M = 60.0
+_learned_grid: dict[tuple[int, int], list] | None = None
+_learned_count = 0
+
+
+def learned_signals(obs: list) -> list[tuple[float, float]]:
+    """Spots with stops on LEARNED_MIN_DAYS different days. ``obs`` is
+    ``[[lat, lon, "YYYY-MM-DD"], ...]``; returns one point per spot."""
+    out: list[tuple[float, float]] = []
+    for lat, lon, _day in obs:
+        if any(math.hypot(*_metres(lat, lon, a, b)) <= LEARNED_SAME_SPOT_M for a, b in out):
+            continue
+        near = [(a, b, d) for a, b, d in obs
+                if abs(a - lat) < 0.001 and abs(b - lon) < 0.001
+                and math.hypot(*_metres(lat, lon, a, b)) <= LEARNED_SAME_SPOT_M]
+        if len({d for _, _, d in near}) >= LEARNED_MIN_DAYS:
+            out.append((sum(a for a, _, _ in near) / len(near),
+                        sum(b for _, b, _ in near) / len(near)))
+    return out
+
+
+def set_learned_signals(points: list[tuple[float, float]]) -> None:
+    global _learned_grid, _learned_count
+    grid: dict[tuple[int, int], list] = {}
+    pad = LEARNED_CLEAR_M / 111_320.0 * 1.2
+    for lat, lon in points:
+        for i in range(int(math.floor((lat - pad) / _CELL)), int(math.floor((lat + pad) / _CELL)) + 1):
+            for j in range(int(math.floor((lon - pad) / _CELL)), int(math.floor((lon + pad) / _CELL)) + 1):
+                grid.setdefault((i, j), []).append((lat, lon))
+    with _lock:
+        _learned_grid, _learned_count = (grid or None), len(points)
+
+
 def status() -> dict[str, Any]:
-    return {**_meta, "city_overrides": _city_count}
+    return {**_meta, "city_overrides": _city_count, "learned_signals": _learned_count}
 
 
 def road_class(lat: Any, lon: Any) -> str | None:
@@ -269,8 +313,13 @@ def road_class(lat: Any, lon: Any) -> str | None:
         for seg in city.get(cell, ()):
             if _seg_dist_m(lat, lon, seg) <= CITY_OVERRIDE_M:
                 return "city"
+    learned = _learned_grid
     for seg in grid.get(cell, ()):
         if _seg_dist_m(lat, lon, seg) <= MATCH_M:
+            if learned is not None and any(
+                    math.hypot(*_metres(lat, lon, a, b)) <= LEARNED_CLEAR_M
+                    for a, b in learned.get(cell, ())):
+                return "city"
             return "highway"
     return "city"
 
@@ -284,6 +333,33 @@ def _query(bbox: tuple[float, float, float, float]) -> str:
             f"({s},{w},{n},{e})->.r;"
             'node(w.r)["highway"="traffic_signals"]->.s;'
             ".r out body geom;.s out skel qt;")
+
+
+_EXPRESSWAY_REF = re.compile(r"(^|[;,/\s])E\s?\d", re.IGNORECASE)
+_EXPRESSWAY_NAME = re.compile(r"lebuh\s?raya|expressway|highway|jambatan|bridge|"
+                              r"tol\b|toll\b|motorway|freeway|tunnel|terowong",
+                              re.IGNORECASE)
+
+
+def is_expressway(tags: dict) -> bool:
+    """Whether a road OpenStreetMap tags trunk is an expressway rather than a
+    main road through town.
+
+    Malaysia numbers its expressways E1, E36, ... and names them Lebuhraya /
+    Expressway / Highway; federal and state roads carry plain numbers and
+    Jalan names even where the map tags them trunk — Jalan Sultan Azlan Shah
+    is trunk, as is the Lim Chong Eu Expressway (E36). So a trunk road counts
+    by its number or its name, or by being mapped as limited-access
+    (motorroad=yes). The bridges and tunnels that carry an expressway are kept
+    by name too, since they are sometimes mapped without its number.
+    """
+    if (tags.get("motorroad") or "").lower() == "yes":
+        return True
+    if _EXPRESSWAY_REF.search(tags.get("ref") or ""):
+        return True
+    names = " ".join(v for k, v in tags.items()
+                     if k in ("name", "name:en", "name:ms", "official_name", "alt_name"))
+    return bool(_EXPRESSWAY_NAME.search(names))
 
 
 def _clear_of_signals(pts: list[tuple[float, float]], signals: list[tuple[float, float]],
@@ -333,7 +409,12 @@ def _fetch(bbox: tuple[float, float, float, float]) -> list[list[list[float]]]:
                 # jammed expressway. Expressways do not have traffic lights,
                 # so a trunk road counts only where it is clear of them.
                 # Motorways are taken whole.
-                runs = ([pts] if (el.get("tags") or {}).get("highway") != "trunk"
+                tags = el.get("tags") or {}
+                if tags.get("highway") == "trunk" and not is_expressway(tags):
+                    # A federal or state road the map calls trunk — see
+                    # is_expressway. City, however fast it is signposted.
+                    continue
+                runs = ([pts] if tags.get("highway") != "trunk"
                         else _clear_of_signals(pts, signals, SIGNAL_CLEAR_M))
                 for run in runs:
                     run = _simplify(run, _SIMPLIFY_M)

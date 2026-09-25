@@ -91,6 +91,11 @@ def generate(session: Session, days: int = 120, seed: int = 42) -> Vehicle:
         for _ in range(n_drives):
             hour = rng.choice([7, 8, 12, 17, 18, 19]) + rng.randint(0, 1)
             t0 = day.replace(hour=min(hour, 22), minute=rng.randint(0, 59), second=0, microsecond=0)
+            # Two draws can land on the same minute, and (vehicle, start) is
+            # unique: seeding then failed outright on the days whose weekday
+            # pattern produced the clash. A minute later is the same errand.
+            while any(p[0] == t0 for p in pending):
+                t0 += timedelta(minutes=1)
 
             if is_weekday and hour in (7, 8, 17, 18):
                 distance = rng.uniform(18, 32)       # commute

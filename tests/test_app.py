@@ -11692,3 +11692,34 @@ def test_city_overrides_seed_once_mark_roads_and_delete():
         roads.clear()
         roads.set_city_overrides([])
         settings.app_passcode = old_pc
+
+
+def test_a_closed_trip_feeds_its_expressway_stops_to_learning_not_to_the_store():
+    import json as _json
+
+    from app import roads, state
+    from app.api import routes
+    from app.database import SessionLocal
+
+    s = SessionLocal()
+    prev = state.get(s, state.ROAD_LEARNED_STOPS_KEY)
+    try:
+        state.put(s, state.ROAD_LEARNED_STOPS_KEY, "[]")
+        roads.clear()
+        roads.set_network([[[5.30, 100.20], [5.30, 100.40]]])
+        day = 86400.0
+        base = 1_790_000_000.0
+        for n in range(3):
+            trips: list = []
+            routes._append_trip(trips, {"vin": "LEARN0000000001", "start_ts": base + n * day,
+                                        "end_ts": base + n * day + 600,
+                                        "highway_stop_pts": [[5.30, 100.30, base + n * day + 300]]},
+                                session=s, via="test")
+            assert "highway_stop_pts" not in trips[-1]
+        assert len(_json.loads(state.get(s, state.ROAD_LEARNED_STOPS_KEY))) == 3
+        assert roads.road_class(5.30, 100.30) == "city"
+    finally:
+        state.put(s, state.ROAD_LEARNED_STOPS_KEY, prev or "")
+        s.close()
+        roads.set_learned_signals([])
+        roads.clear()
