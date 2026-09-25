@@ -3672,14 +3672,31 @@ def _rested_odo_between(session: Session, vin: str,
 
 
 def _trip_ends(trips: list) -> dict:
-    """{vin: end_ts of its newest trip} — newest meaning last in the store,
-    which is the trip the ingest's late-arrival fold (amend_closed_trip)
-    considers. Recomputed from the stored list, never patched."""
+    """{vin: [end_ts, end_odo_km] of its newest trip} — newest meaning last in
+    the store, which is the trip the ingest's late-arrival fold
+    (amend_closed_trip) considers. Recomputed from the stored list, never
+    patched.
+
+    The odometer is there because the time alone was not enough to skip the
+    read: for fifteen minutes after every park, every batch from a car still
+    awake in the carpark fell inside the window and loaded the whole ~70 KB
+    store to find that the odometer had not moved. Measured live at ~10 MB of
+    egress per park. amend_closed_trip takes nothing unless the odometer went
+    forwards, and that is answerable from these two numbers."""
     ends: dict = {}
     for t in trips:
         if t.get("vin") and t.get("end_ts") is not None:
-            ends[t["vin"]] = t["end_ts"]
+            ends[t["vin"]] = [t["end_ts"], t.get("end_odo_km")]
     return ends
+
+
+def _trip_end_entry(value) -> tuple:
+    """(end_ts, end_odo_km) from a TELEMETRY_TRIP_ENDS_KEY entry. The older
+    form stored the bare end_ts, and reads as an unknown odometer."""
+    if isinstance(value, (list, tuple)):
+        return (value[0] if value else None,
+                value[1] if len(value) > 1 else None)
+    return value, None
 
 
 def _put_trips(session: Session, trips: list) -> None:
@@ -12385,6 +12402,10 @@ TELEMETRY_MODE_FIELDS = ("BMSState", "CenterDisplay", "Gear",
                          # be read.
                          "DetailedChargeState")
 TELEMETRY_MODES_MAX = 400
+# How many changes collect in state.TELEMETRY_MODES_TAIL_KEY before they are
+# folded into the log. Each fold reads the whole log once; the tail it saves
+# re-reading stays a few KB.
+TELEMETRY_MODES_FOLD = 25
 # Silence longer than this is a gap worth recording. Records arrive every few
 # seconds while the car is awake, so two minutes is unambiguous — and a parked
 # car that has gone to sleep produces gaps of hours, which are expected and
@@ -13072,7 +13093,7 @@ def telemetry_ingest(
                 if _append_trip(load_trips(), finished, session=session, via="close-live"):
                     recovered += 1
                 if finished.get("end_ts") is not None:
-                    trip_ends[vin] = finished["end_ts"]
+                    trip_ends[vin] = [finished["end_ts"], finished.get("end_odo_km")]
                 closed += 1
             # And again the moment a trip OPENS, not only when it closes.
             # The opening odometer is the whole input to the correction, so
@@ -13111,10 +13132,20 @@ def telemetry_ingest(
                 # enough before this reading for amend_closed_trip to take it
                 # — its own window test, applied to one number instead of to
                 # the whole store. No index entry: load and let it decide.
-                end = trip_ends.get(vin)
+                #
+                # And only when the odometer moved past the trip's end. A car
+                # left awake in the carpark posts every few seconds for the
+                # whole window, and each of those batches loaded the store to
+                # learn that it had not — see _trip_ends.
+                end, end_odo = _trip_end_entry(trip_ends.get(vin))
+                odo = snap.get("odo_km")
                 reach = (trips_box["list"] is not None or end is None
-                         or 0.0 <= float(snap.get("ts") or 0.0) - float(end)
-                         <= sync_mod.SHADOW_TAIL_SEC)
+                         or (0.0 <= float(snap.get("ts") or 0.0) - float(end)
+                             <= sync_mod.SHADOW_TAIL_SEC
+                             and odo is not None
+                             and (end_odo is None
+                                  or 0.0 < round(float(odo) - float(end_odo), 3)
+                                  <= sync_mod.SHADOW_TAIL_MAX_KM)))
                 newest_trip = next((t for t in reversed(load_trips())
                                     if t.get("vin") == vin), None) if reach else None
                 if newest_trip is not None and sync_mod.amend_closed_trip(
@@ -13187,7 +13218,19 @@ def telemetry_ingest(
 
     key_names = {state.TELEMETRY_CHARGES_KEY: "charges"}
     append_store(state.TELEMETRY_GAPS_KEY, new_gaps, TELEMETRY_GAPS_MAX)
-    append_store(state.TELEMETRY_MODES_KEY, new_modes, TELEMETRY_MODES_MAX)
+    if new_modes:
+        # Into the small tail, folded into the log only once it has grown —
+        # see state.TELEMETRY_MODES_TAIL_KEY.
+        try:
+            tail = _json.loads(state.get(session, state.TELEMETRY_MODES_TAIL_KEY)
+                               or "[]") or []
+        except ValueError:
+            tail = []
+        tail = (tail + new_modes)[-TELEMETRY_MODES_MAX:]
+        if len(tail) >= TELEMETRY_MODES_FOLD:
+            append_store(state.TELEMETRY_MODES_KEY, tail, TELEMETRY_MODES_MAX)
+            tail = []
+        state.put(session, state.TELEMETRY_MODES_TAIL_KEY, _json.dumps(tail))
     state.put(session, state.TELEMETRY_LATEST_KEY, _json.dumps(latest))
     state.put(session, state.TELEMETRY_SHADOW_KEY, _json.dumps(shadows))
     trips_written = False
@@ -14203,10 +14246,14 @@ def telemetry_modes(
     """
     import json as _json
 
-    try:
-        modes = _json.loads(state.get(session, state.TELEMETRY_MODES_KEY) or "[]") or []
-    except ValueError:
-        modes = []
+    modes = []
+    # The log, then the tail not yet folded into it.
+    for key in (state.TELEMETRY_MODES_KEY, state.TELEMETRY_MODES_TAIL_KEY):
+        try:
+            modes += _json.loads(state.get(session, key) or "[]") or []
+        except ValueError:
+            pass
+    modes = modes[-TELEMETRY_MODES_MAX:]
     # changes is the whole log; matching is what the filter left. Reporting
     # only the filtered count made an empty filter indistinguishable from an
     # empty log — asked for DetailedChargeState mid-charge, this answered

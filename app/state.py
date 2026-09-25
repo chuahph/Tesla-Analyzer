@@ -98,6 +98,11 @@ TELEMETRY_MODES_KEY = "telemetry_modes"  # JSON list of {ts, vin, field, from,
 # current value and nothing holds the moment it moved — and the question these
 # answer ("when does the car decide a journey is over?") can only be answered
 # from the moment.
+TELEMETRY_MODES_TAIL_KEY = "telemetry_modes_tail"  # The newest few entries of
+# TELEMETRY_MODES_KEY, not yet folded into it. A mode change used to read and
+# rewrite the whole ~70 KB log, and a car parking changes five or six of these
+# fields in a minute; appending here costs a few KB, and the big log is read
+# once per routes.TELEMETRY_MODES_FOLD changes. Readers take both, log first.
 TELEMETRY_TRIPS_KEY = "telemetry_trips"  # JSON list of finished shadow trips.
 # Kept out of the Drive table on purpose — these are unverified, and a wrong
 # row in the real history is a repair job while a wrong row here is a delete.

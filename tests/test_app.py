@@ -6827,9 +6827,11 @@ def test_mode_changes_are_logged_with_the_moment_they_happened():
     settings.app_passcode = ""
     sess = SessionLocal()
     prev = state.get(sess, state.TELEMETRY_MODES_KEY)
+    prev_tail = state.get(sess, state.TELEMETRY_MODES_TAIL_KEY)
     vin = "MODES00000000001"
     try:
         state.put(sess, state.TELEMETRY_MODES_KEY, "[]")
+        state.put(sess, state.TELEMETRY_MODES_TAIL_KEY, "[]")
         sess.commit()
 
         with TestClient(app) as client:
@@ -6873,6 +6875,7 @@ def test_mode_changes_are_logged_with_the_moment_they_happened():
             assert none["matching"] == 0 and none["changes"] == 3
     finally:
         state.put(sess, state.TELEMETRY_MODES_KEY, prev or "[]")
+        state.put(sess, state.TELEMETRY_MODES_TAIL_KEY, prev_tail or "[]")
         sess.commit()
         sess.close()
         settings.app_passcode = old_pc
@@ -11011,6 +11014,78 @@ def test_only_put_trips_writes_the_trips_store():
     assert len(direct) == 1 and direct[0].startswith("routes.py"), direct
 
 
+def test_a_mode_change_appends_to_the_tail_not_the_whole_log():
+    """A mode change read and rewrote the whole ~70 KB mode log, and parking
+    moves five or six of those fields in a minute. It goes to a small tail
+    now, folded into the log every TELEMETRY_MODES_FOLD changes — and the
+    endpoint still sees both."""
+    import json as _json
+
+    from sqlalchemy import event
+
+    from app import state
+    from app.api import routes
+    from app.database import SessionLocal, engine
+
+    settings = get_settings()
+    old_pc = settings.app_passcode
+    settings.app_passcode = ""
+    sess = SessionLocal()
+    keys = (state.TELEMETRY_MODES_KEY, state.TELEMETRY_MODES_TAIL_KEY)
+    prev = {k: state.get(sess, k) for k in keys}
+    vin = "MODETAIL00000001"
+    read = []
+
+    def spy(conn, cur, stmt, params, ctx, many):
+        if stmt.lstrip().upper().startswith("SELECT") and "settings" in stmt:
+            read.extend(v for v in (params if isinstance(params, (list, tuple))
+                                    else (params or {}).values()) if isinstance(v, str))
+
+    old_log = [{"ts": None, "vin": "OLD", "field": "Gear", "from": None, "to": "x"}]
+    try:
+        state.put(sess, state.TELEMETRY_MODES_KEY, _json.dumps(old_log))
+        state.put(sess, state.TELEMETRY_MODES_TAIL_KEY, "[]")
+        sess.commit()
+        event.listen(engine, "before_cursor_execute", spy)
+        with TestClient(app) as client:
+            gears = ["ShiftStateD", "ShiftStateP"]
+            for i in range(routes.TELEMETRY_MODES_FOLD - 1):
+                read.clear()
+                r = client.post("/api/telemetry", json={"records": [{
+                    "vin": vin, "createdAt": f"2026-09-09T15:{i:02d}:00Z",
+                    "data": [{"key": "Gear",
+                              "value": {"stringValue": gears[i % 2]}}]}]})
+                assert r.status_code == 200, r.text
+                assert state.TELEMETRY_MODES_KEY not in read, (i, read)
+            s2 = SessionLocal()
+            assert _json.loads(state.get(s2, state.TELEMETRY_MODES_KEY)) == old_log
+            s2.close()
+            body = client.get("/api/telemetry/modes").json()
+            assert body["changes"] == routes.TELEMETRY_MODES_FOLD
+            assert body["recent"][0]["vin"] == "OLD"   # log first, then tail
+
+            # The change that fills the tail folds it into the log.
+            r = client.post("/api/telemetry", json={"records": [{
+                "vin": vin, "createdAt": "2026-09-09T16:00:00Z",
+                "data": [{"key": "Gear", "value": {"stringValue": "ShiftStateR"}}]}]})
+            assert r.status_code == 200
+            s3 = SessionLocal()
+            log = _json.loads(state.get(s3, state.TELEMETRY_MODES_KEY))
+            assert len(log) == routes.TELEMETRY_MODES_FOLD + 1
+            assert _json.loads(state.get(s3, state.TELEMETRY_MODES_TAIL_KEY)) == []
+            s3.close()
+            again = client.get("/api/telemetry/modes").json()
+            assert again["changes"] == routes.TELEMETRY_MODES_FOLD + 1
+            assert again["recent"][-1]["to"] == "ShiftStateR"
+    finally:
+        event.remove(engine, "before_cursor_execute", spy)
+        for k, v in prev.items():
+            state.put(sess, k, v or "")
+        sess.commit()
+        sess.close()
+        settings.app_passcode = old_pc
+
+
 def test_a_parked_batch_reads_the_history_stores_only_when_it_needs_them():
     """The trips, modes, gaps and charges stores are the biggest values this
     app reads, and every telemetry batch used to read all four — every 6-13
@@ -11074,6 +11149,18 @@ def test_a_parked_batch_reads_the_history_stores_only_when_it_needs_them():
             for big in (state.TELEMETRY_TRIPS_KEY, state.TELEMETRY_MODES_KEY,
                         state.TELEMETRY_GAPS_KEY, state.TELEMETRY_CHARGES_KEY):
                 assert big not in read, (big, read)
+
+            # Inside the window but not moved: the car sitting awake in the
+            # carpark after parking. Measured live, every one of these batches
+            # loaded the whole store for fifteen minutes after each park.
+            state.put(sess, state.TELEMETRY_SHADOW_KEY, _json.dumps({vin: {}}))
+            state.put(sess, state.TELEMETRY_LATEST_KEY, in_park)
+            sess.commit()
+            read.clear()
+            r = client.post("/api/telemetry", json=parked(
+                "2026-09-07T16:55:20.000Z", 31119.297 / 1.609344))
+            assert r.status_code == 200
+            assert state.TELEMETRY_TRIPS_KEY not in read, read
 
             # A fresh shadow, then a reading 60 s after the end, 0.2 km on:
             # inside the window, so the trips store loads and the tail folds in.
@@ -11306,7 +11393,9 @@ def test_the_unreadable_store_flag_clears_only_when_that_store_reads_back():
             state.put(sess, state.TELEMETRY_SHADOW_KEY, _json.dumps({vin: {}}))
             state.put(sess, state.TELEMETRY_LATEST_KEY, in_park)
             return {"records": [{"vin": vin, "createdAt": when, "data": [
-                {"key": "Odometer", "value": {"doubleValue": 19337.2}},
+                # 0.2 km past the trip's end: a tail worth folding in, so
+                # the store is read (a reading that had not moved is not).
+                {"key": "Odometer", "value": {"doubleValue": (31119.297 + 0.2) / 1.609344}},
                 {"key": "VehicleSpeed", "value": {"doubleValue": 0}},
                 {"key": "Gear", "value": {"stringValue": "ShiftStateP"}}]}]}
 

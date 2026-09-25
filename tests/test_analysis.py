@@ -935,7 +935,7 @@ def test_charging_cost_split_and_per_100km(seeded):
     assert r["cost_per_100km"] == round(in_span / km * 100.0, 2)
     # And the bound is doing something here rather than being a no-op, so this
     # keeps testing what it means to: some charge sits outside the drives.
-    assert in_span <= r["total_cost"]
+    assert in_span <= r["total_cost"] + 1e-9  # float sums, not a cent
 
 
 def test_recent_trips_report_data_quality():
