@@ -40,6 +40,34 @@ from ..models import (ArrivalTailSample, BatteryReading, Charge, Drive, Place,
                       SecurityEvent, ServiceRecord, Vehicle)
 from ..schemas import ChargeOut, DriveOut, VehicleOut
 
+# Held by the telemetry ingest and by _settle_shadows, the two writers of the
+# shadow and trips stores. Both are plain `def` routes, which FastAPI runs on a
+# thread pool, so a sync tick settling a trip and a telemetry batch stepping
+# the same shadow could each read the store, change it, and write it back —
+# the later write silently undoing the earlier one. One process serves this
+# app, so a process lock is the whole fix. Re-entrant because the ingest's own
+# calls can reach _settle_shadows.
+_SHADOW_LOCK = threading.RLock()
+# Longer than any ingest batch takes, including one that sends a notification
+# (10 s network timeout).
+SHADOW_LOCK_WAIT_SEC = 15.0
+
+
+def _holding_shadow_lock(fn):
+    """Run ``fn`` under _SHADOW_LOCK — for the admin paths that also
+    read-modify-write the trips store (purge, restore, drop, recover), so a
+    telemetry batch landing mid-run cannot be overwritten by them or they by
+    it. Taken before the function touches the database, so it never waits on
+    the lock while holding a row the ingest wants."""
+    import functools
+
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        with _SHADOW_LOCK:
+            return fn(*args, **kwargs)
+    return wrapper
+
+
 router = APIRouter(prefix="/api", tags=["analytics"])
 
 
@@ -2212,6 +2240,7 @@ def _staged_trip_starts(session: Session) -> list:
     return out
 
 
+@_holding_shadow_lock
 def _purge_drives_before(session: Session, vehicle, cutover: datetime,
                          apply: bool, freeze: bool, backup_key: str,
                          restore_path: str) -> dict:
@@ -2534,6 +2563,7 @@ def restore_stale_drives(
     return _restore_drives_from(session, state.PURGED_STALE_DRIVES_KEY, apply)
 
 
+@_holding_shadow_lock
 def _restore_drives_from(session: Session, key: str, apply: bool) -> dict:
     """Put back drive rows serialised into ``key`` by whichever delete made it.
 
@@ -2557,7 +2587,21 @@ def _restore_drives_from(session: Session, key: str, apply: bool) -> dict:
                 "restored": 0, "unreadable": True}
     rows = backup.get("rows") or []
     present = set(session.scalars(select(Drive.id)).all())
-    missing = [r for r in rows if r.get("id") not in present]
+    # And by the drives unique key, not only by id. A trip re-promoted from
+    # the stream since the delete holds the same (vehicle, start) under a new
+    # id, and inserting the old row beside it failed the whole restore.
+    taken = {(v, t.replace(microsecond=0)) for v, t in session.execute(
+        select(Drive.vehicle_id, Drive.start_time)).all() if t}
+
+    def _key(r):
+        try:
+            return (r.get("vehicle_id"),
+                    datetime.fromisoformat(r["start_time"]).replace(microsecond=0))
+        except (KeyError, TypeError, ValueError):
+            return None
+
+    missing = [r for r in rows
+               if r.get("id") not in present and _key(r) not in taken]
     # The shadow trips the purge dropped alongside the rows. Put back too, or
     # the restore returns the history without the staging that produced it —
     # and a later correction from the stream would have nothing to correct.
@@ -3126,12 +3170,18 @@ def add_service(payload: dict = Body(...), session: Session = Depends(get_sessio
     try:
         date = (datetime.fromisoformat(payload["date"]) if payload.get("date")
                 else sync_mod.now_local())
-    except (KeyError, ValueError):
+    except (KeyError, TypeError, ValueError):
         raise HTTPException(400, "Invalid 'date' (expected ISO format).")
+    if date.tzinfo is not None:
+        # Stored naive MYT like every other time here; an aware one made the
+        # due-date comparison raise, failing /service and the alerts check.
+        date = date.astimezone(sync_mod.MYT).replace(tzinfo=None)
     try:
         odo_km = float(payload.get("odo_km") or 0.0)
         cost = float(payload.get("cost") or 0.0)
     except (TypeError, ValueError):
+        raise HTTPException(400, "Invalid 'odo_km'/'cost'.")
+    if not (math.isfinite(odo_km) and math.isfinite(cost)) or odo_km < 0 or cost < 0:
         raise HTTPException(400, "Invalid 'odo_km'/'cost'.")
     notes = str(payload.get("notes") or "")[:200]
 
@@ -4809,19 +4859,6 @@ def _auto_repair_arrivals(session: Session) -> int:
     except Exception:  # noqa: BLE001 — never let this break the sync
         session.rollback()
         return 0
-
-
-# Held by the telemetry ingest and by _settle_shadows, the two writers of the
-# shadow and trips stores. Both are plain `def` routes, which FastAPI runs on a
-# thread pool, so a sync tick settling a trip and a telemetry batch stepping
-# the same shadow could each read the store, change it, and write it back —
-# the later write silently undoing the earlier one. One process serves this
-# app, so a process lock is the whole fix. Re-entrant because the ingest's own
-# calls can reach _settle_shadows.
-_SHADOW_LOCK = threading.RLock()
-# Longer than any ingest batch takes, including one that sends a notification
-# (10 s network timeout).
-SHADOW_LOCK_WAIT_SEC = 15.0
 
 
 def _settle_shadows(session: Session) -> int:
@@ -13902,6 +13939,7 @@ def _compare_row(t: dict, d, t_start, car_by_drive: dict, pct) -> dict:
 
 
 @router.api_route("/telemetry/drop-trips", methods=["GET", "POST"])
+@_holding_shadow_lock
 def telemetry_drop_trips(
     since: str = Query(..., description="Local ISO datetime, e.g. 2026-09-08T19:00"),
     apply: bool = Query(False),
@@ -13963,6 +14001,7 @@ def telemetry_drop_trips(
 
 
 @router.api_route("/telemetry/recover-gaps", methods=["GET", "POST"])
+@_holding_shadow_lock
 def telemetry_recover_gaps(
     apply: bool = Query(False),
     session: Session = Depends(get_session),

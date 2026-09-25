@@ -65,3 +65,14 @@ def test_most_recent_record_per_type_wins():
     row = next(r for r in rows if r["type"] == "Tire Rotation")
     assert row["last_odo_km"] == 15_000.0
     assert row["status"] == "ok"
+
+
+def test_a_record_with_no_odometer_is_not_due_by_distance():
+    """The form stores a blank odometer as 0. Read as "rotated at 0 km", the
+    next rotation was due at 10,000 km — overdue on the day it was logged,
+    on any car past that, and pushed as an alert."""
+    rows = due_status([{"type": "Tire Rotation", "date": NOW, "odo_km": 0.0}],
+                      current_odo_km=31_900, now=NOW)
+    row = next(r for r in rows if r["type"] == "Tire Rotation")
+    assert row["due_odo_km"] is None
+    assert row["status"] == "ok"

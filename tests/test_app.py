@@ -11536,3 +11536,40 @@ def test_price_and_energy_inputs_refuse_nan_and_infinity():
                 assert r.status_code == 400, (bad, r.text)
     finally:
         settings.app_passcode = old_pc
+
+
+def test_restore_skips_a_trip_since_re_recorded_under_a_new_id():
+    """A purged trip the stream has promoted again since holds the same
+    (vehicle, start) under a new id; inserting the old row beside it hit the
+    drives unique index and failed the whole restore."""
+    import json as _json
+
+    from app import state
+    from app.api import routes
+    from app.database import SessionLocal
+    from app.models import Drive, Vehicle
+
+    key = "test_restore_backup"
+    s = SessionLocal()
+    try:
+        v = Vehicle(vin="TESTVIN-RESTORE1", name="t", model="m")
+        s.add(v)
+        s.commit()
+        t1, t2 = datetime(2026, 6, 1, 8, 0), datetime(2026, 6, 2, 8, 0)
+        again = Drive(vehicle_id=v.id, start_time=t1, end_time=t1 + timedelta(minutes=20),
+                      distance_km=10.0, source="telemetry")
+        s.add(again)
+        s.commit()
+        rows = [{"id": 900001, "vehicle_id": v.id, "start_time": t1.isoformat(),
+                 "end_time": (t1 + timedelta(minutes=20)).isoformat(), "distance_km": 10.0},
+                {"id": 900002, "vehicle_id": v.id, "start_time": t2.isoformat(),
+                 "end_time": (t2 + timedelta(minutes=20)).isoformat(), "distance_km": 12.0}]
+        state.put(s, key, _json.dumps({"at": "x", "rows": rows}))
+        s.commit()
+        plan = routes._restore_drives_from(s, key, apply=True)
+        assert plan["restored"] == 1 and plan["already_present"] == 1
+        assert s.get(Drive, 900002) is not None and s.get(Drive, 900001) is None
+    finally:
+        state.put(s, key, "")
+        s.commit()
+        s.close()

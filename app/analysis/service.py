@@ -69,7 +69,11 @@ def due_status(
             continue
 
         due_date = last["date"] + timedelta(days=interval_months * 30.44) if interval_months else None
-        due_odo = (last.get("odo_km") or 0.0) + interval_km if interval_km else None
+        # No odometer logged means the distance side is unknown, not "done at
+        # 0 km": the form stores a blank as 0, which made a tyre rotation due
+        # at 10,000 km and read overdue at once on any car past that.
+        last_odo = last.get("odo_km") or 0.0
+        due_odo = last_odo + interval_km if interval_km and last_odo > 0 else None
 
         overdue = due_soon = False
         if due_date is not None:
