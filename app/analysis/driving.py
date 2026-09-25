@@ -2836,7 +2836,7 @@ def highway_congestion(d: Any, cuts: dict[str, float] | None = None) -> list[str
     return why
 
 
-def road_verdict(d: Any) -> str | None:
+def road_verdict(d: Any, cuts: dict[str, float] | None = None) -> str | None:
     """"highway", "city", or None to fall back to the speed rule.
 
     A part-trip (SimpleTrip) can carry its road already decided; a whole trip
@@ -2851,7 +2851,19 @@ def road_verdict(d: Any) -> str | None:
     if total <= 0 or known / total < ROAD_KNOWN_MIN_SHARE:
         return None
     hw = totals.get("highway", {}).get("km", 0.0)
-    return "highway" if hw / known >= ROAD_HIGHWAY_MIN_SHARE else "city"
+    if hw / known >= ROAD_HIGHWAY_MIN_SHARE:
+        return "highway"
+    # The map calls it city, but nobody averages expressway pace in town: a
+    # trip that clears the speed rule's bars was on an expressway the map is
+    # missing or has misread (a stretch mapped without its E number, say).
+    # Handed back to the speed rule rather than filed as a 110 km/h city trip.
+    c = resolved_cuts(cuts)
+    dur = float(getattr(d, "duration_min", 0.0) or 0.0)
+    dist = float(getattr(d, "distance_km", 0.0) or 0.0)
+    mx = float(getattr(d, "max_speed_kmh", 0.0) or 0.0)
+    if dur > 0 and _is_highway(dist / (dur / 60.0), mx, c):
+        return None
+    return "city"
 
 
 def _energy_vs_expected(d: Any, highway: bool, c: dict[str, float]) -> float | None:
@@ -2886,7 +2898,7 @@ def mode_references(drives: list[Any], cuts: dict[str, float] | None = None) -> 
         mx = float(getattr(d, "max_speed_kmh", 0.0) or 0.0)
         if dur <= 0 or dist <= 0 or mx <= 0:
             continue
-        road = road_verdict(d)
+        road = road_verdict(d, c)
         highway = (road == "highway") if road else _is_highway(dist / (dur / 60.0), mx, c)
         if highway and road and highway_congestion(d, c):
             # A jammed expressway trip (SH) is not what FH/CH are measured
@@ -3174,7 +3186,7 @@ def drive_mode_explained(d: Any, cuts: dict[str, float] | None = None) -> dict[s
     # The road, exactly as drive_mode decides it — the map when the trip
     # carries road data, speed otherwise — said first, because it decides
     # which half of the explanation follows.
-    road = road_verdict(d)
+    road = road_verdict(d, c)
     totals = road_totals(d)
     highway = _is_highway(avg, mx, c) if road is None else road == "highway"
     if road is not None:
@@ -3272,10 +3284,11 @@ def drive_mode(d: Any, cuts: dict[str, float] | None = None) -> str | None:
     c2 = resolved_cuts(c)
     w = c2["efficiency_weight"]
     # Which road first. From the map when the trip carries a road profile
-    # (app/roads.py): an expressway is a highway however slowly it was driven,
-    # and a fast ordinary road is not one. From absolute speed otherwise — the
-    # rule below, which is all the history before road lookup has.
-    road = road_verdict(d)
+    # (app/roads.py): an expressway is a highway however slowly it was driven.
+    # From absolute speed otherwise — the rule below, which is all the history
+    # before road lookup has, and what a trip the map calls city is handed back
+    # to when it averaged expressway pace anyway (see road_verdict).
+    road = road_verdict(d, c2)
     highway_pace = _is_highway(avg, mx, c2)
     on_highway = highway_pace if road is None else road == "highway"
     congested: list[str] = []

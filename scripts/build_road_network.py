@@ -34,14 +34,25 @@ TIME_BUDGET_SEC = float(os.environ.get("ROAD_BUILD_BUDGET_SEC", str(100 * 60)))
 # the owner knows (Jelutong -> Bayan Lepas), and which of them the rule keeps
 # as expressway — so a rule change can be judged against a known answer from
 # the action's log, without anyone reaching Overpass by hand.
-CHECK_BBOX = (5.33, 100.29, 5.38, 100.33)
+CHECK_AREAS = {
+    "Jelutong -> Bayan Lepas": (5.33, 100.29, 5.38, 100.33),
+    # Where the expressway-number rule left a gap in the network north of
+    # Kuala Kangsar: the North-South Expressway (should stay) or Federal
+    # Route 1 (should go)?
+    "Kuala Kangsar north": (4.76, 100.84, 4.92, 100.99),
+}
 
 
 def report_corridor() -> None:
+    for label, bbox in CHECK_AREAS.items():
+        _report_area(label, bbox)
+
+
+def _report_area(label: str, bbox: tuple) -> None:
     import httpx
     from collections import Counter
 
-    s, w, n, e = CHECK_BBOX
+    s, w, n, e = bbox
     q = (f'[out:json][timeout:60];way["highway"~"^({"|".join(roads.ROAD_CLASSES)})$"]'
          f"({s},{w},{n},{e});out tags;")
     for url in roads.OVERPASS_URLS:
@@ -60,8 +71,7 @@ def report_corridor() -> None:
         keep = t.get("highway") == "motorway" or roads.is_expressway(t)
         seen[(t.get("highway"), t.get("ref", "-"), t.get("name", "-"),
               "EXPRESSWAY" if keep else "city")] += 1
-    print("corridor check (Jelutong -> Bayan Lepas): ways by highway/ref/name -> verdict",
-          flush=True)
+    print(f"corridor check ({label}): ways by highway/ref/name -> verdict", flush=True)
     for (hw, ref, name, verdict), n_ways in sorted(seen.items()):
         print(f"  {n_ways:3d} x {hw:8s} ref={ref:10s} {name:40s} -> {verdict}", flush=True)
 

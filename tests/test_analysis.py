@@ -4349,11 +4349,13 @@ def test_the_map_decides_highway_and_a_slow_expressway_is_sh():
     open_road = D(20.0, 12.0, 110.0, {"highway": {"100": band(20.0, 12.0, 3.2)}})
     assert drive_mode(open_road) == "CH"
 
-    # A fast ordinary road the map does not list: the speed rule would call it
-    # highway (avg 80, peak 105); the map says city.
-    fast_trunkless = D(20.0, 15.0, 105.0, {"city": {"80": band(20.0, 15.0, 3.0)}})
+    # A fast road the map does not list as expressway (an open federal road,
+    # or an expressway stretch mapped without its number): the map says city,
+    # but avg 80 / peak 105 is expressway pace, which no town trip reaches —
+    # so the speed rule decides, as it does for the same trip without a map.
+    fast_unlisted = D(20.0, 15.0, 105.0, {"city": {"80": band(20.0, 15.0, 3.0)}})
     assert drive_mode(D(20.0, 15.0, 105.0)) == "CH"
-    assert drive_mode(fast_trunkless) in ("CC", "SC", "HC")
+    assert drive_mode(fast_unlisted) == "CH"
 
     # A long wait on the expressway is a jammed highway, not heavy city.
     stuck = D(10.0, 60.0, 60.0, {"highway": {"10": band(10.0, 60.0, 1.5)}}, idle=30.0)
@@ -4407,3 +4409,29 @@ def test_matrix_codes_carry_the_country_the_trip_started_in():
 
     bare = condition_matrix([D("")], capacity_kwh=68.6)["modes"]
     assert [r["code"] for r in bare] == ["CC"]
+
+
+def test_a_trip_the_map_calls_city_at_expressway_pace_falls_back_to_speed():
+    """A stretch of expressway mapped without its E number reads city on the
+    map. Nobody averages expressway pace in town, so such a trip is handed
+    back to the speed rule instead of being filed as a 100 km/h city trip."""
+    import json as _json
+
+    from app.analysis.driving import drive_mode, road_verdict
+
+    class D:
+        def __init__(self, km, mins, mx):
+            self.distance_km = km; self.duration_min = mins
+            self.max_speed_kmh = mx; self.idle_min = 0.0
+            self.idle_tracked = True; self.energy_estimated = False
+            self.outside_temp_c = 30.0
+            self.energy_used_kwh = 0.15 * km; self.wh_per_km = 150.0
+            self.road_profile = _json.dumps(
+                {"city": {"100": {"km": km, "min": mins, "kwh": 0.15 * km}}})
+
+    fast = D(50.0, 30.0, 120.0)             # 100 km/h average, 120 peak
+    assert road_verdict(fast) is None
+    assert drive_mode(fast) in ("FH", "CH")
+    slow = D(6.0, 24.0, 57.0)               # a real city crawl stays city
+    assert road_verdict(slow) == "city"
+    assert drive_mode(slow) in ("CC", "SC", "HC")
