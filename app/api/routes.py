@@ -4110,7 +4110,8 @@ def _promote_shadow_trips(session: Session, apply: bool = False,
     if not vin_to_vehicle:
         return []
     drives = session.scalars(
-        select(Drive).where(Drive.start_time >= since).order_by(Drive.start_time)
+        select(Drive).where(Drive.end_time >= _promote_rows_from(trips, since))
+        .order_by(Drive.start_time)
     ).all()
     # Identity is the row's own start_time, in a DateTime column, and not a
     # timestamp in a float one.
@@ -4343,6 +4344,30 @@ def _shadow_charge_kwh(c: dict, prefer: str = CHARGE_ENERGY_SOURCE):
     return None, ""
 
 
+def _promote_rows_from(staged: list, since: datetime) -> datetime:
+    """How far back promotion must load existing rows to see every one a
+    staged session could match.
+
+    Sessions are considered when they END after ``since``, so one can start
+    before it — and the rows were loaded by START after ``since``, which left
+    out the very row already written for a session straddling the window's
+    edge. It then looked new: a charge, which nothing unique guards, was
+    written twice; a trip hit the drives unique index and failed the whole
+    promotion, on every batch, until the edge moved past it.
+
+    Any row a session can match overlaps it, so ends after the session's
+    start: loading rows that END after the earliest such start sees them all.
+    """
+    lo = since
+    for x in staged:
+        try:
+            if sync_mod._dt(float(x["end_ts"])) >= since:
+                lo = min(lo, sync_mod._dt(float(x["start_ts"])))
+        except (KeyError, TypeError, ValueError, OSError):
+            continue
+    return lo
+
+
 def _promote_shadow_charges(session: Session, apply: bool = False,
                             days: int = PROMOTE_MAX_DAYS,
                             max_add: int | None = None) -> list[dict]:
@@ -4379,7 +4404,8 @@ def _promote_shadow_charges(session: Session, apply: bool = False,
     vin_to_vehicle = {v.vin: v.id for v in session.scalars(select(Vehicle)).all() if v.vin}
     since = sync_mod.now_local() - timedelta(days=days)
     existing = session.scalars(
-        select(Charge).where(Charge.start_time >= since).order_by(Charge.start_time)
+        select(Charge).where(Charge.end_time >= _promote_rows_from(charges, since))
+        .order_by(Charge.start_time)
     ).all()
     by_shadow = {(c.vehicle_id, c.start_time.replace(microsecond=0)): c
                  for c in existing
@@ -5757,7 +5783,8 @@ def add_manual_charge(payload: dict = Body(...), session: Session = Depends(get_
         energy_added_kwh = float(payload["energy_added_kwh"])
     except (KeyError, TypeError, ValueError):
         raise HTTPException(400, "Missing or invalid 'energy_added_kwh'.")
-    if energy_added_kwh <= 0:
+    # isfinite: "nan" parses and passes "<= 0", then poisons every total.
+    if not math.isfinite(energy_added_kwh) or energy_added_kwh <= 0:
         raise HTTPException(400, "'energy_added_kwh' must be greater than 0.")
 
     charge_type = str(payload.get("charge_type") or "AC").upper()
@@ -5771,6 +5798,9 @@ def add_manual_charge(payload: dict = Body(...), session: Session = Depends(get_
         cost = payload.get("cost")
         cost = float(cost) if cost not in (None, "") else None
     except (TypeError, ValueError):
+        raise HTTPException(400, "Invalid numeric field.")
+    if not all(math.isfinite(x) for x in (start_soc, end_soc, max_power_kw, outside_temp_c)) \
+            or (cost is not None and (not math.isfinite(cost) or cost < 0)):
         raise HTTPException(400, "Invalid numeric field.")
     location = str(payload.get("location") or "")[:120]
     # No telemetry field reliably marks a free session (e.g. a Tesla
@@ -5821,7 +5851,7 @@ def edit_charge_rate(payload: dict = Body(...), session: Session = Depends(get_s
         rate = float(payload["price_per_kwh"])
     except (KeyError, TypeError, ValueError):
         raise HTTPException(400, "Missing or invalid 'price_per_kwh'.")
-    if rate < 0:
+    if not math.isfinite(rate) or rate < 0:
         raise HTTPException(400, "'price_per_kwh' must be >= 0.")
     source = payload.get("source") or ""
     if source and source not in pricing_prefs.EDIT_SOURCES:
@@ -5962,7 +5992,9 @@ def save_pricing_prefs(payload: dict = Body(...), session: Session = Depends(get
             value = float(raw_rates[key])
         except (TypeError, ValueError):
             raise HTTPException(400, f"'{key}' must be a number.")
-        if value < 0:
+        # isfinite: "nan" parses, and is neither < 0 nor anything else —
+        # saved, it made every charge priced from it cost NaN.
+        if not math.isfinite(value) or value < 0:
             raise HTTPException(400, f"'{key}' must be >= 0.")
         rates[key] = value
 

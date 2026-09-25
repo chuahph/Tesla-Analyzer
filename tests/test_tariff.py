@@ -79,3 +79,13 @@ def test_charge_price_at_falls_back_to_flat_tou_when_ac_dc_unset():
     monday_11pm = datetime(2026, 7, 6, 23, 0)    # off-peak
     assert charge_price_at(settings, dc=False, dt=monday_2pm) == 1.20
     assert charge_price_at(settings, dc=True, dt=monday_11pm) == 0.45
+
+
+def test_a_peak_window_across_midnight_prices_both_sides():
+    """22:00 -> 08:00 peak: the plain start <= hour < end test is empty for
+    it, so every hour priced off-peak."""
+    wed = datetime(2026, 9, 23)
+    rate = lambda h: price_at(wed.replace(hour=h), 0.5, peak=0.9, off_peak=0.3,
+                              peak_start_hour=22, peak_end_hour=8)
+    assert rate(23) == 0.9 and rate(3) == 0.9
+    assert rate(8) == 0.3 and rate(15) == 0.3

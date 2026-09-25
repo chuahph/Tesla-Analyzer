@@ -11449,3 +11449,90 @@ def test_settle_and_ingest_share_one_lock():
     assert done.wait(5)
     t1.join()
     t2.join()
+
+
+def test_promotion_sees_the_row_of_a_session_straddling_the_window_edge(monkeypatch):
+    """Promotion considers a staged session when it ENDS inside the window,
+    and loaded the existing rows by START inside it — so a session whose
+    start fell just before the edge could not find the row already written
+    for it. A charge (nothing unique guards it) was then written twice; a
+    trip matched to a polled drive likewise."""
+    import json as _json
+
+    from app import state
+    from app import sync as sync_mod
+    from app.api import routes
+    from app.database import SessionLocal
+    from app.models import Charge, Drive, Vehicle
+
+    vin = "TESTVIN-STRADDLE"
+    start = datetime(2026, 8, 1, 10, 0)
+    end = datetime(2026, 8, 1, 12, 0)
+    # The 7-day edge falls at 11:00, halfway through the session.
+    monkeypatch.setattr(sync_mod, "now_local",
+                        lambda: datetime(2026, 8, 8, 11, 0))
+    s = SessionLocal()
+    prev = {k: state.get(s, k) for k in (state.TELEMETRY_CHARGES_KEY,
+                                         state.TELEMETRY_TRIPS_KEY)}
+    try:
+        v = Vehicle(vin=vin, name="t", model="m")
+        s.add(v)
+        s.commit()
+        s.add(Charge(vehicle_id=v.id, start_time=start, end_time=end,
+                     energy_added_kwh=18.0, charge_type="AC", cost=16.0))
+        # A polled drive, a minute off the stream's own boundary.
+        s.add(Drive(vehicle_id=v.id, start_time=start + timedelta(minutes=1),
+                    end_time=end, distance_km=100.0, duration_min=119.0))
+        s.commit()
+        ts0, ts1 = sync_mod.to_epoch(start), sync_mod.to_epoch(end)
+        state.put(s, state.TELEMETRY_CHARGES_KEY, _json.dumps([{
+            "vin": vin, "start_ts": ts0, "end_ts": ts1,
+            "start_time": start.isoformat(), "end_time": end.isoformat(),
+            "duration_min": 120.0, "kwh_pack_meter": 18.0, "kwh_wall": 19.0,
+            "soc_start": 50.0, "soc_end": 80.0}]))
+        state.put(s, state.TELEMETRY_TRIPS_KEY, _json.dumps([{
+            "vin": vin, "start_ts": ts0, "end_ts": ts1,
+            "start_time": start.isoformat(), "end_time": end.isoformat(),
+            "distance_km": 100.2, "energy_kwh": 15.0, "duration_min": 120.0,
+            "start_odo_km": 1000.0, "end_odo_km": 1100.2}]))
+        s.commit()
+
+        charges = routes._promote_shadow_charges(s, apply=False, days=7)
+        # Matched to the row already written (and at most corrected), never
+        # added as a second copy.
+        assert len(charges) == 1 and charges[0]["action"] != "add", charges
+        trips = [t for t in routes._promote_shadow_trips(s, apply=False, days=7)
+                 if t.get("start") == start.isoformat()]
+        assert [t["action"] for t in trips] == ["correct"], trips
+    finally:
+        for k, val in prev.items():
+            state.put(s, k, val or "")
+        s.commit()
+        s.close()
+
+
+def test_price_and_energy_inputs_refuse_nan_and_infinity():
+    """float("nan") parses, and is not "< 0" — it was accepted, stored, and
+    turned every total it reached into NaN."""
+    settings = get_settings()
+    old_pc = settings.app_passcode
+    settings.app_passcode = ""
+    try:
+        with TestClient(app) as client:
+            for bad in ("nan", "inf"):
+                r = client.post("/api/pricing-prefs",
+                                json={"rates": {"home_ac": bad}, "default_source": "home"})
+                assert r.status_code == 400, (bad, r.text)
+                r = client.post("/api/charges/edit-rate",
+                                json={"id": 1, "price_per_kwh": bad})
+                assert r.status_code == 400, (bad, r.text)
+                r = client.post("/api/charges/manual", json={
+                    "start_time": "2026-09-01T10:00:00", "end_time": "2026-09-01T11:00:00",
+                    "energy_added_kwh": bad})
+                assert r.status_code == 400, (bad, r.text)
+                r = client.post("/api/charges/manual", json={
+                    "start_time": "2026-09-01T10:00:00", "end_time": "2026-09-01T11:00:00",
+                    "energy_added_kwh": 5, "cost": bad})
+                assert r.status_code == 400, (bad, r.text)
+    finally:
+        settings.app_passcode = old_pc

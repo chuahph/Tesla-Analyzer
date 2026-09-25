@@ -29,7 +29,13 @@ def price_at(
         return flat
     if weekend_off_peak and dt.weekday() >= 5:
         return off_peak
-    return peak if peak_start_hour <= dt.hour < peak_end_hour else off_peak
+    if peak_start_hour <= peak_end_hour:
+        in_peak = peak_start_hour <= dt.hour < peak_end_hour
+    else:
+        # A peak that runs past midnight (22 -> 8). The plain range test is
+        # empty for it, so every hour priced off-peak.
+        in_peak = dt.hour >= peak_start_hour or dt.hour < peak_end_hour
+    return peak if in_peak else off_peak
 
 
 def price_fn_from_settings(settings):
