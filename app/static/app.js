@@ -224,6 +224,15 @@ const allPointLabelsPlugin = {
 };
 Chart.register(barLabelsPlugin, centerTextPlugin, allPointLabelsPlugin);
 
+// Text from outside this app — geocoded addresses, OpenStreetMap place names
+// anyone can edit, names typed into forms — about to go into innerHTML. A
+// "place" called <img src=x onerror=...> near where the car parks would
+// otherwise run as script inside the signed-in dashboard.
+function h(text) {
+  return String(text == null ? "" : text).replace(/[&<>"']/g, (c) => (
+    { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+}
+
 function kpiCard(label, value, sub, tone) {
   return `<div class="kpi${tone ? " tone-" + tone : ""}"><div class="label">${label}</div>
     <div class="value">${value}</div><div class="sub">${sub || ""}</div></div>`;
@@ -497,7 +506,7 @@ async function renderCompareTable() {
     table.innerHTML = "<tr><td>No linked cars to compare.</td></tr>";
     return;
   }
-  const head = `<tr><th></th>${cars.map((c) => `<th>${c.name || c.model || "Car"}</th>`).join("")}</tr>`;
+  const head = `<tr><th></th>${cars.map((c) => `<th>${h(c.name || c.model || "Car")}</th>`).join("")}</tr>`;
   const body = COMPARE_ROWS.map((row) =>
     `<tr><th>${row.label}</th>${cars.map((c) => `<td>${row.fmt(c[row.key], data.currency)}</td>`).join("")}</tr>`
   ).join("");
@@ -818,7 +827,7 @@ function renderKpis(d) {
     // (see /api/places — needs at least one named place to show at all).
     if (lt.eta) {
       const soc = lt.eta.projected_soc;
-      cards.push(kpiCard(`ETA · ${lt.eta.place}`, fmt(lt.eta.eta_min) + " min",
+      cards.push(kpiCard(`ETA · ${h(lt.eta.place)}`, fmt(lt.eta.eta_min) + " min",
         `${fmt(lt.eta.distance_km, 1)} km` + (soc != null ? ` · ~${fmt(soc, 1)}% on arrival` : ""),
         soc != null && soc < 15 ? "amber" : "blue"));
     }
@@ -1779,7 +1788,7 @@ function renderLists(d) {
       // reusable geofence (self-hosted only — needs real coords + a place
       // to persist against). A route like "12 Main St, George Town → Home"
       // reads as start → end, so the two pins sit either side of the arrow.
-      const routeParts = t.route ? t.route.split(" → ") : [];
+      const routeParts = t.route ? t.route.split(" → ").map(h) : [];
       const pin = (coords) => coords && !STATIC_MODE
         ? `<button class="place-pin" data-coords="${coords}" title="Name this place">📍</button>` : "";
       const routeHtml = t.route
@@ -2080,6 +2089,7 @@ function attr(text) {
 function chargeRowHtml(c, currency, idx) {
   const when = `${tripWhen(c.start_time)} → ${tripEnd(c.start_time, c.end_time)}`;
   const loc = c.location ? `${c.location} · ${c.charge_type}` : c.charge_type;
+  const locHtml = h(loc);
   const kwh = `${fmt(c.energy_added_kwh, 1)} kWh`;
   const soc = c.start_soc != null && c.end_soc != null
     ? ` · ${fmt(c.start_soc)}% → ${fmt(c.end_soc)}%` : "";
@@ -2100,7 +2110,7 @@ function chargeRowHtml(c, currency, idx) {
   // trip has no label of its own to bulk-match other sessions against.
   let renameBtn = "";
   if (!STATIC_MODE && c.id != null && !chargeSelectMode) {
-    const escLoc = loc.replace(/"/g, "&quot;");
+    const escLoc = attr(loc);
     const rawLoc = c.location_raw != null ? c.location_raw : (c.location || "");
     renameBtn = ` <button class="charge-rename-btn" data-rename-charge-id="${c.id}" ` +
       `data-loc-raw="${attr(rawLoc)}" data-loc-shown="${attr(c.location || "")}" ` +
@@ -2133,7 +2143,7 @@ function chargeRowHtml(c, currency, idx) {
       `title="Copy this charge's diagnostics">⧉</button>`
     : "";
   return `<li class="charge${chargeSelectMode && c.id != null ? " selectable" : ""}">` +
-    `<span class="charge-main">${check}<span class="charge-loc">${loc}${renameBtn}</span>` +
+    `<span class="charge-main">${check}<span class="charge-loc">${locHtml}${renameBtn}</span>` +
     `<span class="charge-when">${when}</span></span>` +
     `<span class="charge-figs">${kwh}${soc} · ${cost}${rate}${buttons}${diagBtn}</span></li>`;
 }
@@ -2573,7 +2583,7 @@ function renderMatrix(d) {
   const park = parked.map((p) => `
       <tr class="mx-parked">
         <td class="mx-code">${p.code}</td>
-        <td class="mx-name">${p.name}<span class="mx-sub">${parkSub(p)}</span></td>
+        <td class="mx-name">${h(p.name)}<span class="mx-sub">${parkSub(p)}</span></td>
         <td>${p.pct == null ? "—"
           : p.pct_max != null && p.pct_max > p.pct
             ? `${num(p.pct, 1)}–${num(p.pct_max, 1)}%`
@@ -2741,7 +2751,7 @@ function renderMatrixTrips(d) {
   const html = rows.map((r) => `
       <tr${r.counted === false ? ' class="mx-parked"' : ""}>
         <td class="mx-code">${r.mode ?? "—"}</td>
-        <td class="mx-name">${(r.at || "").replace("T", " ")} — ${r.route || "?"}
+        <td class="mx-name">${(r.at || "").replace("T", " ")} — ${h(r.route || "?")}
           <span class="mx-sub">${num(r.km, 1)} km · ${num(r.min, 0)} min ·
             avg ${num(r.avg_kmh, 0)} / max ${num(r.max_kmh, 0)} km/h${
               r.constancy != null ? ` (${num(r.constancy, 2)})` : ""} ·
@@ -3344,7 +3354,7 @@ async function lookupPlanDest() {
     // costs is a property of the road, not of when you leave.
     plannerRoute = body.route_wh_per_km
       ? { whPerKm: body.route_wh_per_km, n: body.route_trips,
-          label: body.dest_label, km: body.km }
+          label: h(body.dest_label), km: body.km }
       : null;
     computePlan();
     const est = body.method === "driving" ? "driving distance" : "straight-line estimate";
@@ -4628,7 +4638,7 @@ function buildReport(d) {
     ? drv.total_distance_km / repSocPct : null;
   return `
     <h1>Tesla Analyzer — ${windowText}</h1>
-    <p class="rep-sub">${[v.year, v.model, v.name].filter(Boolean).join(" · ")}
+    <p class="rep-sub">${h([v.year, v.model, v.name].filter(Boolean).join(" · "))}
       · generated ${footerDateFmt.format(new Date())}</p>
     <h2>Driving</h2>
     <table>${
@@ -4984,7 +4994,7 @@ async function renderServicePanel() {
       : `last ${fmtServiceDate(r.last_date)}` +
         (r.due_date ? ` · due ${fmtServiceDate(r.due_date)}` : "") +
         (r.due_odo_km != null ? ` · due ${fmt(r.due_odo_km)} km` : "");
-    return `<li><span>${r.type}<span class="svc-meta"><br>${meta}</span></span>` +
+    return `<li><span>${h(r.type)}<span class="svc-meta"><br>${meta}</span></span>` +
       `<span class="svc-status ${r.status}">${SERVICE_STATUS_LABEL[r.status]}</span></li>`;
   }).join("");
 
@@ -4992,9 +5002,9 @@ async function renderServicePanel() {
     listEl.innerHTML = '<li class="places-empty">No service history logged yet.</li>';
   } else {
     listEl.innerHTML = data.records.map((r) =>
-      `<li><span>${r.type} · ${fmtServiceDate(r.date)}` +
+      `<li><span>${h(r.type)} · ${fmtServiceDate(r.date)}` +
       `<span class="place-meta">${r.odo_km ? ` · ${fmt(r.odo_km)} km` : ""}` +
-      `${r.cost ? ` · ${fmt(r.cost, 2)}` : ""}${r.notes ? ` · ${r.notes}` : ""}</span></span>` +
+      `${r.cost ? ` · ${fmt(r.cost, 2)}` : ""}${r.notes ? ` · ${h(r.notes)}` : ""}</span></span>` +
       `<button class="place-del" data-id="${r.id}" title="Remove this record">✕</button></li>`
     ).join("");
     listEl.querySelectorAll(".place-del").forEach((btn) => {
