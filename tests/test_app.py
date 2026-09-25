@@ -6103,6 +6103,11 @@ def test_promotion_recognises_its_own_rows_across_a_storage_round_trip():
     try:
         now = sync_mod.now_local()
         at = now - timedelta(minutes=70)
+        # Not on a whole thousand seconds: 7 significant figures of an epoch
+        # near 1.79e9 is a multiple of 1000, and a start that already is one
+        # survives the perturbation below intact — one run in a thousand.
+        if int(at.replace(tzinfo=sync_mod.MYT).timestamp()) % 1000 == 0:
+            at += timedelta(seconds=7)
         start_ts = at.replace(tzinfo=sync_mod.MYT).timestamp() + 0.708992
 
         vehicle = Vehicle(vin="ROUNDTRIP0000001", name="Test", model="Model 3")
