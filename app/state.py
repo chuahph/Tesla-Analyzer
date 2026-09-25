@@ -103,6 +103,9 @@ TELEMETRY_MODES_TAIL_KEY = "telemetry_modes_tail"  # The newest few entries of
 # rewrite the whole ~70 KB log, and a car parking changes five or six of these
 # fields in a minute; appending here costs a few KB, and the big log is read
 # once per routes.TELEMETRY_MODES_FOLD changes. Readers take both, log first.
+ROAD_CITY_OVERRIDES_KEY = "road_city_overrides"  # JSON list of {id, name,
+# added, lines}: road stretches the owner has marked as city whatever the map
+# says (see roads.set_city_overrides). Seeded once from roads.SEED_PATH.
 TELEMETRY_TRIPS_KEY = "telemetry_trips"  # JSON list of finished shadow trips.
 # Kept out of the Drive table on purpose — these are unverified, and a wrong
 # row in the real history is a repair job while a wrong row here is a delete.

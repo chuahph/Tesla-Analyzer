@@ -193,8 +193,63 @@ def _tiles_for(bbox: tuple[float, float, float, float]) -> dict[str, tuple]:
     return out
 
 
+# Stretches the owner has marked as city whatever the map says — a trunk road
+# through town whose traffic lights OpenStreetMap never mapped reads exactly
+# like an expressway, and no rule applied to the map can tell them apart.
+# Checked before the network: a position within CITY_OVERRIDE_M of one is
+# city. Held here, loaded from the database by the app (routes
+# _load_city_overrides), so this module stays DB-free.
+CITY_OVERRIDE_M = 35.0
+# Shipped starting set: the Jelutong–Bayan Lepas arterials (Jalan Sultan Azlan
+# Shah and the parallel road past Home) that trips 3126 and 3127 crawled along
+# and the map called expressway. Seeded into the database once; after that the
+# stored list is the owner's to edit.
+SEED_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                         "city_overrides_seed.json")
+_city_grid: dict[tuple[int, int], list] | None = None
+_city_count = 0
+
+
+def set_city_overrides(items: list[dict]) -> None:
+    """Install the owner's city stretches: ``[{"lines": [[[lat, lon], ...]]}]``."""
+    global _city_grid, _city_count
+    lines = [line for it in items for line in (it.get("lines") or [])
+             if isinstance(line, list) and len(line) >= 2]
+    grid = _build(lines) if lines else None
+    with _lock:
+        _city_grid, _city_count = grid, len(items)
+
+
+def seed_city_lines() -> list:
+    try:
+        with open(SEED_PATH) as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return []
+
+
+def network_lines_near(lat: float, lon: float, radius_m: float) -> list:
+    """The loaded expressway segments within ``radius_m`` of a point, as
+    two-point lines — what "mark the road here as city" captures."""
+    grid = _grid
+    if grid is None:
+        return []
+    reach = int(radius_m / 1100.0) + 2
+    ci, cj = int(math.floor(lat / _CELL)), int(math.floor(lon / _CELL))
+    seen, out = set(), []
+    for i in range(ci - reach, ci + reach + 1):
+        for j in range(cj - reach, cj + reach + 1):
+            for seg in grid.get((i, j), ()):
+                if seg in seen:
+                    continue
+                seen.add(seg)
+                if _seg_dist_m(lat, lon, seg) <= radius_m:
+                    out.append([[seg[0], seg[1]], [seg[2], seg[3]]])
+    return out
+
+
 def status() -> dict[str, Any]:
-    return dict(_meta)
+    return {**_meta, "city_overrides": _city_count}
 
 
 def road_class(lat: Any, lon: Any) -> str | None:
@@ -208,7 +263,13 @@ def road_class(lat: Any, lon: Any) -> str | None:
         # This tile has not downloaded yet: unknown, never "city" — a road
         # the map has not got must not read as the absence of one.
         return None
-    for seg in grid.get((int(math.floor(lat / _CELL)), int(math.floor(lon / _CELL))), ()):
+    cell = (int(math.floor(lat / _CELL)), int(math.floor(lon / _CELL)))
+    city = _city_grid
+    if city is not None:
+        for seg in city.get(cell, ()):
+            if _seg_dist_m(lat, lon, seg) <= CITY_OVERRIDE_M:
+                return "city"
+    for seg in grid.get(cell, ()):
         if _seg_dist_m(lat, lon, seg) <= MATCH_M:
             return "highway"
     return "city"

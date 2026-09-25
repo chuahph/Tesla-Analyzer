@@ -11642,3 +11642,53 @@ def test_login_stops_answering_after_repeated_wrong_passcodes():
     finally:
         main_mod._login_fails.clear()
         settings.app_passcode = old
+
+
+def test_city_overrides_seed_once_mark_roads_and_delete():
+    """A trunk road through town whose traffic lights OpenStreetMap never
+    mapped reads like an expressway (trips 3126/3127). The owner's city list
+    wins over the map; it is seeded once with the Jelutong–Bayan Lepas
+    arterials, and a deleted entry stays deleted."""
+    from app import roads, state
+    from app.database import SessionLocal
+
+    settings = get_settings()
+    old_pc = settings.app_passcode
+    settings.app_passcode = ""
+    s = SessionLocal()
+    prev = state.get(s, state.ROAD_CITY_OVERRIDES_KEY, None)
+    try:
+        state.delete(s, state.ROAD_CITY_OVERRIDES_KEY)
+        # A map with the arterial by SRJK Kwang Hwa on it, and a real
+        # expressway 5 km away.
+        roads.clear()
+        roads.set_network([[[5.3300, 100.2945], [5.3447, 100.3018]],
+                           [[5.30, 100.20], [5.30, 100.40]]])
+        roads.set_city_overrides([])
+        assert roads.road_class(5.3356, 100.2974) == "highway"
+        with TestClient(app) as client:
+            got = client.get("/api/road-overrides").json()["overrides"]
+            assert len(got) == 1 and got[0]["segments"] > 50       # seeded
+            assert roads.road_class(5.3356, 100.2974) == "city"      # the arterial
+            assert roads.road_class(5.30, 100.30) == "highway"       # untouched
+
+            # Mark a point on the other road; only that road is captured.
+            r = client.get("/api/road-overrides/add?at=5.30,100.30&radius_m=300&name=t")
+            assert r.status_code == 200 and r.json()["segments"] == 1
+            assert roads.road_class(5.30, 100.30) == "city"
+            assert roads.road_class(5.30, 100.25) == "city"  # whole map segment
+            assert client.get("/api/road-overrides/add?at=6.5,103.0").status_code == 404
+
+            client.get("/api/road-overrides/delete?id=1")
+            client.get(f"/api/road-overrides/delete?id={r.json()['added']}")
+            assert client.get("/api/road-overrides").json()["overrides"] == []
+            assert roads.road_class(5.3356, 100.2974) == "highway"   # not re-seeded
+    finally:
+        if prev is None:
+            state.delete(s, state.ROAD_CITY_OVERRIDES_KEY)
+        else:
+            state.put(s, state.ROAD_CITY_OVERRIDES_KEY, prev)
+        s.close()
+        roads.clear()
+        roads.set_city_overrides([])
+        settings.app_passcode = old_pc

@@ -1500,6 +1500,101 @@ def _country_at(coords: str) -> str | None:
 COUNTRY_BACKFILL_PER_TICK = 5
 
 
+def _city_overrides(session: Session) -> list[dict]:
+    """The stored city stretches, seeded from roads.SEED_PATH the first time.
+
+    Seeded only when the key has never been written — an owner who deletes the
+    shipped Penang stretches must not have them come back on the next start.
+    """
+    raw = state.get(session, state.ROAD_CITY_OVERRIDES_KEY, None)
+    if raw is None:
+        seed = roads.seed_city_lines()
+        items = ([{"id": 1, "name": "Jelutong–Bayan Lepas arterials (shipped)",
+                   "added": sync_mod.now_local().isoformat(timespec="seconds"),
+                   "lines": seed}] if seed else [])
+        state.put(session, state.ROAD_CITY_OVERRIDES_KEY, _json_mod.dumps(items))
+        return items
+    try:
+        items = _json_mod.loads(raw or "[]") or []
+    except ValueError:
+        return []
+    return items if isinstance(items, list) else []
+
+
+def _load_city_overrides(session: Session) -> list[dict]:
+    items = _city_overrides(session)
+    roads.set_city_overrides(items)
+    return items
+
+
+# How far "mark the road here as city" reaches from the point given.
+CITY_OVERRIDE_RADIUS_DEFAULT_M = 400.0
+
+
+@router.get("/road-overrides")
+def road_overrides(session: Session = Depends(get_session)):
+    """Road stretches marked as city whatever the map says. Each is judged
+    city within roads.CITY_OVERRIDE_M of its lines — for new trips only: a
+    trip's road split is fixed when it is recorded."""
+    items = _load_city_overrides(session)
+    return {"overrides": [{"id": it.get("id"), "name": it.get("name"),
+                           "added": it.get("added"),
+                           "segments": sum(max(len(l) - 1, 0) for l in it.get("lines") or [])}
+                          for it in items],
+            "how": ("/api/road-overrides/add?at=<lat>,<lon>&radius_m=400&name=<label> "
+                    "marks the expressway/trunk road within radius_m of a point as city; "
+                    "/api/road-overrides/delete?id=<id> removes one")}
+
+
+@router.api_route("/road-overrides/add", methods=["GET", "POST"])
+def road_overrides_add(
+    at: str = Query(..., description="lat,lon on the road, e.g. 5.3356,100.2978"),
+    radius_m: float = Query(CITY_OVERRIDE_RADIUS_DEFAULT_M, ge=50, le=3000),
+    name: str = Query(""),
+    session: Session = Depends(get_session),
+):
+    """Mark the expressway/trunk road around a point as city.
+
+    Captures the segments of the loaded road map within ``radius_m`` of the
+    point — so the road itself, as the map draws it, not a circle that would
+    also swallow a real expressway passing nearby only because it is close.
+    GET as well as POST so it can be tapped from a phone, like the other
+    corrections.
+    """
+    try:
+        lat, lon = (float(x.strip()) for x in at.split(",", 1))
+    except ValueError:
+        raise HTTPException(422, "at must be 'lat,lon', e.g. 5.3356,100.2978")
+    if not (math.isfinite(lat) and math.isfinite(lon)):
+        raise HTTPException(422, "at must be 'lat,lon'")
+    lines = roads.network_lines_near(lat, lon, radius_m)
+    if not lines:
+        st = roads.status()
+        raise HTTPException(
+            404, "no expressway/trunk road on the map within that distance"
+                 + ("" if st.get("state") == "loaded" else f" (road map {st.get('state')})"))
+    items = _city_overrides(session)
+    new_id = max([int(it.get("id") or 0) for it in items] + [0]) + 1
+    items.append({"id": new_id, "name": name.strip()[:80] or f"near {lat:.4f},{lon:.4f}",
+                  "added": sync_mod.now_local().isoformat(timespec="seconds"),
+                  "at": [lat, lon], "radius_m": radius_m, "lines": lines})
+    state.put(session, state.ROAD_CITY_OVERRIDES_KEY, _json_mod.dumps(items))
+    roads.set_city_overrides(items)
+    return {"added": new_id, "segments": len(lines),
+            "note": "applies to trips recorded from now on"}
+
+
+@router.api_route("/road-overrides/delete", methods=["GET", "POST"])
+def road_overrides_delete(id: int = Query(...), session: Session = Depends(get_session)):
+    items = _city_overrides(session)
+    kept = [it for it in items if it.get("id") != id]
+    if len(kept) == len(items):
+        raise HTTPException(404, "no override with that id")
+    state.put(session, state.ROAD_CITY_OVERRIDES_KEY, _json_mod.dumps(kept))
+    roads.set_city_overrides(kept)
+    return {"deleted": id, "remaining": len(kept)}
+
+
 def _backfill_countries(session: Session, limit: int = COUNTRY_BACKFILL_PER_TICK) -> int:
     """Look up the country for a few drives that have coordinates and none
     yet. Newest first, so the trips on screen get their prefix soonest."""

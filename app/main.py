@@ -352,6 +352,16 @@ def _startup() -> None:
         from . import roads
 
         roads.ensure_loaded()
+    # The owner's city stretches, which apply on top of whichever network
+    # loads. One small read at start, and again whenever they are edited.
+    try:
+        from .api.routes import _load_city_overrides
+        from .database import SessionLocal
+
+        with SessionLocal() as s:
+            _load_city_overrides(s)
+    except Exception:  # noqa: BLE001 — a missing override, never a failed start
+        pass
     if settings.demo_mode:
         # Seed sample data so the dashboard is usable out of the box.
         seed_demo_if_empty()
