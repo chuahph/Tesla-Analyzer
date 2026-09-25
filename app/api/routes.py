@@ -5,6 +5,7 @@ import json as _json_mod
 import math
 import os
 import re
+import threading
 import time
 from datetime import datetime, timedelta
 from typing import Any
@@ -4780,7 +4781,22 @@ def _auto_repair_arrivals(session: Session) -> int:
         return 0
 
 
+# Held by the telemetry ingest and by _settle_shadows, the two writers of the
+# shadow and trips stores. Both are plain `def` routes, which FastAPI runs on a
+# thread pool, so a sync tick settling a trip and a telemetry batch stepping
+# the same shadow could each read the store, change it, and write it back —
+# the later write silently undoing the earlier one. One process serves this
+# app, so a process lock is the whole fix. Re-entrant because the ingest's own
+# calls can reach _settle_shadows.
+_SHADOW_LOCK = threading.RLock()
+
+
 def _settle_shadows(session: Session) -> int:
+    with _SHADOW_LOCK:
+        return _settle_shadows_locked(session)
+
+
+def _settle_shadows_locked(session: Session) -> int:
     """Close any shadow trip whose stream went quiet. Returns how many.
 
     The shadow machine is driven by arriving records, so a car that parks and
@@ -6224,7 +6240,6 @@ def export_csv(
     two raw tables. Defaults to everything; pass ``days``, ``since_charge`` or
     ``current_drive`` to export only the currently viewed window.
     """
-    import json as _json
 
     from fastapi.responses import Response
 
@@ -8347,7 +8362,6 @@ def accuracy(
         return {"trips": 0,
                 "how": "Add pairs with /api/add-car-reading?readings=<id>:<km>:<pct>:<wh_per_km>"}
 
-    settings = get_settings()
     out, d_err, e_err = [], [], []
     # The climate/accessory model, judged against the car's own breakdown.
     #
@@ -12795,6 +12809,12 @@ def _telemetry_battery_reading(session: Session, vin: str, snap: dict) -> bool:
 def telemetry_ingest(
     payload: dict = Body(...), session: Session = Depends(get_session)
 ):
+    """See _telemetry_ingest; serialised against _settle_shadows."""
+    with _SHADOW_LOCK:
+        return _telemetry_ingest(payload, session)
+
+
+def _telemetry_ingest(payload: dict, session: Session):
     """Receive a batch of Fleet Telemetry records from the receiver's bridge.
 
     Deliberately does not build a snapshot or touch a trip yet. Tesla does not
@@ -13734,7 +13754,6 @@ def _compare_row(t: dict, d, t_start, car_by_drive: dict, pct) -> dict:
     Split out of telemetry_compare so a record the store cannot read is a
     skipped row with a reason rather than a 500 over the whole report.
     """
-    t_end = sync_mod._dt(t["end_ts"])
     return {
         "telemetry": {
             "start": t["start_time"], "end": t["end_time"],

@@ -11411,3 +11411,39 @@ def test_the_unreadable_store_flag_clears_only_when_that_store_reads_back():
             state.put(sess, k, v or "")
         sess.close()
         settings.app_passcode = old_pc
+
+
+def test_settle_and_ingest_share_one_lock():
+    """A sync tick settling a trip and a telemetry batch stepping the same
+    shadow both read-modify-write it, on FastAPI's thread pool. Neither may
+    run while the other holds the store."""
+    import threading
+
+    from app.api import routes
+    from app.database import SessionLocal
+
+    held, release, done = threading.Event(), threading.Event(), threading.Event()
+
+    def holder():
+        with routes._SHADOW_LOCK:
+            held.set()
+            release.wait(5)
+
+    def settler():
+        s = SessionLocal()
+        try:
+            routes._settle_shadows(s)
+        finally:
+            s.close()
+            done.set()
+
+    t1 = threading.Thread(target=holder)
+    t1.start()
+    assert held.wait(5)
+    t2 = threading.Thread(target=settler)
+    t2.start()
+    assert not done.wait(0.3), "settled while another writer held the store"
+    release.set()
+    assert done.wait(5)
+    t1.join()
+    t2.join()
