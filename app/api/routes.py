@@ -1,6 +1,7 @@
 """REST API endpoints."""
 from __future__ import annotations
 
+import hmac
 import json as _json_mod
 import math
 import os
@@ -3241,6 +3242,9 @@ def _oauth_redirect_uri(request: Request) -> str:
     return f"https://{request.url.netloc}/api/link/oauth/callback"
 
 
+OAUTH_STATE_COOKIE = "tesla_oauth_state"
+
+
 @router.get("/link/oauth/start")
 def oauth_start(request: Request, session: Session = Depends(get_session)):
     """Button 2 (OAuth flow) — redirect to Tesla's sign-in page."""
@@ -3271,20 +3275,32 @@ def oauth_start(request: Request, session: Session = Depends(get_session)):
                 "Check TESLA_CLIENT_ID / TESLA_CLIENT_SECRET and that this domain "
                 "is listed under Allowed Origins in your Tesla developer app.",
             ) from exc
-    url, _state = auth.authorize_url(_oauth_redirect_uri(request))
-    return RedirectResponse(url)
+    url, oauth_state = auth.authorize_url(_oauth_redirect_uri(request))
+    resp = RedirectResponse(url)
+    # Checked on the way back. Without it the callback accepted any code, so
+    # a link that sent a signed-in browser to it with someone else's code
+    # linked THEIR Tesla account to this dashboard.
+    resp.set_cookie(OAUTH_STATE_COOKIE, oauth_state, max_age=600,
+                    httponly=True, samesite="lax")
+    return resp
 
 
 @router.get("/link/oauth/callback")
 def oauth_callback(
     request: Request,
     code: str | None = None, error: str | None = None,
+    state_param: str | None = Query(None, alias="state"),
     session: Session = Depends(get_session),
 ):
     if error:
         raise HTTPException(400, f"Tesla sign-in failed: {error}")
     if not code:
         raise HTTPException(400, "Missing authorization code.")
+    expected = request.cookies.get(OAUTH_STATE_COOKIE, "")
+    if not (expected and state_param
+            and hmac.compare_digest(expected, state_param)):
+        raise HTTPException(400, "Sign-in could not be verified (state mismatch). "
+                                 "Start again from the Link button.")
     try:
         tokens = auth.exchange_code(code, _oauth_redirect_uri(request))
         result = services.link_with_token(
@@ -3296,7 +3312,9 @@ def oauth_callback(
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(400, f"OAuth exchange failed: {exc}") from exc
     # Land the user back on the dashboard.
-    return RedirectResponse(f"/?linked={result['source']}")
+    resp = RedirectResponse(f"/?linked={result['source']}")
+    resp.delete_cookie(OAUTH_STATE_COOKIE)
+    return resp
 
 
 def _check_bridge_quiet(session: Session, vehicle, vin: str, snap: dict,

@@ -104,6 +104,9 @@ TESLA_KEY_PATH = "/.well-known/appspecific/com.tesla.3p.public-key.pem"
 # /vm and /car join them: curl running on the receiver box has no passcode
 # cookie, and both only hand back a public GitHub URL.
 _OPEN_PATHS = {"/login", "/api/health", "/api/ping", TESLA_KEY_PATH, "/vm", "/car"}
+# Reached from another site on purpose: Tesla's sign-in redirects back here.
+# Guarded by its own OAuth state check instead.
+_CROSS_SITE_OK = {"/api/link/oauth/callback"}
 
 
 # Measured live, September 2026: Render's own platform health probe — not any
@@ -128,6 +131,16 @@ async def _passcode_gate(request: Request, call_next):
     settings = get_settings()
     passcode = settings.app_passcode.strip()
     path = request.url.path
+    if (passcode and path.startswith("/api/") and path not in _CROSS_SITE_OK
+            and request.headers.get("sec-fetch-site") == "cross-site"
+            and _is_authed(request, passcode)):
+        # The cookie is SameSite=Lax, which still rides along on a plain link
+        # followed from another site — and several endpoints here act on a GET
+        # (purge ?apply=true, the manual corrections), by design, so they can
+        # be typed or tapped on a phone. A typed URL or one opened from an app
+        # reports "none"; only a page on some other site reports cross-site,
+        # and nothing legitimate reaches this API from one.
+        return JSONResponse({"detail": "Cross-site request refused."}, status_code=403)
     if not passcode or path in _OPEN_PATHS or _is_authed(request, passcode):
         return await call_next(request)
     # External cron services trigger /api/sync (hands-off background logging),
@@ -257,16 +270,47 @@ def login_page() -> HTMLResponse:
     return HTMLResponse(LOGIN_HTML.replace("{err}", ""))
 
 
+# Wrong passcodes allowed per client in LOGIN_WINDOW_SEC before refusing.
+# The app has one user and a URL anyone can find; without a limit, guessing
+# the passcode is only a matter of how fast the host answers.
+LOGIN_MAX_FAILS = 10
+LOGIN_WINDOW_SEC = 15 * 60
+_login_fails: dict[str, list[float]] = {}
+
+
+def _client_id(request: Request) -> str:
+    # Behind Render's proxy the peer is the proxy; the first forwarded hop is
+    # the browser.
+    fwd = request.headers.get("x-forwarded-for", "")
+    return (fwd.split(",")[0].strip() if fwd else
+            (request.client.host if request.client else "?"))
+
+
 @app.post("/login")
-def login_submit(passcode: str = Form("")):
+def login_submit(request: Request, passcode: str = Form("")):
+    import time as _time
+
+    now = _time.monotonic()
+    who = _client_id(request)
+    recent = [t for t in _login_fails.get(who, []) if now - t < LOGIN_WINDOW_SEC]
+    if len(recent) >= LOGIN_MAX_FAILS:
+        return HTMLResponse(
+            LOGIN_HTML.replace("{err}", '<div class="err">Too many wrong attempts — '
+                                        'wait 15 minutes.</div>'),
+            status_code=429)
     expected = get_settings().app_passcode.strip()
     if expected and secrets.compare_digest(passcode.strip(), expected):
+        _login_fails.pop(who, None)
         resp = RedirectResponse("/", status_code=303)
         resp.set_cookie(
             AUTH_COOKIE, _auth_token(expected),
             max_age=60 * 60 * 24 * 90, httponly=True, samesite="lax",
         )
         return resp
+    recent.append(now)
+    _login_fails[who] = recent
+    if len(_login_fails) > 1000:  # bounded, whatever is thrown at it
+        _login_fails.clear()
     return HTMLResponse(
         LOGIN_HTML.replace("{err}", '<div class="err">Wrong passcode — try again.</div>'),
         status_code=401,

@@ -11573,3 +11573,72 @@ def test_restore_skips_a_trip_since_re_recorded_under_a_new_id():
         state.put(s, key, "")
         s.commit()
         s.close()
+
+
+def test_cross_site_api_calls_are_refused_but_typed_ones_work():
+    """SameSite=Lax still sends the cookie on a link followed from another
+    site, and several endpoints act on a GET. A page elsewhere must not be
+    able to drive them; a typed URL or an app's link ("none") still can."""
+    settings = get_settings()
+    old = settings.app_passcode
+    settings.app_passcode = "secret123"
+    try:
+        with TestClient(app) as client:
+            client.post("/login", data={"passcode": "secret123"}, follow_redirects=False)
+            assert client.get("/api/summary",
+                              headers={"sec-fetch-site": "cross-site"}).status_code == 403
+            assert client.get("/api/summary",
+                              headers={"sec-fetch-site": "none"}).status_code == 200
+            assert client.get("/api/summary",
+                              headers={"sec-fetch-site": "same-origin"}).status_code == 200
+    finally:
+        settings.app_passcode = old
+
+
+def test_oauth_callback_requires_the_state_it_sent(monkeypatch):
+    """The state was generated and never checked, so any code reaching the
+    callback was exchanged and linked — someone else's Tesla account, sent
+    there by a link."""
+    from app import auth, services
+
+    exchanged = []
+    monkeypatch.setattr(auth, "exchange_code",
+                        lambda code, uri: exchanged.append(code) or {"access_token": "t"})
+    monkeypatch.setattr(services, "link_with_token",
+                        lambda *a, **k: {"source": "tesla"})
+    settings = get_settings()
+    old = settings.app_passcode
+    settings.app_passcode = ""
+    try:
+        with TestClient(app) as client:
+            r = client.get("/api/link/oauth/callback?code=abc&state=forged",
+                           follow_redirects=False)
+            assert r.status_code == 400 and exchanged == []
+            client.cookies.set("tesla_oauth_state", "right")
+            r = client.get("/api/link/oauth/callback?code=abc&state=wrong",
+                           follow_redirects=False)
+            assert r.status_code == 400 and exchanged == []
+            r = client.get("/api/link/oauth/callback?code=abc&state=right",
+                           follow_redirects=False)
+            assert r.status_code == 307 and exchanged == ["abc"]
+    finally:
+        settings.app_passcode = old
+
+
+def test_login_stops_answering_after_repeated_wrong_passcodes():
+    from app import main as main_mod
+
+    settings = get_settings()
+    old = settings.app_passcode
+    settings.app_passcode = "secret123"
+    main_mod._login_fails.clear()
+    try:
+        with TestClient(app) as client:
+            for _ in range(main_mod.LOGIN_MAX_FAILS):
+                assert client.post("/login", data={"passcode": "nope"}).status_code == 401
+            # Even the right one is refused until the window passes.
+            assert client.post("/login", data={"passcode": "secret123"},
+                               follow_redirects=False).status_code == 429
+    finally:
+        main_mod._login_fails.clear()
+        settings.app_passcode = old
