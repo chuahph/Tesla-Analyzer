@@ -104,13 +104,27 @@ def evaluate(
             and gap.get("pct", 0.0) >= STANDBY_GAP_PCT):
         cost = f" / {currency} {gap['cost']:.2f}" if gap.get("cost") is not None else ""
         cause = f" {gap['inducer']} was the likely draw." if gap.get("inducer") else ""
+        # This is the single worst gap found in a 30-day scan, not necessarily
+        # today's — and a re-send after COOLDOWN_DAYS delivers the SAME old
+        # gap again, which with no date on it reads as something that just
+        # happened. Said explicitly, with how long ago, so a resend of a
+        # five-day-old gap does not look like a fresh one.
+        when = ""
+        try:
+            end_dt = datetime.fromisoformat(gap.get("end", ""))
+            age_days = (now - end_dt).days
+            when = (f" on {end_dt.strftime('%d %b')}"
+                    + (f", {age_days} day{'s' if age_days != 1 else ''} ago"
+                       if age_days >= 1 else ""))
+        except (TypeError, ValueError):
+            pass
         out.append({
             "key": "standby_drain",
             # End timestamp -> one alert per distinct parked event.
             "signature": str(gap.get("end", "")),
             "title": "Unusual standby drain while parked",
             "body": f"Lost {gap['pct']:.1f}% ({gap['kwh']:.1f} kWh{cost}) parked over "
-                    f"{gap.get('hours', 0):.0f} h with no charging.{cause} "
+                    f"{gap.get('hours', 0):.0f} h with no charging{when}.{cause} "
                     "Turn off Sentry Mode when parked somewhere safe to cut it.",
         })
 

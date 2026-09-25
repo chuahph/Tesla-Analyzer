@@ -55,11 +55,37 @@ def test_standby_alert_fires_on_a_big_parked_event():
         service_rows=None, standby_longest=gap, currency="RM") if a["key"] == "standby_drain")
     assert "Sentry Mode" in a["body"]
     assert a["signature"] == "2026-07-23T22:00:00"
+    # Same day (11 h before NOW): dated, but no "days ago" — it just happened.
+    assert "23 Jul" in a["body"] and "ago" not in a["body"]
     # A small routine gap doesn't fire.
     small = {"kwh": 0.4, "pct": 0.5, "hours": 12, "end": "x"}
     assert not any(a["key"] == "standby_drain" for a in alerts.evaluate(
         now=NOW, efficiency=None, prev_efficiency=None, battery=None,
         service_rows=None, standby_longest=small))
+
+
+def test_standby_alert_says_how_old_a_resent_gap_is():
+    """/api/alerts/check scans a rolling 30 days and re-sends the same worst
+    gap once COOLDOWN_DAYS has passed — so a resend with no date on it reads
+    as something that just happened, when it can be weeks old. Measured live:
+    a 4.3%/2.9 kWh gap arrived as a plain "parked over 4 h" push with nothing
+    to say it was from days earlier, read against the car's own "since last
+    charge" screen (a different window entirely) as if it disagreed with it.
+    """
+    old_gap = {"kwh": 2.9, "pct": 4.3, "hours": 4, "end": "2026-07-19T10:00:00",
+              "inducer": "Sentry Mode & climate (maybe)", "cost": 2.64}
+    a = next(a for a in alerts.evaluate(
+        now=NOW, efficiency=None, prev_efficiency=None, battery=None,
+        service_rows=None, standby_longest=old_gap, currency="RM")
+        if a["key"] == "standby_drain")
+    assert "19 Jul, 4 days ago" in a["body"]
+    # An unparsable end timestamp costs the date, not the whole alert.
+    undated = dict(old_gap, end="not-a-date")
+    b = next(a for a in alerts.evaluate(
+        now=NOW, efficiency=None, prev_efficiency=None, battery=None,
+        service_rows=None, standby_longest=undated, currency="RM")
+        if a["key"] == "standby_drain")
+    assert "Lost 4.3%" in b["body"] and "ago" not in b["body"]
 
 
 def test_dispatch_dedups_within_cooldown_and_resends_on_change(session):
