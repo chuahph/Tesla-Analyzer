@@ -23,6 +23,11 @@ from app import roads  # noqa: E402
 
 ROUNDS = 8           # full passes over the missing tiles before giving up
 ROUND_PAUSE_SEC = 60  # between passes, to let a busy server recover
+# Stop downloading with this much of the job's 120 minutes used, and write
+# what arrived. A run killed at the limit wrote nothing and threw away every
+# tile it had; now a slow night leaves a partial bundle, and the next run
+# starts from it and fetches only the rest.
+TIME_BUDGET_SEC = float(os.environ.get("ROAD_BUILD_BUDGET_SEC", str(100 * 60)))
 
 
 # Printed after the build: what the map calls the roads through one corridor
@@ -61,12 +66,54 @@ def report_corridor() -> None:
         print(f"  {n_ways:3d} x {hw:8s} ref={ref:10s} {name:40s} -> {verdict}", flush=True)
 
 
+def _shipped_pending(path: str) -> list:
+    """Tiles the shipped bundle still carries from an older rule."""
+    import gzip as _gz
+
+    try:
+        with _gz.open(path, "rt") as f:
+            return json.load(f).get("pending_tiles") or []
+    except (OSError, ValueError, EOFError):
+        return []
+
+
 def main() -> int:
+    shipped, fetch = roads.BUNDLE_PATH, roads._fetch
+    try:
+        return _build()
+    finally:
+        # Put back what _build swapped out, so a second build in the same
+        # process (the tests) starts from the bundle this one wrote.
+        roads.BUNDLE_PATH, roads._fetch = shipped, fetch
+
+
+def _build() -> int:
+    started = time.monotonic()
     roads.CACHE_PATH = os.path.join(tempfile.mkdtemp(), "roads.json")
+    shipped = roads.BUNDLE_PATH
     roads.BUNDLE_PATH = os.path.join(tempfile.mkdtemp(), "none.json.gz")  # start empty
     roads.clear()
+    # Resume: tiles already in the shipped bundle under the CURRENT rule are
+    # kept, so a run that stopped on its budget is finished by the next one.
+    shipped_tiles, rule = roads._read_tiles(shipped, want_rule=True)
+    pending = set(_shipped_pending(shipped))
+    kept = {k: v for k, v in (shipped_tiles or {}).items() if k not in pending}
+    if kept and rule == roads.NETWORK_RULE:
+        roads._save_cache_file(kept, roads.DEFAULT_BBOX)
+        print(f"resuming from the shipped bundle: {len(kept)} tiles under {rule}", flush=True)
     wanted = roads._tiles_for(roads.DEFAULT_BBOX)
+    real_fetch = roads._fetch
+
+    def budgeted_fetch(bbox):
+        if time.monotonic() - started > TIME_BUDGET_SEC:
+            raise RuntimeError("time budget spent; leaving this tile for the next run")
+        return real_fetch(bbox)
+
+    roads._fetch = budgeted_fetch
     for n in range(ROUNDS):
+        if time.monotonic() - started > TIME_BUDGET_SEC:
+            print("time budget spent; writing what arrived", flush=True)
+            break
         roads._last_attempt = 0.0
         roads.ensure_loaded(roads.DEFAULT_BBOX, background=False)
         st = roads.status()
@@ -74,22 +121,32 @@ def main() -> int:
               flush=True)
         if st.get("state") == "loaded":
             break
+        if time.monotonic() - started + ROUND_PAUSE_SEC > TIME_BUDGET_SEC:
+            continue
         time.sleep(ROUND_PAUSE_SEC)
     tiles = roads._tiles or {}
     if not tiles:
         print("no tile answered; nothing to write", file=sys.stderr)
         return 1
+    tiles = dict(tiles)
+    stale = []
     if len(tiles) < len(wanted):
-        # Written anyway: the app loads what the bundle has and downloads
-        # only the tiles it lacks, so a partial bundle still spares every
-        # restart most of the download. Run the workflow again to fill it.
-        print(f"incomplete: {len(tiles)}/{len(wanted)} tiles — writing what there is",
+        # Never ship fewer tiles than before: a tile this run did not reach
+        # keeps the shipped bundle's version (built under the older rule), and
+        # is listed in pending_tiles so the next run fetches it. Run the
+        # workflow again until nothing is pending.
+        for k in wanted:
+            if k not in tiles and shipped_tiles and k in shipped_tiles:
+                tiles[k] = shipped_tiles[k]
+                stale.append(k)
+        print(f"incomplete: {len(tiles) - len(stale)}/{len(wanted)} tiles fetched, "
+              f"{len(stale)} kept from the previous bundle — run again to finish",
               flush=True)
-    out = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-                       "app", "road_network.json.gz")
+    out = os.environ.get("ROAD_BUNDLE_OUT") or shipped
     body = {"classes": list(roads.ROAD_CLASSES), "rule": roads.NETWORK_RULE,
             "bbox": list(roads.DEFAULT_BBOX),
             "fetched_at": time.strftime("%Y-%m-%d"),
+            "pending_tiles": sorted(stale),
             "tiles": {k: tiles[k] for k in sorted(tiles)}}
     # mtime=0 so the same network gzips to the same bytes, and an unchanged
     # rebuild commits nothing.

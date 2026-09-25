@@ -2155,3 +2155,57 @@ def test_a_spot_the_car_stops_at_on_three_days_is_learned_as_a_traffic_light():
     assert roads.status()["learned_signals"] == 1
     roads.set_learned_signals([])
     roads.clear()
+
+
+def test_the_road_build_never_ships_fewer_tiles_and_resumes(tmp_path, monkeypatch):
+    """A build that runs out of time keeps the previous bundle's version of
+    each tile it did not reach, lists it as pending, and the next run fetches
+    only those."""
+    import gzip
+    import importlib.util
+    import json
+    import pathlib
+
+    from app import roads
+
+    spec = importlib.util.spec_from_file_location(
+        "build_road_network",
+        pathlib.Path(__file__).resolve().parents[1] / "scripts" / "build_road_network.py")
+    build = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(build)
+
+    bbox = (5.0, 100.0, 6.0, 102.0)                   # two tiles: 5,100 and 5,101
+    shipped = tmp_path / "bundle.json.gz"
+    old_line = [[5.5, 100.1], [5.5, 100.2]]
+    with gzip.open(shipped, "wt") as f:
+        json.dump({"classes": list(roads.ROAD_CLASSES), "rule": "older",
+                   "tiles": {"5,100": [old_line], "5,101": [old_line]}}, f)
+    monkeypatch.setattr(roads, "BUNDLE_PATH", str(shipped))
+    monkeypatch.setattr(roads, "DEFAULT_BBOX", bbox)
+    monkeypatch.setattr(roads, "_TILE_PAUSE_SEC", 0.0)
+    monkeypatch.setattr(build, "ROUNDS", 1)
+    monkeypatch.setattr(build, "ROUND_PAUSE_SEC", 0)
+    monkeypatch.setattr(build, "report_corridor", lambda: None)
+    fetched = []
+
+    def fake_fetch(tile_bbox):
+        fetched.append(tile_bbox[1])
+        if tile_bbox[1] >= 101.0:
+            raise RuntimeError("busy")
+        return [[[5.5, 100.5], [5.5, 100.6]]]
+
+    monkeypatch.setattr(roads, "_fetch", fake_fetch)
+    assert build.main() == 0
+    out = json.load(gzip.open(shipped, "rt"))
+    assert out["rule"] == roads.NETWORK_RULE
+    assert set(out["tiles"]) == {"5,100", "5,101"}          # nothing lost
+    assert out["pending_tiles"] == ["5,101"]
+    assert out["tiles"]["5,101"] == [old_line]
+
+    # The next run fetches only the pending tile.
+    fetched.clear()
+    monkeypatch.setattr(roads, "_fetch", lambda b: fetched.append(b[1]) or [[[5.5, 101.5], [5.5, 101.6]]])
+    assert build.main() == 0
+    out = json.load(gzip.open(shipped, "rt"))
+    assert fetched == [101.0] and out["pending_tiles"] == []
+    roads.clear()

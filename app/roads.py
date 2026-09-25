@@ -325,14 +325,14 @@ def road_class(lat: Any, lon: Any) -> str | None:
 
 
 def _query(bbox: tuple[float, float, float, float]) -> str:
-    """The roads, their node ids (to find which carry traffic lights), and
-    the traffic lights on them."""
+    """The roads (tags and geometry only — node ids would roughly double a
+    tile and nothing reads them) and the traffic lights on them."""
     classes = "|".join(ROAD_CLASSES)
     s, w, n, e = bbox
     return (f'[out:json][timeout:90];way["highway"~"^({classes})$"]'
             f"({s},{w},{n},{e})->.r;"
             'node(w.r)["highway"="traffic_signals"]->.s;'
-            ".r out body geom;.s out skel qt;")
+            ".r out tags geom;.s out skel qt;")
 
 
 _EXPRESSWAY_REF = re.compile(r"(^|[;,/\s])E\s?\d", re.IGNORECASE)
