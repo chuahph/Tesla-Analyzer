@@ -11338,7 +11338,7 @@ def test_a_drives_country_is_looked_up_once_and_backfilled(monkeypatch):
     assert routes._country_at("5.3404, 100.3099") == "MY"   # same ~1 km cell
     assert len(calls) == 1 and calls[0][2] == 3             # country level
     assert routes._country_at("1.3000, 103.8000") == "SG"
-    assert routes._country_at("") is None
+    assert routes._country_at("") == "??"   # nothing to ask; asking again won't help
 
     engine = create_engine("sqlite:///:memory:", connect_args={"check_same_thread": False})
     Base.metadata.create_all(engine)
@@ -11347,13 +11347,15 @@ def test_a_drives_country_is_looked_up_once_and_backfilled(monkeypatch):
         v = Vehicle(vin="COUNTRY000000001", name="t", model="m")
         s.add(v)
         s.commit()
-        for i, coords in enumerate(("5.34, 100.31", "1.30, 103.80", "")):
+        # Newest last: unreadable coordinates on the newest drive used to
+        # stop the backfill before it reached any older one, every tick.
+        for i, coords in enumerate(("5.34, 100.31", "1.30, 103.80", "", "garbled")):
             s.add(Drive(vehicle_id=v.id, start_time=_dt(2026, 9, 1 + i, 8),
                         end_time=_dt(2026, 9, 1 + i, 9), start_coords=coords))
         s.commit()
-        assert routes._backfill_countries(s) == 2
+        assert routes._backfill_countries(s) == 3
         got = sorted(d.country for d in s.query(Drive).all())
-        assert got == ["", "MY", "SG"]    # the one without coordinates waits
+        assert got == ["", "??", "MY", "SG"]    # the one without coordinates waits
         assert routes._backfill_countries(s) == 0
 
     # A geocoder that fails answers None, and nothing is written for it.

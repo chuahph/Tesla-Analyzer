@@ -1427,8 +1427,9 @@ _COUNTRY_CACHE: dict[tuple[float, float], str] = {}
 
 def _country_at(coords: str) -> str | None:
     """Two-letter country code at a "lat, lon", upper case; "??" when the
-    lookup answered but named no country; None when it could not answer
-    (no coordinates, or the geocoder failed) — so the caller retries later.
+    lookup answered but named no country, or when there is nothing to look up
+    (coordinates that do not parse — asking again will not change them); None
+    only when the geocoder failed, so the caller retries later.
 
     A country-level (zoom 3) Nominatim reverse, which is light for the
     service and all this needs, behind the same one-request-per-second limit
@@ -1437,7 +1438,10 @@ def _country_at(coords: str) -> str | None:
     try:
         lat, lon = (float(p.strip()) for p in (coords or "").split(",", 1))
     except ValueError:
-        return None
+        # Not None: the backfill stops at the first None to wait out a
+        # geocoder that is down, and it goes newest first — so one drive with
+        # unreadable coordinates blocked every drive older than it, for ever.
+        return "??"
     key = (round(lat, 2), round(lon, 2))
     if key in _COUNTRY_CACHE:
         return _COUNTRY_CACHE[key]
@@ -4789,11 +4793,23 @@ def _auto_repair_arrivals(session: Session) -> int:
 # app, so a process lock is the whole fix. Re-entrant because the ingest's own
 # calls can reach _settle_shadows.
 _SHADOW_LOCK = threading.RLock()
+# Longer than any ingest batch takes, including one that sends a notification
+# (10 s network timeout).
+SHADOW_LOCK_WAIT_SEC = 15.0
 
 
 def _settle_shadows(session: Session) -> int:
-    with _SHADOW_LOCK:
+    # Bounded, and skipped rather than waited out. Settling is retried on every
+    # sync tick and dashboard load, so missing one costs nothing — whereas a
+    # caller that ever reached here holding an uncommitted row the ingest then
+    # wanted would otherwise wait on this lock while the ingest waited on the
+    # database, for ever.
+    if not _SHADOW_LOCK.acquire(timeout=SHADOW_LOCK_WAIT_SEC):
+        return 0
+    try:
         return _settle_shadows_locked(session)
+    finally:
+        _SHADOW_LOCK.release()
 
 
 def _settle_shadows_locked(session: Session) -> int:
