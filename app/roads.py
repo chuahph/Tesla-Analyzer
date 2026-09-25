@@ -64,6 +64,14 @@ _RETRY_SEC = 30 * 60.0
 # the public servers time out on when busy, and one timeout then cost the
 # whole download. Tiles that answered are kept; only the rest are retried.
 TILE_DEG = 1.0
+# A trunk road within this distance of a traffic light is a city arterial
+# there, not an expressway. Wide enough to cover the approach queue and the
+# short stretches between closely spaced junctions; an expressway's rare
+# signalled junction costs it only this much either side.
+SIGNAL_CLEAR_M = float(os.environ.get("ROAD_SIGNAL_CLEAR_M", "400"))
+# Bumped whenever what counts as a highway changes, so a network saved under
+# the old rule is replaced rather than trusted (see _read_tiles).
+NETWORK_RULE = f"signal-clear-{SIGNAL_CLEAR_M:g}m"
 # Pause between tile requests — the Overpass servers are a shared, free
 # service and ask for sequential, unhurried clients.
 _TILE_PAUSE_SEC = 1.0
@@ -207,10 +215,37 @@ def road_class(lat: Any, lon: Any) -> str | None:
 
 
 def _query(bbox: tuple[float, float, float, float]) -> str:
+    """The roads, their node ids (to find which carry traffic lights), and
+    the traffic lights on them."""
     classes = "|".join(ROAD_CLASSES)
     s, w, n, e = bbox
     return (f'[out:json][timeout:90];way["highway"~"^({classes})$"]'
-            f"({s},{w},{n},{e});out geom;")
+            f"({s},{w},{n},{e})->.r;"
+            'node(w.r)["highway"="traffic_signals"]->.s;'
+            ".r out body geom;.s out skel qt;")
+
+
+def _clear_of_signals(pts: list[tuple[float, float]], signals: list[tuple[float, float]],
+                      radius_m: float) -> list[list[tuple[float, float]]]:
+    """The runs of ``pts`` farther than ``radius_m`` from every signal — a
+    trunk road split around its traffic lights."""
+    if not signals:
+        return [pts]
+    runs: list[list[tuple[float, float]]] = []
+    cur: list[tuple[float, float]] = []
+    for lat, lon in pts:
+        near = any(math.hypot(*_metres(lat, lon, s_lat, s_lon)) <= radius_m
+                   for s_lat, s_lon in signals
+                   if abs(s_lat - lat) < 0.01 and abs(s_lon - lon) < 0.01)
+        if near:
+            if len(cur) >= 2:
+                runs.append(cur)
+            cur = []
+        else:
+            cur.append((lat, lon))
+    if len(cur) >= 2:
+        runs.append(cur)
+    return runs
 
 
 def _fetch(bbox: tuple[float, float, float, float]) -> list[list[list[float]]]:
@@ -222,21 +257,37 @@ def _fetch(bbox: tuple[float, float, float, float]) -> list[list[list[float]]]:
             r = httpx.post(url, data={"data": _query(bbox)}, timeout=120.0,
                            headers={"User-Agent": "ev-drive-analyzer (road type lookup)"})
             r.raise_for_status()
+            elements = r.json().get("elements", [])
+            signals = [(el["lat"], el["lon"]) for el in elements
+                       if el.get("type") == "node" and "lat" in el and "lon" in el]
             lines = []
-            for el in r.json().get("elements", []):
+            for el in elements:
+                if el.get("type") != "way":
+                    continue
                 pts = [(round(p["lat"], 5), round(p["lon"], 5))
                        for p in el.get("geometry") or [] if "lat" in p and "lon" in p]
-                pts = _simplify(pts, _SIMPLIFY_M)
-                if len(pts) >= 2:
-                    lines.append([list(p) for p in pts])
+                # Trunk is not only expressways. OSM also tags city arterials
+                # with traffic lights trunk — Jalan Sultan Azlan Shah, which
+                # made a signal-to-signal crawl through Bayan Lepas read as a
+                # jammed expressway. Expressways do not have traffic lights,
+                # so a trunk road counts only where it is clear of them.
+                # Motorways are taken whole.
+                runs = ([pts] if (el.get("tags") or {}).get("highway") != "trunk"
+                        else _clear_of_signals(pts, signals, SIGNAL_CLEAR_M))
+                for run in runs:
+                    run = _simplify(run, _SIMPLIFY_M)
+                    if len(run) >= 2:
+                        lines.append([list(p) for p in run])
             return lines
         except Exception as exc:  # noqa: BLE001 — try the next mirror
             last = exc
     raise RuntimeError(f"no Overpass mirror answered: {last}")
 
 
-def _read_tiles(path: str) -> dict[str, list] | None:
-    """Tiles from a saved network (plain or gzipped JSON), or None."""
+def _read_tiles(path: str, want_rule: bool = False):
+    """Tiles from a saved network (plain or gzipped JSON), or None — with the
+    rule it was built under when ``want_rule`` (None for a network saved
+    before rules were recorded)."""
     import gzip
 
     try:
@@ -244,18 +295,28 @@ def _read_tiles(path: str) -> dict[str, list] | None:
         with opener(path, "rt") as f:
             data = json.load(f)
     except (OSError, ValueError, EOFError):
-        return None
+        return (None, None) if want_rule else None
     if data.get("classes") != list(ROAD_CLASSES) or not isinstance(data.get("tiles"), dict):
-        return None
-    return data["tiles"]
+        return (None, None) if want_rule else None
+    return (data["tiles"], data.get("rule")) if want_rule else data["tiles"]
 
 
 def _load_cache_file() -> dict[str, list] | None:
     """Tiles from the bundled network and the cache file together, or None.
     The older whole-network cache form (one "lines" list) reads as a single
-    tile covering everything."""
-    tiles = dict(_read_tiles(BUNDLE_PATH) or {})
-    tiles.update(_read_tiles(CACHE_PATH) or {})
+    tile covering everything.
+
+    A network built under an older NETWORK_RULE is still used — a slightly
+    wrong map beats none, and rebuilding the bundle takes a GitHub Action run
+    — but never mixed with one built under the current rule: tiles saved
+    under the old rule are dropped once the bundle carries the new one."""
+    bundle, bundle_rule = _read_tiles(BUNDLE_PATH, want_rule=True)
+    cache, cache_rule = _read_tiles(CACHE_PATH, want_rule=True)
+    tiles = dict(bundle or {})
+    if cache and (cache_rule == bundle_rule or bundle_rule != NETWORK_RULE):
+        tiles.update(cache)
+    _meta["rule"] = (NETWORK_RULE if (bundle_rule if bundle else cache_rule) == NETWORK_RULE
+                     else "older rule — rebuild the bundle")
     if tiles:
         return tiles
     try:
@@ -278,7 +339,8 @@ def _save_cache_file(tiles: dict[str, list], bbox: tuple) -> None:
         os.makedirs(os.path.dirname(CACHE_PATH), exist_ok=True)
         tmp = CACHE_PATH + ".tmp"
         with open(tmp, "w") as f:
-            json.dump({"classes": list(ROAD_CLASSES), "bbox": list(bbox),
+            json.dump({"classes": list(ROAD_CLASSES), "rule": NETWORK_RULE,
+                       "bbox": list(bbox),
                        "fetched_at": time.strftime("%Y-%m-%d"), "tiles": tiles},
                       f, separators=(",", ":"))
         os.replace(tmp, CACHE_PATH)

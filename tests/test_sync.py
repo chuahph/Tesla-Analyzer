@@ -2075,3 +2075,33 @@ def test_a_bundled_road_network_loads_without_any_download(tmp_path, monkeypatch
         assert roads.road_class(5.30, 100.30) == "highway"
     finally:
         roads.clear()
+
+
+def test_a_trunk_road_with_traffic_lights_is_city_near_them(monkeypatch):
+    """OSM tags city arterials with traffic lights trunk as well as
+    expressways — Jalan Sultan Azlan Shah made a signal-to-signal crawl
+    through Bayan Lepas read as a jammed expressway (trip 3127). A trunk road
+    counts as highway only clear of its lights; a motorway counts whole."""
+    from app import roads
+
+    class R:
+        def raise_for_status(self): pass
+        def json(self):
+            line = [{"lat": 5.30, "lon": 100.20 + i * 0.001} for i in range(201)]
+            return {"elements": [
+                {"type": "way", "tags": {"highway": "trunk"}, "geometry": line},
+                {"type": "way", "tags": {"highway": "motorway"},
+                 "geometry": [{"lat": 5.40, "lon": p["lon"]} for p in line]},
+                # A traffic light on the trunk road, and one beside the motorway.
+                {"type": "node", "lat": 5.30, "lon": 100.30},
+                {"type": "node", "lat": 5.40, "lon": 100.30},
+            ]}
+    monkeypatch.setattr("httpx.post", lambda *a, **k: R())
+    roads.clear()
+    roads.set_network(roads._fetch((5.0, 100.0, 6.0, 101.0)))
+    assert roads.road_class(5.30, 100.30) == "city"       # at the light
+    assert roads.road_class(5.30, 100.303) == "city"      # ~330 m from it
+    assert roads.road_class(5.30, 100.25) == "highway"    # 5.5 km clear
+    assert roads.road_class(5.40, 100.30) == "highway"    # motorway: whole
+    assert "signals" in roads._query((5.0, 100.0, 6.0, 101.0)).replace("traffic_signals", "signals")
+    roads.clear()

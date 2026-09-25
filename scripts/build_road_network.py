@@ -51,7 +51,8 @@ def main() -> int:
               flush=True)
     out = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                        "app", "road_network.json.gz")
-    body = {"classes": list(roads.ROAD_CLASSES), "bbox": list(roads.DEFAULT_BBOX),
+    body = {"classes": list(roads.ROAD_CLASSES), "rule": roads.NETWORK_RULE,
+            "bbox": list(roads.DEFAULT_BBOX),
             "fetched_at": time.strftime("%Y-%m-%d"),
             "tiles": {k: tiles[k] for k in sorted(tiles)}}
     # mtime=0 so the same network gzips to the same bytes, and an unchanged
