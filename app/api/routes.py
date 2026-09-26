@@ -1886,6 +1886,11 @@ def health(session: Session = Depends(get_session)):
         "mode": mode,
         "source": source,
         "oauth_available": auth.oauth_configured(),
+        # Whether the dashboard needs a passcode, and whether the key the cron
+        # and receiver box use is set — so an open install shows up here
+        # rather than by someone finding it. Booleans only.
+        "protected": {"passcode": bool(get_settings().app_passcode.strip()),
+                      "sync_key": bool(get_settings().sync_key.strip())},
         "build": _build_info(),
         # Whether trips are being placed on the map yet (app/roads.py): the
         # expressway network is downloaded by the server after start-up, and
@@ -13916,7 +13921,7 @@ def telemetry_recent(
 
 
 @router.get("/fleet-token")
-def fleet_token(session: Session = Depends(get_session)):
+def fleet_token(request: Request, session: Session = Depends(get_session)):
     """Hand the telemetry box a Tesla access token for one configuration call.
 
     Telling a car to stream requires a payload signed by the virtual key, and
@@ -13937,6 +13942,18 @@ def fleet_token(session: Session = Depends(get_session)):
     is ever exposed — with this endpoint in place it is no longer only worth
     a sync tick.
     """
+    # The key itself, always — not only when the passcode gate is on. With no
+    # APP_PASSCODE the gate lets every request through, and this handed a live
+    # Tesla access token to anyone who asked. The only caller is the receiver
+    # box, which holds the sync key; without one configured there is no safe
+    # way to serve this at all.
+    key = get_settings().sync_key.strip()
+    given = request.headers.get("x-sync-key") or request.query_params.get("key", "")
+    if not key:
+        raise HTTPException(403, "Set SYNC_KEY to use this endpoint: it hands out a "
+                                 "Tesla access token and must never be open.")
+    if not hmac.compare_digest(given, key):
+        raise HTTPException(403, "Wrong or missing sync key.")
     token = state.active_token(session)
     if not token:
         raise HTTPException(400, "No linked Tesla account — link your account first.")

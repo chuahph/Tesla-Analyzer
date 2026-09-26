@@ -4430,6 +4430,14 @@ def test_fleet_token_needs_the_key_and_withholds_the_refresh_token(monkeypatch):
             assert body["access_token"] == "access-abc"
             assert "refresh_token" not in body
             assert "vin" in body and "base_url" in body
+            # With no passcode the gate lets everything through; the key is
+            # still required here, and with no key configured it is refused.
+            settings.app_passcode = ""
+            assert client.get("/api/fleet-token").status_code == 403
+            assert client.get("/api/fleet-token",
+                              headers={"X-Sync-Key": "cronkey"}).status_code == 200
+            settings.sync_key = ""
+            assert client.get("/api/fleet-token?key=").status_code == 403
     finally:
         settings.app_passcode, settings.sync_key = old_pc, old_sk
         with SessionLocal() as s:
