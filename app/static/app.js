@@ -4670,11 +4670,46 @@ function buildReport(d) {
     <table><tr><th>When</th><th>Distance</th><th>Efficiency</th><th>Cost</th></tr>${trips}</table>` : ""}`;
 }
 
+// A separate stylesheet for the standalone fallback below: the report's
+// print rules in style.css are gated behind @media print, which the new tab
+// this opens does not need — it should look like the report immediately,
+// not only once print() (or the user's own Share > Print) fires.
+const REPORT_STANDALONE_CSS = `
+  body { font: 12pt/1.5 Georgia, serif; margin: 8mm; color: #111; }
+  h1 { font-size: 18pt; margin: 0 0 2mm; }
+  h2 { font-size: 13pt; margin: 6mm 0 2mm; border-bottom: 1px solid #999; }
+  .rep-sub { color: #555; margin: 0 0 4mm; font-size: 10pt; }
+  table { width: 100%; border-collapse: collapse; }
+  td, th { padding: 1mm 2mm; text-align: left; border-bottom: 1px solid #ddd; }
+  td:first-child { color: #555; width: 38%; }
+`;
+
 const reportBtn = document.getElementById("btn-report");
 if (reportBtn) reportBtn.addEventListener("click", () => {
   if (!lastData) return;
+  const html = buildReport(lastData);
+  // iOS: a PWA opened from the Home Screen ("standalone" — no Safari chrome)
+  // gives window.print() nowhere to put a dialog, and it silently does
+  // nothing at all there — confirmed against a real build with no error,
+  // no output, the button just looking broken. window.open() still escapes
+  // to a real Safari tab from standalone, so the report opens there instead
+  // and prints itself as soon as it loads, where print() actually works.
+  const standalone = window.navigator.standalone === true
+    || window.matchMedia("(display-mode: standalone)").matches;
+  if (standalone) {
+    const page = `<!DOCTYPE html><html><head><meta charset="utf-8">
+      <title>Tesla Analyzer report</title>
+      <style>${REPORT_STANDALONE_CSS}</style></head>
+      <body>${html}<script>
+        window.onload = () => setTimeout(() => window.print(), 200);
+      <\/script></body></html>`;
+    const url = URL.createObjectURL(new Blob([page], { type: "text/html" }));
+    window.open(url, "_blank");
+    setTimeout(() => URL.revokeObjectURL(url), 60000);
+    return;
+  }
   const holder = document.getElementById("print-report");
-  holder.innerHTML = buildReport(lastData);
+  holder.innerHTML = html;
   window.print();
 });
 
