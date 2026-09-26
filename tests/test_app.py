@@ -11921,3 +11921,37 @@ def test_api_replies_declare_utf8():
     with TestClient(app) as client:
         assert "charset=utf-8" in client.get("/api/ping").headers["content-type"]
         assert "charset=utf-8" in client.get("/api/health").headers["content-type"]
+
+
+def test_a_charge_time_can_be_corrected_by_hand():
+    from app.database import SessionLocal
+    from app.models import Charge, Vehicle
+
+    settings = get_settings()
+    old_pc = settings.app_passcode
+    settings.app_passcode = ""
+    s = SessionLocal()
+    try:
+        v = Vehicle(vin="EDITCHGTIME00001", name="t", model="m")
+        s.add(v)
+        s.commit()
+        c = Charge(vehicle_id=v.id, start_time=datetime(2026, 9, 8, 12, 16),
+                   end_time=datetime(2026, 9, 8, 17, 6), duration_min=290,
+                   energy_added_kwh=2.38, cost=1.93, charge_type="AC")
+        s.add(c)
+        s.commit()
+        with TestClient(app) as client:
+            r = client.get(f"/api/charges/edit-time?id={c.id}&start=16:45")
+            assert r.status_code == 200, r.text
+            body = r.json()
+            assert body["start"] == "2026-09-08T16:45" and body["duration_min"] == 21.0
+            assert body["was"]["start"] == "2026-09-08T12:16"
+            assert client.get(f"/api/charges/edit-time?id={c.id}&start=18:00").status_code == 422
+            assert client.get(f"/api/charges/edit-time?id={c.id}").status_code == 422
+            assert client.get(f"/api/charges/edit-time?id={c.id}&start=nope").status_code == 422
+        with SessionLocal() as s2:
+            got = s2.get(Charge, c.id)
+            assert got.cost == 1.93 and got.energy_added_kwh == 2.38
+    finally:
+        s.close()
+        settings.app_passcode = old_pc

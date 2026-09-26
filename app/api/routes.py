@@ -6201,6 +6201,59 @@ def edit_charge_location(payload: dict = Body(...), session: Session = Depends(g
     return {"id": charge.id, "location": charge.location, "updated": updated}
 
 
+def _clock_or_iso(value: str, day: datetime) -> datetime:
+    """"HH:MM" on ``day``'s date, or a full ISO datetime."""
+    value = (value or "").strip()
+    if len(value) <= 5 and ":" in value:
+        h, m = (int(x) for x in value.split(":", 1))
+        return day.replace(hour=h, minute=m, second=0, microsecond=0)
+    got = datetime.fromisoformat(value)
+    if got.tzinfo is not None:
+        got = got.astimezone(sync_mod.MYT).replace(tzinfo=None)
+    return got
+
+
+@router.api_route("/charges/edit-time", methods=["GET", "POST"])
+def edit_charge_time(
+    charge_id: int = Query(..., alias="id", description="Charge row id"),
+    start: str = Query("", description="New start: HH:MM on the same day, or ISO"),
+    end: str = Query("", description="New end: HH:MM on the same day, or ISO"),
+    session: Session = Depends(get_session),
+):
+    """Correct one charging session's start and/or end time by hand.
+
+    Polling could only see a session at its ticks, so an older row's start is
+    wherever a tick first found the car charging, which can be hours off. The
+    duration is recalculated; energy and cost are left alone — the kWh is the
+    car's own figure whenever it was read, and the rate applied is edited
+    separately (/charges/edit-rate) if it needs to change too.
+
+    GET as well as POST so it can be tapped from a phone, like the other
+    corrections. HH:MM keeps the session's own date.
+    """
+    charge = session.get(Charge, charge_id)
+    if charge is None:
+        raise HTTPException(404, "Charge not found.")
+    if not start and not end:
+        raise HTTPException(422, "Give start and/or end, e.g. start=16:45")
+    try:
+        new_start = _clock_or_iso(start, charge.start_time) if start else charge.start_time
+        new_end = _clock_or_iso(end, charge.end_time) if end else charge.end_time
+    except ValueError:
+        raise HTTPException(422, "Times must be HH:MM or ISO, e.g. 16:45 or 2026-09-08T16:45")
+    if new_end <= new_start:
+        raise HTTPException(422, "The end must be after the start.")
+    was = {"start": charge.start_time.isoformat(timespec="minutes"),
+           "end": charge.end_time.isoformat(timespec="minutes")}
+    charge.start_time, charge.end_time = new_start, new_end
+    charge.duration_min = round((new_end - new_start).total_seconds() / 60.0, 1)
+    session.commit()
+    return {"id": charge.id, "was": was,
+            "start": new_start.isoformat(timespec="minutes"),
+            "end": new_end.isoformat(timespec="minutes"),
+            "duration_min": charge.duration_min}
+
+
 @router.api_route("/charges/edit-type", methods=["GET", "POST"])
 def edit_charge_type(
     charge_id: int = Query(..., alias="id", description="Charge row id"),
