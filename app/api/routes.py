@@ -4155,6 +4155,9 @@ def _promotion_health(session: Session) -> dict:
         err = _json.loads(state.get(session, state.PROMOTE_FAIL_KEY) or "null")
     except ValueError:
         err = {"error": "unreadable"}
+    if isinstance(err, dict) and err.get("error"):
+        # Also for errors stored before _public_error existed.
+        err = {**err, "error": _public_error(str(err["error"]))}
     # The cap does not promote max_per_run and leave the rest — it REFUSES THE
     # WHOLE RUN, because a cap that fires halfway through has already written
     # the duplicates it exists to prevent. So a backlog over the limit promotes
@@ -4264,6 +4267,20 @@ def _cached_health_checks(session: Session) -> tuple[dict, dict]:
     return promotion, continuity
 
 
+def _public_error(err) -> str:
+    """An exception as one line, cut before the SQL.
+
+    Stored promotion errors are served by /api/health, which is open without
+    the passcode. A database error's text carries the statement and its
+    parameters, and a failed trip insert's parameters are place names and
+    coordinates — where the car starts and ends its trips. Only the first line
+    (the kind of failure) is kept."""
+    text = err if isinstance(err, str) else f"{type(err).__name__}: {err}"
+    for cut in ("\n", "[SQL:", "[parameters:", "(Background on this error"):
+        text = text.split(cut, 1)[0]
+    return text.strip()[:200]
+
+
 def _record_promote_result(session: Session, where: str,
                            err: BaseException | None) -> None:
     """Remember that an automatic promotion failed, or that it stopped failing.
@@ -4291,7 +4308,7 @@ def _record_promote_result(session: Session, where: str,
         state.put(session, state.PROMOTE_FAIL_KEY, _json.dumps({
             "at": sync_mod.now_local().isoformat(timespec="seconds"),
             "where": where,
-            "error": f"{type(err).__name__}: {err}"[:400],
+            "error": _public_error(err),
         }))
         session.commit()
         _invalidate_health_checks_cache()

@@ -11810,3 +11810,34 @@ def test_a_zip_that_expands_past_the_limit_is_refused(monkeypatch):
     monkeypatch.setattr(importer, "ZIP_MAX_EXPANDED_BYTES", 100_000)
     with pytest.raises(importer.ImportError_):
         importer.parse_upload("export.zip", buf.getvalue())
+
+
+def test_the_public_health_check_never_shows_sql_parameters():
+    """/api/health is open without the passcode, and a stored promotion error
+    carried the failed INSERT's parameters: trip place names and coordinates."""
+    import json as _json
+
+    from app import state
+    from app.api import routes
+    from app.database import SessionLocal
+
+    leaky = ("IntegrityError: (sqlite3.IntegrityError) UNIQUE constraint failed: "
+             "drives.vehicle_id, drives.start_time\n[SQL: INSERT INTO drives ...]\n"
+             "[parameters: (1, '2026-07-13 09:55', 'Home', 'Office', '5.3427, 100.3103')]")
+    assert routes._public_error(leaky).endswith("drives.start_time")
+    s = SessionLocal()
+    prev = state.get(s, state.PROMOTE_FAIL_KEY)
+    settings = get_settings()
+    old_pc = settings.app_passcode
+    settings.app_passcode = "secret123"
+    try:
+        state.put(s, state.PROMOTE_FAIL_KEY, _json.dumps({"at": "x", "where": "ingest", "error": leaky}))
+        routes._invalidate_health_checks_cache()
+        with TestClient(app) as client:
+            body = client.get("/api/health").text
+        assert "5.3427" not in body and "parameters" not in body and "Home" not in body
+    finally:
+        state.put(s, state.PROMOTE_FAIL_KEY, prev or "")
+        s.close()
+        routes._invalidate_health_checks_cache()
+        settings.app_passcode = old_pc
