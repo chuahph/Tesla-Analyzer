@@ -201,12 +201,12 @@ def _tiles_for(bbox: tuple[float, float, float, float]) -> dict[str, tuple]:
 # city. Held here, loaded from the database by the app (routes
 # _load_city_overrides), so this module stays DB-free.
 CITY_OVERRIDE_M = 35.0
-# Shipped starting set: the Jelutong–Bayan Lepas arterials (Jalan Sultan Azlan
-# Shah and the parallel road past Home) that trips 3126 and 3127 crawled along
-# and the map called expressway. Seeded into the database once; after that the
-# stored list is the owner's to edit.
-SEED_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                         "city_overrides_seed.json")
+# No shipped starting set any more. One used to mark the Jelutong–Bayan Lepas
+# roads as city; the expressway-number rule now reads Jalan Sultan Azlan Shah
+# as city by itself, and the other road was the Lim Chong Eu (E36) — a real
+# expressway the owner drives — so the shipped entry had become both
+# redundant and wrong. routes._city_overrides retires it from stored lists.
+SHIPPED_OVERRIDE_SUFFIX = "(shipped)"
 _city_grid: dict[tuple[int, int], list] | None = None
 _city_count = 0
 
@@ -219,14 +219,6 @@ def set_city_overrides(items: list[dict]) -> None:
     grid = _build(lines) if lines else None
     with _lock:
         _city_grid, _city_count = grid, len(items)
-
-
-def seed_city_lines() -> list:
-    try:
-        with open(SEED_PATH) as f:
-            return json.load(f)
-    except (OSError, ValueError):
-        return []
 
 
 def network_lines_near(lat: float, lon: float, radius_m: float) -> list:
@@ -244,8 +236,25 @@ def network_lines_near(lat: float, lon: float, radius_m: float) -> list:
                 if seg in seen:
                     continue
                 seen.add(seg)
-                if _seg_dist_m(lat, lon, seg) <= radius_m:
-                    out.append([[seg[0], seg[1]], [seg[2], seg[3]]])
+                if _seg_dist_m(lat, lon, seg) > radius_m:
+                    continue
+                # Only the part of the segment inside the radius. A straight
+                # expressway is often one segment several kilometres long, and
+                # taking it whole marked road far past the point asked about.
+                a_lat, a_lon, b_lat, b_lon = seg
+                length = math.hypot(*_metres(a_lat, a_lon, b_lat, b_lon))
+                n = max(1, int(math.ceil(length / 50.0)))
+                run: list = []
+                for k in range(n + 1):
+                    p = (a_lat + (b_lat - a_lat) * k / n, a_lon + (b_lon - a_lon) * k / n)
+                    if math.hypot(*_metres(lat, lon, *p)) <= radius_m:
+                        run.append([round(p[0], 6), round(p[1], 6)])
+                    else:
+                        if len(run) >= 2:
+                            out.append(run)
+                        run = []
+                if len(run) >= 2:
+                    out.append(run)
     return out
 
 
@@ -264,20 +273,64 @@ _learned_grid: dict[tuple[int, int], list] | None = None
 _learned_count = 0
 
 
+_BUCKET = 0.001  # ~110 m: wider than LEARNED_SAME_SPOT_M, so neighbours suffice
+
+
+def _near_obs(obs: list, buckets: dict, lat: float, lon: float) -> list:
+    bi, bj = int(math.floor(lat / _BUCKET)), int(math.floor(lon / _BUCKET))
+    return [obs[k] for i in (bi - 1, bi, bi + 1) for j in (bj - 1, bj, bj + 1)
+            for k in buckets.get((i, j), ())
+            if math.hypot(*_metres(lat, lon, obs[k][0], obs[k][1])) <= LEARNED_SAME_SPOT_M]
+
+
+def _bucket(obs: list) -> dict:
+    buckets: dict[tuple[int, int], list[int]] = {}
+    for k, (lat, lon, _d) in enumerate(obs):
+        buckets.setdefault((int(math.floor(lat / _BUCKET)),
+                            int(math.floor(lon / _BUCKET))), []).append(k)
+    return buckets
+
+
 def learned_signals(obs: list) -> list[tuple[float, float]]:
     """Spots with stops on LEARNED_MIN_DAYS different days. ``obs`` is
-    ``[[lat, lon, "YYYY-MM-DD"], ...]``; returns one point per spot."""
+    ``[[lat, lon, "YYYY-MM-DD"], ...]``; returns one point per spot.
+
+    Bucketed, not every stop against every other: this runs inside the
+    telemetry lock when a trip closes, and a full store is 1,500 stops."""
+    buckets = _bucket(obs)
     out: list[tuple[float, float]] = []
     for lat, lon, _day in obs:
         if any(math.hypot(*_metres(lat, lon, a, b)) <= LEARNED_SAME_SPOT_M for a, b in out):
             continue
-        near = [(a, b, d) for a, b, d in obs
-                if abs(a - lat) < 0.001 and abs(b - lon) < 0.001
-                and math.hypot(*_metres(lat, lon, a, b)) <= LEARNED_SAME_SPOT_M]
+        near = _near_obs(obs, buckets, lat, lon)
         if len({d for _, _, d in near}) >= LEARNED_MIN_DAYS:
             out.append((sum(a for a, _, _ in near) / len(near),
                         sum(b for _, b, _ in near) / len(near)))
     return out
+
+
+def trim_learned_stops(obs: list, cap: int) -> list:
+    """``obs`` cut to ``cap``, oldest first — except the evidence for a spot
+    already learned, which is kept (its newest LEARNED_MIN_DAYS * 2 stops).
+
+    Once a spot reads city the car's stops there are no longer recorded (they
+    are no longer on an expressway), so without this its evidence would age
+    out under everyone else's and the light would be forgotten, flip back to
+    expressway, and have to be learned again."""
+    if len(obs) <= cap:
+        return obs
+    keep: set[int] = set()
+    buckets = _bucket(obs)
+    for a, b in learned_signals(obs):
+        ids = [k for k in sorted({k for i in range(-1, 2) for j in range(-1, 2)
+                                  for k in buckets.get((int(math.floor(a / _BUCKET)) + i,
+                                                        int(math.floor(b / _BUCKET)) + j), ())})
+               if math.hypot(*_metres(a, b, obs[k][0], obs[k][1])) <= LEARNED_SAME_SPOT_M]
+        keep.update(ids[-LEARNED_MIN_DAYS * 2:])
+    rest = [k for k in range(len(obs)) if k not in keep]
+    room = max(cap - len(keep), 0)
+    chosen = sorted(keep | set(rest[len(rest) - room:] if room else []))
+    return [obs[k] for k in chosen]
 
 
 def set_learned_signals(points: list[tuple[float, float]]) -> None:

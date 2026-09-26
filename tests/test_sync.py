@@ -2209,3 +2209,31 @@ def test_the_road_build_never_ships_fewer_tiles_and_resumes(tmp_path, monkeypatc
     out = json.load(gzip.open(shipped, "rt"))
     assert fetched == [101.0] and out["pending_tiles"] == []
     roads.clear()
+
+
+def test_a_learned_light_keeps_its_evidence_when_the_store_is_trimmed():
+    """Once a spot reads city, stops there are no longer recorded; trimming
+    the store oldest-first would then forget the light and flip it back."""
+    from app import roads
+
+    light = [[5.30, 100.30, f"2026-09-0{d}"] for d in (1, 2, 3)]
+    noise = [[5.0 + i * 0.01, 101.0, "2026-09-10"] for i in range(50)]
+    trimmed = roads.trim_learned_stops(light + noise, cap=20)
+    assert len(trimmed) == 20
+    assert len(roads.learned_signals(trimmed)) == 1
+    assert all(o in trimmed for o in light)
+
+
+def test_learning_a_full_store_is_quick():
+    import random
+    import time
+
+    from app import roads
+
+    rng = random.Random(1)
+    obs = [[5.2 + rng.random() * 0.3, 100.2 + rng.random() * 0.3,
+            f"2026-09-{1 + rng.randrange(28):02d}"] for _ in range(1500)]
+    t = time.monotonic()
+    roads.learned_signals(obs)
+    roads.trim_learned_stops(obs + obs[:100], 1500)
+    assert time.monotonic() - t < 1.0

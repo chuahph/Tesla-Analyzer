@@ -11649,11 +11649,13 @@ def test_login_stops_answering_after_repeated_wrong_passcodes():
         settings.app_passcode = old
 
 
-def test_city_overrides_seed_once_mark_roads_and_delete():
-    """A trunk road through town whose traffic lights OpenStreetMap never
-    mapped reads like an expressway (trips 3126/3127). The owner's city list
-    wins over the map; it is seeded once with the Jelutong–Bayan Lepas
-    arterials, and a deleted entry stays deleted."""
+def test_city_overrides_retire_the_shipped_entry_and_clip_to_the_radius():
+    """The owner's city list wins over the map. The entry an earlier version
+    shipped (it marked the Lim Chong Eu Expressway as city) is retired from
+    stored lists; owner-added entries are kept; "mark road here" takes only
+    the road inside the radius, not whole map segments; delete works."""
+    import json as _json
+
     from app import roads, state
     from app.database import SessionLocal
 
@@ -11663,31 +11665,31 @@ def test_city_overrides_seed_once_mark_roads_and_delete():
     s = SessionLocal()
     prev = state.get(s, state.ROAD_CITY_OVERRIDES_KEY, None)
     try:
-        state.delete(s, state.ROAD_CITY_OVERRIDES_KEY)
-        # A map with the arterial by SRJK Kwang Hwa on it, and a real
-        # expressway 5 km away.
+        # A stored list from the old version: the shipped entry, and one the
+        # owner added themselves.
+        shipped = {"id": 1, "name": "Jelutong–Bayan Lepas arterials (shipped)",
+                   "lines": [[[5.30, 100.20], [5.30, 100.40]]]}
+        mine = {"id": 2, "name": "my street", "lines": [[[5.50, 100.20], [5.50, 100.21]]]}
+        state.put(s, state.ROAD_CITY_OVERRIDES_KEY, _json.dumps([shipped, mine]))
         roads.clear()
-        roads.set_network([[[5.3300, 100.2945], [5.3447, 100.3018]],
-                           [[5.30, 100.20], [5.30, 100.40]]])
+        # One long, straight map segment: 22 km of expressway.
+        roads.set_network([[[5.30, 100.20], [5.30, 100.40]]])
         roads.set_city_overrides([])
-        assert roads.road_class(5.3356, 100.2974) == "highway"
         with TestClient(app) as client:
             got = client.get("/api/road-overrides").json()["overrides"]
-            assert len(got) == 1 and got[0]["segments"] > 50       # seeded
-            assert roads.road_class(5.3356, 100.2974) == "city"      # the arterial
-            assert roads.road_class(5.30, 100.30) == "highway"       # untouched
+            assert [o["id"] for o in got] == [2]                     # shipped retired
+            assert _json.loads(state.get(SessionLocal(), state.ROAD_CITY_OVERRIDES_KEY))[0]["id"] == 2
+            assert roads.road_class(5.30, 100.30) == "highway"       # LCE-like road back
 
-            # Mark a point on the other road; only that road is captured.
             r = client.get("/api/road-overrides/add?at=5.30,100.30&radius_m=300&name=t")
-            assert r.status_code == 200 and r.json()["segments"] == 1
+            assert r.status_code == 200
             assert roads.road_class(5.30, 100.30) == "city"
-            assert roads.road_class(5.30, 100.25) == "city"  # whole map segment
+            assert roads.road_class(5.30, 100.302) == "city"         # ~220 m, inside
+            assert roads.road_class(5.30, 100.25) == "highway"       # 5.5 km: not taken
             assert client.get("/api/road-overrides/add?at=6.5,103.0").status_code == 404
 
-            client.get("/api/road-overrides/delete?id=1")
             client.get(f"/api/road-overrides/delete?id={r.json()['added']}")
-            assert client.get("/api/road-overrides").json()["overrides"] == []
-            assert roads.road_class(5.3356, 100.2974) == "highway"   # not re-seeded
+            assert roads.road_class(5.30, 100.30) == "highway"
     finally:
         if prev is None:
             state.delete(s, state.ROAD_CITY_OVERRIDES_KEY)
@@ -11697,7 +11699,6 @@ def test_city_overrides_seed_once_mark_roads_and_delete():
         roads.clear()
         roads.set_city_overrides([])
         settings.app_passcode = old_pc
-
 
 def test_a_closed_trip_feeds_its_expressway_stops_to_learning_not_to_the_store():
     import json as _json

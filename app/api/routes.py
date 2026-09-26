@@ -1501,24 +1501,21 @@ COUNTRY_BACKFILL_PER_TICK = 5
 
 
 def _city_overrides(session: Session) -> list[dict]:
-    """The stored city stretches, seeded from roads.SEED_PATH the first time.
-
-    Seeded only when the key has never been written — an owner who deletes the
-    shipped Penang stretches must not have them come back on the next start.
-    """
-    raw = state.get(session, state.ROAD_CITY_OVERRIDES_KEY, None)
-    if raw is None:
-        seed = roads.seed_city_lines()
-        items = ([{"id": 1, "name": "Jelutong–Bayan Lepas arterials (shipped)",
-                   "added": sync_mod.now_local().isoformat(timespec="seconds"),
-                   "lines": seed}] if seed else [])
-        state.put(session, state.ROAD_CITY_OVERRIDES_KEY, _json_mod.dumps(items))
-        return items
+    """The owner's stored city stretches."""
     try:
-        items = _json_mod.loads(raw or "[]") or []
+        items = _json_mod.loads(state.get(session, state.ROAD_CITY_OVERRIDES_KEY) or "[]") or []
     except ValueError:
         return []
-    return items if isinstance(items, list) else []
+    if not isinstance(items, list):
+        return []
+    # The entry an earlier version shipped (see roads.SHIPPED_OVERRIDE_SUFFIX)
+    # is retired wherever it is still stored: it marked the Lim Chong Eu
+    # Expressway as city. Entries the owner added are never touched.
+    kept = [it for it in items
+            if not str(it.get("name") or "").endswith(roads.SHIPPED_OVERRIDE_SUFFIX)]
+    if len(kept) != len(items):
+        state.put(session, state.ROAD_CITY_OVERRIDES_KEY, _json_mod.dumps(kept))
+    return kept
 
 
 def _load_city_overrides(session: Session) -> list[dict]:
@@ -1553,7 +1550,7 @@ def _learn_road_stops(session: Session, stops: list) -> None:
     obs = _learned_stops(session)
     for lat, lon, ts in stops:
         obs.append([lat, lon, sync_mod._dt(float(ts)).date().isoformat()])
-    obs = obs[-LEARNED_STOPS_MAX:]
+    obs = roads.trim_learned_stops(obs, LEARNED_STOPS_MAX)
     state.put(session, state.ROAD_LEARNED_STOPS_KEY, _json_mod.dumps(obs, separators=(",", ":")))
     roads.set_learned_signals(roads.learned_signals(obs))
 
@@ -3973,7 +3970,11 @@ def _append_trip(trips: list, finished: dict,
         try:
             _learn_road_stops(session, stops)
         except Exception:  # noqa: BLE001 — a lost observation, never a lost trip
-            pass
+            # Rolled back, not just swallowed: on Postgres a failed statement
+            # aborts the transaction, and everything the batch does after this
+            # would fail behind it. state.put commits per call, so nothing
+            # earlier in the batch is lost by this.
+            session.rollback()
     previous = next((t for t in reversed(trips)
                      if t.get("vin") == finished.get("vin")), None)
     rested = None

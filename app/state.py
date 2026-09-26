@@ -105,7 +105,7 @@ TELEMETRY_MODES_TAIL_KEY = "telemetry_modes_tail"  # The newest few entries of
 # once per routes.TELEMETRY_MODES_FOLD changes. Readers take both, log first.
 ROAD_CITY_OVERRIDES_KEY = "road_city_overrides"  # JSON list of {id, name,
 # added, lines}: road stretches the owner has marked as city whatever the map
-# says (see roads.set_city_overrides). Seeded once from roads.SEED_PATH.
+# says (see roads.set_city_overrides). Owner-added only; nothing is shipped.
 ROAD_LEARNED_STOPS_KEY = "road_learned_stops"  # JSON list of [lat, lon,
 # "YYYY-MM-DD"]: where the car came to rest on roads the map calls
 # expressway. roads.learned_signals turns repeats into traffic lights.
