@@ -3,7 +3,9 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import logging
 import os
+import re
 import secrets
 from pathlib import Path
 
@@ -17,6 +19,27 @@ from .config import get_settings
 from .database import init_db
 
 STATIC_DIR = Path(__file__).parent / "static"
+
+
+class _RedactKey(logging.Filter):
+    """Blank the sync key out of uvicorn's access log.
+
+    The cron and the telemetry bridge authenticate with ?key=, and the access
+    log writes the full URL — so the key was in the host's logs on every sync
+    tick and every telemetry post, about 15,000 times a day. That key also
+    opens /api/fleet-token, which hands out a live Tesla access token. The
+    X-Sync-Key header works too and never reaches a URL at all."""
+
+    _KEY = re.compile(r"([?&]key=)[^&\s\"]*")
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if isinstance(record.args, tuple):
+            record.args = tuple(self._KEY.sub(r"\1REDACTED", a) if isinstance(a, str) else a
+                                for a in record.args)
+        return True
+
+
+logging.getLogger("uvicorn.access").addFilter(_RedactKey())
 
 app = FastAPI(
     title="Tesla Analyzer",
@@ -183,7 +206,9 @@ async def _passcode_gate(request: Request, call_next):
                      # leaves that box, so the token has to travel instead —
                      # see fleet_token for what is and is not handed over.
                      "/api/fleet-token")
-        and hmac.compare_digest(request.query_params.get("key", ""), sync_key)
+        and hmac.compare_digest(
+            request.headers.get("x-sync-key") or request.query_params.get("key", ""),
+            sync_key)
     ):
         return await call_next(request)
     if path.startswith("/api/"):

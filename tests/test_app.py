@@ -11841,3 +11841,28 @@ def test_the_public_health_check_never_shows_sql_parameters():
         s.close()
         routes._invalidate_health_checks_cache()
         settings.app_passcode = old_pc
+
+
+def test_the_sync_key_never_reaches_the_access_log_and_works_as_a_header():
+    import logging
+
+    from app import main as main_mod
+
+    rec = logging.LogRecord("uvicorn.access", logging.INFO, "", 0,
+                            '%s - "%s %s HTTP/%s" %d', ("1.2.3.4:5", "GET",
+                            "/api/fleet-token?key=s3cret&x=1", "1.1", 200), None)
+    main_mod._RedactKey().filter(rec)
+    assert "s3cret" not in rec.getMessage() and "key=REDACTED&x=1" in rec.getMessage()
+
+    settings = get_settings()
+    old_pc, old_key = settings.app_passcode, settings.sync_key
+    settings.app_passcode, settings.sync_key = "pass", "s3cret"
+    try:
+        with TestClient(app) as client:
+            assert client.get("/api/telemetry/fields").status_code == 401
+            assert client.get("/api/telemetry/fields",
+                              headers={"X-Sync-Key": "s3cret"}).status_code == 200
+            assert client.get("/api/telemetry/fields",
+                              headers={"X-Sync-Key": "wrong"}).status_code == 401
+    finally:
+        settings.app_passcode, settings.sync_key = old_pc, old_key
