@@ -2773,8 +2773,39 @@ ROAD_KNOWN_MIN_SHARE = 0.5
 ROAD_HIGHWAY_MIN_SHARE = 0.5
 
 
+def road_override_of(d: Any) -> str | None:
+    """"highway"/"city" when the owner has set this trip's road by hand."""
+    ov = (getattr(d, "road_override", "") or "").strip().lower()
+    return ov if ov in ("highway", "city") else None
+
+
 def road_profile_of(d: Any) -> dict[str, dict[str, dict[str, float]]] | None:
-    """A trip's stored road profile, parsed: {road: {band: {km, min, kwh}}}."""
+    """A trip's stored road profile, parsed: {road: {band: {km, min, kwh}}}.
+
+    With a road set by hand (road_override_of) every road's bands, stops and
+    idle are merged into that one road, so everything downstream — the mode,
+    the congestion test, the part-trip split, the range model — reads the
+    trip as driven wholly on it, from the one place they all read."""
+    prof = _parsed_road_profile(d)
+    ov = road_override_of(d)
+    if not ov or not prof:
+        return prof
+    bands: dict[str, dict[str, float]] = {}
+    for road, rb in prof.items():
+        if road.startswith("_"):
+            continue
+        for edge, part in (rb or {}).items():
+            slot = bands.setdefault(edge, {"km": 0.0, "min": 0.0, "kwh": 0.0})
+            for k in ("km", "min", "kwh"):
+                slot[k] += float((part or {}).get(k) or 0.0)
+    merged: dict[str, Any] = {ov: bands}
+    for meta in ("_stops", "_idle_min"):
+        if isinstance(prof.get(meta), dict):
+            merged[meta] = {ov: sum(float(v or 0.0) for v in prof[meta].values())}
+    return merged
+
+
+def _parsed_road_profile(d: Any) -> dict[str, dict[str, dict[str, float]]] | None:
     raw = getattr(d, "road_profile", None)
     if not raw:
         return None
@@ -2845,6 +2876,11 @@ def road_verdict(d: Any, cuts: dict[str, float] | None = None) -> str | None:
     forced = getattr(d, "road", None)
     if forced in ("highway", "city"):
         return forced
+    # Set by hand: the owner knows which road it was, and neither the map nor
+    # the speed fallback below gets a say.
+    ov = road_override_of(d)
+    if ov:
+        return ov
     totals = road_totals(d)
     known = sum(totals.get(r, {}).get("km", 0.0) for r in ("highway", "city"))
     total = known + totals.get("unknown", {}).get("km", 0.0)
@@ -3194,8 +3230,12 @@ def drive_mode_explained(d: Any, cuts: dict[str, float] | None = None) -> dict[s
         hw_km = totals.get("highway", {}).get("km", 0.0)
         out["road"] = road
         out["highway_share"] = round(hw_km / known, 3) if known else None
-        where = (f"on expressway/trunk roads for {hw_km / known * 100:.0f}% of the "
-                 f"kilometres the map could place")
+        if road_override_of(d):
+            where = ("on " + ("expressway/trunk roads" if road == "highway" else "city roads")
+                     + " (road set by hand)")
+        else:
+            where = (f"on expressway/trunk roads for {hw_km / known * 100:.0f}% of the "
+                     f"kilometres the map could place")
         if highway and hw_km and totals["highway"].get("min"):
             avg = hw_km / (totals["highway"]["min"] / 60.0)
             out["avg_kmh"] = round(avg, 1)

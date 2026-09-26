@@ -11874,3 +11874,43 @@ def test_the_sync_key_never_reaches_the_access_log_and_works_as_a_header():
                               headers={"X-Sync-Key": "wrong"}).status_code == 401
     finally:
         settings.app_passcode, settings.sync_key = old_pc, old_key
+
+
+def test_a_trip_road_can_be_set_by_hand_and_put_back():
+    """Trip 3127 crawled Jalan Sultan Azlan Shah, which the map of the day
+    called expressway; its split cannot be re-derived, so the owner says
+    which road it was. Reversible: road=auto follows the map again."""
+    import json as _json
+
+    from app.database import SessionLocal
+    from app.models import Drive, Vehicle
+
+    settings = get_settings()
+    old_pc = settings.app_passcode
+    settings.app_passcode = ""
+    s = SessionLocal()
+    try:
+        v = Vehicle(vin="SETROAD000000001", name="t", model="m")
+        s.add(v)
+        s.commit()
+        prof = {"highway": {"10": {"km": 4.3, "min": 14.0, "kwh": 0.8}},
+                "city": {"20": {"km": 1.8, "min": 5.0, "kwh": 0.3}},
+                "_stops": {"highway": 6, "city": 1}, "_idle_min": {"highway": 0.0}}
+        d = Drive(vehicle_id=v.id, start_time=datetime(2026, 9, 25, 13, 42),
+                  end_time=datetime(2026, 9, 25, 14, 1), distance_km=6.1,
+                  duration_min=19.0, max_speed_kmh=84.0, energy_used_kwh=1.12,
+                  outside_temp_c=28.0, road_profile=_json.dumps(prof))
+        s.add(d)
+        s.commit()
+        with TestClient(app) as client:
+            before = client.get(f"/api/data/set-road?id={d.id}&road=auto").json()
+            assert before["mode"] == "SH"
+            r = client.get(f"/api/data/set-road?id={d.id}&road=city").json()
+            assert r["mode"] in ("CC", "SC", "HC") and "set by hand" in r["why"]
+            back = client.get(f"/api/data/set-road?id={d.id}&road=auto").json()
+            assert back["mode"] == "SH" and back["was"] == "city"
+            assert client.get(f"/api/data/set-road?id={d.id}&road=moon").status_code == 422
+            assert client.get("/api/data/set-road?id=99999999&road=city").status_code == 404
+    finally:
+        s.close()
+        settings.app_passcode = old_pc

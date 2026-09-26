@@ -3015,6 +3015,35 @@ def set_drive_cost(payload: dict = Body(...), session: Session = Depends(get_ses
     return {"id": drive_id, "cost_override": drive.cost_override}
 
 
+@router.api_route("/data/set-road", methods=["GET", "POST"])
+def set_road(
+    trip_id: int = Query(..., alias="id", description="Trip id"),
+    road: str = Query(..., description="city, highway, or auto to follow the map"),
+    session: Session = Depends(get_session),
+):
+    """Say which road a trip was on, overriding the map — for a trip recorded
+    before the map got it right (trip 3127: Jalan Sultan Azlan Shah, read as
+    expressway). The recorded road split is kept as it was; this only decides
+    how it is read, so road=auto puts the trip back on the map's verdict.
+
+    GET as well as POST so it can be tapped from a phone, like the other
+    corrections.
+    """
+    road = (road or "").strip().lower()
+    if road not in ("city", "highway", "auto"):
+        raise HTTPException(422, "road must be city, highway or auto")
+    drive = session.get(Drive, trip_id)
+    if drive is None:
+        raise HTTPException(404, "Trip not found.")
+    was = drive.road_override or "auto"
+    drive.road_override = "" if road == "auto" else road
+    session.commit()
+    c = _classify_cuts(session, drive.vehicle_id)
+    return {"id": trip_id, "was": was, "road": road,
+            "mode": driving_analysis.drive_mode(drive, c),
+            "why": driving_analysis.drive_mode_explained(drive, c).get("why")}
+
+
 @router.post("/data/edit-drive")
 def edit_drive(payload: dict = Body(...), session: Session = Depends(get_session)):
     """Manually correct a trip's start and/or end time — for a no-signal

@@ -157,6 +157,11 @@ class Drive(Base):
     # are not averaged together. "" until looked up; "??" where the lookup
     # answered but named no country (the sea).
     country: Mapped[str] = mapped_column(String(2), default="")
+    # "highway" or "city" when the owner has said which road this trip was on,
+    # overriding the map (see /api/data/set-road); "" to follow the map. Set
+    # rather than rewriting road_profile, so it can be undone: the recorded
+    # split stays as it was captured.
+    road_override: Mapped[str] = mapped_column(String(8), default="")
 
     # User-assigned category ("work" / "personal", or any free text) for
     # expense-claim/cost-splitting purposes. "" = untagged.
