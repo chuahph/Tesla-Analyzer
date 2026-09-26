@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import csv
 import io
+import math
 import json
 import zipfile
 from datetime import datetime
@@ -95,9 +96,11 @@ def _num(value: Any, default: float = 0.0) -> float:
     if value is None or value == "":
         return default
     try:
-        return float(str(value).replace(",", "").strip())
+        v = float(str(value).replace(",", "").strip())
     except ValueError:
         return default
+    # "nan" and "inf" parse; one such cell turned every total it reached NaN.
+    return v if math.isfinite(v) else default
 
 
 def _dt(value: Any) -> datetime | None:
@@ -277,7 +280,14 @@ def _is_junk(path: str) -> bool:
     )
 
 
-def _parse_zip(content: bytes, _depth: int = 0) -> tuple[list[dict], list[dict], list[str]]:
+# Most a ZIP may expand to, nested zips included. A real Tesla export is a few
+# MB; this only has to stop a zip bomb, or a huge unrelated archive, from
+# exhausting a 512 MB free-plan instance mid-import.
+ZIP_MAX_EXPANDED_BYTES = 200 * 1024 * 1024
+
+
+def _parse_zip(content: bytes, _depth: int = 0,
+               _budget: list | None = None) -> tuple[list[dict], list[dict], list[str]]:
     """Parse every recognised data file inside a ZIP (recursing into nested zips).
 
     Returns (drives, charges, data_filenames_seen). Real Tesla exports nest files
@@ -288,19 +298,34 @@ def _parse_zip(content: bytes, _depth: int = 0) -> tuple[list[dict], list[dict],
     drives: list[dict] = []
     charges: list[dict] = []
     seen: list[str] = []
+    budget = _budget if _budget is not None else [ZIP_MAX_EXPANDED_BYTES]
 
     with zipfile.ZipFile(io.BytesIO(content)) as zf:
         for info in zf.infolist():
             if info.is_dir() or _is_junk(info.filename):
                 continue
             inner = info.filename.lower()
+            if not inner.endswith((".zip", ".csv", ".tsv", ".txt", ".json")):
+                continue  # never decompress what would be skipped anyway
+            # The declared size first, then what actually came out: a bomb
+            # can lie in its header, so the read itself is bounded too.
+            if info.file_size > budget[0]:
+                raise ImportError_("The ZIP expands to more than "
+                                   f"{ZIP_MAX_EXPANDED_BYTES // (1024 * 1024)} MB — "
+                                   "too large to import.")
             try:
-                raw = zf.read(info)
+                with zf.open(info) as fh:
+                    raw = fh.read(budget[0] + 1)
             except Exception:  # noqa: BLE001 - skip unreadable entries
                 continue
+            if len(raw) > budget[0]:
+                raise ImportError_("The ZIP expands to more than "
+                                   f"{ZIP_MAX_EXPANDED_BYTES // (1024 * 1024)} MB — "
+                                   "too large to import.")
+            budget[0] -= len(raw)
 
             if inner.endswith(".zip") and _depth < 3:
-                d, c, s = _parse_zip(raw, _depth + 1)
+                d, c, s = _parse_zip(raw, _depth + 1, budget)
                 drives += d
                 charges += c
                 seen += s

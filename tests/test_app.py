@@ -11729,3 +11729,84 @@ def test_a_closed_trip_feeds_its_expressway_stops_to_learning_not_to_the_store()
         s.close()
         roads.set_learned_signals([])
         roads.clear()
+
+
+def test_full_history_leaves_the_callers_trips_attached():
+    """_full_history used to expunge its rows from the CALLER's session, and
+    the identity map made those the very objects the caller already held: an
+    edit to one after the call was silently never saved."""
+    from app.api import routes
+    from app.database import SessionLocal
+    from app.models import Drive, Vehicle
+
+    s = SessionLocal()
+    try:
+        v = Vehicle(vin="FULLHIST00000001", name="t", model="m")
+        s.add(v)
+        s.commit()
+        d = Drive(vehicle_id=v.id, start_time=datetime(2026, 5, 1, 8),
+                  end_time=datetime(2026, 5, 1, 9), distance_km=10.0)
+        s.add(d)
+        s.commit()
+        mine = s.get(Drive, d.id)
+        routes._FULL_HISTORY_CACHE.clear()
+        routes._full_history(s, v.id)
+        mine.start_location = "Edited after"
+        s.commit()
+        with SessionLocal() as other:
+            assert other.get(Drive, d.id).start_location == "Edited after"
+    finally:
+        s.close()
+
+
+def test_import_refuses_to_erase_a_linked_car_and_merges_every_file(monkeypatch):
+    """/api/import replaces EVERYTHING — every trip, charge and battery
+    reading, and the car — with no backup. On a linked car that is history
+    that cannot be fetched again, so it needs an explicit yes. And several
+    files arrive together and are merged: posted one at a time, each wiped
+    the one before and only the last survived."""
+    from app import importer
+    from app.database import SessionLocal
+    from app.models import Drive, Vehicle
+
+    settings = get_settings()
+    old_pc = settings.app_passcode
+    settings.app_passcode = ""
+    csv_a = "start_time,end_time,distance_km,energy_kwh\n2026-01-01 08:00,2026-01-01 08:30,10,1.5\n"
+    csv_b = "start_time,end_time,distance_km,energy_kwh\n2026-01-02 08:00,2026-01-02 08:30,20,3.0\n"
+    try:
+        with TestClient(app) as client:
+            with SessionLocal() as s:
+                s.add(Vehicle(vin="LRW3F7EKIMPORTT1", name="Real", model="Model 3"))
+                s.commit()
+            files = [("file", ("a.csv", csv_a, "text/csv")), ("file", ("b.csv", csv_b, "text/csv"))]
+            r = client.post("/api/import", files=files)
+            assert r.status_code == 409, r.text
+            with SessionLocal() as s:
+                assert s.query(Vehicle).filter(Vehicle.vin == "LRW3F7EKIMPORTT1").count() == 1
+
+            r = client.post("/api/import?erase_live=yes", files=files)
+            assert r.status_code == 200, r.text
+            assert r.json()["imported_drives"] == 2           # both files, merged
+            with SessionLocal() as s:
+                assert s.query(Drive).count() == 2
+    finally:
+        settings.app_passcode = old_pc
+
+    # A "nan" cell no longer parses as a number.
+    assert importer._num("nan", 0.0) == 0.0 and importer._num("inf", 1.0) == 1.0
+    assert importer._num("1,234.5") == 1234.5
+
+
+def test_a_zip_that_expands_past_the_limit_is_refused(monkeypatch):
+    import io
+    import zipfile
+
+    from app import importer
+
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("drives.csv", "start_time,distance_km\n" + "2026-01-01 08:00,1\n" * 50000)
+    monkeypatch.setattr(importer, "ZIP_MAX_EXPANDED_BYTES", 100_000)
+    with pytest.raises(importer.ImportError_):
+        importer.parse_upload("export.zip", buf.getvalue())

@@ -4317,15 +4317,22 @@ importSubmit.addEventListener("click", async () => {
       localStorage.setItem(STORE_KEY, JSON.stringify(dataset));
       drivesN = drives.length; chargesN = charges.length;
     } else {
-      // Self-hosted: send each selected file to the API (last one wins for now).
-      let body;
-      for (const f of pendingFiles) {
-        const fd = new FormData();
-        fd.append("file", f);
-        const res = await fetch("/api/import", { method: "POST", body: fd });
+      // Self-hosted: every selected file in ONE request, merged server-side.
+      // Posting them one at a time wiped each previous file, keeping only the
+      // last. The server refuses (409) when a real car is linked, because an
+      // import replaces its whole history; that needs an explicit yes.
+      const fd = new FormData();
+      for (const f of pendingFiles) fd.append("file", f);
+      let res = await fetch("/api/import", { method: "POST", body: fd });
+      let body = await res.json();
+      if (res.status === 409) {
+        if (!confirm(`${body.detail}\n\nErase the linked car's history and import?`)) {
+          throw new Error("Import cancelled — nothing was changed.");
+        }
+        res = await fetch("/api/import?erase_live=yes", { method: "POST", body: fd });
         body = await res.json();
-        if (!res.ok) throw new Error(body.detail || "Import failed");
       }
+      if (!res.ok) throw new Error(body.detail || "Import failed");
       drivesN = body.imported_drives; chargesN = body.imported_charges;
     }
     setStatus(importStatus, `Imported ${drivesN} drives & ${chargesN} charges.`, "ok");

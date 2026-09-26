@@ -1349,13 +1349,19 @@ def _full_history(session: Session, vehicle_id: int) -> tuple[list, list]:
     cached = _FULL_HISTORY_CACHE.get(vehicle_id)
     if cached is not None and now - cached[0] < _FULL_HISTORY_TTL_SEC:
         return cached[1], cached[2]
-    drives = list(session.scalars(
-        select(Drive).where(Drive.vehicle_id == vehicle_id)
-        .order_by(Drive.start_time)))
-    charges = list(session.scalars(
-        select(Charge).where(Charge.vehicle_id == vehicle_id)))
-    for row in (*drives, *charges):
-        session.expunge(row)
+    # Its own short session, not the caller's. Expunging from the caller's
+    # session detached every Drive the request had ALREADY loaded — the
+    # identity map hands back the same objects — so an edit made to one of
+    # them after this call (purge, promotion and the summary all load trips
+    # and then reach here through _usable_capacity) would silently never be
+    # saved. A separate session leaves the caller's objects alone.
+    with Session(session.get_bind(), expire_on_commit=False, autoflush=False) as own:
+        drives = list(own.scalars(
+            select(Drive).where(Drive.vehicle_id == vehicle_id)
+            .order_by(Drive.start_time)))
+        charges = list(own.scalars(
+            select(Charge).where(Charge.vehicle_id == vehicle_id)))
+        own.expunge_all()
     _FULL_HISTORY_CACHE[vehicle_id] = (now, drives, charges)
     return drives, charges
 
@@ -1943,18 +1949,50 @@ def health(session: Session = Depends(get_session)):
 # --- Data source: manual import -------------------------------------------
 
 
+# Largest single file /api/import accepts. A Tesla export is a few MB.
+IMPORT_MAX_BYTES = 50 * 1024 * 1024
+
+
 @router.post("/import")
 async def import_data(
-    file: UploadFile = File(...), session: Session = Depends(get_session)
+    file: list[UploadFile] = File(...),
+    erase_live: str = Query("", description="'yes' to replace a linked car's history"),
+    session: Session = Depends(get_session),
 ):
-    """Button 1 — load a Tesla privacy/usage data export (CSV/JSON/ZIP)."""
-    content = await file.read()
-    try:
-        drives, charges = parse_upload(file.filename or "upload", content)
-    except ImportError_ as exc:
-        raise HTTPException(422, str(exc)) from exc
-    except Exception as exc:  # noqa: BLE001
-        raise HTTPException(400, f"Could not read file: {exc}") from exc
+    """Button 1 — load a Tesla privacy/usage data export (CSV/JSON/ZIP).
+
+    REPLACES everything stored: every trip, charge, battery reading and
+    service record, and the car itself (services._wipe), with no backup. That
+    is the intent for a first import into a fresh or demo install; on an app
+    with a linked car it would erase history that cannot be fetched again, so
+    it is refused there unless ``erase_live=yes`` says that is what is meant.
+
+    Several files arrive in one request and are merged. The dashboard used to
+    post them one at a time, and each post wiped the one before, so only the
+    last file of a multi-file import survived.
+    """
+    live = [v.vin for v in session.scalars(select(Vehicle))
+            if v.vin and not v.vin.upper().startswith(("DEMO", "IMPORT"))]
+    if live and erase_live != "yes":
+        raise HTTPException(
+            409, "Importing replaces ALL stored history — every trip, charge and "
+                 "battery reading of the linked car, with no backup. Confirm to "
+                 "erase it and load the file instead.")
+    drives: list = []
+    charges: list = []
+    for f in file:
+        content = await f.read(IMPORT_MAX_BYTES + 1)
+        if len(content) > IMPORT_MAX_BYTES:
+            raise HTTPException(413, f"{f.filename} is larger than "
+                                     f"{IMPORT_MAX_BYTES // (1024 * 1024)} MB.")
+        try:
+            d, c = parse_upload(f.filename or "upload", content)
+        except ImportError_ as exc:
+            raise HTTPException(422, f"{f.filename}: {exc}") from exc
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(400, f"Could not read {f.filename}: {exc}") from exc
+        drives += d
+        charges += c
     return services.replace_with_import(session, drives, charges)
 
 
