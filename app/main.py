@@ -41,7 +41,16 @@ class _RedactKey(logging.Filter):
 
 logging.getLogger("uvicorn.access").addFilter(_RedactKey())
 
+class _UTF8JSONResponse(JSONResponse):
+    """JSON that says it is UTF-8. Without the charset a phone browser showing
+    a tapped correction link's raw reply guessed Latin-1, so ° × — arrived as
+    Â° Ã— â€”. The dashboard's fetch() was never affected."""
+
+    media_type = "application/json; charset=utf-8"
+
+
 app = FastAPI(
+    default_response_class=_UTF8JSONResponse,
     title="Tesla Analyzer",
     description="Self-hosted analytics for driving, usage and charging patterns.",
     version="0.1.0",

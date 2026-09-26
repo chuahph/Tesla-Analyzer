@@ -11914,3 +11914,10 @@ def test_a_trip_road_can_be_set_by_hand_and_put_back():
     finally:
         s.close()
         settings.app_passcode = old_pc
+
+
+def test_api_replies_declare_utf8():
+    """A tapped link's raw JSON showed ° as Â° on a phone without it."""
+    with TestClient(app) as client:
+        assert "charset=utf-8" in client.get("/api/ping").headers["content-type"]
+        assert "charset=utf-8" in client.get("/api/health").headers["content-type"]
