@@ -978,7 +978,7 @@ def _live_eta(session: Session, snap: dict, live: dict, capacity_kwh: float) -> 
     pace = live["avg_speed_kmh"] if live.get("avg_speed_kmh", 0) >= 5.0 else sync_mod.CITY_SPEED_KMH
     wh_per_km = live.get("driving_wh_per_km") or live.get("wh_per_km") or 0.0
     projected_soc = None
-    if capacity_kwh and wh_per_km:
+    if capacity_kwh and wh_per_km and live.get("soc") is not None:
         used_kwh = best_km * wh_per_km / 1000.0
         projected_soc = round(max(live["soc"] - used_kwh / capacity_kwh * 100.0, 0.0), 1)
     return {

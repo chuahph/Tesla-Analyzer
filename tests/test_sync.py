@@ -2237,3 +2237,19 @@ def test_learning_a_full_store_is_quick():
     roads.learned_signals(obs)
     roads.trim_learned_stops(obs + obs[:100], 1500)
     assert time.monotonic() - t < 1.0
+
+
+def test_the_live_drive_view_survives_a_snapshot_missing_odometer_or_soc():
+    """A streamed snapshot carries only what the car has sent so far; one
+    without an odometer or SoC crashed the dashboard's current-drive view, and
+    a DRIVE_MIN_KM of 0 turned a parked-still trip into a division by zero."""
+    from app import sync
+
+    opened = {"ts": 1_790_000_000.0, "odo_km": 31900.0, "soc": 80.0,
+              "range_km": 400.0, "max_speed": 0.0}
+    no_odo = {"ts": 1_790_000_600.0, "soc": 79.0, "range_km": 395.0, "speed_kmh": 30.0}
+    assert sync.live_trip(opened, no_odo)["distance_km"] == 0.0
+    no_soc = {"ts": 1_790_000_600.0, "odo_km": 31905.0, "range_km": 395.0}
+    assert sync.live_trip(opened, no_soc)["distance_km"] == 5.0
+    still = {"ts": 1_790_000_600.0, "odo_km": 31900.0, "soc": 80.0, "range_km": 399.0}
+    assert sync.live_trip(opened, still, drive_min_km=0.0) is not None

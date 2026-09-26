@@ -878,9 +878,18 @@ def live_trip(
     """Progress of the drive in flight — the dashboard's "current drive" view."""
     if not open_trip or not snap:
         return None
-    distance = max(snap["odo_km"] - open_trip["odo_km"], 0.0)
-    dt_min = max((snap["ts"] - open_trip["ts"]) / 60.0, 0.0)
-    soc_used = max(open_trip["soc"] - snap["soc"], 0.0)
+    # A floor, so a DRIVE_MIN_KM of 0 cannot turn the Wh/km guards below into
+    # a division by a zero distance.
+    drive_min_km = max(float(drive_min_km or 0.0), 0.001)
+    # .get, not [...]: a streamed snapshot carries only what the car has sent,
+    # and one without an odometer or SoC yet crashed the live view outright.
+    if snap.get("odo_km") is None or open_trip.get("odo_km") is None:
+        distance = 0.0
+    else:
+        distance = max(float(snap["odo_km"]) - float(open_trip["odo_km"]), 0.0)
+    dt_min = max((float(snap["ts"]) - float(open_trip["ts"])) / 60.0, 0.0)
+    soc_used = (max(float(open_trip["soc"]) - float(snap["soc"]), 0.0)
+                if snap.get("soc") is not None and open_trip.get("soc") is not None else 0.0)
     energy_kwh = _energy_kwh(open_trip, snap, capacity_kwh)
     avg_speed = distance / (dt_min / 60.0) if dt_min else 0.0
     # Current speed and average both bound the max from below.
@@ -901,8 +910,8 @@ def live_trip(
         "duration_min": round(dt_min),
         "avg_speed_kmh": round(avg_speed, 1),
         "max_speed_kmh": round(observed_max, 1),
-        "start_soc": open_trip["soc"],
-        "soc": snap["soc"],
+        "start_soc": open_trip.get("soc"),
+        "soc": snap.get("soc"),
         "soc_used": round(soc_used, 1),
         "km_per_soc": round(distance / soc_eff, 1) if soc_eff >= 0.2 and distance else None,
         "energy_kwh": round(energy_kwh, 2),
