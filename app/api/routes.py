@@ -2011,10 +2011,20 @@ def clear_drives(session: Session = Depends(get_session)):
     return {"deleted_drives": deleted}
 
 
+def _payload_ids(payload: dict) -> list[int]:
+    """The "ids" list from a bulk-action body. Anything but a list is refused:
+    a bare string would otherwise be iterated per character, so "735" would
+    act on rows 7, 3 and 5."""
+    raw = payload.get("ids") or []
+    if not isinstance(raw, list):
+        raise HTTPException(422, "ids must be a list of row ids.")
+    return [int(i) for i in raw if str(i).lstrip("-").isdigit()]
+
+
 @router.post("/data/delete-drives")
 def delete_drives(payload: dict = Body(...), session: Session = Depends(get_session)):
     """Delete only the selected trips (by id); charges/battery kept."""
-    ids = [int(i) for i in (payload.get("ids") or []) if str(i).lstrip("-").isdigit()]
+    ids = _payload_ids(payload)
     deleted = services.delete_drives(session, ids)
     return {"deleted_drives": deleted}
 
@@ -2957,7 +2967,7 @@ def relabel_all_drives(session: Session = Depends(get_session)):
 def relabel_drives(payload: dict = Body(...), session: Session = Depends(get_session)):
     """Re-geocode only the selected trips' locations (by id) — see
     _relabel_drives."""
-    ids = [int(i) for i in (payload.get("ids") or []) if str(i).lstrip("-").isdigit()]
+    ids = _payload_ids(payload)
     return _relabel_drives(session, ids)
 
 
@@ -2974,7 +2984,7 @@ def clear_charges(session: Session = Depends(get_session)):
 @router.post("/data/delete-charges")
 def delete_charges(payload: dict = Body(...), session: Session = Depends(get_session)):
     """Delete only the selected charges (by id); trips/battery kept."""
-    ids = [int(i) for i in (payload.get("ids") or []) if str(i).lstrip("-").isdigit()]
+    ids = _payload_ids(payload)
     deleted = services.delete_charges(session, ids)
     return {"deleted_charges": deleted}
 

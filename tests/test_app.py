@@ -2759,6 +2759,14 @@ def test_delete_selected_drives_by_id():
                 assert not s.query(Drive).filter(Drive.id.in_(ids)).count()
             # Empty / no ids deletes nothing.
             assert client.post("/api/data/delete-drives", json={"ids": []}).json()["deleted_drives"] == 0
+            # A bare string is refused, not iterated per character ("12" -> 1, 2).
+            with SessionLocal() as s:
+                before = s.query(Drive).count()
+            for path in ("/api/data/delete-drives", "/api/data/delete-charges",
+                         "/api/data/relabel-drives"):
+                assert client.post(path, json={"ids": "12"}).status_code == 422
+            with SessionLocal() as s:
+                assert s.query(Drive).count() == before
     finally:
         settings.app_passcode = old
 
