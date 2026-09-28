@@ -12034,3 +12034,37 @@ def test_dashboard_matrix_and_recent_trips_cover_the_same_trips():
         with SessionLocal() as s:
             services._wipe(s)
         seed_demo_if_empty()
+
+
+def test_current_soc_prefers_the_streams_decimal_over_a_whole_point_reading():
+    """BatteryReading rows are only written on a whole-point move, so the
+    newest can trail the car by up to 0.99% — 48 against the car's 47 after
+    a drive. The stream's own Soc is used when it is at least as new."""
+    from app import state
+    from app import sync as sync_mod
+    from app.api.routes import _current_soc
+    from app.database import SessionLocal
+    from app.models import BatteryReading, Vehicle
+
+    with TestClient(app):
+        with SessionLocal() as s:
+            vehicle = s.query(Vehicle).first()
+            base = sync_mod.now_local().replace(microsecond=0) + timedelta(days=1)
+            s.add(BatteryReading(vehicle_id=vehicle.id, ts=base, soc=48.0,
+                                 range_km=200.0, odo_km=0.0))
+            s.commit()
+            epoch = base.replace(tzinfo=sync_mod.MYT).timestamp()
+            try:
+                state.put(s, state.TELEMETRY_LATEST_KEY, json.dumps(
+                    {vehicle.vin: {"Soc": 47.26, "_ts": epoch + 600}}))
+                s.commit()
+                assert _current_soc(s, vehicle) == pytest.approx(47.26)
+                # A stream older than the stored reading does not win.
+                state.put(s, state.TELEMETRY_LATEST_KEY, json.dumps(
+                    {vehicle.vin: {"Soc": 55.0, "_ts": epoch - 600}}))
+                s.commit()
+                assert _current_soc(s, vehicle) == pytest.approx(48.0)
+            finally:
+                state.delete(s, state.TELEMETRY_LATEST_KEY)
+                s.query(BatteryReading).filter(BatteryReading.ts == base).delete()
+                s.commit()

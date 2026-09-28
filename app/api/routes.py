@@ -9934,12 +9934,7 @@ def driving_matrix(days: int = Query(30, ge=1, le=730),
     # (limited_by == "charge", the same guard parked_anchor uses above).
     battery_used_pct = None
     if limited_by == "charge" and last_charge is not None and capacity_kwh:
-        current_soc = session.scalar(
-            select(BatteryReading.soc)
-            .where(BatteryReading.vehicle_id == vehicle.id)
-            .order_by(BatteryReading.ts.desc())
-            .limit(1)
-        )
+        current_soc = _current_soc(session, vehicle)
         if current_soc is not None:
             battery_used_pct = round(max(last_charge.end_soc - current_soc, 0.0), 2)
     out["totals"] = {
@@ -12448,12 +12443,7 @@ def summary(
 
     # Battery Balance: how much charge is actually left in the pack right now
     # (the latest logged SoC reading) — the "fuel gauge", not a derived delta.
-    current_soc = session.scalar(
-        select(BatteryReading.soc)
-        .where(BatteryReading.vehicle_id == vehicle.id)
-        .order_by(BatteryReading.ts.desc())
-        .limit(1)
-    )
+    current_soc = _current_soc(session, vehicle)
     # Battery Used: % of the full (degradation-adjusted) pack, same basis as
     # every other %-of-battery figure in the app (km/1% Battery's
     # soc_used_pct, each trip's own soc_used_pct) so they're all directly
@@ -13040,6 +13030,36 @@ def _telemetry_value(entry: dict) -> Any:
             return None
         return inner
     return value
+
+
+def _current_soc(session: Session, vehicle) -> float | None:
+    """The car's SoC now, to the decimal where the stream has it.
+
+    BatteryReading rows are written only when SoC moves a whole point (or a
+    Sentry/climate state changes), so the newest row can trail the car by up
+    to 0.99% — it read 48 against the car's own 47 after a drive, putting
+    since-charge Battery Used 1.7 points under the car's figure. The telemetry
+    composite holds the latest Soc the car sent, and is used whenever it is at
+    least as new as that row; the row still answers when the stream is stale.
+    """
+    import json as _json
+
+    row = session.execute(
+        select(BatteryReading.soc, BatteryReading.ts)
+        .where(BatteryReading.vehicle_id == vehicle.id)
+        .order_by(BatteryReading.ts.desc()).limit(1)).first()
+    try:
+        latest = _json.loads(state.get(session, state.TELEMETRY_LATEST_KEY) or "{}") or {}
+    except ValueError:
+        latest = {}
+    car = latest.get(vehicle.vin) if isinstance(latest, dict) else None
+    if isinstance(car, dict):
+        ts = _telemetry_ts(car.get("_ts"))
+        soc = sync_mod.snapshot_from_telemetry(car, ts)["soc"] if ts else 0.0
+        if 0.0 < soc <= 100.0 and (
+                row is None or sync_mod._dt(ts) >= row.ts):
+            return soc
+    return row.soc if row else None
 
 
 def _live_from_stream(session: Session, vin: str):
