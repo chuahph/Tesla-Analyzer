@@ -11963,3 +11963,74 @@ def test_a_charge_time_can_be_corrected_by_hand():
     finally:
         s.close()
         settings.app_passcode = old_pc
+
+
+def test_dashboard_matrix_and_recent_trips_cover_the_same_trips():
+    """The dashboard cards, Recent Trips, the driving matrix and the matrix's
+    own per-trip list all answer for one window, so for every window option
+    they must count the same trips, tag them the same way, and the matrix's
+    rows plus what it names as left out must add up to the window's trips."""
+    import pytest as _pytest
+
+    settings = get_settings()
+    old = settings.app_passcode
+    settings.app_passcode = ""
+    try:
+        with TestClient(app) as client:  # startup seeds demo data
+            from app import state as _state
+            from app.database import SessionLocal
+            from app.models import Drive
+            # Treat the demo history as streamed, with no drawn boundary, so the
+            # matrix is narrowed only by the same days/charge bound the cards use.
+            from app import services as _services
+            from app.collector import seed_demo_if_empty as _seed
+            with SessionLocal() as s:
+                _services._wipe(s)
+            _seed()
+            with SessionLocal() as s:
+                s.query(Drive).update({Drive.source: "telemetry"})
+                _state.delete(s, _state.MATRIX_SINCE_KEY)
+                s.commit()
+            checked = 0
+            for q in ("days=90&since_charge=1", "days=7", "days=30", "days=90"):
+                summ = client.get(f"/api/summary?{q}&trips_limit=500").json()
+                drv = summ["driving"]
+                matrix = client.get(f"/api/driving-matrix?{q}").json()
+                trips = client.get(f"/api/driving-matrix/trips?{q}").json()
+
+                if not drv.get("available"):
+                    assert matrix["trips_in_window"] == 0, q
+                    continue
+                recent = drv["recent_trips"]
+                # Cards vs Recent Trips: the same trips, whole.
+                assert len(recent) == drv["total_drives"], q
+                assert sum(t["distance_km"] for t in recent) == _pytest.approx(
+                    drv["total_distance_km"], abs=0.1 * len(recent) + 0.1), q
+
+                # Matrix vs its own per-trip list: the same window.
+                assert matrix["trips_in_window"] == trips["trips"], q
+                # Every trip is in exactly one row or named as left out.
+                in_rows = sum(r["trips"] for r in matrix["modes"])
+                assert (in_rows + matrix["no_energy_trips"]
+                        + matrix["unclassified_trips"]) == matrix["trips_in_window"], q
+                by_code: dict = {}
+                for t in trips["rows"]:
+                    if t["counted"]:
+                        by_code[t["mode"]] = by_code.get(t["mode"], 0) + 1
+                assert by_code == {r["code"]: r["trips"] for r in matrix["modes"]}, q
+
+                # Where nothing but the days/charge bound narrowed the matrix,
+                # it covers exactly Recent Trips' trips, tagged identically.
+                if matrix["window"]["limited_by"] in ("days", "charge"):
+                    assert ({t["id"]: t["mode"] for t in trips["rows"]}
+                            == {t["id"]: t["matrix_mode"] for t in recent}), q
+                    checked += len(recent)
+            assert checked, "no window exercised the trip-by-trip comparison"
+    finally:
+        settings.app_passcode = old
+        from app import services
+        from app.collector import seed_demo_if_empty
+        from app.database import SessionLocal
+        with SessionLocal() as s:
+            services._wipe(s)
+        seed_demo_if_empty()

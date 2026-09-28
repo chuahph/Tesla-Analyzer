@@ -2445,6 +2445,18 @@ function renderRangeModel(m) {
       <tbody>${cells}</tbody></table>`;
 }
 
+// How the window's trips reconcile with the rows: every trip is in exactly
+// one row or named here as left out, so the count matches Recent Trips.
+function matrixTripLine(d) {
+  const inRows = (d.modes || []).reduce((n, m) => n + (m.trips || 0), 0);
+  const total = d.trips_in_window ?? inRows;
+  const out = [];
+  if (d.no_energy_trips) out.push(`${d.no_energy_trips} with no plausible energy reading`);
+  if (d.unclassified_trips) out.push(`${d.unclassified_trips} with no duration, distance or peak speed to sort by`);
+  return `${total} trip(s) in this window, ${inRows} in the rows above`
+    + (out.length ? ` — left out: ${out.join(", ")}.` : ".");
+}
+
 function renderMatrix(d) {
   const box = document.getElementById("matrix-body");
   if (!box) return;
@@ -2458,9 +2470,7 @@ function renderMatrix(d) {
   const anyParked = parked.some((p) => p.kw != null || p.pct != null);
   if (!modes.length && !anyParked) {
     box.innerHTML =
-      `<p class="modal-sub">Nothing to show yet. A trip can only be sorted once its
-       idle time was tracked live, and ${d.unclassified_trips || 0} trip(s) in this
-       window were not — they are left out rather than guessed into a row.</p>`;
+      `<p class="modal-sub">Nothing to show yet. ${matrixTripLine(d)}</p>`;
     return;
   }
   const num = (v, dp) => (v == null ? "—" : Number(v).toFixed(dp));
@@ -2718,7 +2728,7 @@ function renderMatrix(d) {
       ${tot}
       ${win}
       Baseline ${d.baseline_range_km ?? "—"} km at the car's rated consumption.
-      ${d.unclassified_trips ? `${d.unclassified_trips} trip(s) left out — idle never tracked.` : ""}
+      ${matrixTripLine(d)}
       ${d.context ? `${d.context.climate}, ${d.context.region}.` : ""}
       ${unknown}
     </p>`;
@@ -2878,17 +2888,12 @@ function setupMatrixModal() {
     });
   });
 
-  // The per-trip table's own days, parsed from the same window the aggregate
-  // just asked for. since_charge has no meaning here — the trips endpoint
-  // has no charge boundary to narrow to — so only the day count carries over.
-  function matrixDays() {
-    const m = /days=(\d+)/.exec(matrixWindowQuery());
-    return m ? m[1] : "90";
-  }
+  // The per-trip table asks for exactly the window the aggregate did,
+  // since_charge included, so it lists the same trips the rows are built from.
   async function reloadTrips() {
     const box = document.getElementById("matrix-trips");
     try {
-      const r = await fetch(`/api/driving-matrix/trips?days=${matrixDays()}`);
+      const r = await fetch(`/api/driving-matrix/trips?${matrixWindowQuery()}`);
       if (!r.ok) throw new Error("load failed");
       renderMatrixTrips(await r.json());
     } catch (e) {

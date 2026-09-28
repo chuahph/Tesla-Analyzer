@@ -9549,8 +9549,56 @@ def set_matrix_window(payload: dict = Body(...),
     return driving_matrix(days=730, since_charge=False, session=session)
 
 
+def _matrix_since(session: Session, vehicle_id: int, now: datetime, days: int,
+                  since_charge: bool):
+    """Where the driving matrix starts: (since, limited_by, cutover, drawn,
+    last_charge). Shared by the matrix and its per-trip list so the two
+    always cover the same trips."""
+    asked_since = now - timedelta(days=days)
+    cutover = session.scalar(
+        select(func.min(Drive.start_time)).where(
+            Drive.vehicle_id == vehicle_id, Drive.source == "telemetry"))
+    # Three boundaries, and the LATEST wins: the days asked for, where streamed
+    # history begins, and an explicit "start here" if one is set. Taking the
+    # latest is what makes them compose — a boundary cannot drag the report back
+    # into the polled era, and the cutover cannot widen one a person narrowed.
+    bounds = [(asked_since, "days")]
+    if cutover:
+        bounds.append((cutover, "telemetry"))
+    drawn = _matrix_boundary(session, vehicle_id)
+    if drawn:
+        bounds.append((drawn[0], "boundary"))
+    # The dashboard's own window, so the matrix can answer for the same stretch
+    # the cards above it are answering for.
+    #
+    # Worth the parameter because the two disagreeing is not a small confusion:
+    # both report a parked figure, in percent of the same pack, and a reader
+    # has no way to see that one of them reaches back past a charge and the
+    # other does not. Measured on this car, an armed-Sentry park sitting in
+    # that difference put 10.7% against 3.2% for what looked like the same
+    # eleven trips.
+    #
+    # It composes like the rest rather than overriding them: a charge more
+    # recent than the streamed history narrows the report to it, and one older
+    # loses to the cutover, because there is no matrix to draw from trips that
+    # do not exist.
+    # The full row, not just its end_time — parked_share()'s anchor below
+    # needs end_soc too, to measure the gap before the window's first drive
+    # rather than leave it invisible.
+    last_charge = None
+    if since_charge:
+        last_charge = session.scalar(
+            select(Charge).where(Charge.vehicle_id == vehicle_id)
+            .order_by(Charge.end_time.desc()).limit(1))
+        if last_charge:
+            bounds.append((last_charge.end_time, "charge"))
+    since, limited_by = max(bounds, key=lambda pair: pair[0])
+    return since, limited_by, cutover, drawn, last_charge
+
+
 @router.get("/driving-matrix/trips")
 def driving_matrix_trips(days: int = Query(30, ge=1, le=730),
+                         since_charge: bool = False,
                          session: Session = Depends(get_session)):
     """Every trip in the window, the mode it landed in, and what decided it.
 
@@ -9564,14 +9612,7 @@ def driving_matrix_trips(days: int = Query(30, ge=1, le=730),
     """
     vehicle = _first_vehicle(session)
     now = sync_mod.now_local()
-    asked_since = now - timedelta(days=days)
-    cutover = session.scalar(
-        select(func.min(Drive.start_time)).where(
-            Drive.vehicle_id == vehicle.id, Drive.source == "telemetry"))
-    since = max(asked_since, cutover) if cutover else asked_since
-    drawn = _matrix_boundary(session, vehicle.id)
-    if drawn and drawn[0] > since:
-        since = drawn[0]
+    since = _matrix_since(session, vehicle.id, now, days, since_charge)[0]
     drives, _ = _window(session, vehicle.id, days, since=since)
     cuts = _classify_cuts(session, vehicle.id)
     rows = []
@@ -9656,45 +9697,8 @@ def driving_matrix(days: int = Query(30, ge=1, le=730),
     # and for the same reason: only the rows know where telemetry began, so it
     # is read off them rather than typed in as a date.
     now = sync_mod.now_local()
-    asked_since = now - timedelta(days=days)
-    cutover = session.scalar(
-        select(func.min(Drive.start_time)).where(
-            Drive.vehicle_id == vehicle.id, Drive.source == "telemetry"))
-    # Three boundaries, and the LATEST wins: the days asked for, where streamed
-    # history begins, and an explicit "start here" if one is set. Taking the
-    # latest is what makes them compose — a boundary cannot drag the report back
-    # into the polled era, and the cutover cannot widen one a person narrowed.
-    bounds = [(asked_since, "days")]
-    if cutover:
-        bounds.append((cutover, "telemetry"))
-    drawn = _matrix_boundary(session, vehicle.id)
-    if drawn:
-        bounds.append((drawn[0], "boundary"))
-    # The dashboard's own window, so the matrix can answer for the same stretch
-    # the cards above it are answering for.
-    #
-    # Worth the parameter because the two disagreeing is not a small confusion:
-    # both report a parked figure, in percent of the same pack, and a reader
-    # has no way to see that one of them reaches back past a charge and the
-    # other does not. Measured on this car, an armed-Sentry park sitting in
-    # that difference put 10.7% against 3.2% for what looked like the same
-    # eleven trips.
-    #
-    # It composes like the rest rather than overriding them: a charge more
-    # recent than the streamed history narrows the report to it, and one older
-    # loses to the cutover, because there is no matrix to draw from trips that
-    # do not exist.
-    # The full row, not just its end_time — parked_share()'s anchor below
-    # needs end_soc too, to measure the gap before the window's first drive
-    # rather than leave it invisible.
-    last_charge = None
-    if since_charge:
-        last_charge = session.scalar(
-            select(Charge).where(Charge.vehicle_id == vehicle.id)
-            .order_by(Charge.end_time.desc()).limit(1))
-        if last_charge:
-            bounds.append((last_charge.end_time, "charge"))
-    since, limited_by = max(bounds, key=lambda pair: pair[0])
+    since, limited_by, cutover, drawn, last_charge = _matrix_since(
+        session, vehicle.id, now, days, since_charge)
     drives, charges = _window(session, vehicle.id, days, since=since)
     # The yardstick every row is measured against: what this pack is worth at
     # the car's own rated consumption. Derived rather than configured, so it

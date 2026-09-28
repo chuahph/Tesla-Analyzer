@@ -3934,6 +3934,9 @@ def condition_matrix(drives: list[Any], capacity_kwh: float,
         # Trips that could not be sorted, and why it matters: they are missing
         # from every row above rather than distributed among them.
         "unclassified_trips": unclassified,
+        # Every trip in the window: the rows' trip counts plus the two
+        # left-out counts always add up to this.
+        "trips_in_window": len(drives),
         "unclassified_kwh": round(unclassified_kwh, 2),
         "unclassified_pct": (round(unclassified_kwh / capacity_kwh * 100.0, 2)
                              if capacity_kwh else None),
