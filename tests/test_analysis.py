@@ -4124,14 +4124,22 @@ def test_a_mixed_trip_is_split_across_modes_by_measured_distance():
     assert list(whole) == ["SC"]
     assert whole["SC"]["km"] == pytest.approx(12.0)
 
-    # The matrix reports how many journeys were split, so a reader can tell a
-    # row built from whole trips apart from one built from shares.
+    # The matrix itself, though, does not use this split: it reuses
+    # drive_mode's own single whole-trip verdict, so a row here never appears
+    # unless a trip is tagged that way in Recent Trips too. 735's blended
+    # 75 km/h average over 22.4 minutes reads CH as a whole trip (drive_mode
+    # is the one and only classifier here), so all 28 km land under CH —
+    # not split 20/8 the way mode_split() divides it for the per-trip view.
+    assert driving_analysis.drive_mode(d) == "CH"
     got = driving_analysis.condition_matrix([d, plain], 68.6, None, None)
-    assert got["split_trips"] == 1
+    assert "split_trips" not in got
     by_code = {r["code"]: r for r in got["modes"]}
-    assert by_code["FH"]["km"] == pytest.approx(20.0, abs=0.05)
-    # Both halves of 735 are counted, and nothing is double counted.
+    assert by_code["CH"]["km"] == pytest.approx(28.0, abs=0.05)
+    assert by_code["CH"]["trips"] == 1
+    assert by_code["SC"]["km"] == pytest.approx(12.0, abs=0.05)
+    # Both trips are counted once each, and nothing is double counted.
     assert sum(r["km"] for r in got["modes"]) == pytest.approx(40.0, abs=0.05)
+    assert sum(r["trips"] for r in got["modes"]) == 2
 
 
 def test_a_profile_that_cannot_describe_a_real_drive_is_refused_at_read_time():
@@ -4437,7 +4445,7 @@ def test_a_trip_the_map_calls_city_at_expressway_pace_falls_back_to_speed():
     assert drive_mode(slow) in ("CC", "SC", "HC")
 
 
-def test_a_highway_sliver_does_not_inherit_the_citys_whole_idle():
+def test_a_mixed_trip_lands_under_one_row_with_its_own_real_idle():
     """condition_matrix used to give a road-split row the WHOLE trip's idle
     minutes for every trip that touched it even briefly, divided by only
     that row's own (small) minutes — a trip that idled 15 of its 20 minutes
@@ -4445,10 +4453,17 @@ def test_a_highway_sliver_does_not_inherit_the_citys_whole_idle():
     put those same 15 minutes on the highway row too, reading as 150%
     idle on a stretch that was barely idle at all. Measured live: a 6-trip
     MYSH row showing "138% idle" traced to exactly this.
+
+    The fix was structural, not arithmetic: the matrix no longer splits a
+    trip by road segment. It reuses drive_mode's own single whole-trip
+    verdict, so this same mixed trip — heavy idle, on a road the map calls
+    city — lands under exactly one row, and that row's idle share is just
+    the trip's own idle_min over its own duration_min. There is no other
+    row left for it to leak into.
     """
     import json as _json
 
-    from app.analysis.driving import condition_matrix
+    from app.analysis.driving import condition_matrix, drive_mode
 
     def band(km, mins, kwh):
         return {"km": km, "min": mins, "kwh": kwh}
@@ -4472,19 +4487,13 @@ def test_a_highway_sliver_does_not_inherit_the_citys_whole_idle():
         "_stops": {"city": 4},
         "_idle_min": {"city": 15.0},   # highway carries none
     })
+    # Heavy idle on a road the map calls city (3 of 8 km highway, under the
+    # highway-share bar) reads HC as a whole trip.
+    assert drive_mode(d) == "HC"
 
     out = condition_matrix([d], capacity_kwh=68.6)
-    by_code = {r["code"]: r for r in out["modes"]}
-    highway_rows = [r for code, r in by_code.items() if r["mode"] in ("FH", "CH", "SH")]
-    assert highway_rows, by_code
-    hw = highway_rows[0]
-    # The bug: idle / this row's own ~2 minutes, using the trip's whole 15,
-    # landed at 750%. It must now reflect the highway stretch's own (zero)
-    # idle, not the city portion's.
-    assert hw["idle_share_pct"] == 0.0, hw
-    city_rows = [r for code, r in by_code.items() if r["mode"] in ("CC", "SC", "HC")]
-    assert city_rows, by_code
-    city = city_rows[0]
-    # The city row still reports its own real idle correctly — 15 of its own
-    # 18 minutes.
-    assert city["idle_share_pct"] == pytest.approx(15.0 / 18.0 * 100.0, abs=0.5)
+    # One trip, one row — never two, so nothing can leak between them.
+    assert len(out["modes"]) == 1, out["modes"]
+    row = out["modes"][0]
+    assert row["mode"] == "HC"
+    assert row["idle_share_pct"] == pytest.approx(15.0 / 20.0 * 100.0, abs=0.5)

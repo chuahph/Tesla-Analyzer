@@ -3771,13 +3771,19 @@ def condition_matrix(drives: list[Any], capacity_kwh: float,
     lets a 2 km crawl move the figure as far as a 40 km run, and the question
     this answers is what a full battery is worth in each condition — which is
     a property of the kilometres, not of the trips they were grouped into.
+
+    Each trip counts once, under the SAME single code Recent Trips shows it
+    under (drive_mode) — deliberately not split by road segment any more. A
+    trip whose whole verdict was Heavy City could previously also credit a
+    few minutes to a Slow Highway row if some of its kilometres crossed an
+    expressway; a reader comparing this table against Recent Trips could find
+    a mode row here — SH — with no trip anywhere tagged SH, built entirely
+    from slivers of trips tagged something else. This way the two always
+    agree: every trip in a row here is tagged that way in Recent Trips too,
+    and every row's trip count sums to the window's actual trip count.
     """
-    # Each trip's contribution to each mode, so a journey that was partly one
-    # thing and partly another lands in both — see mode_split. A trip with no
-    # speed profile contributes wholly to one mode, exactly as before.
     parts: dict[str, dict[str, float]] = {}
     members: dict[str, list[Any]] = {}
-    split_trips = 0
     unclassified = 0
     # The energy that does NOT reach a row, kept apart by reason. Without these
     # the table looks like it accounts for the window's driving and quietly does
@@ -3803,20 +3809,13 @@ def condition_matrix(drives: list[Any], capacity_kwh: float,
         # are different roads and different climates, and averaging them
         # together would describe neither.
         cc = country_of(d, home_country)
-        share = {cc + k: v for k, v in mode_split(d, cuts).items()}
-        if len(share) > 1:
-            split_trips += 1
-        for code, got_part in share.items():
-            slot = parts.setdefault(code, {"km": 0.0, "min": 0.0, "kwh": 0.0, "idle": 0.0})
-            for k in ("km", "min", "kwh"):
-                slot[k] += got_part[k]
-            # mode_split's own per-part idle (see add(), there) — not carried
-            # by the km/min/kwh loop above, which is why the fix below it
-            # read as 0 until this line was added: mode_split() itself was
-            # already correct, but this accumulator was silently dropping
-            # the field it returned.
-            slot["idle"] += got_part.get("idle", 0.0)
-            members.setdefault(code, []).append(d)
+        code = cc + m
+        slot = parts.setdefault(code, {"km": 0.0, "min": 0.0, "kwh": 0.0, "idle": 0.0})
+        slot["km"] += float(getattr(d, "distance_km", 0.0) or 0.0)
+        slot["min"] += float(getattr(d, "duration_min", 0.0) or 0.0)
+        slot["kwh"] += float(getattr(d, "energy_used_kwh", 0.0) or 0.0)
+        slot["idle"] += float(getattr(d, "idle_min", 0.0) or 0.0)
+        members.setdefault(code, []).append(d)
 
     rows = []
     # Countries by distance driven, busiest first; within each, the six modes
@@ -3828,25 +3827,14 @@ def condition_matrix(drives: list[Any], capacity_kwh: float,
     codes = [cc + m for cc in sorted(km_by_country, key=lambda k: -km_by_country[k])
              for m in order]
     for code in codes:
-        # Driven by the members list, not the whole-trip bucket: a mode can now
-        # be reached by a journey whose whole-trip verdict was something else —
-        # the motorway share of a mixed trip.
         got = members.get(code) or []
         if not got:
             continue
-        # Distance, time and energy come from the SPLIT, so a trip counted in
-        # two modes contributes its measured share to each rather than its
-        # whole self to both. Everything else on the row — trip count, speeds,
-        # temperature — describes the journeys that touched this mode.
+        # Every trip in ``got`` is tagged this same code in Recent Trips —
+        # see the docstring above. Distance, time, energy and idle are each
+        # trip's own whole figures, summed.
         share = parts.get(code) or {"km": 0.0, "min": 0.0, "kwh": 0.0, "idle": 0.0}
-        km, mins, kwh = share["km"], share["min"], share["kwh"]
-        # This row's OWN idle (mode_split's per-part figure), not every
-        # contributing trip's whole idle_min. That summed a trip's full
-        # idle onto EVERY mode it touched even a sliver of — a trip that
-        # idled 15 minutes in heavy city traffic and crossed 90 seconds of
-        # open highway put that same 15 minutes on the highway row too,
-        # which read as "138% idle" on a stretch that was barely idle at all.
-        idle = share.get("idle", 0.0)
+        km, mins, kwh, idle = share["km"], share["min"], share["kwh"], share["idle"]
         wh = kwh * 1000.0 / km if km else None
         rng = capacity_kwh / (wh / 1000.0) if wh else None
         temps = [float(d.outside_temp_c) for d in got
@@ -3946,11 +3934,6 @@ def condition_matrix(drives: list[Any], capacity_kwh: float,
         # Trips that could not be sorted, and why it matters: they are missing
         # from every row above rather than distributed among them.
         "unclassified_trips": unclassified,
-        # Journeys that contributed to more than one mode, because the stream
-        # recorded where their kilometres actually happened. The rest were
-        # placed whole, either because they were one thing throughout or
-        # because they predate the speed profile and nothing can reconstruct it.
-        "split_trips": split_trips,
         "unclassified_kwh": round(unclassified_kwh, 2),
         "unclassified_pct": (round(unclassified_kwh / capacity_kwh * 100.0, 2)
                              if capacity_kwh else None),
@@ -4082,16 +4065,6 @@ MATRIX_DEFINITIONS = {
                                   "and per-hour rankings are reverses of each "
                                   "other, which is the point of showing both."},
     ],
-    "split_trips": (
-        "A trip is not necessarily one thing. Where the stream recorded where a "
-        "journey's kilometres actually happened, its motorway share is counted "
-        "as motorway and its town share as town — measured, not apportioned, "
-        "down to each band's own energy. A 28 km run at an average of 75 with a "
-        "peak of 160 is a motorway drive with town at either end, and counting "
-        "it as one category is wrong about most of it. Trips recorded before "
-        "this existed have no profile and are still placed whole; the report "
-        "says how many of each."
-    ),
     "adds_up": (
         "Every hour of the window lands in exactly one bucket — driving, parked, "
         "charging, excluded (a gap the odometer says the car moved through, or "

@@ -2719,7 +2719,6 @@ function renderMatrix(d) {
       ${win}
       Baseline ${d.baseline_range_km ?? "—"} km at the car's rated consumption.
       ${d.unclassified_trips ? `${d.unclassified_trips} trip(s) left out — idle never tracked.` : ""}
-      ${d.split_trips ? `${d.split_trips} trip(s) counted across more than one condition, by where their kilometres actually happened.` : ""}
       ${d.context ? `${d.context.climate}, ${d.context.region}.` : ""}
       ${unknown}
     </p>`;
@@ -2788,7 +2787,6 @@ function renderGlossary(defs) {
     <details class="matrix-gloss">
       <summary>What these names mean</summary>
       ${defs.constancy ? `<p class="modal-sub">${defs.constancy}</p>` : ""}
-      ${defs.split_trips ? `<p class="modal-sub">${defs.split_trips}</p>` : ""}
       <p class="modal-sub">${defs.how_sorted || ""}</p>
       <dl class="mx-defs">${modes}</dl>
       <dl class="mx-defs">${cols}</dl>
