@@ -2992,7 +2992,7 @@ def _split_by_speed(d: Any, bands: dict, whole: str, cuts: dict[str, float] | No
                        idle=float(getattr(d, "idle_min", 0.0) or 0.0),
                        kwh=leftover["kwh"],
                        temp=getattr(d, "outside_temp_c", None)), cuts)
-        add(city or "HC", leftover)
+        add(city or "HC", leftover, float(getattr(d, "idle_min", 0.0) or 0.0))
 
 
 
@@ -3028,12 +3028,22 @@ def mode_split(d: Any, cuts: dict[str, float] | None = None) -> dict[str, dict[s
     kwh = float(getattr(d, "energy_used_kwh", 0.0) or 0.0)
     if whole is None:
         return {}
+    # {mode: {km, min, kwh, idle}} — idle in minutes, this MODE's own share
+    # (see add(), below), not the whole trip's — used by condition_matrix for
+    # idle_share_pct on a row a trip contributed only part of its distance to.
     out: dict[str, dict[str, float]] = {}
 
-    def add(mode: str, part: dict[str, float]) -> None:
-        slot = out.setdefault(mode, {"km": 0.0, "min": 0.0, "kwh": 0.0})
+    def add(mode: str, part: dict[str, float], idle_min: float = 0.0) -> None:
+        slot = out.setdefault(mode, {"km": 0.0, "min": 0.0, "kwh": 0.0, "idle": 0.0})
         for k in ("km", "min", "kwh"):
             slot[k] += part[k]
+        # The part's OWN idle, not the whole trip's — see condition_matrix,
+        # which used to sum every member trip's whole idle_min onto whichever
+        # row credited it even a sliver of minutes. A trip that idled 15
+        # minutes in heavy city traffic and crossed 90 seconds of open
+        # highway put that same 15 minutes on the highway row too, reading
+        # as "138% idle" on a stretch that was barely idle at all.
+        slot["idle"] += idle_min
 
     if road_verdict(d) is not None:
         # Split by the ROAD each stretch was on, and let each part's own speeds
@@ -3052,6 +3062,9 @@ def mode_split(d: Any, cuts: dict[str, float] | None = None) -> dict[str, dict[s
                 continue
             part = {"km": t["km"], "min": t["min"], "kwh": t["kwh"]}
             if road == "unknown":
+                # No idle attributed: an unplaced stretch has no per-road idle
+                # of its own to report, and attributing the whole trip's
+                # would risk the same double-count this fix removes.
                 add(whole, part)
                 continue
             prof = road_profile_of(d) or {}
@@ -3063,11 +3076,16 @@ def mode_split(d: Any, cuts: dict[str, float] | None = None) -> dict[str, dict[s
                               "_stops": {road: (prof.get("_stops") or {}).get(road, 0)},
                               "_idle_min": {road: (prof.get("_idle_min") or {}).get(road, 0)}}),
                 cuts)
-            add(mode or whole, part)
+            # This road's OWN idle (road_totals, sourced from road_profile's
+            # per-road _idle_min) — real measured minutes, not the classifier
+            # heuristic above, which exists only to decide FH/CH/SH/CC/SC/HC
+            # and folds the whole trip's idle onto one side by convention.
+            add(mode or whole, part, t.get("idle_min", 0.0))
     else:
         bands = speed_profile_of(d)
         if not bands:
-            return {whole: {"km": km, "min": mins, "kwh": kwh}}
+            return {whole: {"km": km, "min": mins, "kwh": kwh,
+                            "idle": float(getattr(d, "idle_min", 0.0) or 0.0)}}
         _split_by_speed(d, bands, whole, cuts, add)
 
     # The profile is sampled from records and the trip's own totals come from
@@ -3085,6 +3103,11 @@ def mode_split(d: Any, cuts: dict[str, float] | None = None) -> dict[str, dict[s
             v["min"] *= mins / got_min
         if got_kwh > 0 and kwh > 0:
             v["kwh"] *= kwh / got_kwh
+        # Idle is not scaled: it is real measured minutes (road_totals'
+        # per-road _idle_min, or the trip's own idle_min), not a share of
+        # something reconstituted from a sampled profile — scaling it the
+        # way km/min/kwh are would manufacture idle time that was never
+        # observed.
     return out
 
 
@@ -3784,9 +3807,15 @@ def condition_matrix(drives: list[Any], capacity_kwh: float,
         if len(share) > 1:
             split_trips += 1
         for code, got_part in share.items():
-            slot = parts.setdefault(code, {"km": 0.0, "min": 0.0, "kwh": 0.0})
+            slot = parts.setdefault(code, {"km": 0.0, "min": 0.0, "kwh": 0.0, "idle": 0.0})
             for k in ("km", "min", "kwh"):
                 slot[k] += got_part[k]
+            # mode_split's own per-part idle (see add(), there) — not carried
+            # by the km/min/kwh loop above, which is why the fix below it
+            # read as 0 until this line was added: mode_split() itself was
+            # already correct, but this accumulator was silently dropping
+            # the field it returned.
+            slot["idle"] += got_part.get("idle", 0.0)
             members.setdefault(code, []).append(d)
 
     rows = []
@@ -3809,9 +3838,15 @@ def condition_matrix(drives: list[Any], capacity_kwh: float,
         # two modes contributes its measured share to each rather than its
         # whole self to both. Everything else on the row — trip count, speeds,
         # temperature — describes the journeys that touched this mode.
-        share = parts.get(code) or {"km": 0.0, "min": 0.0, "kwh": 0.0}
+        share = parts.get(code) or {"km": 0.0, "min": 0.0, "kwh": 0.0, "idle": 0.0}
         km, mins, kwh = share["km"], share["min"], share["kwh"]
-        idle = sum(float(getattr(d, "idle_min", 0.0) or 0.0) for d in got)
+        # This row's OWN idle (mode_split's per-part figure), not every
+        # contributing trip's whole idle_min. That summed a trip's full
+        # idle onto EVERY mode it touched even a sliver of — a trip that
+        # idled 15 minutes in heavy city traffic and crossed 90 seconds of
+        # open highway put that same 15 minutes on the highway row too,
+        # which read as "138% idle" on a stretch that was barely idle at all.
+        idle = share.get("idle", 0.0)
         wh = kwh * 1000.0 / km if km else None
         rng = capacity_kwh / (wh / 1000.0) if wh else None
         temps = [float(d.outside_temp_c) for d in got

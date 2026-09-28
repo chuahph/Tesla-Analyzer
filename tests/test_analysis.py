@@ -4435,3 +4435,56 @@ def test_a_trip_the_map_calls_city_at_expressway_pace_falls_back_to_speed():
     slow = D(6.0, 24.0, 57.0)               # a real city crawl stays city
     assert road_verdict(slow) == "city"
     assert drive_mode(slow) in ("CC", "SC", "HC")
+
+
+def test_a_highway_sliver_does_not_inherit_the_citys_whole_idle():
+    """condition_matrix used to give a road-split row the WHOLE trip's idle
+    minutes for every trip that touched it even briefly, divided by only
+    that row's own (small) minutes — a trip that idled 15 of its 20 minutes
+    in heavy city traffic and crossed 2 minutes of open, unjammed highway
+    put those same 15 minutes on the highway row too, reading as 150%
+    idle on a stretch that was barely idle at all. Measured live: a 6-trip
+    MYSH row showing "138% idle" traced to exactly this.
+    """
+    import json as _json
+
+    from app.analysis.driving import condition_matrix
+
+    def band(km, mins, kwh):
+        return {"km": km, "min": mins, "kwh": kwh}
+
+    class D:
+        def __init__(self, km, mins, mx, profile, idle):
+            self.distance_km = km; self.duration_min = mins
+            self.max_speed_kmh = mx; self.idle_min = idle
+            self.idle_tracked = True; self.energy_estimated = False
+            self.outside_temp_c = 30.0
+            self.energy_used_kwh = 2.0
+            self.wh_per_km = self.energy_used_kwh * 1000.0 / km
+            self.road_profile = _json.dumps(profile)
+            self.id = 1
+
+    # 18 minutes crawling in town (15 of them standing still), then a clean
+    # 2-minute, unjammed highway crossing — no stops, no idle recorded there.
+    d = D(km=8.0, mins=20.0, mx=95.0, idle=15.0, profile={
+        "highway": {"90": band(3.0, 2.0, 0.5)},
+        "city": {"10": band(5.0, 18.0, 1.5)},
+        "_stops": {"city": 4},
+        "_idle_min": {"city": 15.0},   # highway carries none
+    })
+
+    out = condition_matrix([d], capacity_kwh=68.6)
+    by_code = {r["code"]: r for r in out["modes"]}
+    highway_rows = [r for code, r in by_code.items() if r["mode"] in ("FH", "CH", "SH")]
+    assert highway_rows, by_code
+    hw = highway_rows[0]
+    # The bug: idle / this row's own ~2 minutes, using the trip's whole 15,
+    # landed at 750%. It must now reflect the highway stretch's own (zero)
+    # idle, not the city portion's.
+    assert hw["idle_share_pct"] == 0.0, hw
+    city_rows = [r for code, r in by_code.items() if r["mode"] in ("CC", "SC", "HC")]
+    assert city_rows, by_code
+    city = city_rows[0]
+    # The city row still reports its own real idle correctly — 15 of its own
+    # 18 minutes.
+    assert city["idle_share_pct"] == pytest.approx(15.0 / 18.0 * 100.0, abs=0.5)
