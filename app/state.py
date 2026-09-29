@@ -187,7 +187,7 @@ WOKE_AT_KEY = "woke_at_ts"  # epoch a car was last seen waking on its own (not o
 LAST_POLL_KEY = "last_poll_ts"  # epoch of the last actual vehicle_data() read per VIN
 LAST_STATUS_KEY = "last_status"  # JSON: {status, ts, soc, odo_km, speed_kmh, note} per VIN —
 # the cron's own last determination of what the car was doing, so the
-# dashboard can show a near-live status straight from Neon on page load
+# dashboard can show a near-live status straight from the database on page load
 # without itself pinging Tesla.
 UNREACHABLE_SINCE_KEY = "unreachable_since_ts"  # epoch a car was first seen not
 # "online" (asleep or offline) this episode, per VIN — cleared once it's back

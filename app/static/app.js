@@ -3727,7 +3727,7 @@ async function load() {
     }
 
     // Live mode: reveal the Sync button. The dashboard itself never pings
-    // Tesla on its own any more — it's a pure read-only view of Neon (see
+    // Tesla on its own any more — it's a pure read-only view of the database (see
     // renderLastStatus above); the external cron is the only thing that
     // talks to the car, plus this button for an explicit manual check.
     const syncBtn = document.getElementById("btn-sync");
@@ -4481,7 +4481,7 @@ async function syncNow(wake) {
     if (!res.ok) throw new Error(body.detail || `Sync unavailable (${res.status}) — try again shortly`);
     // Keep the fallback cache fresh with this live result, so a *later*
     // failed check still has something better than a bare error to fall
-    // back on than the page-load snapshot from Neon.
+    // back on than the page-load snapshot from the database.
     lastStatusCache = {
       status: body.status, ts: Date.now() / 1000,
       soc: body.soc ?? (body.last && body.last.soc),
@@ -4513,7 +4513,7 @@ async function syncNow(wake) {
     }
   } catch (e) {
     // A failed live check shouldn't erase perfectly good info we already
-    // have from Neon (this tab's last load, or an earlier successful sync
+    // have from the database (this tab's last load, or an earlier successful sync
     // this visit) — re-show it with a note instead of a bare error.
     if (lastStatusCache) {
       renderLastStatus(lastStatusCache, `⚠️ live check failed: ${e.message}`);

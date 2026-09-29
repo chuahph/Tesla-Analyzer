@@ -418,7 +418,7 @@ def _log_tick_isolated(detail: str, session: Session | None = None) -> None:
 
     Tries the request's own session first, rolled back so a poisoned
     transaction can't block the write. A brand new connection sounds safer and
-    is not: on a connection-capped host (Neon's free tier) opening a second
+    is not: on a connection-capped host (a free-tier Postgres) opening a second
     one mid-request is exactly when it may be refused, and this failing
     silently is how a real 500 left no trace at all. So the extra connection
     is the FALLBACK, for when the request had no usable session.
@@ -12221,7 +12221,7 @@ def summary(
     # "found it asleep") — written every /api/sync tick, read here purely
     # from the database. This is what lets the dashboard show a near-live
     # status on page load without itself ever pinging Tesla: the background
-    # cron already did, and left the answer sitting in Neon.
+    # cron already did, and left the answer sitting in the database.
     last_status_raw = state.get(session, state.scoped(state.LAST_STATUS_KEY, vehicle.vin))
     last_status = _json.loads(last_status_raw) if last_status_raw else None
     # Computed fresh on every request from the server's own clock (not the
