@@ -387,46 +387,44 @@ satisfy is declined rather than failed — a unique index that would conflict
 with existing duplicates leaves the app running and says so in
 `/api/health` under `schema`, rather than taking the deployment down.
 
-### Emergency fallback: switching provider under load
+### Emergency fallback: moving to a fresh database
 
-Both Supabase and Neon's free tiers cap monthly network transfer at 5 GB, and
-either can be exhausted by the same thing: a query pulling more rows than its
-caller needs, run often enough. That happened on Neon in September 2026 — see
-`app/database.py`'s `_QUERY_LOG` for the instrumentation added to find it.
-Once a provider is actually near its cap, switching does not fix the
-underlying query cost — only the code does — but it buys a fresh monthly
-allowance to keep collecting data while that gets fixed.
+Supabase's free tier caps monthly network transfer at 5 GB, and that can be
+exhausted by a query pulling more rows than its caller needs, run often
+enough. It happened on this project's previous provider (Neon) in September
+2026 — see `app/database.py`'s `_QUERY_LOG` for the instrumentation added to
+find it. Once a database is near its cap, moving does not fix the underlying
+query cost — only the code does — but a fresh project comes with a fresh
+monthly allowance, which keeps data flowing while that gets fixed. There is no
+grace period: over quota, a free project is restricted immediately (402s), not
+warned first.
 
-**Precondition**: a same-day mirror on the OTHER provider. `pg_dump` the live
-database, `pg_restore --clean --if-exists` it into the other one:
+**1. Copy the data into a new, empty project** — a second Supabase project
+works, as does any other Postgres:
 
 ```bash
-pg_dump "<LIVE_DB_DIRECT_URL>" --no-owner --no-acl -Fc -f backup.dump
-pg_restore --no-owner --no-acl --clean --if-exists -d "<OTHER_DB_URL>" backup.dump
+pg_dump "<LIVE_DB_URL>" --no-owner --no-acl -Fc -f backup.dump
+pg_restore --no-owner --no-acl --clean --if-exists -d "<NEW_DB_URL>" backup.dump
 ```
 
-Use each provider's **direct** connection string for this, not the pooler —
-Supabase's session pooler is the exception: its direct connection is
-IPv6-only, so a network that lacks an IPv6 route (this project's GCP VM did)
-has to go through the session pooler instead, whose username is
-`postgres.<project-ref>`, not plain `postgres`. `pg_restore` against a
-Supabase target will report a page of errors about `storage.*` and
-`extensions.*` objects it cannot own — that is Supabase's own
-platform-managed schema riding along in the dump, refusing to be
-overwritten by a non-superuser. Harmless; verify the actual application
-tables (`drives`, `charges`, `battery_readings`, `vehicles`) with a row
-count instead of reading into those.
+Use Supabase's **session pooler** string for both, not the direct connection:
+the direct one is IPv6-only, and a network without an IPv6 route (this
+project's GCP VM, for one) cannot reach it. The pooler's username is
+`postgres.<project-ref>`, not plain `postgres`. `pg_restore` into Supabase
+reports a page of errors about `storage.*` and `extensions.*` objects it
+cannot own — Supabase's own platform schema riding along in the dump.
+Harmless; check the application tables (`drives`, `charges`,
+`battery_readings`, `vehicles`) by row count instead.
 
-**The switch itself**, once the mirror is current: Render dashboard → this
-service → Environment → edit `DATABASE_URL` to the other provider's
-connection string → Save. That alone triggers a redeploy; no code change,
-no branch to push. Same for reverting once the original provider's monthly
-cap resets.
+Do this while the live database still answers. A project already restricted
+may refuse the dump, and then the only copy is your last
+[automated backup](#automated-backups) — which is the case for setting one up
+before it is needed.
 
-Neither provider gives a grace period once its free-tier Fair Use Policy
-applies (Supabase's ended 21 Sep 2026) — over quota means the project is
-restricted immediately (402s), not warned first. So this buys one fresh
-monthly allowance, not an indefinite escape from fixing the query cost.
+**2. Switch**: Render dashboard → this service → Environment → set
+`DATABASE_URL` to the new project's connection string → Save. That alone
+redeploys; no code change. Anything the car streamed between the dump and the
+switch landed in the old database, so dump as close to the switch as you can.
 
 ---
 
