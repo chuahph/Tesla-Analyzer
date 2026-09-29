@@ -5665,6 +5665,13 @@ def _sync_now_impl(wake: bool, session: Session, promoted_drives: int = 0):
             last = _json.loads(last_raw)
             resp["last"] = {"soc": last.get("soc"), "ts": last.get("ts"),
                             "odo_km": round(last.get("odo_km", 0), 1)}
+        # The last POLLED snapshot can be hours old: with the stream recording
+        # trips, this tick rarely reads the car. It showed 27% on 30 September
+        # against the car's 22%, after drives the stream had already seen.
+        # The stream's BatteryLevel is the car's own figure and current.
+        level = _displayed_level(session, SimpleNamespace(vin=active_target))
+        if level is not None:
+            resp.setdefault("last", {})["soc"] = level
         _save_last_status(
             session, active_target, status=resp["status"], ts=now_ts,
             soc=resp.get("last", {}).get("soc"), odo_km=resp.get("last", {}).get("odo_km"),

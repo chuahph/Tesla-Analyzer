@@ -4969,3 +4969,43 @@ def test_sync_logged_count_reports_rows_written_not_polled_sessions(monkeypatch)
             assert s.query(Drive).count() == before, "polling wrote a drive"
     finally:
         settings.app_passcode = old
+
+
+def test_asleep_status_shows_the_streams_battery_level(monkeypatch):
+    """A tick that finds the car asleep reported the last POLLED snapshot's
+    SoC, which with the stream recording trips can be hours old: the header
+    read 27% on 30 September while the car said 22%. The stream's
+    BatteryLevel is current and is the car's own figure, so it wins."""
+    import json
+
+    from app import services, state
+
+    settings = get_settings()
+    old = settings.app_passcode
+    settings.app_passcode = ""
+    _SleepsAfterDrivingClient.step = 0
+    try:
+        monkeypatch.setattr("app.tesla_client.TeslaClient", _FakeClient)
+        with SessionLocal() as s:
+            services.link_with_token(s, "tok")
+        vin = _SleepsAfterDrivingClient.VIN
+        monkeypatch.setattr("app.tesla_client.TeslaClient", _SleepsAfterDrivingClient)
+        with TestClient(app) as client:
+            client.post("/api/sync")                       # polled snapshot saved
+            with SessionLocal() as s:
+                state.put(s, state.TELEMETRY_LATEST_KEY, json.dumps(
+                    {vin: {"Soc": 27.4, "BatteryLevel": 22, "_ts": 4_000_000_000.0}}))
+                s.commit()
+            _SleepsAfterDrivingClient.step = 2
+            asleep = client.post("/api/sync").json()
+        assert asleep["status"] == "asleep"
+        assert asleep["last"]["soc"] == 22
+        with SessionLocal() as s:
+            saved = json.loads(state.get(s, state.scoped(state.LAST_STATUS_KEY, vin)))
+            assert saved["soc"] == 22
+            state.delete(s, state.TELEMETRY_LATEST_KEY)
+            s.commit()
+    finally:
+        settings.app_passcode = old
+        _SleepsAfterDrivingClient.step = 0
+        _reset_to_demo()
