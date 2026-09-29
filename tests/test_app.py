@@ -12133,3 +12133,79 @@ def test_park_since_the_last_drive_is_idle_on_the_card_and_in_pk():
     finally:
         settings.app_passcode = old_pc
         settings.battery_capacity_kwh = old_cap
+
+
+def test_streamed_since_charge_battery_used_is_measured_parts_like_the_matrix():
+    """Checked against the car on 29 September: the card's SoC-delta total put
+    idle at 4.8% where the car's Park tab read 5.4% and the matrix 5.5%. With
+    every trip streamed, Battery Used is now trip energy plus measured parked
+    drop, the same sum as the matrix — so a "now" reading that reads high
+    (here 86 when the parts say 85) no longer moves the split."""
+    settings = get_settings()
+    old_pc, old_cap = settings.app_passcode, settings.battery_capacity_kwh
+    settings.app_passcode = ""
+    settings.battery_capacity_kwh = 70.0
+    try:
+        with TestClient(app) as client:
+            from app.database import SessionLocal
+            from app.models import BatteryReading, Charge, Drive, Vehicle
+
+            with SessionLocal() as s:
+                v = Vehicle(vin="TESTVIN-MEASURED", name="Test", model="Model 3")
+                s.add(v)
+                s.commit()
+                s.add(Charge(
+                    vehicle_id=v.id,
+                    start_time=datetime(2026, 7, 1, 19, 30), end_time=datetime(2026, 7, 1, 20, 0),
+                    duration_min=30, start_soc=80, end_soc=100, energy_added_kwh=14.0,
+                    charge_type="AC", max_power_kw=7, location="Home", cost=12.6,
+                ))
+                # Streamed history begins before the charge, as it does on the
+                # real car, so the matrix window starts at the charge.
+                s.add(Drive(
+                    vehicle_id=v.id, start_time=datetime(2026, 6, 30, 8, 0),
+                    end_time=datetime(2026, 6, 30, 8, 30), source="telemetry",
+                    distance_km=10, duration_min=30, start_soc=90, end_soc=88,
+                    energy_used_kwh=1.5, avg_speed_kmh=20, max_speed_kmh=60, outside_temp_c=28,
+                ))
+                # Parks: 100->97 overnight, 95->94, 92->91; then 90 at the end
+                # of the last trip. Trips measured at 1.5 kWh each.
+                for start, end, ssoc, esoc in [
+                    (datetime(2026, 7, 2, 8, 0), datetime(2026, 7, 2, 8, 30), 97, 95),
+                    (datetime(2026, 7, 2, 12, 0), datetime(2026, 7, 2, 12, 30), 94, 92),
+                    (datetime(2026, 7, 2, 17, 0), datetime(2026, 7, 2, 17, 30), 91, 90),
+                ]:
+                    s.add(Drive(
+                        vehicle_id=v.id, start_time=start, end_time=end, source="telemetry",
+                        distance_km=10, duration_min=30, start_soc=ssoc, end_soc=esoc,
+                        energy_used_kwh=1.5, avg_speed_kmh=20, max_speed_kmh=60, outside_temp_c=28,
+                    ))
+                # Parked since, and genuinely 1 point lower...
+                s.add(BatteryReading(vehicle_id=v.id, ts=datetime(2026, 7, 2, 21, 0),
+                                     soc=89, range_km=300.0, odo_km=1000.0))
+                s.commit()
+
+            client.post("/api/active-vehicle", json={"vin": "TESTVIN-MEASURED"})
+            try:
+                bal = client.get("/api/summary?days=365&since_charge=true").json()["battery_balance"]
+                # 4.5 kWh of trips + (3 + 1 + 1 + 1)% = 4.2 kWh parked.
+                assert bal["vampire_kwh"] == pytest.approx(4.2, abs=0.01)
+                assert bal["used_kwh"] == pytest.approx(8.7, abs=0.05)
+                assert bal["trip_kwh"] == pytest.approx(4.5, abs=0.05)
+                matrix = client.get("/api/driving-matrix?days=365&since_charge=true").json()
+                pk = {row["code"]: row for row in matrix["parked"]}["PK"]
+                assert pk["kwh"] == pytest.approx(bal["vampire_kwh"], abs=0.01)
+                t = matrix["totals"]
+                assert t["battery_used_pct"] == bal["used_pct"]
+                assert abs(t["battery_used_gap_pct"]) < 0.1
+            finally:
+                client.post("/api/active-vehicle", json={"vin": "DEMO0SAMPLE0000001"})
+                with SessionLocal() as s:
+                    s.query(Drive).filter(Drive.vehicle_id == v.id).delete()
+                    s.query(Charge).filter(Charge.vehicle_id == v.id).delete()
+                    s.query(BatteryReading).filter(BatteryReading.vehicle_id == v.id).delete()
+                    s.query(Vehicle).filter(Vehicle.id == v.id).delete()
+                    s.commit()
+    finally:
+        settings.app_passcode = old_pc
+        settings.battery_capacity_kwh = old_cap

@@ -9940,7 +9940,11 @@ def driving_matrix(days: int = Query(30, ge=1, le=730),
     battery_used_pct = None
     if limited_by == "charge" and last_charge is not None and capacity_kwh:
         current_soc = _current_soc(session, vehicle)
-        if current_soc is not None:
+        if drives and all((getattr(d, "source", "") or "") == "telemetry" for d in drives):
+            # The card sums the same measured parts this table does (see
+            # summary()), so it is quoted from them rather than re-derived.
+            battery_used_pct = round(max(total_kwh, 0.0) / capacity_kwh * 100.0, 1)
+        elif current_soc is not None:
             battery_used_pct = round(max(last_charge.end_soc - current_soc, 0.0), 2)
     out["totals"] = {
         "hours": round(total_hours, 1),
@@ -12508,6 +12512,27 @@ def summary(
         if tail_h >= driving_analysis.VAMPIRE_MIN_GAP_HOURS:
             vampire_hours = round(vampire_hours + tail_h, 1)
             vampire_gaps += 1
+    # Every trip streamed: build the total from measured parts instead — each
+    # trip's own energy plus each park's own SoC fall, anchored at the charge
+    # and closed at now — exactly as the driving matrix sums it. The SoC delta
+    # above hangs on a single "now" reading that Soc streams only once a
+    # minute and can read high after a rest: measured against the car on 29
+    # September, it put Battery Used at 55.1% and idle at 4.8% where the car's
+    # own Park tab said 5.4% and the matrix 5.5%. Polled trips keep the SoC
+    # delta, because their per-trip energy carries the upward bias that the
+    # delta exists to correct (see driving_analysis._trip_kwh).
+    if (ground_truth_used_kwh is not None and drives
+            and all((getattr(d, "source", "") or "") == "telemetry" for d in drives)):
+        share = driving_analysis.parked_share(
+            list(drives), list(charges), capacity_kwh,
+            _hist("parked_readings", _parked_readings, session, vehicle.id),
+            anchor=(last_charge.end_time, last_charge.end_soc),
+            tail=tail[:2] if tail else None)
+        park_kwh = share["total"]["kwh"] or 0.0
+        drive_kwh = sum(float(d.energy_used_kwh or 0.0) for d in drives)
+        used_kwh = max(drive_kwh + park_kwh, 0.0)
+        used_pct = round(used_kwh / capacity_kwh * 100.0, 1)
+        vampire_kwh = park_kwh
     if ground_truth_used_kwh is not None:
         # Cap the idle share at the (rounded) total before deriving trip by
         # subtraction: SoC can rebound a little while parked (BMS re-reading
