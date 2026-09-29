@@ -981,7 +981,9 @@ function renderKpis(d) {
     if (bal && bal.current_soc_pct != null && bal.full_charge_kwh > 0) {
       const measured = eff && eff.available && eff.avg_efficiency_wh_per_km;
       const whPerKm = measured || (eff && eff.rated_wh_per_km) || 150;
-      const soc = bal.current_soc_pct;
+      // The % the car's screen shows where the stream carries it: range to
+      // 20% means 20% as the car will display it.
+      const soc = bal.current_level_pct ?? bal.current_soc_pct;
       const kmAt = (pct) => Math.max(soc - pct, 0) / 100 * bal.full_charge_kwh / whPerKm * 1000;
       const totalKm = kmAt(0) + (drv.available ? drv.total_distance_km : 0);
       const thresholds = [];
@@ -3315,7 +3317,7 @@ function renderPlanner(d) {
   // user hasn't already typed their own — recompute-on-reload shouldn't
   // clobber an in-progress what-if.
   if (socInput && !socInput.value && bal.current_soc_pct != null) {
-    socInput.value = Math.round(bal.current_soc_pct);
+    socInput.value = Math.round(bal.current_level_pct ?? bal.current_soc_pct);
   }
   computePlan();
 }

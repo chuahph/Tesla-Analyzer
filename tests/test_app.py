@@ -1239,7 +1239,7 @@ def test_summary_reports_battery_balance():
             body = client.get("/api/summary?days=365").json()
             bal = body["battery_balance"]
             assert set(bal) == {
-                "full_charge_kwh", "charged_kwh", "used_kwh", "used_pct", "current_soc_pct",
+                "full_charge_kwh", "charged_kwh", "used_kwh", "used_pct", "current_soc_pct", "current_level_pct",
                 "trip_kwh", "vampire_kwh", "vampire_hours", "vampire_gaps",
                 "vampire_longest_hours", "vampire_longest_start", "vampire_longest_end",
                 "vampire_longest_inducer",
@@ -12209,3 +12209,36 @@ def test_streamed_since_charge_battery_used_is_measured_parts_like_the_matrix():
     finally:
         settings.app_passcode = old_pc
         settings.battery_capacity_kwh = old_cap
+
+
+def test_displayed_battery_level_comes_from_batterylevel_not_soc():
+    """The car's screen read 24% while the stream's Soc said 27. BatteryLevel
+    is the screen's figure: it is what the header and range-to-% use, while
+    Soc stays the basis for SoC differences."""
+    from app import state
+    from app import sync as sync_mod
+    from app.api.routes import _current_soc, _displayed_level
+    from app.database import SessionLocal
+    from app.models import Vehicle
+
+    assert sync_mod.snapshot_from_telemetry({"Soc": 27.2}, 1.0)["battery_level"] is None
+    snap = sync_mod.snapshot_from_telemetry({"Soc": 27.2, "BatteryLevel": "24"}, 1.0)
+    assert snap["soc"] == pytest.approx(27.2) and snap["battery_level"] == pytest.approx(24.0)
+
+    with TestClient(app):
+        with SessionLocal() as s:
+            vehicle = s.query(Vehicle).first()
+            epoch = sync_mod.now_local().replace(tzinfo=sync_mod.MYT).timestamp() + 86400
+            try:
+                state.put(s, state.TELEMETRY_LATEST_KEY, json.dumps(
+                    {vehicle.vin: {"Soc": 27.2, "BatteryLevel": 24, "_ts": epoch}}))
+                s.commit()
+                assert _displayed_level(s, vehicle) == pytest.approx(24.0)
+                assert _current_soc(s, vehicle) == pytest.approx(27.2)
+                state.put(s, state.TELEMETRY_LATEST_KEY, json.dumps(
+                    {vehicle.vin: {"Soc": 27.2, "_ts": epoch}}))
+                s.commit()
+                assert _displayed_level(s, vehicle) is None
+            finally:
+                state.delete(s, state.TELEMETRY_LATEST_KEY)
+                s.commit()

@@ -1124,6 +1124,12 @@ def snapshot_from_telemetry(fields: dict[str, Any], ts: float) -> dict[str, Any]
         "ts": ts,
         "odo_km": (odo * MILES_TO_KM) if odo is not None else 0.0,
         "soc": num("Soc") or 0.0,
+        # The % the car's own screen shows. Soc runs above it (27 against the
+        # car's 24 on 29 September), so this is what anything read as "your
+        # battery is at" uses; Soc stays the basis for every SoC difference,
+        # since trips and charges are all recorded in it. None until the car
+        # streams the field (scripts/telemetry/02-configure-vehicle.sh).
+        "battery_level": num("BatteryLevel"),
         "range_km": (rated * MILES_TO_KM) if rated is not None else 0.0,
         "charging": charge_state.endswith("Charging"),
         # Whichever side is delivering. A Supercharge reports DCChargingPower

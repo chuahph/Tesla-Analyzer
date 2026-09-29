@@ -12575,6 +12575,8 @@ def summary(
         "used_kwh": round(used_kwh, 1),
         "used_pct": used_pct,
         "current_soc_pct": round(current_soc, 1) if current_soc is not None else None,
+        "current_level_pct": (round(_level, 1) if (_level := _displayed_level(session, vehicle))
+                              is not None else None),
         "trip_kwh": trip_kwh,
         "vampire_kwh": vampire_kwh,
         "vampire_hours": vampire_hours,
@@ -13095,6 +13097,24 @@ def _park_since_last_drive(session: Session, vehicle, drives, current_soc):
     if now <= last_drive.end_time:
         return None
     return now, float(current_soc), last_drive
+
+
+def _displayed_level(session: Session, vehicle) -> float | None:
+    """The battery % the car's own screen shows, from the stream's
+    BatteryLevel, or None when the car does not stream it. For display only:
+    differences of SoC stay in Soc, which every trip and charge is stored in."""
+    import json as _json
+
+    try:
+        latest = _json.loads(state.get(session, state.TELEMETRY_LATEST_KEY) or "{}") or {}
+    except ValueError:
+        return None
+    car = latest.get(vehicle.vin) if isinstance(latest, dict) else None
+    if not isinstance(car, dict):
+        return None
+    ts = _telemetry_ts(car.get("_ts"))
+    level = sync_mod.snapshot_from_telemetry(car, ts)["battery_level"] if ts else None
+    return level if level is not None and 0.0 <= level <= 100.0 else None
 
 
 def _current_soc(session: Session, vehicle) -> float | None:
@@ -13686,7 +13706,9 @@ def _telemetry_ingest(payload: dict, session: Session):
             session, vin,
             status=("driving" if (snap.get("speed_kmh") or 0) > 0
                     else "charging" if snap.get("charging") else "online"),
-            ts=float(snap["ts"]), soc=snap.get("soc"),
+            ts=float(snap["ts"]),
+            soc=(snap.get("battery_level")
+                 if snap.get("battery_level") is not None else snap.get("soc")),
             odo_km=round(snap.get("odo_km") or 0.0, 1),
             speed_kmh=snap.get("speed_kmh"),
             # Named for where it came from. A record arriving IS the car

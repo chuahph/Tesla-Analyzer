@@ -326,6 +326,7 @@ cat > "$WORK/config.json" <<EOF
 $DEFAULT_DRIVE_COUNTER
       "EnergyRemaining":           {"interval_seconds": 10},
       "Soc":                       {"interval_seconds": 60},
+      "BatteryLevel":              {"interval_seconds": 60},
       "RatedRange":                {"interval_seconds": 300},
       "DetailedChargeState":       {"interval_seconds": 30},
       "ChargePortLatch":           {"interval_seconds": 60},
