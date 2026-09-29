@@ -482,17 +482,18 @@ Any service that can hit a URL on a schedule works. [cron-job.org](https://cron-
 is free and reliable enough for this:
 
 1. Create a free account.
-2. **Keep-alive**: create a cronjob for
-   `https://<your-app>.onrender.com/api/ping` every **10 minutes**. It keeps
-   Render's free host awake and touches neither the car nor the database.
-3. **Watchdog**: create a cronjob for
+2. **Create cronjob** for
    ```
    https://<your-app>.onrender.com/api/sync?key=<SYNC_KEY>
    ```
    every **30 minutes** (`SYNC_KEY` is whatever you set in Render's environment
-   variables). See "choosing the interval" below for why these are two jobs
-   rather than one fast `/api/sync`.
-4. Save. That's it; no repository secrets or GitHub Actions involved.
+   variables). See "choosing the interval" below for why not tighter.
+3. Save. That's it; no repository secrets or GitHub Actions involved.
+
+Render's free host sleeping between ticks is acceptable: each tick wakes it,
+and so does the telemetry bridge, which spools any batch it cannot deliver and
+resends it once the app answers. A keep-alive job is optional (below) and only
+saves the loading splash on a dashboard opened after a quiet spell.
 
 Any similar service works the same way — UptimeRobot (as an "HTTP(s)" monitor,
 which incidentally also gets you uptime alerts for free), EasyCron, or your
@@ -502,26 +503,26 @@ own always-on machine's system `cron` calling `curl`.
 
 Two limits pull in opposite directions, and they are not the same limit.
 
-**Below 15 minutes, or the host sleeps.** Render's free tier stops the service
-after fifteen minutes with no inbound request. A sleeping host runs nothing
-scheduled — including the telemetry watchdog — so a cron slower than that
-silences the alarm for the exact fault it exists to catch, and the only visible
-symptom is the "APPLICATION LOADING" splash on your next dashboard open, which
-looks like nothing. `/api/health` reports `sync.last_tick_min_ago` alongside
+**The host sleeping between ticks is fine; a tick that never completes is
+not.** Render's free tier stops the service after fifteen minutes with no
+inbound request, but nothing here runs on a timer inside the app — the watchdog
+check runs inside the `/api/sync` tick itself, so a tick that wakes the host
+still does its job. What can fail is the wake: a cold start takes 30-60
+seconds, and a cron service that gives up sooner may record a timeout. Give the
+job the longest timeout your cron service allows, and check it rather than
+guess: `/api/health` reports `sync.last_tick_min_ago` alongside
 `sync.every_min` — the cadence it has actually observed, not one it assumes —
-and flags `sync.stale` once the cron has missed several of its own beats, so
-this is checkable rather than guessed at, at whatever interval you chose.
+and flags `sync.stale` once the cron has missed several of its own beats.
 
 **Above a few minutes, or you pay Tesla.** Every tick may read `vehicle_data`
 on an awake car, subject to `SYNC_POLL_INTERVAL_MIN`. Those reads are billed,
 and each one is itself an activity signal that resets Tesla's sleep countdown
 — so a tight cron keeps the car awake, which costs real battery.
 
-**No single interval satisfies both, so run two jobs.** There is no number
-that is under fifteen minutes and also sparse enough to let a car sleep: the
-two limits overlap only where the car is being read more often than it should
-be. Splitting them costs nothing, because only the watchdog needs `/api/sync`
-— keeping the host warm needs nothing but a request.
+**If you want the host kept warm too, use a second job.** A single
+`/api/sync` under fifteen minutes would keep Render awake, but only by reading
+an awake car that often. A keep-alive needs nothing but a request, so it can
+go to a path that touches neither the car nor the database.
 
 `/api/ping` is an open path that does nothing at all: no passcode, no Tesla
 call, and no database query, so a keep-alive costs no database egress either
@@ -529,7 +530,7 @@ call, and no database query, so a keep-alive costs no database egress either
 
 | job | url | interval |
 | --- | --- | --- |
-| keep-alive | `https://<your-app>.onrender.com/api/ping` | 10 min |
+| keep-alive (optional) | `https://<your-app>.onrender.com/api/ping` | 10 min |
 | watchdog | `https://<your-app>.onrender.com/api/sync?key=<SYNC_KEY>` | 20-30 min |
 
 The keep-alive holds the host awake for free at any `/api/sync` cadence, and

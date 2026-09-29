@@ -495,7 +495,7 @@
 
         <li>
           <details>
-            <summary><span class="gs-num">8</span> ⏰ Two cron jobs — required</summary>
+            <summary><span class="gs-num">8</span> ⏰ Watchdog cron — required</summary>
             <div class="gs-body">
               <p><strong>Why:</strong> trips and charges now arrive by themselves (Step 7), but
                 a one-way stream can't tell you when it has stopped. A regular ping to
@@ -504,20 +504,23 @@
                 goes unnoticed and trips are silently lost.</p>
               <ol>
                 <li>Open <strong>cron-job.org</strong> (free) → create a free account.</li>
-                <li><strong>Keep-alive</strong> — Create cronjob → URL
-                  <code>https://&lt;your-app&gt;/api/ping</code>, every
-                  <strong>10 minutes</strong>. Render's free plan sleeps after 15 minutes without
-                  a visit, and a sleeping app runs no watchdog. This one never touches the car.</li>
-                <li><strong>Watchdog</strong> — Create cronjob → URL
+                <li><strong>Create cronjob</strong> → URL
                   <code>https://&lt;your-app&gt;/api/sync?key=YOUR_SYNC_KEY</code> (the
                   <code>SYNC_KEY</code> from Step 3), every <strong>30 minutes</strong>. A dead
                   stream is then reported within about 20–50 minutes.</li>
+                <li>Under the job's <strong>Advanced</strong> settings, set the
+                  <strong>timeout</strong> to the maximum allowed — waking a sleeping Render
+                  takes 30–60 seconds.</li>
               </ol>
-              <p class="gs-note">🔋 <strong>Why two jobs, not one fast one.</strong> Each watchdog
-                tick can read an awake car, and every read is billed by Tesla and resets the
-                car's sleep timer. Running <code>/api/sync</code> every 10 minutes would keep
-                the car awake and draining. The keep-alive holds Render awake for free, so the
-                watchdog can stay sparse. It never reads a car that's asleep.</p>
+              <p class="gs-note">🔋 <strong>Why not more often.</strong> Each tick can read an
+                awake car, and every read is billed by Tesla and resets the car's sleep timer —
+                a tight cron keeps the car awake and draining. It never reads a car that's
+                asleep.</p>
+              <p class="gs-note gs-note-info">😴 <strong>Render sleeping in between is fine.</strong>
+                The free plan sleeps after 15 minutes without a visit. Each watchdog tick wakes
+                it, and so does your car's stream: the relay server holds any records it can't
+                deliver and resends them once the app is up, so nothing is lost. The only cost
+                is a short loading screen when you open the dashboard after a quiet spell.</p>
               <p class="gs-note gs-note-warn">🤖 <strong>Rather not use a third-party site?</strong>
                 Your fork includes a backup <strong>"Sync car from Tesla"</strong> GitHub Actions
                 workflow, but its schedule is disabled by default — GitHub runs scheduled
