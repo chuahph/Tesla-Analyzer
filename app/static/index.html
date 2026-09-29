@@ -395,34 +395,95 @@
                 Fleet Telemetry). That server can't be Render. It's a tiny always-on Linux box
                 that stores nothing: it passes each record to your app. This is what actually
                 logs your trips — the app no longer records trips by polling.</p>
+              <p><strong>5a · Get a domain</strong> (skip if you already own one)</p>
               <ol>
-                <li><strong>A domain name.</strong> The relay needs a web address of its own,
-                  such as <code>telemetry.yourdomain.com</code>, on a domain you control (about
-                  US$10 a year; Cloudflare is an easy place to buy and manage one).</li>
-                <li><strong>Create the server:</strong> <strong>console.cloud.google.com</strong>
-                  → Compute Engine → <strong>VM instances → Create instance</strong>. Choose
-                  machine type <strong>e2-micro</strong> in <code>us-west1</code>,
-                  <code>us-central1</code> or <code>us-east1</code> (the free-tier regions), boot
-                  disk <strong>Ubuntu 24.04 LTS</strong>, and tick <strong>Allow HTTP</strong> and
-                  <strong>Allow HTTPS traffic</strong>. Then, under <strong>VPC network → IP
-                  addresses</strong>, make its external IP <strong>static</strong> so it never
-                  changes.</li>
-                <li><strong>Point the address at it:</strong> add a DNS <strong>A record</strong>
-                  for <code>telemetry</code> → the server's external IP. In Cloudflare set it to
-                  <strong>DNS only</strong> (grey cloud) — the orange proxy breaks the car's
-                  secure connection.</li>
-                <li><strong>Install it:</strong> tap <strong>SSH</strong> next to the server
-                  (opens in your browser) and run:
-                  <code>curl -sL https://&lt;your-app&gt;/vm -o v.sh &amp;&amp; sudo bash v.sh</code>
-                  It asks for your telemetry address, your app address and your
-                  <code>SYNC_KEY</code> — type <em>your own</em>; the defaults shown are the
-                  original author's. It's safe to re-run if anything fails.</li>
-                <li><strong>Publish your public key:</strong> the script ends by printing a
-                  <strong>PUBLIC KEY</strong> block (see it again any time with
-                  <code>cat /etc/tesla/NEXT-STEPS.txt</code>). On GitHub, open your fork's
+                <li>Open <strong>dash.cloudflare.com</strong> → sign up (free plan).</li>
+                <li><strong>Domain Registration → Register Domains</strong>, search for a name,
+                  and buy it. Cheap endings such as <code>.xyz</code> cost a few dollars a
+                  year. Its DNS is then managed in Cloudflare automatically.</li>
+                <li>Already have a domain elsewhere? Keep it. Either add it to Cloudflare
+                  (<strong>Add a domain</strong>, then change the two nameservers at your
+                  registrar to the ones Cloudflare shows), or add the record in 5c at your
+                  registrar's own DNS page instead.</li>
+              </ol>
+
+              <p><strong>5b · Create the server on Google Cloud</strong></p>
+              <ol>
+                <li>Open <strong>console.cloud.google.com</strong>, sign in with a Google
+                  account and set up billing. A card is required even for the free tier.</li>
+                <li>Create a project (any name), then open <strong>Compute Engine</strong> and
+                  tap <strong>Enable</strong> if asked (the first time takes a minute).</li>
+                <li><strong>VM instances → Create instance</strong>, and set:
+                  <ul>
+                    <li><strong>Name:</strong> <code>telemetry</code></li>
+                    <li><strong>Region:</strong> <code>us-central1</code>,
+                      <code>us-west1</code> or <code>us-east1</code> — the free-tier regions.
+                      Distance from you doesn't matter here.</li>
+                    <li><strong>Machine type:</strong> E2 → <strong>e2-micro</strong></li>
+                    <li><strong>OS and storage → Change:</strong> <strong>Ubuntu</strong>,
+                      version <strong>Ubuntu 24.04 LTS (x86/64)</strong>, disk type
+                      <strong>Standard persistent disk</strong>, size <strong>30 GB</strong>
+                      or less.</li>
+                    <li><strong>Networking → Firewall:</strong> tick <strong>Allow HTTP
+                      traffic</strong> <em>and</em> <strong>Allow HTTPS traffic</strong>. The
+                      car connects on 443, and the certificate check needs 80.</li>
+                  </ul>
+                  Then tap <strong>Create</strong>.</li>
+                <li><strong>Fix its address:</strong> <strong>VPC network → IP
+                  addresses</strong>, find the row for <code>telemetry</code>'s external
+                  address → ⋮ → <strong>Promote to static IP address</strong>. Without this the
+                  address changes when the server restarts, and your car can no longer find
+                  it. Note the IP down.</li>
+              </ol>
+              <p class="gs-note gs-note-warn">💳 The free tier covers one e2-micro and its
+                disk. Check <strong>Billing</strong> after the first month in case your
+                account is charged a small amount for the static IP.</p>
+
+              <p><strong>5c · Point a name at the server</strong></p>
+              <ol>
+                <li>Cloudflare → your domain → <strong>DNS → Records → Add record</strong>.</li>
+                <li>Type <strong>A</strong>, name <code>telemetry</code>, IPv4 address = the
+                  static IP from 5b, and switch <strong>Proxy status</strong> off so it reads
+                  <strong>DNS only</strong> (grey cloud) → <strong>Save</strong>. The orange
+                  proxy breaks the car's secure connection.</li>
+                <li>Your relay is now <code>telemetry.&lt;yourdomain&gt;</code>. It usually works
+                  within a few minutes; the install script checks it before going on.</li>
+              </ol>
+
+              <p><strong>5d · Install the relay</strong></p>
+              <ol>
+                <li>Compute Engine → <strong>VM instances</strong> → tap <strong>SSH</strong>
+                  on the <code>telemetry</code> row. A terminal opens in your browser; approve
+                  the key it asks to add.</li>
+                <li>Run:
+                  <code>curl -sL https://&lt;your-app&gt;/vm -o v.sh &amp;&amp; sudo bash v.sh</code></li>
+                <li>Answer its four questions. The defaults in brackets are the original
+                  author's, so type your own:
+                  <ul>
+                    <li><strong>Telemetry hostname:</strong> <code>telemetry.&lt;yourdomain&gt;</code></li>
+                    <li><strong>App URL:</strong> your app's address from Step 3, with
+                      <code>https://</code></li>
+                    <li><strong>SYNC_KEY:</strong> the same value as in Render (nothing shows
+                      as you type)</li>
+                    <li><strong>Email:</strong> optional, for certificate expiry notices</li>
+                  </ul></li>
+                <li>It takes about five minutes: Docker, a Let's Encrypt certificate, the
+                  Tesla receiver and the bridge to your app. If anything fails it says why.
+                  Fix that and run the same command again; finished steps are skipped.</li>
+              </ol>
+
+              <p><strong>5e · Publish your public key</strong></p>
+              <ol>
+                <li>The script ends with <strong>Done</strong> and a <strong>PUBLIC KEY</strong>
+                  block. See it again any time with
+                  <code>cat /etc/tesla/NEXT-STEPS.txt</code>.</li>
+                <li>On GitHub, open your fork's
                   <code>app/static/well-known/com.tesla.3p.public-key.pem</code> → ✏️ edit →
-                  replace everything with that block → <strong>Commit changes</strong>. Render
-                  redeploys by itself; wait until it's live.</li>
+                  replace everything with that block, from <code>-----BEGIN</code> to
+                  <code>-----END PUBLIC KEY-----</code> → <strong>Commit changes</strong>.</li>
+                <li>Render redeploys by itself. Before Step 6, check that
+                  <code>&lt;your-app&gt;/.well-known/appspecific/com.tesla.3p.public-key.pem</code>
+                  shows your new key.</li>
               </ol>
               <p class="gs-note gs-note-info">🔒 The <em>private</em> key never leaves the
                 server (<code>/etc/tesla/keys</code>) — only the public half goes in your fork,

@@ -290,12 +290,31 @@ Two scripts, plus one step only a human with a phone can do. Both are
 re-runnable: every step checks for its own result first, so a failure halfway
 through is fixed by running it again.
 
-**1. Stand up the receiver** — a fresh Ubuntu 24.04 box (a free-tier GCP
-instance is enough):
+**0. A domain and a server.** The receiver needs a hostname of its own with
+a publicly trusted certificate, so a domain you control is required (any
+registrar; Cloudflare's is at cost and manages the DNS too).
+
+- **Server**: Google Cloud → Compute Engine → Create instance: `e2-micro`
+  (free tier) in `us-central1`, `us-west1` or `us-east1`; boot disk
+  **Ubuntu 24.04 LTS (x86/64)**, standard persistent disk, 30 GB or less;
+  firewall **Allow HTTP** and **Allow HTTPS** (the car connects on 443, and
+  certbot's challenge needs 80). Then VPC network → IP addresses → promote its
+  external address to **static**, or it changes on restart and the car loses
+  the receiver.
+- **DNS**: an `A` record `telemetry.<yourdomain>` → that static IP. On
+  Cloudflare set it **DNS only** (grey cloud): the proxy terminates TLS, and
+  the car's mutual-TLS handshake cannot survive that. The setup script checks
+  the record resolves to the box before it orders a certificate.
+
+**1. Stand up the receiver** — open the VM's browser SSH and run:
 
 ```bash
 curl -sL https://<your-app>/vm -o v.sh && sudo bash v.sh
 ```
+
+It prompts for the telemetry hostname, the app URL, `SYNC_KEY` (same value as
+the app's) and an optional Let's Encrypt email; the bracketed defaults are
+this project's own, so type yours.
 
 Installs `tesla/fleet-telemetry`, generates the keypair into `/etc/tesla/keys`,
 and installs the bridge as a service. (`/vm` is a short redirect to the real
