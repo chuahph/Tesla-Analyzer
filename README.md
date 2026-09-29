@@ -305,9 +305,18 @@ launcher downloads to a file and checks it before running, because an empty
 body from a deploy still in flight is a valid empty script that runs silently
 and reports success.)
 
-**2. Register the domain and pair the virtual key.** Needs a browser and the
-Tesla app; the setup script deliberately does not attempt it. The app serves
-the partner public key Tesla checks at its well-known path for you.
+**2. Publish the key, register the domain, pair the virtual key.** Needs a
+browser and the Tesla app; the setup script deliberately does not attempt it.
+
+- Copy the public key the script printed (also in `/etc/tesla/NEXT-STEPS.txt`)
+  into `app/static/well-known/com.tesla.3p.public-key.pem` in your fork and
+  push; the app serves that file at Tesla's well-known path.
+- Only then sign in with Tesla from the app. The first sign-in from an address
+  registers that domain with Tesla, which reads the key at that moment — and
+  the app does not register the same domain twice, so signing in before the
+  key is published leaves Tesla holding the wrong one.
+- Pair the key with the car: open `https://tesla.com/_ak/<your-app-domain>` on
+  the phone with the Tesla app and approve.
 
 **3. Tell the car to stream:**
 

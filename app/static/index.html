@@ -208,13 +208,15 @@
       <p class="modal-sub">
         How to run your own copy of Tesla Analyzer and connect your real car — so it
         logs every drive and charge automatically. Everything below is <strong>free</strong>
-        and can be done entirely from your iPhone in about <strong>20 minutes</strong>.
-        You only do this once.
+        except a domain name (Step 5), and can be done entirely from your iPhone in about
+        <strong>an hour</strong>. You only do this once. <strong>Do the steps in
+        order</strong> — Step 5 must come before you first sign in (Step 6).
       </p>
 
       <div class="guide-flow">
-        Your Tesla → Tesla's API → <strong>your copy of this app</strong> (hosted on Render)
-        → history saved in a database (Supabase) → you view it here.
+        Your Tesla <strong>streams</strong> each drive and charge → a small relay server
+        you run (Google Cloud, free) → <strong>your copy of this app</strong> (hosted on
+        Render) → history saved in a database (Supabase) → you view it here.
       </div>
 
       <p class="guide-tip">
@@ -264,17 +266,20 @@
               <p><strong>Why:</strong> the free Render server (Step 3) forgets everything each
                 time it sleeps. Supabase stores your drives and charges permanently — its free
                 tier doesn't expire after 30 days like most others, and (unlike some
-                alternatives) it doesn't meter compute hours either, so the frequent auto-sync
-                cadence in Step 6 stays free indefinitely. It only pauses a project after 7 days
-                with <em>zero</em> database activity — a running sync cron makes that a non-issue.</p>
+                alternatives) it doesn't meter compute hours either, so the app can use it
+                around the clock for free. It only pauses a project after 7 days with
+                <em>zero</em> database activity — the cron in Step 8 makes that a non-issue.</p>
               <ol>
                 <li>Open <strong>supabase.com</strong> → <strong>Sign up with GitHub</strong>.</li>
                 <li><strong>New project</strong> (any name, pick the region closest to you) →
                   set a database password and save it somewhere — you'll need it below.</li>
-                <li>Open <strong>Settings → Database → Connection string</strong> and select the
-                  <strong>Session pooler</strong> option (port <code>5432</code>) — <em>not</em>
+                <li>Tap <strong>Connect</strong> (top of the project page) →
+                  <strong>Connection string</strong>, and set the method to
+                  <strong>Session pooler</strong> (port <code>5432</code>) — <em>not</em>
                   "Direct connection". Render only supports IPv4, and Supabase's direct
-                  connection is IPv6-only; the Session pooler works over IPv4.</li>
+                  connection is IPv6-only; the Session pooler works over IPv4. Its user name
+                  looks like <code>postgres.&lt;project-ref&gt;</code> — keep it exactly as
+                  shown.</li>
                 <li>Fill in your real password in place of <code>[YOUR-PASSWORD]</code>. If the
                   password contains <code>@ : / ? #</code> or <code>%</code>, percent-encode just
                   that character (e.g. <code>@</code> → <code>%40</code>) — an unescaped special
@@ -305,7 +310,9 @@
                       from Step 2.</li>
                     <li><code>APP_PASSCODE</code> — any passcode you like; the app asks for it
                       so only you can open your dashboard.</li>
-                    <li><code>SYNC_KEY</code> — any secret word; used for auto-logging (Step 6).</li>
+                    <li><code>SYNC_KEY</code> — any long secret word. The relay server
+                      (Step 5) and the cron (Step 8) use it to talk to your app, so keep it
+                      handy.</li>
                     <li><code>TESLA_CLIENT_ID</code> / <code>TESLA_CLIENT_SECRET</code> — leave
                       blank for now; you'll get these in Step 4 and add them after.</li>
                   </ul>
@@ -314,6 +321,12 @@
                   <code>https://ev-drive-analyzer.onrender.com</code>. Note it down — you'll
                   reuse it in Step 4.</li>
               </ol>
+              <p class="gs-note gs-note-info">🌐 <strong>Using your own domain for the app?</strong>
+                Optional, but decide now: in Render open your service →
+                <strong>Settings → Custom Domains</strong>, add it, and create the DNS record
+                Render shows you. Then use <em>that</em> address everywhere below instead of the
+                <code>onrender.com</code> one — Tesla registers whichever address you first
+                sign in from (Step 6).</p>
             </div>
           </details>
         </li>
@@ -350,8 +363,8 @@
                   — <em>required.</em> Reads drives, battery level, range and charge data — the core
                   of every chart and KPI.</li>
                 <li><strong>Vehicle Location</strong> <span class="gs-code">vehicle_location</span>
-                  — <em>recommended.</em> Gives trip start/end places and live speed. Skip it and
-                  the app still works, but locations show as blank/coordinates.</li>
+                  — <em>recommended.</em> Gives trip start/end places and the map-based road
+                  split. Skip it and the app still works, but locations show as blank/coordinates.</li>
                 <li><strong>Vehicle Commands</strong> <span class="gs-code">vehicle_cmds</span>
                   — <em>recommended.</em> Lets <strong>⟳ Sync</strong> gently wake a sleeping car so
                   it can report fresh data. Without it, sync only sees the car when it's already awake.</li>
@@ -364,24 +377,74 @@
                 yourself: tap <strong>+ Add Environment Variable</strong>, type the key name exactly
                 (<code>TESLA_CLIENT_ID</code>, then again for <code>TESLA_CLIENT_SECRET</code>),
                 paste each value, and <strong>Save changes</strong> — it redeploys automatically.</p>
-              <p class="gs-note">✅ <strong>Public key / domain check is automatic.</strong>
-                Tesla verifies your domain by fetching a key file — this app already serves it
-                at <code>/.well-known/appspecific/com.tesla.3p.public-key.pem</code>, and the
-                first sign-in registers your domain for you. Nothing to do here.</p>
+              <p class="gs-note gs-note-warn">⛔ <strong>Don't sign in to the app yet.</strong>
+                Your first sign-in registers your app's address with Tesla, and Tesla reads your
+                <strong>public key</strong> at that moment. That key is made on your relay server
+                in Step 5 — until you've put it in your fork, your copy still serves the
+                original author's key, and your car will refuse to pair.</p>
             </div>
           </details>
         </li>
 
         <li>
           <details>
-            <summary><span class="gs-num">5</span> 🔗 Link &amp; sign in — inside this app</summary>
+            <summary><span class="gs-num">5</span> 📡 Relay server — where your car streams to</summary>
+            <div class="gs-body">
+              <p><strong>Why:</strong> your car records each drive and charge by
+                <em>streaming</em> it, live, to a server with a certificate it trusts (Tesla
+                Fleet Telemetry). That server can't be Render. It's a tiny always-on Linux box
+                that stores nothing: it passes each record to your app. This is what actually
+                logs your trips — the app no longer records trips by polling.</p>
+              <ol>
+                <li><strong>A domain name.</strong> The relay needs a web address of its own,
+                  such as <code>telemetry.yourdomain.com</code>, on a domain you control (about
+                  US$10 a year; Cloudflare is an easy place to buy and manage one).</li>
+                <li><strong>Create the server:</strong> <strong>console.cloud.google.com</strong>
+                  → Compute Engine → <strong>VM instances → Create instance</strong>. Choose
+                  machine type <strong>e2-micro</strong> in <code>us-west1</code>,
+                  <code>us-central1</code> or <code>us-east1</code> (the free-tier regions), boot
+                  disk <strong>Ubuntu 24.04 LTS</strong>, and tick <strong>Allow HTTP</strong> and
+                  <strong>Allow HTTPS traffic</strong>. Then, under <strong>VPC network → IP
+                  addresses</strong>, make its external IP <strong>static</strong> so it never
+                  changes.</li>
+                <li><strong>Point the address at it:</strong> add a DNS <strong>A record</strong>
+                  for <code>telemetry</code> → the server's external IP. In Cloudflare set it to
+                  <strong>DNS only</strong> (grey cloud) — the orange proxy breaks the car's
+                  secure connection.</li>
+                <li><strong>Install it:</strong> tap <strong>SSH</strong> next to the server
+                  (opens in your browser) and run:
+                  <code>curl -sL https://&lt;your-app&gt;/vm -o v.sh &amp;&amp; sudo bash v.sh</code>
+                  It asks for your telemetry address, your app address and your
+                  <code>SYNC_KEY</code> — type <em>your own</em>; the defaults shown are the
+                  original author's. It's safe to re-run if anything fails.</li>
+                <li><strong>Publish your public key:</strong> the script ends by printing a
+                  <strong>PUBLIC KEY</strong> block (see it again any time with
+                  <code>cat /etc/tesla/NEXT-STEPS.txt</code>). On GitHub, open your fork's
+                  <code>app/static/well-known/com.tesla.3p.public-key.pem</code> → ✏️ edit →
+                  replace everything with that block → <strong>Commit changes</strong>. Render
+                  redeploys by itself; wait until it's live.</li>
+              </ol>
+              <p class="gs-note gs-note-info">🔒 The <em>private</em> key never leaves the
+                server (<code>/etc/tesla/keys</code>) — only the public half goes in your fork,
+                which is safe to share.</p>
+            </div>
+          </details>
+        </li>
+
+        <li>
+          <details>
+            <summary><span class="gs-num">6</span> 🔗 Sign in &amp; pair your car</summary>
             <div class="gs-body">
               <ol>
-                <li>Open your Render address and enter your <code>APP_PASSCODE</code>.</li>
+                <li>Open your app's address and enter your <code>APP_PASSCODE</code>.</li>
                 <li>Tap <strong>🔗 Link Tesla Account → Sign in with Tesla</strong>, then
-                  approve the request on Tesla's page.</li>
-                <li>Done — the header badge turns green <strong>“live”</strong>. Tap
-                  <strong>⟳ Sync</strong> anytime to wake the car and pull the latest.</li>
+                  approve the request on Tesla's page. This also registers your address with
+                  Tesla, using the key you published in Step 5.</li>
+                <li><strong>Pair the key with your car:</strong> on the phone that has the Tesla
+                  app, open <code>https://tesla.com/_ak/&lt;your-app-address&gt;</code> (the
+                  address without <code>https://</code>, e.g.
+                  <code>tesla.com/_ak/ev-drive-analyzer.onrender.com</code>) and approve adding
+                  the key. You may be asked to tap your key card on the car.</li>
               </ol>
               <p class="gs-note">🚗🚗 <strong>Have two or more cars on one Tesla account?</strong>
                 You still sign in <strong>just once</strong> — a single Tesla login covers every
@@ -401,43 +464,63 @@
                 (<code>chuahph.github.io/Tesla-Analyzer</code>) or have them use
                 <strong>📁 Load Tesla Data</strong> with their own Tesla export — both keep their
                 data on their own device, with no access to your car. For their own live
-                analytics, they'd set up their own copy (Steps 1–5).</p>
+                analytics, they'd set up their own copy (Steps 1–9).</p>
             </div>
           </details>
         </li>
 
         <li>
           <details>
-            <summary><span class="gs-num">6</span> ⏰ Set up auto-sync (cron) — required</summary>
+            <summary><span class="gs-num">7</span> 🚀 Tell your car to stream</summary>
             <div class="gs-body">
-              <p><strong>Why this isn't optional:</strong> the app never polls Tesla on its own —
-                it only checks when something calls <code>/api/sync</code>. Skip this step and
-                your history only fills in on the rare moment you happen to have the dashboard open
-                while something's happening. A scheduled "ping" is what actually makes logging
-                automatic, which is the entire point of self-hosting this.</p>
+              <ol>
+                <li>Back in the server's SSH window, run:
+                  <code>curl -sL https://&lt;your-app&gt;/car -o c.sh &amp;&amp; sudo bash c.sh</code>
+                  It signs the streaming settings with your key and sends them to Tesla.
+                  <strong>HTTP 200</strong> and <code>"updated_vehicles": 1</code> mean it was
+                  accepted.</li>
+                <li><code>synced: false</code> at the end is normal — the car picks the settings
+                  up the next time it wakes. Unlock it or open the Tesla app.</li>
+                <li>Check it's working: <code>&lt;your-app&gt;/api/telemetry/config</code> should
+                  show <strong>synced: true</strong>, and <code>/api/telemetry/fields</code> should
+                  list the fields arriving. Your next drive appears in Recent Trips a moment after
+                  you park.</li>
+              </ol>
+              <p class="gs-note gs-note-warn">🧩 <strong>Error 412?</strong> The car rejected the
+                settings — almost always because the key isn't paired. Redo the
+                <code>tesla.com/_ak/…</code> link in Step 6, then run the command again.</p>
+            </div>
+          </details>
+        </li>
+
+        <li>
+          <details>
+            <summary><span class="gs-num">8</span> ⏰ Watchdog cron — required</summary>
+            <div class="gs-body">
+              <p><strong>Why:</strong> trips and charges now arrive by themselves (Step 7), but
+                a one-way stream can't tell you when it has stopped. A regular ping to
+                <code>/api/sync</code> keeps Render awake, checks the car is reachable, and alerts
+                you if the stream goes quiet while the car is awake. Without it, a broken relay
+                goes unnoticed and trips are silently lost.</p>
               <ol>
                 <li>Open <strong>cron-job.org</strong> (free) → create a free account.</li>
                 <li><strong>Create cronjob</strong> → URL:
-                  <code>https://ev-drive-analyzer.onrender.com/api/sync?key=YOUR_SYNC_KEY</code>
-                  (use the <code>SYNC_KEY</code> from Step 3).</li>
-                <li>Set the schedule to <strong>every 1-2 minutes</strong> → Save. Done — no
-                  repository secrets or GitHub Actions involved.</li>
+                  <code>https://&lt;your-app&gt;/api/sync?key=YOUR_SYNC_KEY</code>
+                  (the <code>SYNC_KEY</code> from Step 3).</li>
+                <li>Set the schedule to <strong>every 10 minutes</strong> → Save. Anything slower
+                  than 15 minutes lets Render fall asleep, which switches the watchdog off.</li>
               </ol>
-              <p class="gs-note">🔋 <strong>Frequent pings are safe.</strong> A built-in sleep
-                window means that once the car has been idle ~15 min, the app stops actually
-                polling it (the pings just keep Render awake), so it <em>won't</em> cause vampire
-                battery drain. The tighter interval simply catches your drives more often while
-                you're actually moving — which gives accurate live speed (incl. max speed) instead
-                of a trip reconstructed after the fact.</p>
+              <p class="gs-note">🔋 <strong>Safe for the battery.</strong> The ping reads the car
+                only every few minutes at most, and not at all while it's asleep, so it won't
+                cause vampire drain.</p>
               <p class="gs-note gs-note-warn">🤖 <strong>Rather not use a third-party site?</strong>
                 Your fork includes a backup <strong>"Sync car from Tesla"</strong> GitHub Actions
-                workflow, but its schedule is disabled by default — GitHub documents that trigger
-                as best-effort, with delays long enough to miss a short trip's whole driving
-                window. Only reach for this if you specifically don't want cron-job.org: uncomment
+                workflow, but its schedule is disabled by default — GitHub runs scheduled
+                workflows on a best-effort basis and can skip them. To use it anyway, uncomment
                 the <code>schedule:</code> block at the top of
                 <code>.github/workflows/sync-car.yml</code>, then add two repository secrets
                 (<strong>Settings → Secrets and variables → Actions</strong>):
-                <code>RENDER_URL</code> = your Render address, and <code>SYNC_KEY</code> = the same
+                <code>RENDER_URL</code> = your app address, and <code>SYNC_KEY</code> = the same
                 value from your Render environment.</p>
             </div>
           </details>
@@ -445,10 +528,10 @@
 
         <li>
           <details>
-            <summary><span class="gs-num">7</span> 📲 Install on your iPhone</summary>
+            <summary><span class="gs-num">9</span> 📲 Install on your iPhone</summary>
             <div class="gs-body">
               <ol>
-                <li>Open your Render address in <strong>Safari</strong>.</li>
+                <li>Open your app's address in <strong>Safari</strong>.</li>
                 <li>Tap the <strong>Share</strong> button (square with an ↑ arrow).</li>
                 <li>Choose <strong>Add to Home Screen → Add</strong>. It now launches full-screen
                   from a ⚡ icon, like a native app, and opens even when offline.</li>

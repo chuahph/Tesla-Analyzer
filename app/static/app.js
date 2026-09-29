@@ -4011,8 +4011,9 @@ document.getElementById("btn-import").addEventListener("click", () => {
   updateResetButton();
 });
 
-// Setup guide: step-by-step for a brand-new user (Neon → Render → Tesla dev
-// account → link → auto-sync → install). Pure static content, works offline.
+// Setup guide: step-by-step for a brand-new user (fork → Supabase → Render →
+// Tesla dev app → relay VM → sign in & pair → stream → watchdog cron →
+// install). Pure static content, works offline.
 document.getElementById("btn-guide")?.addEventListener("click", () =>
   openModal("setup-modal"));
 
