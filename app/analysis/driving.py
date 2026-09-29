@@ -884,7 +884,9 @@ def sentry_standby_kw(drives: list[Any], charges: list[Any] | None,
 
 
 def window_accounting(drives: list[Any], charges: list[Any] | None,
-                      readings: list[Any], since: Any, until: Any) -> dict[str, Any]:
+                      readings: list[Any], since: Any, until: Any,
+                      anchor: tuple[datetime, float] | None = None,
+                      tail: tuple[datetime, float] | None = None) -> dict[str, Any]:
     """Where the window's hours went, so the matrix adds up to something.
 
     The driving rows and the parked rows have always described DIFFERENT
@@ -917,6 +919,11 @@ def window_accounting(drives: list[Any], charges: list[Any] | None,
     ordered = sorted(drives, key=lambda d: d.start_time)
     index = _sentry_index(readings) if readings else None
     charge_starts = sorted(c.start_time for c in (charges or []))
+    # The same edge boundaries parked_share takes, so an edge park it measures
+    # is parked here too rather than "unbounded".
+    chain = (([SimpleNamespace(end_time=anchor[0], end_soc=anchor[1])] if anchor else [])
+             + ordered
+             + ([SimpleNamespace(start_time=tail[0], start_soc=tail[1])] if tail else []))
 
     drive_hours = sum(float(getattr(d, "duration_min", 0.0) or 0.0) / 60.0
                       for d in ordered)
@@ -930,7 +937,7 @@ def window_accounting(drives: list[Any], charges: list[Any] | None,
     short_gaps = 0
     short_by_state = {"sentry_off": 0.0, "sentry_on": 0.0, "unknown": 0.0}
 
-    for a, b in zip(ordered, ordered[1:]):
+    for a, b in zip(chain, chain[1:]):
         hours = (b.start_time - a.end_time).total_seconds() / 3600.0
         # Too short to be a park — see PARKED_MIN_GAP_HOURS. Not counted
         # anywhere, because it is not time the car spent parked; it is the
@@ -993,7 +1000,8 @@ def window_accounting(drives: list[Any], charges: list[Any] | None,
 
 def parked_share(drives: list[Any], charges: list[Any] | None,
                  capacity_kwh: float, readings: list[Any],
-                 anchor: tuple[datetime, float] | None = None) -> dict[str, Any]:
+                 anchor: tuple[datetime, float] | None = None,
+                 tail: tuple[datetime, float] | None = None) -> dict[str, Any]:
     """How much battery the window's parking actually ate, split by Sentry state.
 
     The question the codes were invented to answer, and it is a SUM rather than
@@ -1032,7 +1040,12 @@ def parked_share(drives: list[Any], charges: list[Any] | None,
     """
     ordered = sorted(drives, key=lambda d: d.start_time)
     boundary = SimpleNamespace(end_time=anchor[0], end_soc=anchor[1]) if anchor else None
-    chain = ([boundary] if boundary else []) + ordered
+    # ``tail`` is (now, soc_now): the park since the last drive, which no later
+    # drive closes yet. The mirror of ``anchor``, and it exists for the same
+    # reason — the since-charge Battery Used total runs to the current SoC, so
+    # a park left out here is drain the card and this row would disagree on.
+    closing = SimpleNamespace(start_time=tail[0], start_soc=tail[1]) if tail else None
+    chain = ([boundary] if boundary else []) + ordered + ([closing] if closing else [])
     index = _sentry_index(readings) if readings else None
     charge_starts = sorted(c.start_time for c in (charges or []))
     states = ("sentry_off", "sentry_on", "unknown")

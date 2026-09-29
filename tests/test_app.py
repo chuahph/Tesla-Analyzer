@@ -1562,13 +1562,13 @@ def test_recent_trips_capped_at_5_for_any_window_but_show_more_raises_it():
                 assert since["driving"]["total_drives"] == 7
                 assert len(since["driving"]["recent_trips"]) == 5  # capped, same as any window
 
-                days = client.get("/api/summary?days=90").json()
+                days = client.get("/api/summary?days=365").json()
                 assert days["driving"]["total_drives"] == 7
                 assert len(days["driving"]["recent_trips"]) == 5  # plain window, same cap
 
                 # "Show more" button: trips_limit raises the cap, for either
                 # window shape.
-                more = client.get("/api/summary?days=90&trips_limit=10").json()
+                more = client.get("/api/summary?days=365&trips_limit=10").json()
                 assert len(more["driving"]["recent_trips"]) == 7  # all there are, under the raised cap
 
                 since_more = client.get("/api/summary?since_charge=true&trips_limit=10").json()
@@ -12068,3 +12068,68 @@ def test_current_soc_prefers_the_streams_decimal_over_a_whole_point_reading():
                 state.delete(s, state.TELEMETRY_LATEST_KEY)
                 s.query(BatteryReading).filter(BatteryReading.ts == base).delete()
                 s.commit()
+
+
+def test_park_since_the_last_drive_is_idle_on_the_card_and_in_pk():
+    """Battery Used (since charge) runs to the current SoC, but idle only
+    measured gaps a later drive closes, so drain parked since the last trip —
+    hours of Sentry, say — was billed to "trip" by subtraction. Now it is
+    idle on the card and in the matrix's PK row alike."""
+    settings = get_settings()
+    old_pc, old_cap = settings.app_passcode, settings.battery_capacity_kwh
+    settings.app_passcode = ""
+    settings.battery_capacity_kwh = 70.0
+    try:
+        with TestClient(app) as client:
+            from app.database import SessionLocal
+            from app.models import BatteryReading, Charge, Drive, Vehicle
+
+            with SessionLocal() as s:
+                v = Vehicle(vin="TESTVIN-PARKTAIL", name="Test", model="Model 3")
+                s.add(v)
+                s.commit()
+                s.add(Charge(
+                    vehicle_id=v.id,
+                    start_time=datetime(2026, 7, 1, 19, 30), end_time=datetime(2026, 7, 1, 20, 0),
+                    duration_min=30, start_soc=80, end_soc=100, energy_added_kwh=14.0,
+                    charge_type="AC", max_power_kw=7, location="Home", cost=12.6,
+                ))
+                for start, end, ssoc, esoc in [
+                    (datetime(2026, 7, 2, 10, 0), datetime(2026, 7, 2, 10, 10), 97, 95),
+                    (datetime(2026, 7, 2, 10, 20), datetime(2026, 7, 2, 10, 30), 95, 93),
+                    (datetime(2026, 7, 2, 10, 40), datetime(2026, 7, 2, 10, 50), 93, 91),
+                ]:
+                    s.add(Drive(
+                        vehicle_id=v.id, start_time=start, end_time=end,
+                        distance_km=5, duration_min=10, start_soc=ssoc, end_soc=esoc,
+                        energy_used_kwh=0.5, avg_speed_kmh=30, max_speed_kmh=50, outside_temp_c=28,
+                    ))
+                # Parked since the last drive, and 2 points lower now.
+                s.add(BatteryReading(
+                    vehicle_id=v.id, ts=datetime(2026, 7, 2, 16, 0),
+                    soc=89, range_km=300.0, odo_km=1000.0,
+                ))
+                s.commit()
+
+            client.post("/api/active-vehicle", json={"vin": "TESTVIN-PARKTAIL"})
+            try:
+                bal = client.get("/api/summary?days=365&since_charge=true").json()["battery_balance"]
+                # 100% -> 89%: 3 before the first drive, 6 driving, 2 since.
+                assert bal["used_pct"] == 11.0
+                assert bal["vampire_kwh"] == round(5.0 / 100.0 * 70.0, 1)   # 3.5
+                assert bal["trip_kwh"] == round(6.0 / 100.0 * 70.0, 1)      # 4.2
+                matrix = client.get("/api/driving-matrix?days=365&since_charge=true").json()
+                pk = {row["code"]: row for row in matrix["parked"]}["PK"]
+                assert pk["kwh"] == bal["vampire_kwh"]
+                assert pk["pct"] == pytest.approx(5.0)
+            finally:
+                client.post("/api/active-vehicle", json={"vin": "DEMO0SAMPLE0000001"})
+                with SessionLocal() as s:
+                    s.query(Drive).filter(Drive.vehicle_id == v.id).delete()
+                    s.query(Charge).filter(Charge.vehicle_id == v.id).delete()
+                    s.query(BatteryReading).filter(BatteryReading.vehicle_id == v.id).delete()
+                    s.query(Vehicle).filter(Vehicle.id == v.id).delete()
+                    s.commit()
+    finally:
+        settings.app_passcode = old_pc
+        settings.battery_capacity_kwh = old_cap

@@ -9729,8 +9729,16 @@ def driving_matrix(days: int = Query(30, ge=1, le=730),
     # this rather than from the gaps their rate was fitted on, because those two
     # are different populations and using the fit's population is what stopped
     # the table summing to anything — see driving.window_accounting.
+    parked_anchor = (
+        (last_charge.end_time, last_charge.end_soc)
+        if limited_by == "charge" and last_charge is not None else None
+    )
+    park_tail = (_park_since_last_drive(
+        session, vehicle, list(drives), _current_soc(session, vehicle))
+        if parked_anchor is not None else None)
     acc = driving_analysis.window_accounting(
-        list(drives), list(charges), readings, since, now)
+        list(drives), list(charges), readings, since, now,
+        anchor=parked_anchor, tail=park_tail[:2] if park_tail else None)
     out["accounting"] = acc
     parked_hours = acc["parked"]["hours"]
     drive_kwh = acc["driving"]["kwh"]
@@ -9815,12 +9823,9 @@ def driving_matrix(days: int = Query(30, ge=1, le=730),
     # cutover or drawn boundary newer than the charge means the window does
     # not actually start at the charge, and anchoring to it anyway would
     # invent a gap this window was never in.
-    parked_anchor = (
-        (last_charge.end_time, last_charge.end_soc)
-        if limited_by == "charge" and last_charge is not None else None
-    )
     share_of = driving_analysis.parked_share(
-        list(drives), list(charges), capacity_kwh, readings, anchor=parked_anchor)
+        list(drives), list(charges), capacity_kwh, readings, anchor=parked_anchor,
+        tail=park_tail[:2] if park_tail else None)
     # PK = ID + SE. Two rows, because Sentry is on or off and there is no third
     # state — a park nothing recorded is a gap in what THIS APP SAW, not a
     # category of park, and giving it a row of its own said the opposite.
@@ -12487,6 +12492,22 @@ def summary(
     # analyze() itself uses, just anchored to the more accurate total.
     vd = (driving.get("vampire_drain") or {}) if driving.get("available") else {}
     vampire_kwh = vd.get("kwh", 0.0)
+    vampire_hours = vd.get("hours", 0.0)
+    vampire_gaps = vd.get("gaps", 0)
+    # The park since the last drive. vampire_drain only measures gaps that a
+    # later drive closes, but the ground-truth total runs to the current SoC,
+    # so without this whatever the car drew parked since its last trip (hours
+    # of Sentry, say) landed in "trip" by subtraction. Skipped while a drive is
+    # in progress: the fall since the last trip is then driving, not standing.
+    tail = (_park_since_last_drive(session, vehicle, drives, current_soc)
+            if ground_truth_used_kwh is not None and live is None else None)
+    if tail is not None:
+        last_drive, now_soc = tail[2], tail[1]
+        vampire_kwh += max(float(last_drive.end_soc) - now_soc, 0.0) / 100.0 * capacity_kwh
+        tail_h = (tail[0] - last_drive.end_time).total_seconds() / 3600.0
+        if tail_h >= driving_analysis.VAMPIRE_MIN_GAP_HOURS:
+            vampire_hours = round(vampire_hours + tail_h, 1)
+            vampire_gaps += 1
     if ground_truth_used_kwh is not None:
         # Cap the idle share at the (rounded) total before deriving trip by
         # subtraction: SoC can rebound a little while parked (BMS re-reading
@@ -12531,8 +12552,8 @@ def summary(
         "current_soc_pct": round(current_soc, 1) if current_soc is not None else None,
         "trip_kwh": trip_kwh,
         "vampire_kwh": vampire_kwh,
-        "vampire_hours": vd.get("hours", 0.0),
-        "vampire_gaps": vd.get("gaps", 0),
+        "vampire_hours": vampire_hours,
+        "vampire_gaps": vampire_gaps,
         # The single longest qualifying parked gap this window, separate from
         # the aggregate above — e.g. "that's when I was away for the
         # weekend" vs. day-to-day idle drain.
@@ -13030,6 +13051,25 @@ def _telemetry_value(entry: dict) -> Any:
             return None
         return inner
     return value
+
+
+def _park_since_last_drive(session: Session, vehicle, drives, current_soc):
+    """(now, current_soc, last_drive) for the park since the window's last
+    drive, or None when there is none to measure: no drives, no current SoC,
+    or a drive in progress — the fall since the last trip is then driving,
+    not standing. Shared by the since-charge card and the matrix's parked
+    rows so the two count the same park."""
+    if not drives or current_soc is None:
+        return None
+    if _live_from_stream(session, vehicle.vin)[0] is not None:
+        return None
+    last_drive = max(drives, key=lambda x: x.end_time)
+    if last_drive.end_soc is None:
+        return None
+    now = sync_mod.now_local()
+    if now <= last_drive.end_time:
+        return None
+    return now, float(current_soc), last_drive
 
 
 def _current_soc(session: Session, vehicle) -> float | None:
