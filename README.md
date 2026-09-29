@@ -375,9 +375,8 @@ only after 7 days of zero activity — which any cron makes moot.
 
 **Neon** also works but meters compute with a 5-minute auto-suspend: a cron
 tighter than that keeps it active around the clock and spends the 100 CU-hour
-monthly cap in roughly half a month. If you are on Neon, use the split-job
-arrangement in [Choosing the interval](#choosing-the-interval) so the frequent
-job hits `/api/health` and `/api/sync` stays past the suspend window.
+monthly cap in roughly half a month. The recommended 30-minute watchdog (see
+[Choosing the interval](#choosing-the-interval)) stays well clear of that.
 
 Render's legacy `postgres://` scheme is normalised automatically, and hosted
 databases that drop idle connections are handled with pre-ping, so neither
@@ -492,16 +491,14 @@ is free and reliable enough for this:
 
 Render's free host sleeping between ticks is acceptable: each tick wakes it,
 and so does the telemetry bridge, which spools any batch it cannot deliver and
-resends it once the app answers. A keep-alive job is optional (below) and only
-saves the loading splash on a dashboard opened after a quiet spell.
+resends it once the app answers. The only cost is a short loading splash on a
+dashboard opened after a quiet spell.
 
 Any similar service works the same way — UptimeRobot (as an "HTTP(s)" monitor,
 which incidentally also gets you uptime alerts for free), EasyCron, or your
 own always-on machine's system `cron` calling `curl`.
 
 ### Choosing the interval
-
-Two limits pull in opposite directions, and they are not the same limit.
 
 **The host sleeping between ticks is fine; a tick that never completes is
 not.** Render's free tier stops the service after fifteen minutes with no
@@ -519,40 +516,23 @@ on an awake car, subject to `SYNC_POLL_INTERVAL_MIN`. Those reads are billed,
 and each one is itself an activity signal that resets Tesla's sleep countdown
 — so a tight cron keeps the car awake, which costs real battery.
 
-**If you want the host kept warm too, use a second job.** A single
-`/api/sync` under fifteen minutes would keep Render awake, but only by reading
-an awake car that often. A keep-alive needs nothing but a request, so it can
-go to a path that touches neither the car nor the database.
-
-`/api/ping` is an open path that does nothing at all: no passcode, no Tesla
-call, and no database query, so a keep-alive costs no database egress either
-(`/api/health` also works but reads the database on every call). So:
-
-| job | url | interval |
-| --- | --- | --- |
-| keep-alive (optional) | `https://<your-app>.onrender.com/api/ping` | 10 min |
-| watchdog | `https://<your-app>.onrender.com/api/sync?key=<SYNC_KEY>` | 20-30 min |
-
-The keep-alive holds the host awake for free at any `/api/sync` cadence, and
-`/api/sync` is then free to be as sparse as the car wants. With the watchdog at
-30 minutes and `BRIDGE_QUIET_ALERT_MIN` at 20, a dead telemetry path is
+**30 minutes is the recommended interval.** With `BRIDGE_QUIET_ALERT_MIN` at
+20, a dead telemetry path is
 reported 20-50 minutes after it dies — the right resolution for a fault whose
 remedy is a trip to the VM, and no reason to read the car more often.
 
-**Running only `/api/sync`, tightened, is the tempting mistake.** It looks like
-one job instead of two and it keeps the host warm, but it buys that by reading
-an awake car every ten minutes forever, which is the one thing the interval was
-supposed to avoid.
+**Tightening it to keep the host awake is the tempting mistake.** A
+`/api/sync` under fifteen minutes would stop Render sleeping, but only by
+reading an awake car that often, forever — the one thing the interval is
+there to avoid.
 
 **Your database choice used to constrain this and mostly no longer does.**
 Every tick touches the database, so the interval decides how continuously that
 compute stays active. Supabase's free tier does not meter compute hours (it
 pauses a project only after 7 days of zero activity, which any cron makes
 moot), so the cadence is free indefinitely there. Neon's free tier *does*
-meter, with a 5-minute auto-suspend: a cron tighter than that keeps it active
-~24/7 and spends the 100 CU-hour monthly cap in roughly half a month. On Neon,
-the split-job arrangement above is the way to have both — point the frequent
-job at `/api/health` and let `/api/sync` run past the suspend window.
+meter, with a 5-minute auto-suspend, but a 30-minute watchdog lets it suspend
+between ticks, so the recommended cadence is cheap there too.
 
 **How often you call this doesn't force how often the car is read.** The
 endpoint decides that for itself: it never reads a car that's asleep, and
