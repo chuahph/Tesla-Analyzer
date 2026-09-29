@@ -311,7 +311,7 @@
                     <li><code>APP_PASSCODE</code> — any passcode you like; the app asks for it
                       so only you can open your dashboard.</li>
                     <li><code>SYNC_KEY</code> — any long secret word. The relay server
-                      (Step 5) and the cron (Step 8) use it to talk to your app, so keep it
+                      (Step 5) and the watchdog cron (Step 8) use it to talk to your app, so keep it
                       handy.</li>
                     <li><code>TESLA_CLIENT_ID</code> / <code>TESLA_CLIENT_SECRET</code> — leave
                       blank for now; you'll get these in Step 4 and add them after.</li>
@@ -495,7 +495,7 @@
 
         <li>
           <details>
-            <summary><span class="gs-num">8</span> ⏰ Watchdog cron — required</summary>
+            <summary><span class="gs-num">8</span> ⏰ Two cron jobs — required</summary>
             <div class="gs-body">
               <p><strong>Why:</strong> trips and charges now arrive by themselves (Step 7), but
                 a one-way stream can't tell you when it has stopped. A regular ping to
@@ -504,15 +504,20 @@
                 goes unnoticed and trips are silently lost.</p>
               <ol>
                 <li>Open <strong>cron-job.org</strong> (free) → create a free account.</li>
-                <li><strong>Create cronjob</strong> → URL:
-                  <code>https://&lt;your-app&gt;/api/sync?key=YOUR_SYNC_KEY</code>
-                  (the <code>SYNC_KEY</code> from Step 3).</li>
-                <li>Set the schedule to <strong>every 10 minutes</strong> → Save. Anything slower
-                  than 15 minutes lets Render fall asleep, which switches the watchdog off.</li>
+                <li><strong>Keep-alive</strong> — Create cronjob → URL
+                  <code>https://&lt;your-app&gt;/api/ping</code>, every
+                  <strong>10 minutes</strong>. Render's free plan sleeps after 15 minutes without
+                  a visit, and a sleeping app runs no watchdog. This one never touches the car.</li>
+                <li><strong>Watchdog</strong> — Create cronjob → URL
+                  <code>https://&lt;your-app&gt;/api/sync?key=YOUR_SYNC_KEY</code> (the
+                  <code>SYNC_KEY</code> from Step 3), every <strong>30 minutes</strong>. A dead
+                  stream is then reported within about 20–50 minutes.</li>
               </ol>
-              <p class="gs-note">🔋 <strong>Safe for the battery.</strong> The ping reads the car
-                only every few minutes at most, and not at all while it's asleep, so it won't
-                cause vampire drain.</p>
+              <p class="gs-note">🔋 <strong>Why two jobs, not one fast one.</strong> Each watchdog
+                tick can read an awake car, and every read is billed by Tesla and resets the
+                car's sleep timer. Running <code>/api/sync</code> every 10 minutes would keep
+                the car awake and draining. The keep-alive holds Render awake for free, so the
+                watchdog can stay sparse. It never reads a car that's asleep.</p>
               <p class="gs-note gs-note-warn">🤖 <strong>Rather not use a third-party site?</strong>
                 Your fork includes a backup <strong>"Sync car from Tesla"</strong> GitHub Actions
                 workflow, but its schedule is disabled by default — GitHub runs scheduled

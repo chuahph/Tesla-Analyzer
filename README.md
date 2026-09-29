@@ -482,14 +482,16 @@ Any service that can hit a URL on a schedule works. [cron-job.org](https://cron-
 is free and reliable enough for this:
 
 1. Create a free account.
-2. **Create cronjob** → URL:
+2. **Keep-alive**: create a cronjob for
+   `https://<your-app>.onrender.com/api/ping` every **10 minutes**. It keeps
+   Render's free host awake and touches neither the car nor the database.
+3. **Watchdog**: create a cronjob for
    ```
    https://<your-app>.onrender.com/api/sync?key=<SYNC_KEY>
    ```
-   (`SYNC_KEY` is whatever you set in Render's environment variables — see the
-   Render blueprint section above.)
-3. Set the schedule to **every 10 minutes** — see "choosing the interval"
-   below, and the battery-safety note for why this doesn't drain the car.
+   every **30 minutes** (`SYNC_KEY` is whatever you set in Render's environment
+   variables). See "choosing the interval" below for why these are two jobs
+   rather than one fast `/api/sync`.
 4. Save. That's it; no repository secrets or GitHub Actions involved.
 
 Any similar service works the same way — UptimeRobot (as an "HTTP(s)" monitor,
@@ -521,13 +523,13 @@ two limits overlap only where the car is being read more often than it should
 be. Splitting them costs nothing, because only the watchdog needs `/api/sync`
 — keeping the host warm needs nothing but a request.
 
-`/api/health` is an open path: no passcode, no Tesla call, and no write (it
-resolves `data_source` through `active_token`, which reads settings and
-returns). So:
+`/api/ping` is an open path that does nothing at all: no passcode, no Tesla
+call, and no database query, so a keep-alive costs no database egress either
+(`/api/health` also works but reads the database on every call). So:
 
 | job | url | interval |
 | --- | --- | --- |
-| keep-alive | `https://<your-app>.onrender.com/api/health` | 10 min |
+| keep-alive | `https://<your-app>.onrender.com/api/ping` | 10 min |
 | watchdog | `https://<your-app>.onrender.com/api/sync?key=<SYNC_KEY>` | 20-30 min |
 
 The keep-alive holds the host awake for free at any `/api/sync` cadence, and
