@@ -60,6 +60,45 @@ def _gap_moved_km(a: Any, b: Any) -> float | None:
     return float(start_odo) - float(end_odo)
 
 
+# How far below zero a park measured on the energy gauge may read before it is
+# treated as a broken bracket rather than the 0.02 kWh step of EnergyRemaining.
+GAP_ENERGY_TOLERANCE_KWH = 0.2
+
+
+def _gap_energy_kwh(a: Any, b: Any) -> float | None:
+    """What the pack lost parked between ``a`` and ``b``, in kWh, measured on
+    the EnergyRemaining gauge the trips themselves are measured on — or None
+    when it cannot be, and the caller keeps the Soc measure.
+
+    Telescoped from the start readings rather than read as a.end − b.start:
+    a's start reading minus what a was billed is where a left the pack, so
+    whatever a's billed energy includes (a tail recovered at its own Wh/km, a
+    later arrival reading) is counted there once and not again here, and
+    trips plus parks add up to exactly what the gauge fell. Soc drops are a
+    different gauge — about 1.6% apart from EnergyRemaining over one charge
+    measured on this car — and read high after a rest; mixing the two is what
+    put the matrix 0.8 points over the dashboard.
+
+    ``b`` may be the window's closing boundary, whose start_energy_kwh is the
+    car's current reading. Refused rather than guessed where the bracket is
+    not plausible for a park: more than tolerance below zero (an edited trip,
+    a missed reading), or more than the highest plausible standby draw for
+    its length.
+    """
+    e_a = getattr(a, "start_energy_kwh", None)
+    e_b = getattr(b, "start_energy_kwh", None)
+    used = getattr(a, "energy_used_kwh", None)
+    if e_a is None or e_b is None or used is None:
+        return None
+    gap = float(e_a) - float(used) - float(e_b)
+    hours = (b.start_time - a.end_time).total_seconds() / 3600.0
+    if gap < -GAP_ENERGY_TOLERANCE_KWH or hours <= 0:
+        return None
+    if gap > STANDBY_PLAUSIBLE_KW[1] * hours + GAP_ENERGY_TOLERANCE_KWH:
+        return None
+    return gap
+
+
 def odometer_continuity(drives: list[Any], readings: list[Any]) -> dict[str, Any]:
     """Check each trip's recorded stop against where the car was actually seen
     resting afterwards, and report the ground no trip claims.
@@ -1044,7 +1083,9 @@ def parked_share(drives: list[Any], charges: list[Any] | None,
     # drive closes yet. The mirror of ``anchor``, and it exists for the same
     # reason — the since-charge Battery Used total runs to the current SoC, so
     # a park left out here is drain the card and this row would disagree on.
-    closing = SimpleNamespace(start_time=tail[0], start_soc=tail[1]) if tail else None
+    closing = (SimpleNamespace(start_time=tail[0], start_soc=tail[1],
+                               start_energy_kwh=tail[2] if len(tail) > 2 else None)
+               if tail else None)
     chain = ([boundary] if boundary else []) + ordered + ([closing] if closing else [])
     index = _sentry_index(readings) if readings else None
     charge_starts = sorted(c.start_time for c in (charges or []))
@@ -1084,8 +1125,12 @@ def parked_share(drives: list[Any], charges: list[Any] | None,
             unread.append(row_gap)
         # Signed, for the reason _gap_totals is: clipping each gap at zero
         # rectifies the rounding, and a total built from rectified noise reads
-        # high by exactly the half it threw away.
-        pts[key] += a.end_soc - b.start_soc
+        # high by exactly the half it threw away. On the energy gauge where
+        # both ends carry it (see _gap_energy_kwh), expressed as points of
+        # the same pack so the rows keep one unit.
+        gap_kwh = _gap_energy_kwh(a, b)
+        pts[key] += (gap_kwh / capacity_kwh * 100.0 if gap_kwh is not None and capacity_kwh
+                     else a.end_soc - b.start_soc)
         hrs[key] += hours
         gaps[key] += 1
 
@@ -1650,6 +1695,15 @@ def vampire_drain(
         # whole gap.
         park_min = getattr(b, "start_park_min", None) or 0.0
         measured_hours = max(gap_hours - park_min / 60.0, 0.0)
+        # Both ends streamed: the energy gauge measures the gap to 0.02 kWh, so
+        # neither the whole-point workaround below nor the polled add-back
+        # applies — see _gap_energy_kwh.
+        gap_kwh = _gap_energy_kwh(a, b)
+        if gap_kwh is not None:
+            kwh = max(gap_kwh, 0.0)
+            drop_pct = kwh / capacity_kwh * 100.0
+            park_min = 0.0
+            measured_hours = 0.0
         if measured_hours > 0:
             rate = park_rate(getattr(a, "end_location", None),
                              gap_sentry_state(readings, gap_start, gap_end)

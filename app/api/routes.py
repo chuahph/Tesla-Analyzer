@@ -9,6 +9,7 @@ import re
 import threading
 import time
 from datetime import datetime, timedelta
+from types import SimpleNamespace
 from typing import Any
 
 import httpx
@@ -5002,7 +5003,9 @@ def _apply_shadow_to_drive(row, t: dict) -> None:
                        ("start_odo_km", "start_odo_km"),
                        ("end_odo_km", "end_odo_km"),
                        ("outside_temp_c", "out_temp"),
-                       ("out_temp_end_c", "out_temp_end")):
+                       ("out_temp_end_c", "out_temp_end"),
+                       ("start_energy_kwh", "start_energy_kwh"),
+                       ("end_energy_kwh", "end_energy_kwh")):
         value = t.get(key)
         if value is not None:
             setattr(row, field, float(value))
@@ -9738,7 +9741,7 @@ def driving_matrix(days: int = Query(30, ge=1, le=730),
         if parked_anchor is not None else None)
     acc = driving_analysis.window_accounting(
         list(drives), list(charges), readings, since, now,
-        anchor=parked_anchor, tail=park_tail[:2] if park_tail else None)
+        anchor=parked_anchor, tail=park_tail[:3] if park_tail else None)
     out["accounting"] = acc
     parked_hours = acc["parked"]["hours"]
     drive_kwh = acc["driving"]["kwh"]
@@ -9825,7 +9828,7 @@ def driving_matrix(days: int = Query(30, ge=1, le=730),
     # invent a gap this window was never in.
     share_of = driving_analysis.parked_share(
         list(drives), list(charges), capacity_kwh, readings, anchor=parked_anchor,
-        tail=park_tail[:2] if park_tail else None)
+        tail=park_tail[:3] if park_tail else None)
     # PK = ID + SE. Two rows, because Sentry is on or off and there is no third
     # state — a park nothing recorded is a gap in what THIS APP SAW, not a
     # category of park, and giving it a row of its own said the opposite.
@@ -12506,8 +12509,11 @@ def summary(
     tail = (_park_since_last_drive(session, vehicle, drives, current_soc)
             if ground_truth_used_kwh is not None and live is None else None)
     if tail is not None:
-        last_drive, now_soc = tail[2], tail[1]
-        vampire_kwh += max(float(last_drive.end_soc) - now_soc, 0.0) / 100.0 * capacity_kwh
+        last_drive, now_soc = tail[3], tail[1]
+        tail_kwh = driving_analysis._gap_energy_kwh(
+            last_drive, SimpleNamespace(start_time=tail[0], start_energy_kwh=tail[2]))
+        vampire_kwh += (max(tail_kwh, 0.0) if tail_kwh is not None else
+                        max(float(last_drive.end_soc) - now_soc, 0.0) / 100.0 * capacity_kwh)
         tail_h = (tail[0] - last_drive.end_time).total_seconds() / 3600.0
         if tail_h >= driving_analysis.VAMPIRE_MIN_GAP_HOURS:
             vampire_hours = round(vampire_hours + tail_h, 1)
@@ -12527,7 +12533,7 @@ def summary(
             list(drives), list(charges), capacity_kwh,
             _hist("parked_readings", _parked_readings, session, vehicle.id),
             anchor=(last_charge.end_time, last_charge.end_soc),
-            tail=tail[:2] if tail else None)
+            tail=tail[:3] if tail else None)
         park_kwh = share["total"]["kwh"] or 0.0
         drive_kwh = sum(float(d.energy_used_kwh or 0.0) for d in drives)
         used_kwh = max(drive_kwh + park_kwh, 0.0)
@@ -13080,12 +13086,28 @@ def _telemetry_value(entry: dict) -> Any:
     return value
 
 
+def _current_energy_kwh(session: Session, vehicle) -> float | None:
+    """The car's latest streamed EnergyRemaining, in kWh, or None."""
+    import json as _json
+
+    try:
+        latest = _json.loads(state.get(session, state.TELEMETRY_LATEST_KEY) or "{}") or {}
+    except ValueError:
+        return None
+    car = latest.get(vehicle.vin) if isinstance(latest, dict) else None
+    if not isinstance(car, dict):
+        return None
+    ts = _telemetry_ts(car.get("_ts"))
+    return sync_mod.snapshot_from_telemetry(car, ts)["energy_kwh"] if ts else None
+
+
 def _park_since_last_drive(session: Session, vehicle, drives, current_soc):
-    """(now, current_soc, last_drive) for the park since the window's last
-    drive, or None when there is none to measure: no drives, no current SoC,
-    or a drive in progress — the fall since the last trip is then driving,
-    not standing. Shared by the since-charge card and the matrix's parked
-    rows so the two count the same park."""
+    """(now, current_soc, current_energy_kwh, last_drive) for the park since
+    the window's last drive, or None when there is none to measure: no
+    drives, no current SoC, or a drive in progress — the fall since the last
+    trip is then driving, not standing. Shared by the since-charge card and
+    the matrix's parked rows so the two count the same park. The energy is
+    None off the stream, and the park then keeps the Soc measure."""
     if not drives or current_soc is None:
         return None
     if _live_from_stream(session, vehicle.vin)[0] is not None:
@@ -13096,7 +13118,7 @@ def _park_since_last_drive(session: Session, vehicle, drives, current_soc):
     now = sync_mod.now_local()
     if now <= last_drive.end_time:
         return None
-    return now, float(current_soc), last_drive
+    return now, float(current_soc), _current_energy_kwh(session, vehicle), last_drive
 
 
 def _displayed_level(session: Session, vehicle) -> float | None:

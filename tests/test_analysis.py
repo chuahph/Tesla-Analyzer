@@ -4497,3 +4497,36 @@ def test_a_mixed_trip_lands_under_one_row_with_its_own_real_idle():
     row = out["modes"][0]
     assert row["mode"] == "HC"
     assert row["idle_share_pct"] == pytest.approx(15.0 / 20.0 * 100.0, abs=0.5)
+
+
+def test_parked_drain_uses_the_energy_gauge_between_streamed_trips():
+    """Between two streamed trips a park is measured on EnergyRemaining — the
+    gauge trip energy uses — telescoped from the start readings, so trips plus
+    parks add up to exactly what the gauge fell. An implausible bracket falls
+    back to Soc points."""
+    from datetime import datetime
+    from types import SimpleNamespace as N
+
+    from app.analysis import driving
+
+    a = N(start_time=datetime(2026, 9, 29, 7, 0), end_time=datetime(2026, 9, 29, 8, 0),
+          start_soc=80.0, end_soc=72.0, start_energy_kwh=55.0, energy_used_kwh=5.5,
+          source="telemetry", distance_km=40.0, duration_min=60.0)
+    b = N(start_time=datetime(2026, 9, 29, 16, 0), end_time=datetime(2026, 9, 29, 17, 0),
+          start_soc=69.0, end_soc=60.0, start_energy_kwh=48.3, energy_used_kwh=6.0,
+          source="telemetry", distance_km=40.0, duration_min=60.0)
+    # 55.0 - 5.5 - 48.3 = 1.2 kWh, not the 3 Soc points (2.06 kWh) between them.
+    assert driving._gap_energy_kwh(a, b) == pytest.approx(1.2)
+    share = driving.parked_share([a, b], [], 68.6, [])
+    assert share["total"]["kwh"] == pytest.approx(1.2, abs=0.01)
+    vd = driving.vampire_drain([a, b], [], 68.6)
+    assert vd["kwh"] == pytest.approx(1.2, abs=0.01)
+
+    # A reading that would make the park gain energy is a broken bracket.
+    b.start_energy_kwh = 50.5
+    assert driving._gap_energy_kwh(a, b) is None
+    share = driving.parked_share([a, b], [], 68.6, [])
+    assert share["total"]["pct"] == pytest.approx(3.0)
+    # And a trip without readings keeps the Soc measure.
+    b.start_energy_kwh = None
+    assert driving._gap_energy_kwh(a, b) is None

@@ -288,6 +288,13 @@ class Drive(Base):
     # rather than writing.
     recovered_km: Mapped[float | None] = mapped_column(Float, nullable=True)
     recovered_kwh: Mapped[float | None] = mapped_column(Float, nullable=True)
+    # The car's EnergyRemaining when the stream opened and closed this trip.
+    # Parked drain between two streamed trips is measured from these, in the
+    # same kWh gauge as energy_used_kwh, rather than from Soc points — see
+    # driving._gap_energy_kwh. Null on polled trips and on trips streamed
+    # before the columns existed; those parks keep the Soc measure.
+    start_energy_kwh: Mapped[float | None] = mapped_column(Float, nullable=True)
+    end_energy_kwh: Mapped[float | None] = mapped_column(Float, nullable=True)
     # Which of recover_sleep_gap's three call sites actually fired ("open",
     # "close-live", "close-settled" or "backfill") and when, local time. The
     # "open" fast path needs the next trip's very first telemetry record to
