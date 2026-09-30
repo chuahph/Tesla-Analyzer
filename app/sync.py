@@ -2038,11 +2038,17 @@ HW_STOP_PTS_MAX = 30
 # as unaccounted_km and can raise the number with a measurement behind it.
 SHADOW_TAIL_MAX_KM = 0.6
 # How much of a BLIND carpark gap — no parked reading either side, so the car
-# arrived and left without signal — belongs to the departure. Half: the
-# driver's account of the Home carpark is 0.15-0.25 km in and roughly the
-# same out, and trips 3154/3155 (0.426 km gap; car 7.1 and 9.3 against 6.74
-# and 9.18 unrecovered) put it within a few tens of metres of even.
-DEPARTURE_SHARE_BLIND = 0.5
+# arrived and left without signal — belongs to the departure. A fixed amount,
+# not a share: the departure is awake the whole way out, so the car buffers
+# what it cannot send and replays it once the signal returns — however many
+# km that takes. What is lost is only the moment before its first recorded
+# reading. The arrival is different: the car sleeps before the signal comes
+# back, the buffer is dropped, and everything after the signal died is gone,
+# which varies with where it died. Trip 3155 left Home with no signal and
+# read 9.18 against the car's 9.3 — about 0.1 km short, not the kilometres it
+# took to reconnect. So the departure gets this much (never more than half
+# the gap) and the arrival gets the rest.
+DEPARTURE_BLIND_KM = 0.15
 
 
 def amend_closed_trip(trip: dict[str, Any], snap: dict[str, Any]) -> bool:
@@ -2436,8 +2442,8 @@ def recover_sleep_gap(prev: dict[str, Any], nxt: dict[str, Any],
     # 3154/3155 at Home: 0.426 km, all credited to 3154, which then read 7.17
     # against the car's 7.1 while 3155 read 9.18 against 9.3. The driver's
     # own account of that carpark is 0.15-0.25 km in and about the same out,
-    # so the blind gap is split down the middle: half ends the arriving trip,
-    # half starts the departing one (DEPARTURE_SHARE_BLIND).
+    # so the departing trip gets its fixed share (DEPARTURE_BLIND_KM, at most
+    # half the gap) and the arriving one the rest.
     #
     # The split is remembered on the arriving trip (handover_to_odo_km), so a
     # second call for the same pair — the "open" call site credits the
@@ -2453,7 +2459,7 @@ def recover_sleep_gap(prev: dict[str, Any], nxt: dict[str, Any],
     else:
         if whole > SHADOW_TAIL_MAX_KM:
             return False
-        boundary = float(end_odo) + whole * (1.0 - DEPARTURE_SHARE_BLIND)
+        boundary = float(end_odo) + whole - min(DEPARTURE_BLIND_KM, whole / 2.0)
     gain = round(boundary - float(end_odo), 3)
     if gain <= 0.0 or gain > SHADOW_TAIL_MAX_KM:
         return False

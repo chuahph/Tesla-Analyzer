@@ -5453,8 +5453,8 @@ def test_recovering_gaps_on_stored_trips_previews_before_it_writes():
         with TestClient(app) as client:
             preview = client.get("/api/telemetry/recover-gaps").json()
             assert preview["would_recover"] == 1, preview
-            # Blind (nothing saw it parked): half the gap is the arrival's.
-            assert preview["trips"][0]["recovered_km"] == pytest.approx(0.169, abs=0.002)
+            # Blind (nothing saw it parked): all but the departure's 0.15 km.
+            assert preview["trips"][0]["recovered_km"] == pytest.approx(0.188, abs=0.002)
             # Preview means preview.
             stored = _json.loads(state.get(SessionLocal(), state.TELEMETRY_TRIPS_KEY))
             assert stored[0]["distance_km"] == 3.795
@@ -5462,16 +5462,16 @@ def test_recovering_gaps_on_stored_trips_previews_before_it_writes():
             done = client.get("/api/telemetry/recover-gaps?apply=true").json()
             assert done["recovered"] == 1
             stored = _json.loads(state.get(SessionLocal(), state.TELEMETRY_TRIPS_KEY))
-            assert stored[0]["distance_km"] == pytest.approx(3.964, abs=0.002)
-            # And the other half starts the departing trip.
-            assert stored[1]["distance_km"] == pytest.approx(3.970, abs=0.002)
-            assert stored[1]["start_recovered_km"] == pytest.approx(0.169, abs=0.002)
+            assert stored[0]["distance_km"] == pytest.approx(3.983, abs=0.002)
+            # And the departure's share starts the departing trip.
+            assert stored[1]["distance_km"] == pytest.approx(3.951, abs=0.002)
+            assert stored[1]["start_recovered_km"] == pytest.approx(0.15, abs=0.002)
 
             # Run it again: the trips now meet, so there is nothing to take.
             again = client.get("/api/telemetry/recover-gaps?apply=true").json()
             assert again["recovered"] == 0
             stored = _json.loads(state.get(SessionLocal(), state.TELEMETRY_TRIPS_KEY))
-            assert stored[0]["distance_km"] == pytest.approx(3.964, abs=0.002)
+            assert stored[0]["distance_km"] == pytest.approx(3.983, abs=0.002)
     finally:
         state.put(sess, state.TELEMETRY_TRIPS_KEY, prev or "[]")
         sess.commit()
@@ -5552,7 +5552,7 @@ def test_the_next_morning_s_departure_pays_back_last_night_s_arrival():
                               gear="ShiftStateP", kwh=56.0, soc=80.0))
             post(_tele_record(vin, t0 + 10, mph=25.0, gear="ShiftStateD"))
             opened = _json.loads(state.get(SessionLocal(), state.TELEMETRY_TRIPS_KEY))
-            assert opened[0]["recovered_km"] == pytest.approx(lost_km / 2, abs=0.002), \
+            assert opened[0]["recovered_km"] == pytest.approx(lost_km - 0.15, abs=0.002), \
                 "paid back at the departure, not at the next arrival"
 
             t = drive(31161.861 + lost_km, 31166.0, t + 43000)
@@ -5563,18 +5563,18 @@ def test_the_next_morning_s_departure_pays_back_last_night_s_arrival():
 
         assert len(trips) == 2, [t_["start_time"] for t_ in trips]
         night, morning = trips
-        # Nothing saw the car parked, so it arrived and left blind: half the
-        # gap ends the night, half starts the morning.
-        assert night["recovered_km"] == pytest.approx(lost_km / 2, abs=0.002)
+        # Nothing saw the car parked, so it arrived and left blind: 0.15 km
+        # starts the morning and the rest ends the night.
+        assert night["recovered_km"] == pytest.approx(lost_km - 0.15, abs=0.002)
         # And by this path, not the late-arrival one, which the night ruled out.
         assert night.get("tail_amended_km") is None
         assert night["end_odo_km"] == pytest.approx(morning["start_odo_km"], abs=0.002)
         # Distance recomputed from the bracket, so the two trips now meet and
         # nothing is left in the gap between them.
-        assert night["distance_km"] == pytest.approx(3.795 + lost_km / 2, abs=0.003)
-        assert morning["start_recovered_km"] == pytest.approx(lost_km / 2, abs=0.002)
+        assert night["distance_km"] == pytest.approx(3.795 + lost_km - 0.15, abs=0.003)
+        assert morning["start_recovered_km"] == pytest.approx(0.15, abs=0.002)
         assert morning["distance_km"] == pytest.approx(
-            31166.0 - 31161.861 - lost_km / 2, abs=0.01)
+            31166.0 - 31161.861 - lost_km + 0.15, abs=0.01)
     finally:
         state.put(sess, state.TELEMETRY_TRIPS_KEY, prev_trips or "[]")
         state.put(sess, state.TELEMETRY_SHADOW_KEY, prev_shadow or "{}")
