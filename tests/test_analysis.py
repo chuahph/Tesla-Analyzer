@@ -4552,3 +4552,15 @@ def test_the_park_after_a_charge_cannot_count_negative():
     # Between trips a small rise is kept, signed, as rounding that cancels.
     assert second["pct"] == pytest.approx(-0.19)
     assert share["total"]["pct"] == pytest.approx(-0.19)
+
+    # A lag of more than a whole point is still the charge's reading, not a
+    # journey: counted as zero and kept as parked hours, not skipped.
+    anchor = (datetime(2026, 9, 26, 13, 33), 78.4)
+    share = driving.parked_share([a, b], [], 68.63, [], anchor=anchor)
+    first = share["parks"][0]
+    assert "skipped" not in first and first["pct"] == 0.0
+    acc = driving.window_accounting([a, b], [], [], anchor[0],
+                                    datetime(2026, 9, 26, 17, 0), anchor=anchor)
+    assert acc["excluded"]["hours"] == 0.0
+    assert acc["parked"]["hours"] == pytest.approx(
+        (8 + 160) / 60.0, abs=0.05)

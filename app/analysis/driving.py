@@ -988,8 +988,12 @@ def window_accounting(drives: list[Any], charges: list[Any] | None,
             charging_gaps += 1
             continue
         moved = _gap_moved_km(a, b)
+        # A rise after the charge is the charge's lagging reading, not a
+        # journey or a missed charge — parked_share counts that park as zero,
+        # so its hours are parked here too.
+        after_charge = anchor is not None and a is chain[0]
         if (moved is not None and moved > PARKED_GAP_MAX_MOVE_KM) or (
-                b.start_soc - a.end_soc > SOC_RISE_TOLERANCE_PCT):
+                not after_charge and b.start_soc - a.end_soc > SOC_RISE_TOLERANCE_PCT):
             excluded_hours += hours
             excluded_gaps += 1
             continue
@@ -1120,7 +1124,7 @@ def parked_share(drives: list[Any], charges: list[Any] | None,
         if moved is not None and moved > PARKED_GAP_MAX_MOVE_KM:
             park["skipped"] = f"odometer moved {moved:.2f} km"
             continue
-        if b.start_soc - a.end_soc > SOC_RISE_TOLERANCE_PCT:
+        if a is not boundary and b.start_soc - a.end_soc > SOC_RISE_TOLERANCE_PCT:
             park["skipped"] = "SoC rose across it"
             continue
         armed = index.state(a.end_time, b.start_time) if index else None
