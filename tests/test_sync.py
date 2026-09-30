@@ -837,10 +837,12 @@ def test_the_car_s_own_bms_ends_a_trip_while_the_driver_is_still_seated():
                                            gear="ShiftStateP", speed_mph=0.0))
     assert trip is not None
     assert trip["ended_on"] == "bms"
-    # Ends when the car STOPPED, not when the BMS got round to saying so.
-    assert trip["end_ts"] == 660
-    # ...but measured with the newer odometer, which is what a settled
-    # arrival reading is for.
+    # Ends when the car powered down, as the car's own Trips screen does: a
+    # wait in P with the drivetrain live is part of the drive (trip 3153,
+    # 30 September — the car showed ~22 min where the stop gave 6).
+    assert trip["end_ts"] == 720
+    assert trip["duration_min"] == pytest.approx(12.0)
+    # Measured with the reading taken at that moment.
     assert trip["end_odo_km"] == pytest.approx(106.02 * MILES_TO_KM, abs=0.01)
 
 

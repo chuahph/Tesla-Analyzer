@@ -1547,8 +1547,8 @@ def settle_shadow(shadow: dict[str, Any], now_ts: float) -> dict[str, Any] | Non
     if (shadow.get("bms_seen_drive")
             and last.get("bms_state") not in (None, BMS_DRIVE)):
         shadow["ended_by_bms"] = True
-        return _shadow_close(shadow, shadow.get("still_snap") or last,
-                             readings=last)
+        # At the BMS moment, as the live path does — see advance_shadow.
+        return _shadow_close(shadow, last, readings=last)
 
     arriving = float(last.get("speed_kmh") or 0.0) <= ZERO_SPEED_KMH
     if now_ts - last_ts > (SHADOW_ARRIVED_QUIET_SEC if arriving
@@ -1625,10 +1625,14 @@ def advance_shadow(shadow: dict[str, Any], snap: dict[str, Any]) -> dict[str, An
     # mid-manoeuvre leaves the composite reading Drive, and a trip held open
     # by a stale gear would never reach that branch to be closed at all.
     #
-    # The journey ends where the car stopped, not where the BMS got round to
-    # saying so — still_snap if it was seen to stop, otherwise the last thing
-    # it sent. The closing odometer comes from this snapshot, which is newer
-    # and measures the arrival better.
+    # The journey ends where the BMS says it did — this snapshot — not where
+    # the car was first seen still. That is the car's own definition of a
+    # drive, and the one its Trips screen uses: a wait in P with the
+    # drivetrain still live belongs to the drive until the car powers down
+    # (and moves the seat to Easy Entry). Measured 30 September: trip 3153
+    # shifted to P at 18:24 and powered down about 16 minutes later; the car
+    # showed ~22 min and ~0.6 kWh where ending at the stop gave 6 min and
+    # 0.38. On an ordinary arrival the two moments are seconds apart.
     #
     # Never while the car is moving. Only Drive, Support and Standby have
     # been observed and the drivetrain must be live for the wheels to turn,
@@ -1642,8 +1646,7 @@ def advance_shadow(shadow: dict[str, Any], snap: dict[str, Any]) -> dict[str, An
         bms_now = snap.get("bms_state")
         if bms_now is not None and bms_now != BMS_DRIVE:
             shadow["ended_by_bms"] = True
-            done = _shadow_close(shadow, shadow.get("still_snap") or last or snap,
-                                 readings=snap) or done
+            done = _shadow_close(shadow, snap, readings=snap) or done
             open_at = None
 
     # A car drawing power is a car that has arrived. No timer, no inference,
