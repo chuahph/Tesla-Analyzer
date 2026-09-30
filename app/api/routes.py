@@ -13143,6 +13143,11 @@ def _park_since_last_drive(session: Session, vehicle, drives, current_soc):
         return None
     if _live_from_stream(session, vehicle.vin)[0] is not None:
         return None
+    # Nor while a charge is running: "now" is then climbing, and the park
+    # would read as drain running backwards until the charge closes and
+    # starts a new window.
+    if _shadow_open(session, vehicle.vin)[1]:
+        return None
     last_drive = max(drives, key=lambda x: x.end_time)
     if last_drive.end_soc is None:
         return None

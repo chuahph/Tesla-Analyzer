@@ -12308,3 +12308,20 @@ def test_parked_gaps_lists_every_park_behind_the_pk_total():
     finally:
         settings.app_passcode = old_pc
         settings.battery_capacity_kwh = old_cap
+
+
+def test_no_park_since_the_last_drive_while_a_charge_is_running(monkeypatch):
+    """While charging, the current reading climbs, and the park since the last
+    drive would read as negative drain until the charge closed."""
+    from types import SimpleNamespace as N
+
+    from app.api import routes
+
+    drive = N(end_time=datetime(2026, 9, 30, 7, 17), end_soc=21.6)
+    car = N(vin="TESTVIN-CHARGING")
+    monkeypatch.setattr(routes, "_live_from_stream", lambda s, v: (None, None))
+    monkeypatch.setattr(routes, "_current_energy_kwh", lambda s, v: 14.0)
+    monkeypatch.setattr(routes, "_shadow_open", lambda s, v: (None, None))
+    assert routes._park_since_last_drive(None, car, [drive], 21.4) is not None
+    monkeypatch.setattr(routes, "_shadow_open", lambda s, v: (None, {"ts": 1.0}))
+    assert routes._park_since_last_drive(None, car, [drive], 25.0) is None
