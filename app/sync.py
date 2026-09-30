@@ -1519,7 +1519,10 @@ def settle_shadow(shadow: dict[str, Any], now_ts: float) -> dict[str, Any] | Non
         if now_ts - float(still_since) >= window:
             # Same rule as the live path: time from when it stopped, readings
             # from the last thing the car said while parked in that spot.
-            return _shadow_close(shadow, shadow.get("still_snap") or last,
+            # The exit moment when the driver was seen leaving, as the live
+            # path uses; otherwise the stop.
+            return _shadow_close(shadow, (shadow.get("exit_snap") if shadow.get("exit_seen")
+                                          else None) or shadow.get("still_snap") or last,
                                  readings=last)
         return None
 
@@ -1958,6 +1961,7 @@ def advance_shadow(shadow: dict[str, Any], snap: dict[str, Any]) -> dict[str, An
         shadow["still_since"] = None
         shadow.pop("still_snap", None)
         shadow.pop("exit_seen", None)
+        shadow.pop("exit_snap", None)
         shadow["max_speed_kmh"] = max(
             float(shadow.get("max_speed_kmh") or 0.0), float(snap.get("speed_kmh") or 0.0))
         # Only a BMS that was seen in Drive during THIS trip may end it. The
@@ -1981,6 +1985,12 @@ def advance_shadow(shadow: dict[str, Any], snap: dict[str, Any]) -> dict[str, An
             shadow["exit_seen"] = True
         elif snap.get("seat_occupied") is None and snap.get("doors_open"):
             shadow["exit_seen"] = True
+        # The car as it was when the driver was first seen leaving. A wait in
+        # P before getting out is part of the drive on the car's own Trips
+        # screen — its drivetrain stays live until then — so a trip that ends
+        # on the exit ends here, not at the shift to P. Usually seconds apart.
+        if shadow.get("exit_seen") and "exit_snap" not in shadow:
+            shadow["exit_snap"] = dict(snap)
         if still_since is None:
             # Remember the car as it was when it stopped, not as it will be
             # once the settle window expires. Closing on the later snapshot
@@ -1999,8 +2009,9 @@ def advance_shadow(shadow: dict[str, Any], snap: dict[str, Any]) -> dict[str, An
                 # ones held at the instant P was reached can be half a minute
                 # stale, which on this car's 30-second Odometer interval loses
                 # a quarter of a kilometre off every arrival.
-                done = _shadow_close(shadow, shadow.get("still_snap") or snap,
-                                     readings=snap)
+                end = ((shadow.get("exit_snap") if shadow.get("exit_seen") else None)
+                       or shadow.get("still_snap") or snap)
+                done = _shadow_close(shadow, end, readings=snap)
 
     shadow["last"] = dict(snap)
     return done
@@ -2512,13 +2523,21 @@ def _shadow_close(shadow: dict[str, Any], end: dict[str, Any],
     # rather than counted, exactly as the trailing idle run above is.
     shadow.pop("temp_hold_sec", None)
     shadow.pop("temp_hold_sum", None)
-    # An idle run still open at the close is the arrival itself — the trip
-    # ends at the moment the car stopped, so that stretch comes after it, not
-    # during it. Dropped rather than counted.
+    # An idle run still open at the close is the arrival itself — nothing
+    # moved after it. Dropped rather than counted.
     shadow.pop("idle_run_since", None)
+    # But a wait in P that the trip now INCLUDES — ended when the car powered
+    # down or the driver got out, as on the car's own Trips screen — is
+    # standing still inside the journey, and idle as waiting in D would be.
+    still_since = shadow.get("still_since")
+    if still_since is not None and end.get("ts") is not None:
+        waited = float(end["ts"]) - float(still_since)
+        if waited >= IDLE_STREAK_MIN * 60.0:
+            idle_sec += waited
     shadow["still_since"] = None
     shadow.pop("still_snap", None)
     shadow.pop("exit_seen", None)
+    shadow.pop("exit_snap", None)
     shadow.pop("bms_seen_drive", None)
     shadow.pop("seen_unplugged", None)
     if not start:

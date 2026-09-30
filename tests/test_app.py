@@ -7225,8 +7225,10 @@ def test_a_long_wait_does_not_delay_a_real_arrival():
 
     The short window is measured from when the car STOPPED, so by the time
     someone finally leaves the seat it has long since passed and the trip
-    closes at once — with the end time being when it first parked, not when
-    the door opened.
+    closes at once. It ends when the driver left, not when the car first
+    parked: the car's own Trips screen keeps a drive going through a wait in
+    P until then. (A car streaming BMSState ends it earlier still, when the
+    drivetrain powers down — see the BMS tests.)
     """
     from app import sync as sync_mod
 
@@ -7246,7 +7248,7 @@ def test_a_long_wait_does_not_delay_a_real_arrival():
     assert sh.get("open")
     done = sync_mod.advance_shadow(sh, snap(stopped + 2400, m + 5.4, seat=False))
     assert done is not None, "leaving after a long wait must close it immediately"
-    assert done["end_ts"] == stopped, "the trip ended when the car stopped"
+    assert done["end_ts"] == stopped + 2400, "the trip ended when the driver left"
 
 
 def test_silence_is_recorded_and_charged_to_the_trip_it_falls_in():

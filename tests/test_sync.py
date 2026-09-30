@@ -2255,3 +2255,27 @@ def test_the_live_drive_view_survives_a_snapshot_missing_odometer_or_soc():
     assert sync.live_trip(opened, no_soc)["distance_km"] == 5.0
     still = {"ts": 1_790_000_600.0, "odo_km": 31900.0, "soc": 80.0, "range_km": 399.0}
     assert sync.live_trip(opened, still, drive_min_km=0.0) is not None
+
+
+def test_a_wait_in_p_before_getting_out_is_part_of_the_trip():
+    """The car's Trips screen keeps a drive going until the driver leaves: a
+    wait in P with the drivetrain live is part of it. So a trip that ends on
+    the exit ends when the driver was seen leaving, not at the shift to P."""
+    shadow: dict = {}
+    advance_shadow(shadow, _tel(0, 100.0, 30.0))
+    advance_shadow(shadow, _tel(600, 106.0, 28.5))
+    # Park at 660, still in the seat: nothing ends yet.
+    assert advance_shadow(shadow, _tel(660, 106.0, 28.5, gear="ShiftStateP",
+                                       speed_mph=0.0)) is None
+    # Ten minutes later the driver gets out; the AC ran meanwhile. The settle
+    # window from the stop has long passed, so this closes it at once.
+    trip = advance_shadow(shadow, _tel(1260, 106.0, 28.3, gear="ShiftStateP",
+                                       speed_mph=0.0, door=True))
+    assert trip is not None and trip["ended_on"] == "exit"
+    assert trip["end_ts"] == 1260
+    assert trip["duration_min"] == 21.0
+    assert trip["energy_kwh"] == pytest.approx(1.7)      # 30.0 - 28.3
+    # The ten minutes in P are standing still inside the trip: idle.
+    assert trip["idle_min"] == pytest.approx(10.0)
+    # Cleared with the trip, so the next one cannot inherit it.
+    assert "exit_snap" not in shadow
