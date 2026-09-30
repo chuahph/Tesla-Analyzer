@@ -4530,3 +4530,25 @@ def test_parked_drain_uses_the_energy_gauge_between_streamed_trips():
     # And a trip without readings keeps the Soc measure.
     b.start_energy_kwh = None
     assert driving._gap_energy_kwh(a, b) is None
+
+
+def test_the_park_after_a_charge_cannot_count_negative():
+    """30 September: the charge closed on Soc 79.00 and the first trip opened
+    eight minutes later at 79.98. Signed, that park subtracted 0.68 kWh from
+    parked drain; it counts as zero instead. Parks between trips stay signed."""
+    from datetime import datetime
+    from types import SimpleNamespace as N
+
+    from app.analysis import driving
+
+    a = N(start_time=datetime(2026, 9, 26, 13, 41), end_time=datetime(2026, 9, 26, 13, 47),
+          start_soc=79.98, end_soc=79.31, energy_used_kwh=0.5, distance_km=2.0)
+    b = N(start_time=datetime(2026, 9, 26, 16, 27), end_time=datetime(2026, 9, 26, 16, 54),
+          start_soc=79.50, end_soc=77.4, energy_used_kwh=1.5, distance_km=8.0)
+    share = driving.parked_share([a, b], [], 68.63, [],
+                                 anchor=(datetime(2026, 9, 26, 13, 33), 79.0))
+    first, second = share["parks"]
+    assert first["after"] == "charge" and first["pct"] == 0.0 and "note" in first
+    # Between trips a small rise is kept, signed, as rounding that cancels.
+    assert second["pct"] == pytest.approx(-0.19)
+    assert share["total"]["pct"] == pytest.approx(-0.19)

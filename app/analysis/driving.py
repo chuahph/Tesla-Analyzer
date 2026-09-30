@@ -1147,6 +1147,17 @@ def parked_share(drives: list[Any], charges: list[Any] | None,
         gap_kwh = _gap_energy_kwh(a, b)
         gap_pts = (gap_kwh / capacity_kwh * 100.0 if gap_kwh is not None and capacity_kwh
                    else a.end_soc - b.start_soc)
+        # The park after the charge is not signed like the rest. Its two ends
+        # come from different records — the charge's closing Soc, streamed only
+        # once a minute and still settling as the charge stops, and the first
+        # trip's opening one — so a rise there is the charge's reading lagging,
+        # not drain running backwards. Measured 30 September: 79.00 at the
+        # charge's end, 79.98 eight minutes later, which subtracted 0.68 kWh and
+        # put parked drain at 4.6% against the car's 5.6%. Between two trips the
+        # rounding does cancel, which is why those stay signed.
+        if a is boundary and gap_pts < 0:
+            park["note"] = f"reading rose {-gap_pts:.2f} pts after the charge; counted as 0"
+            gap_pts = 0.0
         pts[key] += gap_pts
         park.update({
             "method": "energy" if gap_kwh is not None and capacity_kwh else "soc",
