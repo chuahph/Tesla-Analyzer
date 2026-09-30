@@ -2882,9 +2882,18 @@ def test_capacity_evidence_takes_the_pack_reading_from_the_car_not_from_itself()
             # easiest mistake to make passes every check there is: the Park
             # tab shows a "% consumed" too, and pairing that with the Since
             # Charge kWh gives a number the right size for a pack.
-            gone = client.post("/api/drop-screen-reading").json()
+            # The bare link only names the newest and how to drop exactly it:
+            # "drop the newest" opened twice would drop two.
+            ask = client.get("/api/drop-screen-reading").json()
+            assert ask["dropped"] is None and ask["newest"]["kwh"] == 21.1
+            assert ask["pooled"]["readings"] == 3
+            link = ask["to_drop_it"]
+            gone = client.get(link).json()
             assert gone["dropped"][0]["kwh"] == 21.1
             assert gone["pooled"]["readings"] == 2
+            # Opened again, it finds nothing and keeps the rest.
+            again = client.get(link).json()
+            assert again["dropped"] is None and again["pooled"]["readings"] == 2
             # And with the newest gone the constant falls back, because two
             # readings no longer clear the precision floor.
             assert "screen readings" not in client.get(

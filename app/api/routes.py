@@ -8359,9 +8359,11 @@ def add_screen_reading(
 @router.api_route("/drop-screen-reading", methods=["GET", "POST"])
 def drop_screen_reading(
     all: bool = Query(False),
+    kwh: float | None = Query(None, description="The reading's kWh, as listed"),
+    pct: float | None = Query(None, description="The reading's %, as listed"),
     session: Session = Depends(get_session),
 ):
-    """Remove the newest screen reading, or all of them.
+    """Remove one screen reading by its figures, or all of them.
 
     These set the capacity constant outright, so a wrong one is not noise to
     be averaged away — it has to be removable. And a wrong one is easy to
@@ -8369,6 +8371,12 @@ def drop_screen_reading(
     Since Charge kWh gives a plausible-looking number that means nothing.
     Neither the entry clamp nor the pooling can catch that, because the result
     is still the right size for a pack.
+
+    By its figures, not "the newest": this is a plain link, and "drop the
+    newest" opened twice drops two — on 30 September it removed the reading
+    it was meant to keep. A reading's kWh and % identify it, since an exact
+    repeat is refused on entry. Without them this only says what the newest
+    is and gives the link that removes exactly that one, safe to open again.
     """
     import json as _json
 
@@ -8378,10 +8386,25 @@ def drop_screen_reading(
         rows = []
     if not rows:
         return {"dropped": None, "pooled": _screen_capacity(session)}
-    dropped = rows if all else [rows[-1]]
-    state.put(session, state.SCREEN_CAPACITY_KEY,
-              "" if all else _json.dumps(rows[:-1]))
-    return {"dropped": dropped, "pooled": _screen_capacity(session)}
+    if all:
+        state.put(session, state.SCREEN_CAPACITY_KEY, "")
+        return {"dropped": rows, "pooled": _screen_capacity(session)}
+    if kwh is None or pct is None:
+        newest = rows[-1]
+        return {"dropped": None, "newest": newest,
+                "to_drop_it": (f"/api/drop-screen-reading?kwh={newest.get('kwh')}"
+                               f"&pct={newest.get('pct')}"),
+                "pooled": _screen_capacity(session)}
+
+    def same(r: dict) -> bool:
+        return (round(float(r.get("kwh") or 0), 2) == round(kwh, 2)
+                and round(float(r.get("pct") or 0), 2) == round(pct, 2))
+
+    dropped = [r for r in rows if same(r)]
+    if dropped:
+        state.put(session, state.SCREEN_CAPACITY_KEY,
+                  _json.dumps([r for r in rows if not same(r)]))
+    return {"dropped": dropped or None, "pooled": _screen_capacity(session)}
 
 # Measured trips needed before this car's own Wh/km is used to price one that
 # has none. A rate is what is being borrowed, and a rate over a handful of
