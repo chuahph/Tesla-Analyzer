@@ -2101,127 +2101,6 @@ def amend_closed_trip(trip: dict[str, Any], snap: dict[str, Any]) -> bool:
     return True
 
 
-# Two trips are one journey with a wait in it when the second starts within
-# this long of the first ending, from the same spot, with the driver never
-# having left and nothing charged in between. The car ends a drive by itself
-# after a while in P — its BMS leaves Drive and the seat moves to Easy Entry —
-# even with the driver sitting buckled in: measured 30 September, trip 3153
-# ended "bms" at a wait the driver then drove on from.
-JOIN_WAIT_MAX_SEC = 1800.0
-# "The same spot": the odometer may creep a few metres between the two.
-JOIN_SAME_SPOT_KM = 0.1
-
-
-def _sum_bands(a: dict | None, b: dict | None) -> dict | None:
-    """Two {band: {km, min, kwh}} profiles added together."""
-    if not a or not b:
-        return a or b
-    out = {k: dict(v) for k, v in a.items()}
-    for k, v in b.items():
-        slot = out.setdefault(k, {"km": 0.0, "min": 0.0, "kwh": 0.0})
-        for f in ("km", "min", "kwh"):
-            slot[f] = round(float(slot.get(f) or 0.0) + float(v.get(f) or 0.0), 4)
-    return out
-
-
-def join_waiting_trip(previous: dict[str, Any] | None, finished: dict[str, Any]) -> bool:
-    """Fold ``finished`` into ``previous`` when they were one journey with a
-    wait in P between them. Mutates ``previous``; True when it did.
-
-    Only on evidence that it was a wait: the previous trip ended because the
-    car said so (bms) or on the long timeout — never on the driver leaving or
-    on silence — and it recorded that the driver did not leave; the next one
-    starts within JOIN_WAIT_MAX_SEC from the same spot; and neither the energy
-    counter nor Soc rose between them, which a charge would do.
-
-    The wait belongs to the journey, as waiting in D already does: its minutes
-    are in the duration and the idle time, and what the car drew while it sat
-    (read off the energy counter across the gap) is in the energy. It is not
-    added to the speed bands, which hold only distance actually driven.
-    """
-    if not previous or previous.get("vin") != finished.get("vin"):
-        return False
-    if previous.get("ended_on") not in ("bms", "timeout"):
-        return False
-    if previous.get("driver_left") is not False:
-        return False
-    e_ts, s_ts = previous.get("end_ts"), finished.get("start_ts")
-    e_odo, s_odo = previous.get("end_odo_km"), finished.get("start_odo_km")
-    if None in (e_ts, s_ts, e_odo, s_odo):
-        return False
-    wait = float(s_ts) - float(e_ts)
-    if not 0.0 <= wait <= JOIN_WAIT_MAX_SEC:
-        return False
-    if not 0.0 <= float(s_odo) - float(e_odo) <= JOIN_SAME_SPOT_KM:
-        return False
-    e_end, e_next = previous.get("end_energy_kwh"), finished.get("start_energy_kwh")
-    if e_end is not None and e_next is not None and float(e_next) > float(e_end) + 0.1:
-        return False
-    soc_end, soc_next = previous.get("soc_end"), finished.get("soc_start")
-    if soc_end is not None and soc_next is not None and float(soc_next) > float(soc_end) + 1.0:
-        return False
-
-    p, f = previous, finished
-    waited_from = p.get("end_time")
-    wait_kwh = (max(float(e_end) - float(e_next), 0.0)
-                if e_end is not None and e_next is not None else 0.0)
-    if p.get("energy_kwh") is not None and f.get("energy_kwh") is not None:
-        p["energy_kwh"] = round(float(p["energy_kwh"]) + float(f["energy_kwh"]) + wait_kwh, 3)
-    else:
-        p["energy_kwh"] = None
-    first_min = float(p.get("duration_min") or 0.0)
-    second_min = float(f.get("duration_min") or 0.0)
-    p["end_ts"], p["end_time"] = f["end_ts"], f.get("end_time")
-    p["end_odo_km"] = f.get("end_odo_km")
-    distance = round(float(p["end_odo_km"]) - float(p["start_odo_km"]), 3)
-    minutes = max((float(p["end_ts"]) - float(p["start_ts"])) / 60.0, 0.0)
-    p["distance_km"] = distance
-    p["duration_min"] = round(minutes, 1)
-    p["wh_per_km"] = (round(p["energy_kwh"] * 1000.0 / distance, 1)
-                      if p.get("energy_kwh") and distance > 0 else None)
-    p["avg_speed_kmh"] = round(distance / (minutes / 60.0), 1) if minutes > 0 else None
-    p["max_speed_kmh"] = max(float(p.get("max_speed_kmh") or 0.0),
-                             float(f.get("max_speed_kmh") or 0.0))
-    # The wait is standing still inside the journey, so it is idle time —
-    # counted as waiting in D would count it, if long enough to be a streak.
-    wait_idle = wait / 60.0 if wait / 60.0 >= IDLE_STREAK_MIN else 0.0
-    p["idle_min"] = round(float(p.get("idle_min") or 0.0) + float(f.get("idle_min") or 0.0)
-                          + wait_idle, 1)
-    p["idle_tracked"] = bool(p.get("idle_tracked") and f.get("idle_tracked"))
-    p["stops"] = int(p.get("stops") or 0) + int(f.get("stops") or 0) + 1
-    p["climate_min"] = round(float(p.get("climate_min") or 0.0)
-                             + float(f.get("climate_min") or 0.0), 1)
-    p["speed_bands"] = _sum_bands(p.get("speed_bands"), f.get("speed_bands"))
-    rb_p, rb_f = p.get("road_bands"), f.get("road_bands")
-    if rb_p and rb_f:
-        merged = {}
-        for road in set(rb_p) | set(rb_f):
-            if road in ("_stops", "_idle_min"):
-                vals = {**(rb_p.get(road) or {})}
-                for k, v in (rb_f.get(road) or {}).items():
-                    vals[k] = round(float(vals.get(k) or 0.0) + float(v or 0.0), 1)
-                merged[road] = vals
-            else:
-                merged[road] = _sum_bands(rb_p.get(road), rb_f.get(road))
-        p["road_bands"] = merged
-    else:
-        p["road_bands"] = rb_p or rb_f
-    for key in ("drive_delta", "regen_delta", "used_delta"):
-        a, b = p.get(key), f.get(key)
-        p[key] = round(float(a) + float(b), 4) if a is not None and b is not None else None
-    if first_min + second_min > 0 and p.get("out_temp") is not None and f.get("out_temp") is not None:
-        p["out_temp"] = round((float(p["out_temp"]) * first_min
-                               + float(f["out_temp"]) * second_min) / (first_min + second_min), 1)
-    for key in ("soc_end", "end_lat", "end_lon", "end_energy_kwh", "ended_on",
-                "driver_left", "out_temp_end", "pack_temp_c", "inside_temp"):
-        if key in f:
-            p[key] = f[key]
-    # Recorded so a joined trip says so, and where its wait began.
-    p.setdefault("joined", []).append({"at": waited_from, "wait_min": round(wait / 60.0, 1),
-                                       "wait_kwh": round(wait_kwh, 3)})
-    return True
-
-
 # A plug-in that moved less than this was somebody testing the cable, not a
 # charge. Well above the 0.02 kWh step EnergyRemaining moves in.
 CHARGE_MIN_KWH = 0.05
@@ -2789,11 +2668,6 @@ def _shadow_close(shadow: dict[str, Any], end: dict[str, Any],
         #               that — typically a hundred metres or two here, and
         #               systematic rather than random, because it is the same
         #               carpark every time.
-        # Whether the driver was seen to leave, whatever ended the trip. The
-        # label below says only the deciding reason, and "bms" outranks
-        # "exit", so this is kept apart: a trip the car ended with the driver
-        # still in the seat is the one join_waiting_trip may carry on.
-        "driver_left": exit_seen,
         "ended_on": ("stream_lost" if shadow.pop("stream_lost", False)
                      else "charging" if ended_by_charge
                      else "bms" if ended_by_bms
