@@ -2037,6 +2037,12 @@ HW_STOP_PTS_MAX = 30
 # times past it — and if a genuine arrival ever exceeds this, it will appear
 # as unaccounted_km and can raise the number with a measurement behind it.
 SHADOW_TAIL_MAX_KM = 0.6
+# How much of a BLIND carpark gap — no parked reading either side, so the car
+# arrived and left without signal — belongs to the departure. Half: the
+# driver's account of the Home carpark is 0.15-0.25 km in and roughly the
+# same out, and trips 3154/3155 (0.426 km gap; car 7.1 and 9.3 against 6.74
+# and 9.18 unrecovered) put it within a few tens of metres of even.
+DEPARTURE_SHARE_BLIND = 0.5
 
 
 def amend_closed_trip(trip: dict[str, Any], snap: dict[str, Any]) -> bool:
@@ -2422,13 +2428,32 @@ def recover_sleep_gap(prev: dict[str, Any], nxt: dict[str, Any],
     # left alone read -0.46% and 2 of 14 long. That is 1.26 points of
     # difference at t = 4.5, and it all points one way.
     #
-    # So a reading takes precedence over the next trip's anchor, and no
-    # reading at all leaves the old behaviour intact — without evidence there
-    # is nothing better to do than assume the gap was the arrival, which is
-    # still likelier than losing it.
-    boundary = float(next_start)
+    # So a reading takes precedence over the next trip's anchor.
+    #
+    # With no reading at all, the car was never seen resting — the place has
+    # no signal, so the arrival AND the departure were both driven dark, and
+    # the gap holds both. It used to go to the arrival whole. Measured, trips
+    # 3154/3155 at Home: 0.426 km, all credited to 3154, which then read 7.17
+    # against the car's 7.1 while 3155 read 9.18 against 9.3. The driver's
+    # own account of that carpark is 0.15-0.25 km in and about the same out,
+    # so the blind gap is split down the middle: half ends the arriving trip,
+    # half starts the departing one (DEPARTURE_SHARE_BLIND).
+    #
+    # The split is remembered on the arriving trip (handover_to_odo_km), so a
+    # second call for the same pair — the "open" call site credits the
+    # arrival before the departure has finished, and the close call comes
+    # later — pays the departure its half instead of the arrival its rest.
+    whole = round(float(next_start) - float(end_odo), 3)
+    handed = prev.get("handover_to_odo_km")
+    if (handed is not None and whole > 0.0
+            and abs(float(handed) - float(next_start)) < 0.0005):
+        return _credit_departure(nxt, whole, float(end_odo), via)
     if rested_odo_km is not None:
-        boundary = min(boundary, float(rested_odo_km))
+        boundary = min(float(next_start), float(rested_odo_km))
+    else:
+        if whole > SHADOW_TAIL_MAX_KM:
+            return False
+        boundary = float(end_odo) + whole * (1.0 - DEPARTURE_SHARE_BLIND)
     gain = round(boundary - float(end_odo), 3)
     if gain <= 0.0 or gain > SHADOW_TAIL_MAX_KM:
         return False
@@ -2463,6 +2488,45 @@ def recover_sleep_gap(prev: dict[str, Any], nxt: dict[str, Any],
     # numerator and denominator are short by the same missing minutes.
     prev["recovered_via"] = via
     prev["recovered_at"] = now_local().isoformat(timespec="seconds")
+    if rested_odo_km is None and float(next_start) - boundary > 0.0005:
+        prev["handover_to_odo_km"] = round(float(next_start), 3)
+        _credit_departure(nxt, round(float(next_start) - boundary, 3),
+                          round(boundary, 3), via)
+    return True
+
+
+def _credit_departure(nxt: dict[str, Any], km: float, new_start: float,
+                      via: str) -> bool:
+    """Start the departing trip where the arriving one now ends.
+
+    Its share of a blind carpark gap: ground it drove before its first
+    record got out. Same accounting as the arrival side — distance from the
+    bracket, energy at the trip's own Wh/km, duration and speed untouched —
+    recorded as start_recovered_km, the field the polled departure recovery
+    used for the same thing.
+
+    Only a finished trip can take it. At the "open" call site the departing
+    trip is a bare opening odometer, so this declines, and the close call
+    pays it once the trip has a distance to add to.
+    """
+    if not nxt or nxt.get("distance_km") is None or km <= 0.0:
+        return False
+    end = nxt.get("end_odo_km")
+    distance = (round(float(end) - new_start, 3) if end is not None
+                else round(float(nxt["distance_km"]) + km, 3))
+    whkm = nxt.get("wh_per_km")
+    nxt["start_odo_km"] = round(new_start, 3)
+    nxt["distance_km"] = distance
+    nxt["start_recovered_km"] = round(
+        float(nxt.get("start_recovered_km") or 0.0) + km, 3)
+    if whkm and nxt.get("energy_kwh") is not None:
+        gained = round(km * float(whkm) / 1000.0, 3)
+        nxt["energy_kwh"] = round(float(nxt["energy_kwh"]) + gained, 3)
+        nxt["start_recovered_kwh"] = round(
+            float(nxt.get("start_recovered_kwh") or 0.0) + gained, 3)
+        nxt["wh_per_km"] = round(
+            float(nxt["energy_kwh"]) * 1000.0 / distance, 1) if distance > 0 else None
+    nxt["start_recovered_via"] = via
     return True
 
 

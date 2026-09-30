@@ -5039,6 +5039,11 @@ def _apply_shadow_to_drive(row, t: dict) -> None:
     # close" directly instead of inferring it from wall-clock behaviour.
     if t.get("recovered_via") is not None:
         row.recovered_via = str(t["recovered_via"])[:20]
+    # The departing side of a blind carpark gap (sync._credit_departure):
+    # the same field the polled departure recovery wrote, so the quality
+    # badge and the continuity checks read it without knowing the source.
+    if t.get("start_recovered_km") is not None:
+        row.start_recovered_km = float(t["start_recovered_km"])
     if t.get("recovered_at") is not None:
         row.recovered_at = str(t["recovered_at"])[:32]
 
@@ -13737,8 +13742,15 @@ def _telemetry_ingest(payload: dict, session: Session):
             if opening and not was_open and opening.get("odo_km"):
                 previous = next((t for t in reversed(load_trips())
                                  if t.get("vin") == vin), None)
+                # With the parked reading, when there is one: without it a
+                # gap is split as blind, and a car seen resting did not
+                # arrive blind.
+                rested = (_rested_odo_between(session, vin, previous.get("end_ts"),
+                                              opening.get("ts"))
+                          if previous is not None else None)
                 if previous is not None and sync_mod.recover_sleep_gap(
-                        previous, {"start_odo_km": opening["odo_km"]}, via="open"):
+                        previous, {"start_odo_km": opening["odo_km"]},
+                        rested_odo_km=rested, via="open"):
                     recovered += 1
             elif not shadow.get("open"):
                 # No trip is running, so this record may be the arrival of the

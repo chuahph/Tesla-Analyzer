@@ -1323,12 +1323,11 @@ def test_a_departure_head_is_not_paid_to_the_arriving_trip():
     assert half["end_odo_km"] == pytest.approx(31405.800)
     assert half["distance_km"] == pytest.approx(12.120, abs=0.001)
 
-    # No reading at all — a car that parks underground and sleeps — keeps the
-    # behaviour it always had. Without evidence, assuming the gap was the
-    # arrival still beats losing it.
+    # No reading at all — a car that parks underground and sleeps — splits
+    # the gap: it arrived and left without signal, so the gap holds both.
     blind = dict(prev)
     assert recover_sleep_gap(blind, nxt) is True
-    assert blind["end_odo_km"] == pytest.approx(31405.922)
+    assert blind["end_odo_km"] == pytest.approx(31405.818)
 
 
 def test_the_temperature_average_stops_when_the_car_does():
@@ -1536,7 +1535,9 @@ def test_the_odometer_gives_back_what_a_sleeping_car_never_sent():
     prev = {"start_odo_km": 31158.066, "end_odo_km": 31161.861,
             "distance_km": 3.795, "energy_kwh": 0.88, "wh_per_km": 231.9,
             "duration_min": 17.2, "ended_on": "stream_lost"}
-    assert recover_sleep_gap(prev, {"start_odo_km": 31162.199}) is True
+    # Seen resting at the next trip's start — so all of it was the arrival.
+    assert recover_sleep_gap(prev, {"start_odo_km": 31162.199},
+                             rested_odo_km=31162.199) is True
     assert prev["distance_km"] == 4.133
     assert prev["recovered_km"] == 0.338
     # Energy follows the distance at the trip's own efficiency, so the three
@@ -1580,7 +1581,7 @@ def test_a_whole_journey_driven_offline_is_not_glued_onto_the_last_arrival():
     # attributed to a trip that did not drive it.
     normal = trip()
     assert recover_sleep_gap(normal, {"start_odo_km": 31161.861 + 0.4}) is True
-    assert normal["recovered_km"] == pytest.approx(0.4, abs=0.002)
+    assert normal["recovered_km"] == pytest.approx(0.2, abs=0.002)
     beyond = trip()
     assert recover_sleep_gap(beyond, {"start_odo_km": 31161.861 + 0.7}) is False
 
@@ -2279,3 +2280,55 @@ def test_a_wait_in_p_before_getting_out_is_part_of_the_trip():
     assert trip["idle_min"] == pytest.approx(10.0)
     # Cleared with the trip, so the next one cannot inherit it.
     assert "exit_snap" not in shadow
+
+
+def test_a_blind_carpark_gap_is_split_between_arrival_and_departure():
+    """Trips 3154/3155, Home, no signal in or out.
+
+    3154 ended stream_lost at 32172.297 and 3155 was first seen at 32172.723.
+    Nothing saw the car parked, so the 0.426 km holds the drive down to the
+    bay AND the drive back out — the driver's account is 0.15-0.25 km each
+    way. All of it went to 3154 (7.17 against the car's 7.1) and 3155 read
+    9.18 against 9.3. Split down the middle, each trip gets its own half.
+    """
+    prev = {"start_odo_km": 32165.553, "end_odo_km": 32172.297,
+            "distance_km": 6.744, "energy_kwh": 1.0, "wh_per_km": 148.3,
+            "ended_on": "stream_lost"}
+    nxt = {"start_odo_km": 32172.723, "end_odo_km": 32181.904,
+           "distance_km": 9.181, "energy_kwh": 1.42, "wh_per_km": 154.7,
+           "ended_on": "bms"}
+    assert recover_sleep_gap(prev, nxt) is True
+    assert prev["end_odo_km"] == pytest.approx(32172.510)
+    assert prev["recovered_km"] == pytest.approx(0.213)
+    assert nxt["start_odo_km"] == pytest.approx(32172.510)
+    assert nxt["distance_km"] == pytest.approx(9.394)
+    assert nxt["start_recovered_km"] == pytest.approx(0.213)
+    # Energy at the departing trip's own Wh/km, and its efficiency unchanged.
+    assert nxt["energy_kwh"] == pytest.approx(1.42 + 0.033, abs=0.001)
+    assert nxt["wh_per_km"] == pytest.approx(154.7, abs=0.3)
+    # Nothing left between them, so a second call takes nothing.
+    assert recover_sleep_gap(prev, nxt) is False
+    assert nxt["distance_km"] == pytest.approx(9.394)
+
+
+def test_the_departure_half_waits_for_the_departing_trip_to_finish():
+    """The "open" call site runs when the next trip has only an opening
+    odometer. It pays the arrival its half then; the close call, with the
+    finished trip, pays the departure the other half — not the arrival."""
+    prev = {"start_odo_km": 100.0, "end_odo_km": 105.0, "distance_km": 5.0,
+            "energy_kwh": 0.75, "wh_per_km": 150.0, "ended_on": "stream_lost"}
+    assert recover_sleep_gap(prev, {"start_odo_km": 105.4}, via="open") is True
+    assert prev["end_odo_km"] == pytest.approx(105.2)
+    # A second opening-time call cannot give the arrival the departure's half.
+    assert recover_sleep_gap(prev, {"start_odo_km": 105.4}, via="open") is False
+    assert prev["end_odo_km"] == pytest.approx(105.2)
+
+    nxt = {"start_odo_km": 105.4, "end_odo_km": 110.4, "distance_km": 5.0,
+           "energy_kwh": 0.8, "wh_per_km": 160.0}
+    assert recover_sleep_gap(prev, nxt, via="close-live") is True
+    assert prev["end_odo_km"] == pytest.approx(105.2)
+    assert prev["recovered_km"] == pytest.approx(0.2)
+    assert nxt["start_odo_km"] == pytest.approx(105.2)
+    assert nxt["distance_km"] == pytest.approx(5.2)
+    assert nxt["start_recovered_km"] == pytest.approx(0.2)
+    assert recover_sleep_gap(prev, nxt, via="close-live") is False
