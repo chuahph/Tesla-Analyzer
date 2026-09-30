@@ -3925,13 +3925,16 @@ def test_trip_gaps_finds_every_boundary_the_odometer_disagrees_about():
                 add(3, 1024.15, 1040.0, base + timedelta(hours=4), 30)
                 # An overlap: two trips claiming the same ground.
                 add(4, 1039.5, 1050.0, base + timedelta(hours=6), 30)
+                # Hours parked, but too short to be a drive of its own: the
+                # Office arrivals of 30 September.
+                add(5, 1050.13, 1060.0, base + timedelta(hours=12), 20)
                 s.commit()
 
             body = client.get("/api/trip-gaps").json()
-            assert body["trips_checked"] == 4
-            assert body["boundaries_checked"] == 3 and body["boundaries_unchecked"] == 0
-            assert body["holes"] == 2 and body["overlaps"] == 1
-            assert body["unaccounted_km"] == pytest.approx(0.09 + 4.15, abs=0.002)
+            assert body["trips_checked"] == 5
+            assert body["boundaries_checked"] == 4 and body["boundaries_unchecked"] == 0
+            assert body["holes"] == 3 and body["overlaps"] == 1
+            assert body["unaccounted_km"] == pytest.approx(0.09 + 4.15 + 0.13, abs=0.002)
             assert body["double_counted_km"] == pytest.approx(0.5, abs=0.002)
 
             # Biggest first — the one worth fixing is rarely the most recent.
@@ -3946,6 +3949,10 @@ def test_trip_gaps_finds_every_boundary_the_odometer_disagrees_about():
 
             over = next(f for f in body["findings"] if f["gap_km"] < 0)
             assert "overlap" in over["suggested"]
+
+            short = next(f for f in body["findings"] if f["gap_km"] == pytest.approx(0.13))
+            assert short["parked_min"] >= 45
+            assert "too short to be a missed drive" in short["suggested"]
 
             # A clean dataset says so rather than returning an empty list.
             with SessionLocal() as s:
@@ -4998,11 +5005,18 @@ def test_asleep_status_shows_the_streams_battery_level(monkeypatch):
                 s.commit()
             _SleepsAfterDrivingClient.step = 2
             asleep = client.post("/api/sync").json()
-        assert asleep["status"] == "asleep"
-        assert asleep["last"]["soc"] == 22
+            assert asleep["status"] == "asleep"
+            assert asleep["last"]["soc"] == 22
+            with SessionLocal() as s:
+                saved = json.loads(state.get(s, state.scoped(state.LAST_STATUS_KEY, vin)))
+                assert saved["soc"] == 22
+                # A stream older than the polled snapshot does not win.
+                state.put(s, state.TELEMETRY_LATEST_KEY, json.dumps(
+                    {vin: {"Soc": 27.4, "BatteryLevel": 5, "_ts": 1.0}}))
+                s.commit()
+            stale = client.post("/api/sync").json()
+            assert stale["last"]["soc"] != 5
         with SessionLocal() as s:
-            saved = json.loads(state.get(s, state.scoped(state.LAST_STATUS_KEY, vin)))
-            assert saved["soc"] == 22
             state.delete(s, state.TELEMETRY_LATEST_KEY)
             s.commit()
     finally:

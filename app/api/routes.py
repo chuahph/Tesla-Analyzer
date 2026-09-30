@@ -5669,7 +5669,8 @@ def _sync_now_impl(wake: bool, session: Session, promoted_drives: int = 0):
         # trips, this tick rarely reads the car. It showed 27% on 30 September
         # against the car's 22%, after drives the stream had already seen.
         # The stream's BatteryLevel is the car's own figure and current.
-        level = _displayed_level(session, SimpleNamespace(vin=active_target))
+        level = _displayed_level(session, SimpleNamespace(vin=active_target),
+                                 newer_than=(resp.get("last") or {}).get("ts"))
         if level is not None:
             resp.setdefault("last", {})["soc"] = level
         _save_last_status(
@@ -10513,6 +10514,14 @@ def trip_gaps(
         elif (nxt.start_lost_km or 0) > 0:
             fix = ("the later trip measured this loss and didn't reclaim it; "
                    "repair-lost-departure")
+        elif gap < sync_mod.TRIP_MIN_KM:
+            # Too short to have been a journey of its own — below the floor a
+            # trip must clear to be recorded at all — so "a drive that was
+            # never logged" would only ever produce a phantom. Measured on
+            # 30 September: 0.13 km holes after hours parked at the Office,
+            # metres at an arrival or a departure the stream did not carry.
+            fix = ("too short to be a missed drive — metres at the arrival or "
+                   "departure that were not streamed; no repair needed")
         elif parked_min >= 45:
             fix = ("hours parked between them — likely a drive that was never "
                    "logged; repair-missing-trip")
@@ -13157,10 +13166,15 @@ def _park_since_last_drive(session: Session, vehicle, drives, current_soc):
     return now, float(current_soc), _current_energy_kwh(session, vehicle), last_drive
 
 
-def _displayed_level(session: Session, vehicle) -> float | None:
+def _displayed_level(session: Session, vehicle,
+                     newer_than: float | None = None) -> float | None:
     """The battery % the car's own screen shows, from the stream's
     BatteryLevel, or None when the car does not stream it. For display only:
-    differences of SoC stay in Soc, which every trip and charge is stored in."""
+    differences of SoC stay in Soc, which every trip and charge is stored in.
+
+    ``newer_than`` (epoch seconds): None as well when the stream's latest
+    record is older than that — a stream that has been dead for days must not
+    outrank a fresher reading from somewhere else."""
     import json as _json
 
     try:
@@ -13171,7 +13185,9 @@ def _displayed_level(session: Session, vehicle) -> float | None:
     if not isinstance(car, dict):
         return None
     ts = _telemetry_ts(car.get("_ts"))
-    level = sync_mod.snapshot_from_telemetry(car, ts)["battery_level"] if ts else None
+    if not ts or (newer_than is not None and ts < float(newer_than)):
+        return None
+    level = sync_mod.snapshot_from_telemetry(car, ts)["battery_level"]
     return level if level is not None and 0.0 <= level <= 100.0 else None
 
 
