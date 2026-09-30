@@ -4060,6 +4060,10 @@ def _append_trip(trips: list, finished: dict,
             session.rollback()
     previous = next((t for t in reversed(trips)
                      if t.get("vin") == finished.get("vin")), None)
+    # One journey with a wait in P, which the car itself ended: carried on
+    # rather than stored as a second trip. See sync.join_waiting_trip.
+    if sync_mod.join_waiting_trip(previous, finished):
+        return False
     rested = None
     if session is not None and previous is not None:
         rested = _rested_odo_between(session, finished.get("vin"),
@@ -4947,6 +4951,13 @@ def _geocode_shadow_drive(session: Session, row, t: dict) -> None:
         if lat is None or lon is None:
             continue
         coords = f"{float(lat):.4f}, {float(lon):.4f}"
+        # A trip joined across a wait has moved its end: the name it was
+        # given belongs to where it waited, not to where it arrived.
+        if (end == "end" and t.get("joined")
+                and (getattr(row, "end_coords", "") or "") not in ("", coords)):
+            row.end_coords = ""
+            row.end_location = ""
+            row.end_area = ""
         if not (getattr(row, f"{end}_coords", "") or ""):
             setattr(row, f"{end}_coords", coords)
         if end == "start" and not (getattr(row, "country", "") or ""):
