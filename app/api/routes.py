@@ -9606,6 +9606,26 @@ def _matrix_since(session: Session, vehicle_id: int, now: datetime, days: int,
     return since, limited_by, cutover, drawn, last_charge
 
 
+@router.get("/parked-gaps")
+def parked_gaps(days: int = Query(90, ge=1, le=730),
+                since_charge: bool = True,
+                session: Session = Depends(get_session)):
+    """Every park the matrix's PK row (and the since-charge card) is built
+    from: its times, the trips either side, the SoC or energy readings, how it
+    was measured, and — where it was left out — why. For tracing a parked
+    total that disagrees with the car's own Park tab to the park responsible.
+    """
+    m = driving_matrix(days=days, since_charge=since_charge, parks=True, session=session)
+    share = m.get("parked_share") or {}
+    return {
+        "window": m.get("window"),
+        "capacity_kwh": m.get("capacity_kwh"),
+        "total": {k: (share.get("total") or {}).get(k)
+                  for k in ("pct", "kwh", "hours", "gaps")},
+        "parks": share.get("parks") or [],
+    }
+
+
 @router.get("/driving-matrix/trips")
 def driving_matrix_trips(days: int = Query(30, ge=1, le=730),
                          since_charge: bool = False,
@@ -9672,6 +9692,7 @@ def driving_matrix(days: int = Query(30, ge=1, le=730),
                    # parameter was added, and the only reason it was caught is
                    # that a test asserted which boundary bit.
                    since_charge: bool = False,
+                   parks: bool = False,
                    session: Session = Depends(get_session)):
     """Efficiency by driving condition, plus what the car costs standing still.
 
@@ -9867,7 +9888,10 @@ def driving_matrix(days: int = Query(30, ge=1, le=730),
          "pct_max": round(share_of["sentry_on"]["pct"] + unattributed, 2),
          **parked(park["armed_kw"], "total", share_of["sentry_on"])},
     ]
-    out["parked_share"] = share_of
+    # The per-park list only on request (see /api/parked-gaps): it grows with
+    # the window, and the dashboard never shows it.
+    out["parked_share"] = (share_of if parks else
+                           {k: v for k, v in share_of.items() if k != "parks"})
     # The car's own Park tab, where one has been typed in. It attributes parked
     # drain BY CAUSE and to 0.1%, so it outranks anything fitted here — and it
     # defines SE differently and better: what Sentry itself drew, rather than

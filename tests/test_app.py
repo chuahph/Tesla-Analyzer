@@ -12242,3 +12242,65 @@ def test_displayed_battery_level_comes_from_batterylevel_not_soc():
             finally:
                 state.delete(s, state.TELEMETRY_LATEST_KEY)
                 s.commit()
+
+
+def test_parked_gaps_lists_every_park_behind_the_pk_total():
+    """/api/parked-gaps shows the parks the PK row and the since-charge card
+    are summed from — the one after the charge, those between trips, and the
+    one since the last drive — and the counted ones add up to the total."""
+    settings = get_settings()
+    old_pc, old_cap = settings.app_passcode, settings.battery_capacity_kwh
+    settings.app_passcode = ""
+    settings.battery_capacity_kwh = 70.0
+    try:
+        with TestClient(app) as client:
+            from app.database import SessionLocal
+            from app.models import BatteryReading, Charge, Drive, Vehicle
+
+            with SessionLocal() as s:
+                v = Vehicle(vin="TESTVIN-PARKLIST", name="Test", model="Model 3")
+                s.add(v)
+                s.commit()
+                s.add(Charge(
+                    vehicle_id=v.id,
+                    start_time=datetime(2026, 7, 1, 19, 30), end_time=datetime(2026, 7, 1, 20, 0),
+                    duration_min=30, start_soc=80, end_soc=100, energy_added_kwh=14.0,
+                    charge_type="AC", max_power_kw=7, location="Home", cost=12.6,
+                ))
+                for start, end, ssoc, esoc in [
+                    (datetime(2026, 7, 2, 8, 0), datetime(2026, 7, 2, 8, 30), 97, 95),
+                    (datetime(2026, 7, 2, 12, 0), datetime(2026, 7, 2, 12, 30), 94, 92),
+                ]:
+                    s.add(Drive(
+                        vehicle_id=v.id, start_time=start, end_time=end,
+                        distance_km=10, duration_min=30, start_soc=ssoc, end_soc=esoc,
+                        energy_used_kwh=1.5, avg_speed_kmh=20, max_speed_kmh=60, outside_temp_c=28,
+                    ))
+                s.add(BatteryReading(vehicle_id=v.id, ts=datetime(2026, 7, 2, 18, 0),
+                                     soc=91, range_km=300.0, odo_km=1000.0))
+                s.commit()
+
+            client.post("/api/active-vehicle", json={"vin": "TESTVIN-PARKLIST"})
+            try:
+                body = client.get("/api/parked-gaps?days=365").json()
+                parks = body["parks"]
+                assert [p["after"] for p in parks][0] == "charge"
+                assert parks[-1]["before"] == "now"
+                counted = [p for p in parks if "skipped" not in p]
+                assert sum(p["pct"] for p in counted) == pytest.approx(body["total"]["pct"], abs=0.02)
+                assert {p["method"] for p in counted} == {"soc"}
+                matrix = client.get("/api/driving-matrix?days=365&since_charge=true").json()
+                assert "parks" not in matrix["parked_share"]
+                pk = {row["code"]: row for row in matrix["parked"]}["PK"]
+                assert pk["kwh"] == pytest.approx(body["total"]["kwh"], abs=0.01)
+            finally:
+                client.post("/api/active-vehicle", json={"vin": "DEMO0SAMPLE0000001"})
+                with SessionLocal() as s:
+                    s.query(Drive).filter(Drive.vehicle_id == v.id).delete()
+                    s.query(Charge).filter(Charge.vehicle_id == v.id).delete()
+                    s.query(BatteryReading).filter(BatteryReading.vehicle_id == v.id).delete()
+                    s.query(Vehicle).filter(Vehicle.id == v.id).delete()
+                    s.commit()
+    finally:
+        settings.app_passcode = old_pc
+        settings.battery_capacity_kwh = old_cap

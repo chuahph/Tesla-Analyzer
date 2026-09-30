@@ -1094,18 +1094,34 @@ def parked_share(drives: list[Any], charges: list[Any] | None,
     hrs = {k: 0.0 for k in states}
     gaps = {k: 0 for k in states}
     unread: list[dict[str, Any]] = []
+    # Every park considered, counted or not, oldest first — so a total that
+    # disagrees with the car's Park tab can be traced to the park responsible.
+    parks: list[dict[str, Any]] = []
 
     for a, b in zip(chain, chain[1:]):
         hours = (b.start_time - a.end_time).total_seconds() / 3600.0
         if hours < PARKED_MIN_GAP_HOURS:
             continue
+        park = {
+            "from": a.end_time.isoformat(timespec="minutes"),
+            "to": b.start_time.isoformat(timespec="minutes"),
+            "hours": round(hours, 2),
+            "after": ("charge" if a is boundary else getattr(a, "id", None)),
+            "before": ("now" if b is closing else getattr(b, "id", None)),
+            "soc": [round(float(a.end_soc), 2), round(float(b.start_soc), 2)],
+        }
+        parks.append(park)
         # The same three exclusions window_accounting makes, so the hours here
         # are the hours it calls parked and the two reports cannot disagree.
         if any(a.end_time < c < b.start_time for c in charge_starts):
+            park["skipped"] = "a charge inside it"
             continue
         moved = _gap_moved_km(a, b)
-        if (moved is not None and moved > PARKED_GAP_MAX_MOVE_KM) or (
-                b.start_soc - a.end_soc > SOC_RISE_TOLERANCE_PCT):
+        if moved is not None and moved > PARKED_GAP_MAX_MOVE_KM:
+            park["skipped"] = f"odometer moved {moved:.2f} km"
+            continue
+        if b.start_soc - a.end_soc > SOC_RISE_TOLERANCE_PCT:
+            park["skipped"] = "SoC rose across it"
             continue
         armed = index.state(a.end_time, b.start_time) if index else None
         key = ("sentry_on" if armed else
@@ -1129,8 +1145,15 @@ def parked_share(drives: list[Any], charges: list[Any] | None,
         # both ends carry it (see _gap_energy_kwh), expressed as points of
         # the same pack so the rows keep one unit.
         gap_kwh = _gap_energy_kwh(a, b)
-        pts[key] += (gap_kwh / capacity_kwh * 100.0 if gap_kwh is not None and capacity_kwh
-                     else a.end_soc - b.start_soc)
+        gap_pts = (gap_kwh / capacity_kwh * 100.0 if gap_kwh is not None and capacity_kwh
+                   else a.end_soc - b.start_soc)
+        pts[key] += gap_pts
+        park.update({
+            "method": "energy" if gap_kwh is not None and capacity_kwh else "soc",
+            "pct": round(gap_pts, 2),
+            "kwh": round(gap_pts / 100.0 * capacity_kwh, 3) if capacity_kwh else None,
+            "sentry": key,
+        })
         hrs[key] += hours
         gaps[key] += 1
 
@@ -1180,6 +1203,7 @@ def parked_share(drives: list[Any], charges: list[Any] | None,
         # Newest first, because the question asked of this list is always
         # "are the RECENT ones still unread?"
         "unread_parks": list(reversed(unread))[:20],
+        "parks": parks,
         # Stated rather than left to be checked: the three parts are measured
         # separately and must come back to the whole.
         "reconciles": abs(total["pct"] - sum(

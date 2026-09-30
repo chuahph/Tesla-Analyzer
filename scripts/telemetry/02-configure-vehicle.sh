@@ -321,7 +321,7 @@ cat > "$WORK/config.json" <<EOF
       "DriverSeatOccupied":        {"interval_seconds": 10},
       "DoorState":                 {"interval_seconds": 10},
       "VehicleSpeed":              {"interval_seconds": 10},
-      "Odometer":                  {"interval_seconds": 30},
+      "Odometer":                  {"interval_seconds": 10},
       "Location":                  {"interval_seconds": 30},
 $DEFAULT_DRIVE_COUNTER
       "EnergyRemaining":           {"interval_seconds": 10},
