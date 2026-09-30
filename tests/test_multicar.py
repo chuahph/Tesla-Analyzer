@@ -2872,6 +2872,11 @@ def test_capacity_evidence_takes_the_pack_reading_from_the_car_not_from_itself()
             assert client.get("/api/capacity-evidence").json()[
                 "screen_side"]["readings"] == 3
 
+            # The same link opened twice is one reading, not two.
+            again = client.get("/api/add-screen-reading?kwh=21.1&pct=30.9").json()
+            assert again["added"] is None and "already recorded" in again["note"]
+            assert again["pooled"]["readings"] == 3
+
             # A wrong reading has to be removable. It sets the constant
             # outright, so it is not noise to be averaged away — and the
             # easiest mistake to make passes every check there is: the Park

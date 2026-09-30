@@ -8340,6 +8340,13 @@ def add_screen_reading(
         rows = _json.loads(state.get(session, state.SCREEN_CAPACITY_KEY) or "[]")
     except ValueError:
         rows = []
+    # The same panel read twice is one measurement, not two. These are plain
+    # links, so a refresh or a second tap re-sends them — on 30 September one
+    # was counted twice and pulled the pooled pack from 68.33 to 68.17 kWh.
+    if any(round(float(r.get("kwh") or 0), 2) == round(kwh, 2)
+           and round(float(r.get("pct") or 0), 2) == round(pct, 2) for r in rows):
+        return {"added": None, "note": "this reading is already recorded",
+                "pooled": _screen_capacity(session)}
     rows.append({"kwh": round(kwh, 2), "pct": round(pct, 2),
                  "at": sync_mod.now_local().isoformat(timespec="minutes")})
     # A pack's capacity moves over years, not weeks, so a long tail of old
