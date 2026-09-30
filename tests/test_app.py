@@ -8897,7 +8897,7 @@ def test_telemetry_config_separates_a_quiet_field_from_a_missing_one():
             # so synced and config sit at the top.
             fake = {"synced": True, "config": {
                 "hostname": "telemetry.example",
-                "fields": {"Soc": {}, "Gear": {},
+                "fields": {"Soc": {"interval_seconds": 60}, "Gear": {},
                            "LifetimeEnergyChargedKwh": {}}}}
             with mock.patch(
                     "app.tesla_client.TeslaClient.telemetry_config",
@@ -8910,6 +8910,10 @@ def test_telemetry_config_separates_a_quiet_field_from_a_missing_one():
             assert out["configured_but_quiet"] == ["LifetimeEnergyChargedKwh"]
             # Nothing should arrive that was never asked for.
             assert out["arriving_unconfigured"] == []
+            # What each field was actually told, so a changed interval can be
+            # confirmed as having landed.
+            assert out["intervals"]["Soc"] == 60
+            assert out["intervals"]["Gear"] is None
     finally:
         settings.app_passcode = old_pc
 

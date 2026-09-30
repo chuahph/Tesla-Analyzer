@@ -14056,6 +14056,11 @@ def telemetry_config(session: Session = Depends(get_session)):
         # means this endpoint and the stream disagree about what the car has.
         "arriving_unconfigured": sorted(f for f in arrived if f not in fields),
         "fields": fields,
+        # What the car was actually told, per field, so a changed interval can
+        # be confirmed as having landed rather than assumed from the script.
+        "intervals": {
+            name: (spec.get("interval_seconds") if isinstance(spec, dict) else None)
+            for name, spec in sorted((config.get("fields") or {}).items())},
     }
 
 
