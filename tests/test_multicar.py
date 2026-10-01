@@ -5037,3 +5037,36 @@ def test_asleep_status_shows_the_streams_battery_level(monkeypatch):
         settings.app_passcode = old
         _SleepsAfterDrivingClient.step = 0
         _reset_to_demo()
+
+
+def test_a_streamed_charge_measures_the_pack_on_the_car_s_own_two_gauges():
+    """EnergyRemaining's rise over the displayed %'s rise is kWh per displayed
+    percent — what the Energy screen divides by — with no charger efficiency
+    in it. Too narrow a swing is listed but not counted."""
+    import json as _json
+    from app import state
+
+    settings = get_settings()
+    old = settings.app_passcode
+    settings.app_passcode = ""
+    try:
+        with TestClient(app) as client:
+            with SessionLocal() as s:
+                prev = state.get(s, state.TELEMETRY_CHARGES_KEY)
+                state.put(s, state.TELEMETRY_CHARGES_KEY, _json.dumps([
+                    {"start_time": "2026-10-02T22:00:00", "kwh_pack_level": 27.33,
+                     "level_start": 30, "level_end": 70},
+                    {"start_time": "2026-10-03T22:00:00", "kwh_pack_level": 3.4,
+                     "level_start": 65, "level_end": 70},
+                    {"start_time": "2026-09-01T22:00:00", "kwh_pack_level": 20.0},
+                ]))
+                s.commit()
+            side = client.get("/api/capacity-evidence").json()["stream_side"]
+            assert side["sessions"] == 2 and side["counted"] == 1
+            assert side["median_kwh"] == pytest.approx(68.33, abs=0.02)
+            assert side["rows"][0]["precision_pct"] == pytest.approx(2.57, abs=0.01)
+            with SessionLocal() as s:
+                state.put(s, state.TELEMETRY_CHARGES_KEY, prev or "[]")
+                s.commit()
+    finally:
+        settings.app_passcode = old

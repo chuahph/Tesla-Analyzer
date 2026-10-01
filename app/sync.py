@@ -2373,6 +2373,12 @@ def _charge_close(shadow: dict[str, Any], end: dict[str, Any]) -> dict[str, Any]
         if kwh_wall and kwh_pack_level is not None and kwh_wall > 0 else None,
         "soc_start": start.get("soc"),
         "soc_end": end.get("soc"),
+        # The % the car's screen shows (BatteryLevel), at both ends. Against
+        # kwh_pack_level this measures the pack the way the car's own Energy
+        # screen divides it — no charger efficiency, no screenshot — see
+        # stream_capacity in the API layer.
+        "level_start": start.get("battery_level"),
+        "level_end": end.get("battery_level"),
         "peak_kw": round(peak, 1),
         "fast": fast,
         "lat": start.get("lat"), "lon": start.get("lon"),
@@ -2816,6 +2822,10 @@ def _shadow_close(shadow: dict[str, Any], end: dict[str, Any],
         # Where the car was last seen standing before this trip moved off —
         # see parked_odo in advance_shadow. [ts, odo], or None.
         "start_parked": start.get("parked_odo"),
+        # The car's displayed % at both ends (BatteryLevel), beside Soc —
+        # evidence for the capacity, the same way a charge's is.
+        "level_start": start.get("battery_level"),
+        "level_end": final.get("battery_level"),
         # The energy bracket, kept rather than only its difference: a reading
         # that arrives after the trip closed can then be folded in by
         # subtraction, instead of the trip having to remember how it got here.

@@ -9198,6 +9198,7 @@ def capacity_evidence(
                    f"Check them against screen_side, which is the only "
                    f"reading here that does not pass through it."),
         "screen_side": _screen_capacity(session),
+        "stream_side": _stream_capacity(session),
         "energy_basis_agreement": _energy_basis_agreement(session, vehicle),
         # The charge-side figures split by how the car was plugged in. They
         # should not: charge_energy_added is the same quantity either way. That
@@ -9220,6 +9221,64 @@ def capacity_evidence(
                  "sample by charging in bigger sessions, or lower min_swing_pct "
                  "and read the precision column."
                  if not good else None),
+    }
+
+
+# The widest a streamed session must swing on the car's displayed % to count.
+# Same reasoning as the charge-side floor: the % is the divisor, and its
+# resolution over a narrow swing is the whole error.
+STREAM_CAPACITY_MIN_SWING = 20.0
+
+
+def _stream_capacity(session: Session) -> dict[str, Any]:
+    """The usable pack as the car's own two gauges divide it.
+
+    A streamed charge records how far EnergyRemaining rose and how far the
+    displayed % (BatteryLevel) rose. Their ratio is kWh per displayed
+    percent — exactly the conversion the car's Energy screen makes, which is
+    what the screenshot readings measure by hand — with no charger
+    efficiency in it, because both are read off the pack itself.
+
+    Reported, not used: it needs sessions recorded since level_start existed,
+    and the % the car shows may settle after a charge ends, so it has to be
+    seen agreeing with screen_side before it replaces it.
+    """
+    import json as _json
+
+    try:
+        charges = _json.loads(state.get(session, state.TELEMETRY_CHARGES_KEY) or "[]") or []
+    except ValueError:
+        charges = []
+    rows = []
+    for c in charges:
+        e, a, b = c.get("kwh_pack_level"), c.get("level_start"), c.get("level_end")
+        if e is None or a is None or b is None:
+            continue
+        swing = float(b) - float(a)
+        if swing <= 0 or e <= 0:
+            continue
+        # Whole-percent readings resolve to a point at each end; finer ones to
+        # a tenth. EnergyRemaining's own 0.02 kWh step is added on top.
+        step = 1.0 if float(a).is_integer() and float(b).is_integer() else 0.1
+        rows.append({
+            "at": c.get("start_time"),
+            "level": [a, b], "swing_pct": round(swing, 1),
+            "kwh_pack_level": round(float(e), 3),
+            "implied_capacity_kwh": round(float(e) / swing * 100.0, 2),
+            "precision_pct": round((step / swing + 0.02 / float(e)) * 100.0, 2),
+            "counts": swing >= STREAM_CAPACITY_MIN_SWING,
+        })
+    good = sorted(r["implied_capacity_kwh"] for r in rows if r["counts"])
+    return {
+        "sessions": len(rows),
+        "counted": len(good),
+        "min_swing_pct": STREAM_CAPACITY_MIN_SWING,
+        "median_kwh": round(percentile(good, 0.5), 2) if good else None,
+        "range_kwh": [good[0], good[-1]] if good else None,
+        "rows": rows[-20:],
+        "note": (None if good else
+                 "No streamed charge with the displayed % at both ends yet — "
+                 "the next charge of 20 points or more will be the first."),
     }
 
 
