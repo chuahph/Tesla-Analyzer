@@ -1646,6 +1646,7 @@ function tripDiagnostics(t, ctx) {
       // anchored this trip actually is, rather than assuming all are equal.
       start_gap_sec: t.start_gap_sec, end_gap_sec: t.end_gap_sec,
       tail_trim_sec: t.tail_trim_sec,
+      p_wait_min: t.p_wait_min,
       data_quality: t.data_quality, distance_flag: t.distance_flag,
       // The parked gap before this trip: a 0.0 kWh reading over a long park
       // is itself a symptom (drain that moved into the drive).

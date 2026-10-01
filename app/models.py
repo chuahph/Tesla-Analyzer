@@ -295,6 +295,11 @@ class Drive(Base):
     # before the columns existed; those parks keep the Soc measure.
     start_energy_kwh: Mapped[float | None] = mapped_column(Float, nullable=True)
     end_energy_kwh: Mapped[float | None] = mapped_column(Float, nullable=True)
+    # Minutes stood in P at the end of a streamed trip, between the shift and
+    # power-down or the driver leaving. Inside duration_min, outside
+    # energy_used_kwh — the car's Current Drive kWh stops at P — so anything
+    # spreading energy over the trip's time leaves these minutes out.
+    p_wait_min: Mapped[float | None] = mapped_column(Float, nullable=True)
     # Which of recover_sleep_gap's three call sites actually fired ("open",
     # "close-live", "close-settled" or "backfill") and when, local time. The
     # "open" fast path needs the next trip's very first telemetry record to

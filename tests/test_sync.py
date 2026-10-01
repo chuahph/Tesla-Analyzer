@@ -2277,7 +2277,11 @@ def test_a_wait_in_p_before_getting_out_is_part_of_the_trip():
     assert trip is not None and trip["ended_on"] == "exit"
     assert trip["end_ts"] == 1260
     assert trip["duration_min"] == 21.0
-    assert trip["energy_kwh"] == pytest.approx(1.7)      # 30.0 - 28.3
+    # Energy stops at the shift to P, as the car's Current Drive kWh does;
+    # what the ten minutes of AC cost is kept beside it.
+    assert trip["energy_kwh"] == pytest.approx(1.5)      # 30.0 - 28.5
+    assert trip["p_wait_kwh"] == pytest.approx(0.2)
+    assert trip["p_wait_min"] == pytest.approx(10.0)
     # The ten minutes in P are standing still inside the trip: idle.
     assert trip["idle_min"] == pytest.approx(10.0)
     # Cleared with the trip, so the next one cannot inherit it.

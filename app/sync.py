@@ -2665,7 +2665,7 @@ def _shadow_close(shadow: dict[str, Any], end: dict[str, Any],
         if waited >= IDLE_STREAK_MIN * 60.0:
             idle_sec += waited
     shadow["still_since"] = None
-    shadow.pop("still_snap", None)
+    still_snap = shadow.pop("still_snap", None)
     shadow.pop("exit_seen", None)
     shadow.pop("exit_snap", None)
     shadow.pop("bms_seen_drive", None)
@@ -2702,8 +2702,29 @@ def _shadow_close(shadow: dict[str, Any], end: dict[str, Any],
     # minutes. Every trip's energy was overstated, always in the same
     # direction, and the accuracy report showed exactly that — seven trips
     # judged against the car and all seven positive.
-    e0, e1 = start.get("energy_kwh"), end.get("energy_kwh")
+    #
+    # And from the shift to P, not from `end`, when the trip ends later than
+    # that — at power-down or when the driver got out. The time does run to
+    # there, as on the car's Trips screen, but the car's Current Drive kWh
+    # and Wh/km stop counting at P. Measured, trip 3156: 2.2% on the car
+    # (1.50 kWh) and 1.50 here, but the car's own 1.4 kWh / 177.7 Wh/km
+    # against 187 — a minute or two of AC in P at 34 C, after the drive.
+    # What the wait cost is kept as p_wait_kwh, so it is not lost, and the
+    # SoC figures still run to the end, which is what the car's % includes.
+    e0 = start.get("energy_kwh")
+    stop = end
+    if (still_snap and still_snap.get("energy_kwh") is not None
+            and still_snap.get("ts") is not None and end.get("ts") is not None
+            and float(start["ts"]) < float(still_snap["ts"]) <= float(end["ts"])):
+        stop = still_snap
+    e1 = stop.get("energy_kwh")
     energy = round(e0 - e1, 3) if e0 is not None and e1 is not None else None
+    e_end = end.get("energy_kwh")
+    p_wait_kwh = (round(max(float(e1) - float(e_end), 0.0), 3)
+                  if stop is not end and e1 is not None and e_end is not None
+                  else None)
+    p_wait_min = (round((float(end["ts"]) - float(stop["ts"])) / 60.0, 1)
+                  if stop is not end else None)
 
     # The drive counter is the better measure of the two: monotonic, so a
     # lost record costs nothing, and it counts only traction — where
@@ -2800,6 +2821,10 @@ def _shadow_close(shadow: dict[str, Any], end: dict[str, Any],
         # subtraction, instead of the trip having to remember how it got here.
         "start_energy_kwh": e0,
         "end_energy_kwh": e1,
+        # Spent standing in P between the shift and the trip's end — not in
+        # energy_kwh, which stops at P as the car's Current Drive does.
+        "p_wait_kwh": p_wait_kwh,
+        "p_wait_min": p_wait_min,
         "drive_delta": drive_delta,
         "regen_delta": regen_delta,
         # The reason for measuring this twice: EnergyRemaining moves in steps

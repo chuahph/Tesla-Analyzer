@@ -5005,7 +5005,8 @@ def _apply_shadow_to_drive(row, t: dict) -> None:
                        ("outside_temp_c", "out_temp"),
                        ("out_temp_end_c", "out_temp_end"),
                        ("start_energy_kwh", "start_energy_kwh"),
-                       ("end_energy_kwh", "end_energy_kwh")):
+                       ("end_energy_kwh", "end_energy_kwh"),
+                       ("p_wait_min", "p_wait_min")):
         value = t.get(key)
         if value is not None:
             setattr(row, field, float(value))
