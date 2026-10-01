@@ -5006,7 +5006,8 @@ def _apply_shadow_to_drive(row, t: dict) -> None:
                        ("out_temp_end_c", "out_temp_end"),
                        ("start_energy_kwh", "start_energy_kwh"),
                        ("end_energy_kwh", "end_energy_kwh"),
-                       ("p_wait_min", "p_wait_min")):
+                       ("p_wait_min", "p_wait_min"),
+                       ("p_wait_kwh", "p_wait_kwh")):
         value = t.get(key)
         if value is not None:
             setattr(row, field, float(value))
@@ -9956,7 +9957,10 @@ def driving_matrix(days: int = Query(30, ge=1, le=730),
     # PK is the parked total and ID and SE are its parts, so only PK counts
     # toward it — adding all three would bill the parked hours twice.
     pk_kwh = out["parked"][0].get("kwh") or 0.0
-    total_kwh = drive_kwh + pk_kwh
+    # Spent standing in P at trips' ends — no row's, but the battery's.
+    pw_kwh = float(acc["driving"].get("p_wait_kwh") or 0.0)
+    pw_pct = round(pw_kwh / capacity_kwh * 100.0, 2) if capacity_kwh else 0.0
+    total_kwh = drive_kwh + pk_kwh + pw_kwh
     total_hours = acc["driving"]["hours"] + parked_hours
     def share(rows: list[dict[str, Any]]) -> None:
         for row in rows:
@@ -9994,7 +9998,8 @@ def driving_matrix(days: int = Query(30, ge=1, le=730),
     # only ever measurable in it — SoC points ARE percent.
     pk_pct = out["parked"][0].get("pct") or 0.0
     total_pct = round(
-        out["modes_pct"] + out["unclassified_pct"] + out["no_energy_pct"] + pk_pct, 2)
+        out["modes_pct"] + out["unclassified_pct"] + out["no_energy_pct"] + pk_pct
+        + pw_pct, 2)
     # The gap against Battery Used's own figure — reported rather than
     # hidden or forced to match. This total is a bottom-up sum of individual
     # trips and parked gaps; Battery Used is anchored to the pack's actual
@@ -10029,6 +10034,7 @@ def driving_matrix(days: int = Query(30, ge=1, le=730),
         "adds_up": " + ".join(
             [f"{m['code']} {m['pct']:.2f}%" for m in out["modes"] if m.get("pct")]
             + ([f"PK {pk_pct:.2f}%"] if pk_pct else [])
+            + ([f"P-wait {pw_pct:.2f}%"] if pw_pct else [])
             + ([f"unsorted {out['unclassified_pct']:.2f}%"]
                if out["unclassified_pct"] else [])
             + ([f"implausible {out['no_energy_pct']:.2f}%"]
@@ -10036,6 +10042,7 @@ def driving_matrix(days: int = Query(30, ge=1, le=730),
         ) + f" = {total_pct:.2f}%",
         "driving_kwh": drive_kwh,
         "parked_kwh": round(pk_kwh, 2),
+        "p_wait_kwh": round(pw_kwh, 2),
         "parked_share_kwh_pct": (round(pk_kwh / total_kwh * 100.0, 1)
                                  if total_kwh else None),
         "modes_kwh": out["modes_kwh"],
@@ -12611,7 +12618,11 @@ def summary(
             anchor=(last_charge.end_time, last_charge.end_soc),
             tail=tail[:3] if tail else None)
         park_kwh = share["total"]["kwh"] or 0.0
-        drive_kwh = sum(float(d.energy_used_kwh or 0.0) for d in drives)
+        # Plus what each trip spent standing in P at its end — outside its
+        # kWh (which stops at P, as the car's Current Drive does) and outside
+        # the park after it, but battery all the same.
+        drive_kwh = sum(float(d.energy_used_kwh or 0.0)
+                        + float(getattr(d, "p_wait_kwh", None) or 0.0) for d in drives)
         used_kwh = max(drive_kwh + park_kwh, 0.0)
         used_pct = round(used_kwh / capacity_kwh * 100.0, 1)
         vampire_kwh = park_kwh

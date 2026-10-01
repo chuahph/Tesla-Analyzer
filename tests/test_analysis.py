@@ -3376,6 +3376,12 @@ def test_an_unrecorded_journey_is_excluded_from_the_accounting_not_dropped():
     assert (acc["driving"]["hours"] + acc["parked"]["hours"]
             + acc["charging"]["hours"] + acc["excluded"]["hours"]
             + acc["unbounded"]["hours"]) == pytest.approx(acc["span_hours"], abs=0.15)
+    # Stood in P at a trip's end: billed to neither the trip nor the park,
+    # so the books carry it on its own line.
+    assert acc["driving"]["p_wait_kwh"] == 0.0
+    history[1].p_wait_kwh = 0.08
+    acc = driving_analysis.window_accounting(history, [], [], since, until)
+    assert acc["driving"]["p_wait_kwh"] == pytest.approx(0.08)
 
 
 def test_pk_equals_id_plus_se_in_energy_not_only_in_rate():
@@ -4521,6 +4527,12 @@ def test_parked_drain_uses_the_energy_gauge_between_streamed_trips():
     assert share["total"]["kwh"] == pytest.approx(1.2, abs=0.01)
     vd = driving.vampire_drain([a, b], [], 68.6)
     assert vd["kwh"] == pytest.approx(1.2, abs=0.01)
+
+    # AC run standing in P before a's end is neither the trip's (its energy
+    # stops at P) nor the park's (which starts at a's end_time).
+    a.p_wait_kwh = 0.3
+    assert driving._gap_energy_kwh(a, b) == pytest.approx(0.9)
+    a.p_wait_kwh = None
 
     # A reading that would make the park gain energy is a broken bracket.
     b.start_energy_kwh = 50.5

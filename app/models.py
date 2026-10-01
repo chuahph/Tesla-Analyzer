@@ -300,6 +300,10 @@ class Drive(Base):
     # energy_used_kwh — the car's Current Drive kWh stops at P — so anything
     # spreading energy over the trip's time leaves these minutes out.
     p_wait_min: Mapped[float | None] = mapped_column(Float, nullable=True)
+    # What those minutes cost, from the same gauge. Not the trip's and not
+    # the park's — the park after it starts at end_time — so parked drain
+    # leaves it out (driving._gap_energy_kwh).
+    p_wait_kwh: Mapped[float | None] = mapped_column(Float, nullable=True)
     # Which of recover_sleep_gap's three call sites actually fired ("open",
     # "close-live", "close-settled" or "backfill") and when, local time. The
     # "open" fast path needs the next trip's very first telemetry record to

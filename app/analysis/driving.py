@@ -90,7 +90,10 @@ def _gap_energy_kwh(a: Any, b: Any) -> float | None:
     used = getattr(a, "energy_used_kwh", None)
     if e_a is None or e_b is None or used is None:
         return None
-    gap = float(e_a) - float(used) - float(e_b)
+    # Less what a spent standing in P before its end_time (Drive.p_wait_kwh):
+    # outside its billed energy, inside its own time, so not the park's.
+    wait = getattr(a, "p_wait_kwh", None) or 0.0
+    gap = float(e_a) - float(used) - float(wait) - float(e_b)
     hours = (b.start_time - a.end_time).total_seconds() / 3600.0
     if gap < -GAP_ENERGY_TOLERANCE_KWH or hours <= 0:
         return None
@@ -1027,7 +1030,12 @@ def window_accounting(drives: list[Any], charges: list[Any] | None,
     return {
         "span_hours": round(span_hours, 1),
         "driving": {"hours": round(drive_hours, 1), "kwh": round(drive_kwh, 2),
-                    "trips": len(ordered)},
+                    "trips": len(ordered),
+                    # Stood in P at trips' ends: in the trips' hours, not in
+                    # their kWh (which stop at P, as the car's Current Drive
+                    # does) and not in any park's — so totals add it back.
+                    "p_wait_kwh": round(sum(float(getattr(d, "p_wait_kwh", None) or 0.0)
+                                            for d in ordered), 2)},
         "parked": {"hours": round(parked_hours, 1), "gaps": parked_gaps,
                    "by_state": {k: round(v, 1) for k, v in by_state.items()},
                    "gaps_by_state": dict(gaps_by_state),
