@@ -9152,8 +9152,12 @@ def capacity_evidence(
         # since the split between them turned out not to exist — see
         # sync.CHARGE_EFFICIENCY.
         implied *= sync_mod.CHARGE_EFFICIENCY
-        # One SoC point at each end, so the swing is +/-1 point in total.
-        precision = 1.0 / swing * 100.0
+        # One SoC point at each end when the ends are whole percent (polled);
+        # the stream reports Soc to a fraction, and there it is the 0.1 a
+        # displayed reading resolves to, not a whole point.
+        whole = (float(c.start_soc or 0).is_integer()
+                 and float(c.end_soc or 0).is_integer())
+        precision = (1.0 if whole else 0.1) / swing * 100.0
         rows.append({
             "charge_id": c.id, "at": c.start_time.isoformat(timespec="minutes"),
             # Which correction was applied, and the only way to read the
