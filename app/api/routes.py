@@ -9286,6 +9286,40 @@ def _stream_capacity(session: Session) -> dict[str, Any]:
     }
 
 
+def _car_rated_line(driving: dict, balance: dict | None, battery: dict,
+                    capacity_kwh: float) -> None:
+    """The car's own "X% more / less than Rated", on each recent trip and on
+    the since-charge balance.
+
+    The car's Energy screen states it in battery points, not as a ratio: the %
+    consumed minus the % that distance would cost at rated range. Rated is the
+    car's 100% range, which the battery-health projection already measures
+    from the stream's RatedRange against SoC — 453 km on this car, which
+    reproduced every screen checked on 1 October to the 0.1 the car rounds to
+    (8.0 km at 2.2%: +0.4; 9.5 km at 1.5%: -0.6). So this needs no
+    screenshot; it is the car's own line, recomputed from what it streams.
+    """
+    full = battery.get("est_full_range_km") if battery.get("available") else None
+    if not full or not capacity_kwh:
+        return
+    full = float(full)
+    for t in (driving.get("recent_trips") or []) if driving.get("available") else []:
+        km, kwh = t.get("distance_km"), t.get("energy_kwh")
+        if not km or kwh is None:
+            continue
+        rated = float(km) / full * 100.0
+        t["rated_pct"] = round(rated, 2)
+        t["vs_rated_pts"] = round(float(kwh) / capacity_kwh * 100.0 - rated, 1)
+    # The car's Drive tab, since its last charge, counts driving and leaves
+    # parked drain to the Park tab — so the trip side, not Battery Used.
+    if (balance and balance.get("used_pct") is not None
+            and balance.get("trip_kwh") is not None and driving.get("total_distance_km")):
+        rated = float(driving["total_distance_km"]) / full * 100.0
+        balance["drive_pct"] = round(float(balance["trip_kwh"]) / capacity_kwh * 100.0, 1)
+        balance["rated_pct"] = round(rated, 2)
+        balance["vs_rated_pts"] = round(balance["drive_pct"] - rated, 1)
+
+
 @router.get("/self-check")
 def self_check(days: int = Query(30, ge=1, le=730),
                session: Session = Depends(get_session)):
@@ -12801,6 +12835,7 @@ def summary(
             "peak_start_hour": settings.tariff_peak_start_hour,
             "peak_end_hour": settings.tariff_peak_end_hour,
         }
+    _car_rated_line(driving, battery_balance, battery, capacity_kwh)
     assessment = recommendations_engine.assess(
         driving,
         charging,

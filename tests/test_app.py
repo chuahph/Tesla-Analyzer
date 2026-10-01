@@ -12334,3 +12334,25 @@ def test_no_park_since_the_last_drive_while_a_charge_is_running(monkeypatch):
     assert routes._park_since_last_drive(None, car, [drive], 21.4) is not None
     monkeypatch.setattr(routes, "_shadow_open", lambda s, v: (None, {"ts": 1.0}))
     assert routes._park_since_last_drive(None, car, [drive], 25.0) is None
+
+
+def test_the_car_s_rated_line_is_recomputed_from_rated_range():
+    """8.0 km at 1.50 kWh on a 68.3 kWh pack with a 453 km rated range is the
+    car's own "+0.4% more than Rated"; 9.5 km at 1.03 kWh its "-0.6%"."""
+    from app.api import routes as routes_mod
+
+    driving = {"available": True, "total_distance_km": 17.5, "recent_trips": [
+        {"distance_km": 8.0, "energy_kwh": 1.50},
+        {"distance_km": 9.5, "energy_kwh": 1.03},
+        {"distance_km": 2.0, "energy_kwh": None}]}
+    balance = {"used_pct": 4.4, "trip_kwh": 2.6}
+    routes_mod._car_rated_line(driving, balance,
+                               {"available": True, "est_full_range_km": 453}, 68.3)
+    a, b, c = driving["recent_trips"]
+    assert a["vs_rated_pts"] == 0.4 and b["vs_rated_pts"] == -0.6
+    assert "vs_rated_pts" not in c
+    assert balance["drive_pct"] == 3.8 and balance["vs_rated_pts"] == -0.1
+    # No measured rated range, nothing invented.
+    bare = {"available": True, "recent_trips": [{"distance_km": 8.0, "energy_kwh": 1.5}]}
+    routes_mod._car_rated_line(bare, None, {"available": False}, 68.3)
+    assert "vs_rated_pts" not in bare["recent_trips"][0]

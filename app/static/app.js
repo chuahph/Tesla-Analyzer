@@ -1611,6 +1611,9 @@ function tripDiagnostics(t, ctx) {
       driving_energy_kwh: t.driving_energy_kwh,
       driving_wh_per_km: t.driving_wh_per_km,
       soc_used_pct: t.soc_used_pct, eco_score: t.eco_score,
+      // The car's "X% more/less than Rated", in battery points like its own
+      // Energy screen: % used minus what the distance costs at rated range.
+      vs_rated_pts: t.vs_rated_pts, rated_pct: t.rated_pct,
       // The trip-boundary instrumentation — which anchor, if either, lost or
       // recovered distance. This is the part that actually settles most
       // accuracy questions, and it's invisible in the UI.
