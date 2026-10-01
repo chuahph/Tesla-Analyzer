@@ -13417,7 +13417,11 @@ def _telemetry_battery_reading(session: Session, vin: str, snap: dict) -> bool:
         ts=ts,
         soc=snap["soc"],
         range_km=round(snap["range_km"], 1),
-        odo_km=round(snap.get("odo_km") or 0.0, 1),
+        # To the metre, as the stream reports it. These readings are where
+        # recover_sleep_gap and the continuity checks learn where a car came
+        # to rest, and rounded to 0.1 km a rest at 32199.542 read 32199.5 —
+        # 42 m taken off the arrival it was meant to bound.
+        odo_km=round(snap.get("odo_km") or 0.0, 3),
         sentry_mode=sentry_now,
         sentry_state=sentry_state_now,
         climate_on=climate_now,
