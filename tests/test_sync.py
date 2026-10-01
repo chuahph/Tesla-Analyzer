@@ -2336,3 +2336,56 @@ def test_the_departure_half_waits_for_the_departing_trip_to_finish():
     assert nxt["distance_km"] == pytest.approx(5.15)
     assert nxt["start_recovered_km"] == pytest.approx(0.15)
     assert recover_sleep_gap(prev, nxt, via="close-live") is False
+
+
+def test_the_car_seen_standing_in_the_bay_decides_the_split():
+    """No assumed 0.15 km when the car said where it stood.
+
+    A car that wakes underground records while it waits to move, and replays
+    it on reconnect. That fresh odometer is where the arrival ended and the
+    departure began: the arrival gets the ground up to it, the departure the
+    rest — however long the signal took to come back.
+    """
+    prev = {"start_odo_km": 100.0, "end_odo_km": 105.0, "distance_km": 5.0,
+            "energy_kwh": 0.75, "wh_per_km": 150.0, "ended_on": "stream_lost",
+            "end_ts": 1000.0}
+
+    def nxt(parked):
+        return {"start_odo_km": 105.4, "end_odo_km": 110.4, "distance_km": 5.0,
+                "energy_kwh": 0.8, "wh_per_km": 160.0, "start_parked": parked}
+
+    seen = dict(prev)
+    n = nxt([50000.0, 105.32])
+    assert recover_sleep_gap(seen, n) is True
+    assert seen["recovered_km"] == pytest.approx(0.32)
+    assert n["start_recovered_km"] == pytest.approx(0.08)
+    assert n["start_odo_km"] == pytest.approx(105.32)
+
+    # Seen at its own recorded end: the arrival was whole, the departure not.
+    whole = dict(prev)
+    n = nxt([50000.0, 105.0])
+    assert recover_sleep_gap(whole, n) is True
+    assert whole["distance_km"] == 5.0 and not whole.get("recovered_km")
+    assert n["start_recovered_km"] == pytest.approx(0.4)
+
+    # A reading from before the arrival's last record is some other moment.
+    stale = dict(prev)
+    n = nxt([900.0, 105.32])
+    assert recover_sleep_gap(stale, n) is True
+    assert stale["recovered_km"] == pytest.approx(0.25)     # the blind rule
+
+
+def test_only_an_odometer_the_car_actually_sent_counts_as_seen_parked():
+    """The composite carries the last odometer forward; after a night asleep
+    that is yesterday's arrival. Only a record carrying Odometer counts."""
+    shadow: dict = {}
+    stood = _tel(0, 100.0, 30.0, gear="ShiftStateP", speed_mph=0.0)
+    advance_shadow(shadow, stood)
+    assert "parked_odo" not in shadow
+    stood = dict(_tel(10, 100.0, 30.0, gear="ShiftStateP", speed_mph=0.0),
+                 odo_fresh=True)
+    advance_shadow(shadow, stood)
+    assert shadow["parked_odo"][1] == pytest.approx(160.934, abs=0.001)
+    advance_shadow(shadow, _tel(20, 100.05, 30.0))
+    assert shadow["open"]["parked_odo"][1] == pytest.approx(160.934, abs=0.001)
+    assert "parked_odo" not in shadow

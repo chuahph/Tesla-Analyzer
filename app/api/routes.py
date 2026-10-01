@@ -13695,6 +13695,11 @@ def _telemetry_ingest(payload: dict, session: Session):
         ts = _telemetry_ts(record.get("created_at"))
         if ts:
             snap = sync_mod.snapshot_from_telemetry(car, ts)
+            # Whether THIS record carried the odometer. The composite carries
+            # the last value forward, and after a night asleep that is the
+            # previous arrival, not where the car stands now.
+            if "Odometer" in reported and not stale:
+                snap["odo_fresh"] = True
             # Newest wins, and a replay cannot displace it: a buffered record
             # arriving late still describes an older state of the car.
             seen = last_snaps.get(vin)
@@ -13749,7 +13754,8 @@ def _telemetry_ingest(payload: dict, session: Session):
                                               opening.get("ts"))
                           if previous is not None else None)
                 if previous is not None and sync_mod.recover_sleep_gap(
-                        previous, {"start_odo_km": opening["odo_km"]},
+                        previous, {"start_odo_km": opening["odo_km"],
+                                   "parked_odo": opening.get("parked_odo")},
                         rested_odo_km=rested, via="open"):
                     recovered += 1
             elif not shadow.get("open"):

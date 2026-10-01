@@ -1591,6 +1591,22 @@ def advance_shadow(shadow: dict[str, Any], snap: dict[str, Any]) -> dict[str, An
     open_at = shadow.get("open")
     done = None
 
+    # Where the car was last SEEN standing, by an odometer it actually sent
+    # (odo_fresh — the composite carries the last value forward, which after a
+    # night asleep is yesterday's arrival, not this morning's bay). A car that
+    # wakes underground records while it waits to move and replays that on
+    # reconnect, so this is where the previous trip really ended — the
+    # evidence recover_sleep_gap needs to split a carpark gap instead of
+    # assuming a split. Kept only on a change of value, so a car sitting
+    # awake does not rewrite the store every batch.
+    if (not open_at and snap.get("odo_fresh")
+            and float(snap.get("speed_kmh") or 0.0) == 0.0
+            and float(snap.get("odo_km") or 0.0) > 0.0):
+        odo = round(float(snap["odo_km"]), 3)
+        held = shadow.get("parked_odo")
+        if not held or abs(float(held[1]) - odo) > 0.0005:
+            shadow["parked_odo"] = [ts, odo]
+
     # How often EnergyRemaining actually arrives, tallied while a trip is
     # open. A trip's energy is the difference between two readings of it, so
     # each end of that bracket is stale by up to one interval — and how large
@@ -1919,6 +1935,9 @@ def advance_shadow(shadow: dict[str, Any], snap: dict[str, Any]) -> dict[str, An
         if (not open_at and float(snap.get("odo_km") or 0.0) > 0.0
                 and float(snap.get("speed_kmh") or 0.0) > 0.0):
             shadow["open"] = dict(snap)
+            parked = shadow.pop("parked_odo", None)
+            if parked:
+                shadow["open"]["parked_odo"] = parked
             shadow["max_speed_kmh"] = 0.0
             # Per trip. The cadence is a property of the journey it was
             # measured during, not of the car in general — the configuration
@@ -2454,16 +2473,33 @@ def recover_sleep_gap(prev: dict[str, Any], nxt: dict[str, Any],
     if (handed is not None and whole > 0.0
             and abs(float(handed) - float(next_start)) < 0.0005):
         return _credit_departure(nxt, whole, float(end_odo), via)
-    if rested_odo_km is not None:
-        boundary = min(float(next_start), float(rested_odo_km))
+    # Best of all: the car itself, standing in the bay before it moved off —
+    # a fresh odometer it sent (or buffered and replayed) while parked, after
+    # the previous trip's last record. That reading IS where the arrival
+    # ended and where the departure began, so nothing is assumed: the
+    # arrival gets the ground up to it, the departure everything after.
+    seen = _parked_before(prev, nxt, float(end_odo), float(next_start))
+    if seen is not None:
+        boundary, credit_departure = seen, True
+    elif rested_odo_km is not None:
+        # A polled reading, rounded to 0.1 km: good enough to stop an arrival
+        # being over-credited, too coarse to hand metres to the departure.
+        boundary, credit_departure = min(float(next_start), float(rested_odo_km)), False
     else:
         if whole > SHADOW_TAIL_MAX_KM:
             return False
         boundary = float(end_odo) + whole - min(DEPARTURE_BLIND_KM, whole / 2.0)
+        credit_departure = True
     gain = round(boundary - float(end_odo), 3)
-    if gain <= 0.0 or gain > SHADOW_TAIL_MAX_KM:
+    departure = round(float(next_start) - boundary, 3) if credit_departure else 0.0
+    if gain > SHADOW_TAIL_MAX_KM or departure > SHADOW_TAIL_MAX_KM:
         return False
-
+    if gain <= 0.0:
+        if departure <= 0.0:
+            return False
+        # The arrival was complete; only the departure's head is missing.
+        prev["handover_to_odo_km"] = round(float(next_start), 3)
+        return _credit_departure(nxt, departure, float(end_odo), via) or True
     whkm = prev.get("wh_per_km")
     distance = round(boundary - float(start_odo), 3)
     # Recomputed from the bracket, never adjusted by a delta — so if this
@@ -2494,11 +2530,35 @@ def recover_sleep_gap(prev: dict[str, Any], nxt: dict[str, Any],
     # numerator and denominator are short by the same missing minutes.
     prev["recovered_via"] = via
     prev["recovered_at"] = now_local().isoformat(timespec="seconds")
-    if rested_odo_km is None and float(next_start) - boundary > 0.0005:
+    if credit_departure and departure > 0.0:
         prev["handover_to_odo_km"] = round(float(next_start), 3)
         _credit_departure(nxt, round(float(next_start) - boundary, 3),
                           round(boundary, 3), via)
     return True
+
+
+def _parked_before(prev: dict[str, Any], nxt: dict[str, Any],
+                   end_odo: float, next_start: float) -> float | None:
+    """The odometer the car was seen standing at between two trips, or None.
+
+    From the departing trip's ``start_parked`` (or, at the "open" call site,
+    the opening snapshot's ``parked_odo``). Trusted only when it was taken
+    after the arriving trip's last record and sits inside the gap — anything
+    else is a reading from some other moment.
+    """
+    held = nxt.get("start_parked") or nxt.get("parked_odo")
+    if not held or len(held) < 2:
+        return None
+    try:
+        at, odo = float(held[0]), float(held[1])
+    except (TypeError, ValueError):
+        return None
+    end_ts = prev.get("end_ts")
+    if end_ts is not None and at <= float(end_ts):
+        return None
+    if not (end_odo - 0.0005 <= odo <= next_start + 0.0005):
+        return None
+    return min(max(odo, end_odo), next_start)
 
 
 def _credit_departure(nxt: dict[str, Any], km: float, new_start: float,
@@ -2732,6 +2792,9 @@ def _shadow_close(shadow: dict[str, Any], end: dict[str, Any],
         # boundary.
         "start_odo_km": round(float(start.get("odo_km") or 0.0), 3),
         "end_odo_km": round(float(final.get("odo_km") or 0.0), 3),
+        # Where the car was last seen standing before this trip moved off —
+        # see parked_odo in advance_shadow. [ts, odo], or None.
+        "start_parked": start.get("parked_odo"),
         # The energy bracket, kept rather than only its difference: a reading
         # that arrives after the trip closed can then be folded in by
         # subtraction, instead of the trip having to remember how it got here.
