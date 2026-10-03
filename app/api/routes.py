@@ -13033,6 +13033,11 @@ TELEMETRY_TRIPS_MAX = 100
 # with extra steps, so nothing reads it for a boundary.
 TELEMETRY_MODE_FIELDS = ("BMSState", "CenterDisplay", "Gear",
                          "DriverSeatOccupied", "SentryMode", "HvacPower",
+                         # Lock and unlock, timestamped: the intrusion alert
+                         # cancels on an unlock reported within
+                         # INTRUSION_UNLOCK_LAG_SEC of an opening, and this is
+                         # where that lag can actually be read.
+                         "Locked",
                          # A key added to the car is how a stolen Tesla is
                          # prepared. Logged rather than alerted on until it is
                          # known what this reads normally.
