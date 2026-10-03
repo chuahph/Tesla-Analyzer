@@ -2520,6 +2520,12 @@ def test_intrusion_alert_fires_once_per_opening(monkeypatch):
             tick(480, False, True)
             assert fired() == 3
 
+            # Sentry on but UNLOCKED: the owner's key unlocked it first — the
+            # boot opened after parking, getting back in. Never a break-in.
+            tick(500, True, False, locked=False)
+            tick(520, True, True, locked=False)
+            assert fired() == 3
+
             # Neither Sentry nor locked: the car was left open on purpose.
             tick(540, False, False, locked=False)
             tick(600, False, True, locked=False)
@@ -2622,6 +2628,14 @@ def test_intrusion_alert_waits_to_see_whether_you_drove_off(monkeypatch):
             assert fired() == 0, "must not fire before the window elapses"
             tick(430, False, True)                      # +70s, window elapsed
             assert fired() == 1, "must fire once nothing has followed the window out"
+
+            # Opened while it still read locked, and the unlock arrived 10 s
+            # later: the owner's key, reported out of order. Silent.
+            tick(600, True, False)
+            tick(660, True, True)
+            tick(670, True, True, locked=False)
+            tick(760, True, True, locked=False)
+            assert fired() == 1, "a late-reported unlock is the owner's own key"
 
             v = s.query(Vehicle).filter(Vehicle.vin == vin).first()
             rows = s.query(SecurityEvent).filter(

@@ -346,7 +346,7 @@ $DEFAULT_DRIVE_COUNTER
       "CabinOverheatProtectionMode": {"interval_seconds": 60},
       "ClimateKeeperMode":         {"interval_seconds": 60},
       "CenterDisplay":             {"interval_seconds": 30},
-      "Locked":                    {"interval_seconds": 300},
+      "Locked":                    {"interval_seconds": 10},
       "TpmsPressureFl":            {"interval_seconds": 3600},
       "TpmsPressureFr":            {"interval_seconds": 3600},
       "TpmsPressureRl":            {"interval_seconds": 3600},

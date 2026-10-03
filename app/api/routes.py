@@ -3745,8 +3745,14 @@ def _evaluate_alerts(session: Session, vehicle, vin: str, snap: dict,
         # always false and cannot tell the owner's own phone key from
         # anyone else's at the moment of opening. See intrusion_confirm_sec
         # for what does — held below rather than announced immediately.
+        # Locked, and only locked. Sentry alone used to arm it, and Sentry
+        # stays "on" through every ordinary park — so the owner opening the
+        # boot after parking (13:56, 3 October) and getting back in before
+        # driving off (15:12) were both reported as break-ins. Nobody opens a
+        # LOCKED car's door with a key: the key unlocks it first. An opening
+        # while it still reads locked is the one that needs explaining.
         armed = (
-            (bool(sentry_now) or bool(snap.get("locked")))
+            snap.get("locked") is True
             and not in_session
             and not snap["user_present"]
         )
@@ -3759,9 +3765,9 @@ def _evaluate_alerts(session: Session, vehicle, vin: str, snap: dict,
             what = "A door or trunk" if opened_doors else "A window"
             notifications.notify(
                 session, "Car opened while parked",
-                f"{what} was opened on {vehicle.name} while it sat parked "
-                f"{'with Sentry Mode on' if sentry_now else 'and locked'} "
-                "with nobody aboard.",
+                f"{what} was opened on {vehicle.name} while it sat parked and "
+                f"locked{', Sentry Mode on' if sentry_now else ''}, "
+                "with no key unlocking it.",
                 tag="intrusion",
             )
             # Persisted as well as pushed. The alert alone left no trace
@@ -3793,7 +3799,14 @@ def _evaluate_alerts(session: Session, vehicle, vin: str, snap: dict,
                 pending = None
 
             if pending:
-                if in_session:
+                if (snap.get("locked") is False and ts
+                        and ts - float(pending.get("since") or ts) <= INTRUSION_UNLOCK_LAG_SEC):
+                    # Unlocked within moments of the opening: the owner's key,
+                    # whose unlock simply reached us after the door did —
+                    # Locked and DoorState stream on separate clocks.
+                    state.put(session, pending_key, "")
+                    pending = None
+                elif in_session:
                     # Drove off, or plugged in, before the window closed —
                     # the opening that started this was the owner's own.
                     # Quiet.
@@ -3821,6 +3834,13 @@ def _evaluate_alerts(session: Session, vehicle, vin: str, snap: dict,
                 # Everything shut again (or the car was driven/occupied) —
                 # arm the alert for the next separate opening.
                 state.put(session, intrusion_key, "")
+
+
+# How late the unlock may be reported after a door it opened and still count
+# as the owner's. Locked and DoorState are separate fields on separate
+# streaming clocks (both 10 s), so an unlock-then-open can arrive the other
+# way round; a stranger inside unlocking it later is not that.
+INTRUSION_UNLOCK_LAG_SEC = 30.0
 
 
 def _process_vehicle(session: Session, data: dict, v_summary: dict, settings) -> tuple:
