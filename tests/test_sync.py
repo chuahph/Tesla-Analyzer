@@ -1,7 +1,7 @@
 """Tests for the telemetry shadow machine and snapshot helpers (app/sync.py)."""
 import pytest
 
-from app.sync import (_energy_kwh, is_driving,
+from app.sync import (DEPARTURE_BLIND_KM, _energy_kwh, is_driving,
                       snapshot_from_telemetry, advance_shadow,
                       snapshot_from_vehicle_data,
                       recover_sleep_gap, ENERGY_QUANTUM_KWH, ENERGY_SAMPLE_SEC, MILES_TO_KM,
@@ -1328,7 +1328,7 @@ def test_a_departure_head_is_not_paid_to_the_arriving_trip():
     # gap this short gives the departure half, never more.
     blind = dict(prev)
     assert recover_sleep_gap(blind, nxt) is True
-    assert blind["end_odo_km"] == pytest.approx(31405.818)
+    assert blind["end_odo_km"] == pytest.approx(31405.872)
 
 
 def test_the_temperature_average_stops_when_the_car_does():
@@ -1582,8 +1582,8 @@ def test_a_whole_journey_driven_offline_is_not_glued_onto_the_last_arrival():
     # attributed to a trip that did not drive it.
     normal = trip()
     assert recover_sleep_gap(normal, {"start_odo_km": 31161.861 + 0.4}) is True
-    # Blind, so the departure's fixed 0.15 km comes off it.
-    assert normal["recovered_km"] == pytest.approx(0.25, abs=0.002)
+    # Blind, so the departure's fixed share comes off it.
+    assert normal["recovered_km"] == pytest.approx(0.4 - DEPARTURE_BLIND_KM, abs=0.002)
     beyond = trip()
     assert recover_sleep_gap(beyond, {"start_odo_km": 31161.861 + 0.7}) is False
 
@@ -2310,17 +2310,17 @@ def test_a_blind_carpark_gap_gives_the_departure_its_fixed_share():
            "distance_km": 9.181, "energy_kwh": 1.42, "wh_per_km": 154.7,
            "ended_on": "bms"}
     assert recover_sleep_gap(prev, nxt) is True
-    assert prev["end_odo_km"] == pytest.approx(32172.573)
-    assert prev["recovered_km"] == pytest.approx(0.276)
-    assert nxt["start_odo_km"] == pytest.approx(32172.573)
-    assert nxt["distance_km"] == pytest.approx(9.331)
-    assert nxt["start_recovered_km"] == pytest.approx(0.15)
+    assert prev["end_odo_km"] == pytest.approx(32172.673)
+    assert prev["recovered_km"] == pytest.approx(0.376)
+    assert nxt["start_odo_km"] == pytest.approx(32172.673)
+    assert nxt["distance_km"] == pytest.approx(9.231)
+    assert nxt["start_recovered_km"] == pytest.approx(0.05)
     # Energy at the departing trip's own Wh/km, and its efficiency unchanged.
-    assert nxt["energy_kwh"] == pytest.approx(1.42 + 0.023, abs=0.001)
+    assert nxt["energy_kwh"] == pytest.approx(1.42 + 0.008, abs=0.001)
     assert nxt["wh_per_km"] == pytest.approx(154.7, abs=0.3)
     # Nothing left between them, so a second call takes nothing.
     assert recover_sleep_gap(prev, nxt) is False
-    assert nxt["distance_km"] == pytest.approx(9.331)
+    assert nxt["distance_km"] == pytest.approx(9.231)
 
 
 def test_the_departure_half_waits_for_the_departing_trip_to_finish():
@@ -2330,19 +2330,19 @@ def test_the_departure_half_waits_for_the_departing_trip_to_finish():
     prev = {"start_odo_km": 100.0, "end_odo_km": 105.0, "distance_km": 5.0,
             "energy_kwh": 0.75, "wh_per_km": 150.0, "ended_on": "stream_lost"}
     assert recover_sleep_gap(prev, {"start_odo_km": 105.4}, via="open") is True
-    assert prev["end_odo_km"] == pytest.approx(105.25)
+    assert prev["end_odo_km"] == pytest.approx(105.35)
     # A second opening-time call cannot give the arrival the departure's share.
     assert recover_sleep_gap(prev, {"start_odo_km": 105.4}, via="open") is False
-    assert prev["end_odo_km"] == pytest.approx(105.25)
+    assert prev["end_odo_km"] == pytest.approx(105.35)
 
     nxt = {"start_odo_km": 105.4, "end_odo_km": 110.4, "distance_km": 5.0,
            "energy_kwh": 0.8, "wh_per_km": 160.0}
     assert recover_sleep_gap(prev, nxt, via="close-live") is True
-    assert prev["end_odo_km"] == pytest.approx(105.25)
-    assert prev["recovered_km"] == pytest.approx(0.25)
-    assert nxt["start_odo_km"] == pytest.approx(105.25)
-    assert nxt["distance_km"] == pytest.approx(5.15)
-    assert nxt["start_recovered_km"] == pytest.approx(0.15)
+    assert prev["end_odo_km"] == pytest.approx(105.35)
+    assert prev["recovered_km"] == pytest.approx(0.35)
+    assert nxt["start_odo_km"] == pytest.approx(105.35)
+    assert nxt["distance_km"] == pytest.approx(5.05)
+    assert nxt["start_recovered_km"] == pytest.approx(0.05)
     assert recover_sleep_gap(prev, nxt, via="close-live") is False
 
 
@@ -2380,7 +2380,7 @@ def test_the_car_seen_standing_in_the_bay_decides_the_split():
     stale = dict(prev)
     n = nxt([900.0, 105.32])
     assert recover_sleep_gap(stale, n) is True
-    assert stale["recovered_km"] == pytest.approx(0.25)     # the blind rule
+    assert stale["recovered_km"] == pytest.approx(0.35)     # the blind rule
 
 
 def test_only_an_odometer_the_car_actually_sent_counts_as_seen_parked():

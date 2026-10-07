@@ -2067,7 +2067,14 @@ SHADOW_TAIL_MAX_KM = 0.6
 # read 9.18 against the car's 9.3 — about 0.1 km short, not the kilometres it
 # took to reconnect. So the departure gets this much (never more than half
 # the gap) and the arrival gets the rest.
-DEPARTURE_BLIND_KM = 0.15
+#
+# 0.05, down from 0.15, on three Home pairs judged against the car's own trip
+# meters (which read ~0.8% over the odometer): 3154/3155 put the departure
+# at 0.05-0.1 km, 3174/3175 at 0-0.1, and 3178/3179 at about nothing — 3179
+# read 10.607 km from its first record against the car's 10.6, and the
+# 0.101 it was credited took it 0.1 over while 3178 stayed short. The car
+# usually reports within metres of moving off; what is lost there is small.
+DEPARTURE_BLIND_KM = 0.05
 
 
 def amend_closed_trip(trip: dict[str, Any], snap: dict[str, Any]) -> bool:
