@@ -9276,6 +9276,13 @@ def _stream_capacity(session: Session) -> dict[str, Any]:
     rows = []
     for c in charges:
         e, a, b = c.get("kwh_pack_level"), c.get("level_start"), c.get("level_end")
+        paired = False
+        p0, p1 = c.get("level_pair_start"), c.get("level_pair_end")
+        if p0 and p1 and len(p0) == 2 and len(p1) == 2:
+            # Both ends read at one instant each — the measure to trust.
+            # The session's own first/last values can be a minute apart.
+            a, b, e = p0[0], p1[0], round(float(p1[1]) - float(p0[1]), 3)
+            paired = True
         if e is None or a is None or b is None:
             continue
         swing = float(b) - float(a)
@@ -9290,6 +9297,7 @@ def _stream_capacity(session: Session) -> dict[str, Any]:
             "kwh_pack_level": round(float(e), 3),
             "implied_capacity_kwh": round(float(e) / swing * 100.0, 2),
             "precision_pct": round((step / swing + 0.02 / float(e)) * 100.0, 2),
+            "paired": paired,
             "counts": swing >= STREAM_CAPACITY_MIN_SWING,
         })
     good = sorted(r["implied_capacity_kwh"] for r in rows if r["counts"])
@@ -13839,6 +13847,10 @@ def _telemetry_ingest(payload: dict, session: Session):
             # previous arrival, not where the car stands now.
             if "Odometer" in reported and not stale:
                 snap["odo_fresh"] = True
+            # Likewise the displayed %: the charge capacity measure pairs it
+            # with the energy at the same record (sync.advance_charge).
+            if "BatteryLevel" in reported and not stale:
+                snap["level_fresh"] = True
             # Newest wins, and a replay cannot displace it: a buffered record
             # arriving late still describes an older state of the car.
             seen = last_snaps.get(vin)

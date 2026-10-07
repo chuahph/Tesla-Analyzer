@@ -2393,3 +2393,29 @@ def test_only_an_odometer_the_car_actually_sent_counts_as_seen_parked():
     advance_shadow(shadow, _tel(20, 100.05, 30.0))
     assert shadow["open"]["parked_odo"][1] == pytest.approx(160.934, abs=0.001)
     assert "parked_odo" not in shadow
+
+
+def test_a_charge_pairs_the_displayed_percent_with_the_energy_at_that_instant():
+    """BatteryLevel every 60 s, EnergyRemaining every 10: the pack is measured
+    from pairs read at the same record, never from each field's own ends."""
+    from app.sync import advance_charge
+
+    def snap(ts, level, kwh, charging=True, fresh=True):
+        s = {"ts": ts, "charging": charging, "battery_level": level,
+             "energy_kwh": kwh, "soc": level, "charger_kw": 7.0,
+             "charge_energy_in_raw": kwh * 1.12}
+        if fresh:
+            s["level_fresh"] = True
+        return s
+
+    shadow: dict = {}
+    advance_charge(shadow, snap(0, 34.0, 23.0))
+    advance_charge(shadow, snap(60, 34.2, 23.12))
+    advance_charge(shadow, snap(500, 49.0, 33.25))
+    # A later energy reading with a stale (repeated) level: not a pair.
+    advance_charge(shadow, snap(550, 49.0, 33.35, fresh=False))
+    done = advance_charge(shadow, snap(600, 49.0, 33.35, charging=False, fresh=False))
+    assert done is not None
+    assert done["level_pair_start"] == [34.0, 23.0]
+    assert done["level_pair_end"] == [49.0, 33.25]
+    assert "level_first" not in shadow and "level_last" not in shadow

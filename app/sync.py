@@ -2157,6 +2157,31 @@ CHARGE_GAP_SEC = 600.0
 
 
 def advance_charge(shadow: dict[str, Any], snap: dict[str, Any]) -> dict[str, Any] | None:
+    """Step the charge machine, then note a displayed-% / energy pair.
+
+    The pair is what measures the pack (see level_pair_* on the finished
+    charge): EnergyRemaining streams every 10 s and BatteryLevel every 60, so
+    a session's first and last values of each are up to a minute apart — and
+    at 7 kW a minute is 0.12 kWh. Measured, 7 October: the session closed on a
+    BatteryLevel of 89.0 that the car went on to show as 90, against an
+    energy reading taken later, and read the pack 1.1% high. Pairing each
+    fresh BatteryLevel with the energy at that same record keeps both ends of
+    the ratio at one instant.
+    """
+    done = _advance_charge(shadow, snap)
+    opening = shadow.get("open")
+    if (opening and snap.get("level_fresh")
+            and snap.get("battery_level") is not None
+            and snap.get("energy_kwh") is not None):
+        pair = [float(snap["battery_level"]), float(snap["energy_kwh"])]
+        if shadow.get("level_for") != opening.get("ts"):
+            shadow["level_for"] = opening.get("ts")
+            shadow["level_first"] = pair
+        shadow["level_last"] = pair
+    return done
+
+
+def _advance_charge(shadow: dict[str, Any], snap: dict[str, Any]) -> dict[str, Any] | None:
     """Step the shadow CHARGE machine with one telemetry snapshot.
 
     Exists to settle one question and to be honest about not having settled
@@ -2298,6 +2323,9 @@ def _charge_close(shadow: dict[str, Any], end: dict[str, Any]) -> dict[str, Any]
     # Popped rather than re-derived from start/end below — see advance_charge,
     # where it accumulates across every snapshot the session actually saw.
     fast = bool(shadow.pop("fast", False))
+    level_first = shadow.pop("level_first", None)
+    level_last = shadow.pop("level_last", None)
+    shadow.pop("level_for", None)
     if not start:
         return None
 
@@ -2379,6 +2407,10 @@ def _charge_close(shadow: dict[str, Any], end: dict[str, Any]) -> dict[str, Any]
         # stream_capacity in the API layer.
         "level_start": start.get("battery_level"),
         "level_end": end.get("battery_level"),
+        # [displayed %, EnergyRemaining] at the first and last records that
+        # carried a fresh BatteryLevel — both halves of each from one instant.
+        "level_pair_start": level_first,
+        "level_pair_end": level_last,
         "peak_kw": round(peak, 1),
         "fast": fast,
         "lat": start.get("lat"), "lon": start.get("lon"),
