@@ -1589,10 +1589,14 @@ def test_a_whole_journey_driven_offline_is_not_glued_onto_the_last_arrival():
 
     # And only for an ending nobody confirmed. A trip the car said goodbye to
     # was measured; a gap after it belongs to whatever happened next.
+    # (Any gap after it is the next trip's departure — see
+    # test_a_confirmed_arrival_hands_any_gap_to_the_departure — never this
+    # trip's arrival.)
     for ending in ("bms", "exit", "timeout"):
         clean = dict(trip(), ended_on=ending)
-        assert recover_sleep_gap(clean, {"start_odo_km": 31162.199}) is False
+        recover_sleep_gap(clean, {"start_odo_km": 31162.199})
         assert clean["distance_km"] == 3.795
+        assert not clean.get("recovered_km")
 
 
 def test_recover_sleep_gap_records_which_call_site_fired_and_when():
@@ -2419,3 +2423,37 @@ def test_a_charge_pairs_the_displayed_percent_with_the_energy_at_that_instant():
     assert done["level_pair_start"] == [34.0, 23.0]
     assert done["level_pair_end"] == [49.0, 33.25]
     assert "level_first" not in shadow and "level_last" not in shadow
+
+
+def test_a_confirmed_arrival_hands_any_gap_to_the_departure():
+    """3177 ended at power-down at 32330.892; 3178 was first seen at
+    32330.920. The arrival was confirmed, so the 28 m is pulling out of the
+    bay — the next trip's, not lost."""
+    prev = {"start_odo_km": 32322.711, "end_odo_km": 32330.892,
+            "distance_km": 8.181, "energy_kwh": 1.86, "wh_per_km": 227.4,
+            "ended_on": "bms"}
+    nxt = {"start_odo_km": 32330.920, "end_odo_km": 32340.382,
+           "distance_km": 9.462, "energy_kwh": 1.32, "wh_per_km": 139.5}
+    assert recover_sleep_gap(prev, nxt) is True
+    assert prev["end_odo_km"] == pytest.approx(32330.892)     # untouched
+    assert not prev.get("recovered_km")
+    assert nxt["start_odo_km"] == pytest.approx(32330.892)
+    assert nxt["start_recovered_km"] == pytest.approx(0.028)
+    assert nxt["distance_km"] == pytest.approx(9.49)
+    assert recover_sleep_gap(prev, nxt) is False                # nothing left
+
+    # At the "open" call site the departure is a bare odometer: remembered,
+    # then paid when the trip closes.
+    prev2 = dict(prev, handover_to_odo_km=None)
+    prev2.pop("handover_to_odo_km")
+    assert recover_sleep_gap(prev2, {"start_odo_km": 32330.920}, via="open") is True
+    assert prev2["end_odo_km"] == pytest.approx(32330.892)
+    nxt2 = {"start_odo_km": 32330.920, "end_odo_km": 32340.382,
+            "distance_km": 9.462, "energy_kwh": 1.32, "wh_per_km": 139.5}
+    assert recover_sleep_gap(prev2, nxt2, via="close-live") is True
+    assert nxt2["start_recovered_km"] == pytest.approx(0.028)
+
+    # A whole journey's worth is not a bay.
+    far = {"start_odo_km": 32335.0, "end_odo_km": 32340.0, "distance_km": 5.0,
+           "energy_kwh": 0.8, "wh_per_km": 160.0}
+    assert recover_sleep_gap(dict(prev), far) is False

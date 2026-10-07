@@ -2466,12 +2466,30 @@ def recover_sleep_gap(prev: dict[str, Any], nxt: dict[str, Any],
     a miss there silently falls through to "close" and is otherwise
     invisible.
     """
-    if not prev or not nxt or prev.get("ended_on") != "stream_lost":
+    if not prev or not nxt:
         return False
     end_odo, next_start = prev.get("end_odo_km"), nxt.get("start_odo_km")
     start_odo = prev.get("start_odo_km")
     if end_odo is None or next_start is None or start_odo is None:
         return False
+    if prev.get("ended_on") != "stream_lost":
+        # The arrival was confirmed — the car said goodbye, at power-down or
+        # as the driver left — so it ended where it says. Any ground between
+        # that and the next trip's first reading is the DEPARTURE's: pulling
+        # out of the bay before the first moving record. Measured, 6 and 7
+        # October: 41 m at the Office and 28 m at Intel PG14, both with
+        # strong signal, both left in unaccounted_km where the car's own trip
+        # meter counts them. Bounded by the same cap: a gap past it is a
+        # journey nobody recorded, not a bay.
+        dep = round(float(next_start) - float(end_odo), 3)
+        if dep <= 0.0 or dep > SHADOW_TAIL_MAX_KM:
+            return False
+        handed = prev.get("handover_to_odo_km")
+        if handed is not None and abs(float(handed) - float(next_start)) < 0.0005:
+            return _credit_departure(nxt, dep, float(end_odo), via)
+        prev["handover_to_odo_km"] = round(float(next_start), 3)
+        _credit_departure(nxt, dep, float(end_odo), via)
+        return True
     # Where the car was actually SEEN resting, when anything saw it, bounds
     # this. The next trip's starting odometer is not evidence of where the
     # previous one stopped — it is evidence of where the next one was first
