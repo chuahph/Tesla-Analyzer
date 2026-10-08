@@ -2075,6 +2075,14 @@ SHADOW_TAIL_MAX_KM = 0.6
 # 0.101 it was credited took it 0.1 over while 3178 stayed short. The car
 # usually reports within metres of moving off; what is lost there is small.
 DEPARTURE_BLIND_KM = 0.05
+# The least an unseen ARRIVAL stretch is priced at. It is the crawl through a
+# carpark gate and down its ramps, with the climate still running — not more
+# of the road the trip averaged over. Priced at the trip's own Wh/km, an
+# efficient run home (3183: 107 Wh/km) added 0.05 kWh for 0.45 km where the
+# car counted about 0.15. Fitted on the eight no-signal Home arrivals the car
+# has judged: the mean shortfall fell from +0.020 to +0.005 kWh per trip and
+# the total error by 16%, flat between 180 and 230.
+ARRIVAL_CRAWL_WH_PER_KM = 200.0
 
 
 def amend_closed_trip(trip: dict[str, Any], snap: dict[str, Any]) -> bool:
@@ -2573,7 +2581,10 @@ def recover_sleep_gap(prev: dict[str, Any], nxt: dict[str, Any],
     prev["recovered_km"] = round(
         float(prev.get("recovered_km") or 0.0) + gain, 3)
     if whkm and prev.get("energy_kwh") is not None:
-        gained_kwh = round(gain * float(whkm) / 1000.0, 3)
+        # At no less than ARRIVAL_CRAWL_WH_PER_KM: the unseen metres are the
+        # gate and the ramps, not more of the road.
+        rate = max(float(whkm), ARRIVAL_CRAWL_WH_PER_KM)
+        gained_kwh = round(gain * rate / 1000.0, 3)
         prev["energy_kwh"] = round(float(prev["energy_kwh"]) + gained_kwh, 3)
         prev["recovered_kwh"] = round(
             float(prev.get("recovered_kwh") or 0.0) + gained_kwh, 3)

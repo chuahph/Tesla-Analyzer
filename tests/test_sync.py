@@ -2457,3 +2457,18 @@ def test_a_confirmed_arrival_hands_any_gap_to_the_departure():
     far = {"start_odo_km": 32335.0, "end_odo_km": 32340.0, "distance_km": 5.0,
            "energy_kwh": 0.8, "wh_per_km": 160.0}
     assert recover_sleep_gap(dict(prev), far) is False
+
+
+def test_an_unseen_arrival_is_priced_as_a_crawl_not_as_more_road():
+    """3183 averaged 107 Wh/km on the road; the 0.45 km it lost was the gate
+    and the ramps. That stretch is priced at no less than the crawl rate."""
+    from app.sync import ARRIVAL_CRAWL_WH_PER_KM
+    prev = {"start_odo_km": 100.0, "end_odo_km": 103.64, "distance_km": 3.64,
+            "energy_kwh": 0.39, "wh_per_km": 107.0, "ended_on": "stream_lost"}
+    assert recover_sleep_gap(prev, {"start_odo_km": 104.09}, rested_odo_km=104.09)
+    assert prev["recovered_kwh"] == pytest.approx(0.45 * ARRIVAL_CRAWL_WH_PER_KM / 1000, abs=0.001)
+    # A trip already above it keeps its own rate.
+    hot = {"start_odo_km": 100.0, "end_odo_km": 105.0, "distance_km": 5.0,
+           "energy_kwh": 1.4, "wh_per_km": 280.0, "ended_on": "stream_lost"}
+    assert recover_sleep_gap(hot, {"start_odo_km": 105.2}, rested_odo_km=105.2)
+    assert hot["recovered_kwh"] == pytest.approx(0.056, abs=0.001)
