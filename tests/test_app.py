@@ -6488,7 +6488,7 @@ def test_a_trip_that_is_mostly_rounding_does_not_referee_the_others():
             state.put(sess, state.TELEMETRY_TRIPS_KEY, _json.dumps([good, tiny, old]))
             state.put(sess, state.CAR_READINGS_KEY, _json.dumps([r1, r2, r3]))
             sess.commit()
-            body = client.get("/api/telemetry/compare?min_km=0").json()
+            body = client.get("/api/telemetry/compare").json()
 
         assert body["telemetry_trips"] == 3, "all three still reported"
         assert body["matched"] == 3, [r["drive_id"] for r in body["trips"]]
@@ -12370,9 +12370,3 @@ def test_the_car_s_rated_line_is_recomputed_from_rated_range():
     bare = {"available": True, "recent_trips": [{"distance_km": 8.0, "energy_kwh": 1.5}]}
     routes_mod._car_rated_line(bare, None, {"available": False}, 68.3)
     assert "vs_rated_pts" not in bare["recent_trips"][0]
-
-
-def test_compare_sets_trips_under_5_km_aside():
-    """Short trips are listed under not_judged as under 5 km, not counted."""
-    from app.api import routes as routes_mod
-    assert routes_mod.COMPARE_MIN_KM == 5.0

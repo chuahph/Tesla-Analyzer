@@ -9348,11 +9348,6 @@ def _car_rated_line(driving: dict, balance: dict | None, battery: dict,
         balance["vs_rated_pts"] = round(balance["drive_pct"] - rated, 1)
 
 
-# Trips shorter than this are listed under not_judged by /api/telemetry/compare
-# rather than counted: the car's own rounding is too coarse there to referee.
-COMPARE_MIN_KM = 5.0
-
-
 @router.get("/self-check")
 def self_check(days: int = Query(30, ge=1, le=730),
                session: Session = Depends(get_session)):
@@ -15183,7 +15178,6 @@ def telemetry_gaps(
 @router.get("/telemetry/compare")
 def telemetry_compare(
     days: int = Query(14, ge=1, le=90),
-    min_km: float = Query(None, ge=0.0, le=100.0),
     session: Session = Depends(get_session),
 ):
     """Shadow trips beside the polled trips they overlap.
@@ -15367,25 +15361,16 @@ def telemetry_compare(
     # A trip whose energy is mostly the 0.02 kWh step cannot say whether
     # anything is 3% out. Ten percent is where the step stops being noise
     # and starts being the figure.
-    #
-    # And a short trip, whatever its quantisation figure says: measured over
-    # the trips judged from 1 October, those under 5 km sat at a median of
-    # 9.8% from the car on Wh/km, none within 3%, against 1.9% and 11 of 14
-    # for the rest. The car's own figures round too coarsely there to referee.
-    short_km = COMPARE_MIN_KM if min_km is None else float(min_km)
-
-    def _why(r):
-        if r["telemetry"]["odo"] is None:
-            return "no odometer bracket"
-        if (r["telemetry"]["km"] or 0.0) < short_km:
-            return f"under {short_km:g} km"
-        if (r["telemetry"]["energy_unc_pct"] or 0.0) > TELEMETRY_UNC_MAX_PCT:
-            return f"energy is {r['telemetry']['energy_unc_pct']}% quantisation"
-        return None
-
-    excluded = [{"start": r["telemetry"]["start"], "why": _why(r)}
-                for r in judged if _why(r)]
-    judged = [r for r in judged if not _why(r)]
+    excluded = [{"start": r["telemetry"]["start"],
+                 "why": ("no odometer bracket" if r["telemetry"]["odo"] is None
+                         else "energy is "
+                              f"{r['telemetry']['energy_unc_pct']}% quantisation")}
+                for r in judged
+                if r["telemetry"]["odo"] is None
+                or (r["telemetry"]["energy_unc_pct"] or 0.0) > TELEMETRY_UNC_MAX_PCT]
+    judged = [r for r in judged
+              if r["telemetry"]["odo"] is not None
+              and (r["telemetry"]["energy_unc_pct"] or 0.0) <= TELEMETRY_UNC_MAX_PCT]
     # Against the car, not against polling. These two medians used to be
     # telemetry-versus-polled — how far the streamed trip sat from the polled
     # one, and how much of its opening polling had missed. Both were questions
