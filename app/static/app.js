@@ -2385,12 +2385,7 @@ function renderMatrixSummary(d) {
   // for a reader to notice as an unexplained difference between two cards.
   // Only present for a since-charge window with a real current SoC reading.
   const battFoot = t.battery_used_pct != null
-    ? `<div class="mx-sum-foot">Battery Used card: ${num(t.battery_used_pct, 1)}% — ${
-        Math.abs(t.battery_used_gap_pct) < 0.05
-          ? "matches this total"
-          : `this total reads ${num(Math.abs(t.battery_used_gap_pct), 1)} pts ${
-              t.battery_used_gap_pct > 0 ? "higher" : "lower"}`
-      }</div>`
+    ? `<div class="mx-sum-foot">${battVsCard(t)}</div>`
     : "";
   box.innerHTML = `
     <div class="mx-sum-head">
@@ -2671,12 +2666,7 @@ function renderMatrix(d) {
   // renderMatrixSummary) — a reader who opened the full table gets the same
   // reconciliation, not just the headline.
   const battNote = t && t.battery_used_pct != null
-    ? `<div class="mx-sub">Battery Used card: ${num(t.battery_used_pct, 1)}% — ${
-        Math.abs(t.battery_used_gap_pct) < 0.05
-          ? "matches this total"
-          : `this total reads ${num(Math.abs(t.battery_used_gap_pct), 1)} pts ${
-              t.battery_used_gap_pct > 0 ? "higher" : "lower"}`
-      }</div>`
+    ? `<div class="mx-sub">${battVsCard(t)}</div>`
     : "";
   const totalBlock = t && t.pct
     ? `<div class="mx-total">
@@ -2835,6 +2825,18 @@ function matrixWindowQuery() {
   return isFinite(days) && days >= 1 ? `days=${days}` : "days=90";
 }
 
+// The matrix total against the Battery Used figure the card on this page is
+// actually showing, not a copy of it the matrix worked out for itself, which
+// agreed by construction and so could never catch the two drifting apart.
+let cardUsedPct = null;
+function battVsCard(t) {
+  const card = cardUsedPct != null ? cardUsedPct : t.battery_used_pct;
+  const gap = t.pct != null ? Math.round((t.pct - card) * 10) / 10 : t.battery_used_gap_pct;
+  return `Battery Used card: ${num(card, 1)}% — ${
+    Math.abs(gap) < 0.05 ? "matches this total"
+      : `this total reads ${num(Math.abs(gap), 1)} pts ${gap > 0 ? "higher" : "lower"}`}`;
+}
+
 function setupMatrixModal() {
   const card = document.getElementById("matrix-card");
   const form = document.getElementById("matrix-form");
@@ -2925,7 +2927,18 @@ function setupMatrixModal() {
   // Re-read whenever the page's window changes, so the card never sits there
   // answering for a stretch the rest of the page has moved off.
   document.addEventListener("ta:window-changed", reload);
-  reload();
+  // And after each summary load that saw different trips. Loading in parallel
+  // with the summary read the trips a moment before the summary saved one
+  // that ended out of signal: measured 10 Oct, trip 3188 (0.76 kWh) was on
+  // the Battery Used card and missing from the matrix, 19.3% against 18.1%,
+  // until the page was reloaded with another window.
+  let summarySig = null;
+  document.addEventListener("ta:summary-loaded", (e) => {
+    const sig = e.detail && e.detail.sig;
+    if (sig === summarySig) return;
+    summarySig = sig;
+    reload();
+  });
 
   // How far back the report reaches. Its own form because it is a different
   // kind of change from the cut-points: those re-sort the same trips, this
@@ -3697,6 +3710,13 @@ async function load() {
       const res = await fetch(`/api/summary?days=${days}${extra}${tripsExtra}`);
       if (!res.ok) throw new Error(await res.text());
       d = await res.json();
+      // The summary is what settles and saves a trip that ended out of
+      // signal, so anything that must cover the same trips (the driving
+      // matrix) reads after it, and again whenever the trips it saw change.
+      const drv = d.driving || {}, bal = d.battery_balance || {};
+      cardUsedPct = sinceCharge && bal.used_pct != null ? bal.used_pct : null;
+      document.dispatchEvent(new CustomEvent("ta:summary-loaded", {detail: {
+        sig: [drv.total_drives, drv.total_energy_kwh, bal.used_kwh, bal.vampire_kwh].join("|")}}));
       const health = await (await fetch("/api/health")).json();
       mode = health.mode;
       setBuildInfo(health.build);
