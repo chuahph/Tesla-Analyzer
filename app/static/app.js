@@ -2830,6 +2830,7 @@ function matrixWindowQuery() {
 // agreed by construction and so could never catch the two drifting apart.
 let cardUsedPct = null;
 function battVsCard(t) {
+  const num = (v, dp) => (v == null ? "—" : Number(v).toFixed(dp));
   const card = cardUsedPct != null ? cardUsedPct : t.battery_used_pct;
   const gap = t.pct != null ? Math.round((t.pct - card) * 10) / 10 : t.battery_used_gap_pct;
   return `Battery Used card: ${num(card, 1)}% — ${
