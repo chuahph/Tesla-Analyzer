@@ -254,7 +254,19 @@
                 enable it once: open your fork's <strong>Actions</strong> tab →
                 <strong>“I understand… enable them”</strong>. From then on it checks hourly and
                 auto-syncs your fork whenever the original changes — and Render redeploys on its
-                own. No clicks needed after that.</p>
+                own. No clicks needed after that. If it ever shows as paused in the Actions tab
+                (GitHub pauses scheduled actions in repos it sees as idle), tap
+                <strong>Enable workflow</strong> again.</p>
+              <p class="gs-note gs-note-warn">📡 <strong>When an update changes what the car
+                streams.</strong> Most updates need nothing from you. A few change which car
+                fields are streamed, or how often (for example the 10-second lock state).
+                Those only reach the car when you re-run the Step 7 command on your relay
+                server; the update's notes say when.</p>
+              <p class="gs-note">🛠️ <strong>If Render ever stops redeploying</strong> after a
+                sync, add your service's Deploy Hook as a repository secret named
+                <code>RENDER_DEPLOY_HOOK_URL</code> (Render → service → Settings → Deploy Hook;
+                GitHub → Settings → Secrets and variables → Actions). The included
+                <strong>“Deploy to Render”</strong> action then triggers the deploy itself.</p>
             </div>
           </details>
         </li>
@@ -584,13 +596,17 @@
                 is a short loading screen when you open the dashboard after a quiet spell.</p>
               <p class="gs-note gs-note-warn">🤖 <strong>Rather not use a third-party site?</strong>
                 Your fork includes a backup <strong>"Sync car from Tesla"</strong> GitHub Actions
-                workflow, but its schedule is disabled by default — GitHub runs scheduled
-                workflows on a best-effort basis and can skip them. To use it anyway, uncomment
-                the <code>schedule:</code> block at the top of
-                <code>.github/workflows/sync-car.yml</code>, then add two repository secrets
-                (<strong>Settings → Secrets and variables → Actions</strong>):
+                workflow. It is scheduled every 15 minutes but does nothing until you add two
+                repository secrets (<strong>Settings → Secrets and variables → Actions</strong>):
                 <code>RENDER_URL</code> = your app address, and <code>SYNC_KEY</code> = the same
-                value from your Render environment.</p>
+                value from your Render environment. GitHub runs it on a best-effort basis —
+                in practice about hourly — so keep the cron-job.org job as the main watchdog
+                and treat this as a backup.</p>
+              <p class="gs-note">⚡ <strong>Optional: no loading screen.</strong> Add a second
+                cron-job.org job for <code>https://&lt;your-app&gt;/api/ping</code> every 10
+                minutes. It keeps Render awake without touching the database. It uses about
+                744 of Render's 750 free hours a month, so skip it if you run another free
+                Render service.</p>
             </div>
           </details>
         </li>

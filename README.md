@@ -472,10 +472,11 @@ has a charge open) or when you press Sync.
 
 That inverts the old advice. A tick that is late no longer costs a trip; a
 tick that never comes costs the alarm for a dead stream. The repo
-ships `.github/workflows/sync-car.yml` for this, but **its schedule trigger is
-disabled by default** — use an external cron service instead (below). It stays
-in the workflow only as a manual `workflow_dispatch` button (Actions tab → Sync
-car from Tesla → Run workflow) for on-demand testing.
+ships `.github/workflows/sync-car.yml` for this as a **backup**: it is scheduled
+every 15 minutes (GitHub delivers it roughly hourly) and does nothing until the
+`RENDER_URL` and `SYNC_KEY` repository secrets are set. Use an external cron
+service as the main watchdog (below); the workflow also has a manual
+`workflow_dispatch` button (Actions tab → Sync car from Tesla → Run workflow).
 
 **Why not GitHub Actions' own schedule?** GitHub
 [documents](https://docs.github.com/en/actions/using-workflows/events-that-trigger-workflows#schedule)
@@ -574,12 +575,12 @@ if you'd rather not see tiny phantom drives from a car nudged while parked or
 a multi-point turn; lower it if even 0.1 km is still filtering out real
 moves you want caught.
 
-### Re-enabling the GitHub Actions schedule instead
+### Using the GitHub Actions schedule instead
 
-If you'd rather not sign up for another service, uncomment the `schedule:`
-block at the top of `.github/workflows/sync-car.yml` and add the `RENDER_URL`
-/ `SYNC_KEY` repository secrets (Settings → Secrets and variables → Actions).
-It will work, just with the delay/reliability caveat above.
+If you'd rather not sign up for another service, add the `RENDER_URL` /
+`SYNC_KEY` repository secrets (Settings → Secrets and variables → Actions);
+`.github/workflows/sync-car.yml` is already scheduled and starts working. It
+will work, just with the delay/reliability caveat above.
 
 ---
 
