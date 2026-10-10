@@ -2544,12 +2544,14 @@ def analyze(drives: list[Drive], rated_wh_per_km: float = 150.0,
                     # this figure came out equal to the gross exactly when it
                     # was most worth having. Needs no speed heuristic either,
                     # so legacy trips get a real figure instead of a fallback.
-                    # Less the wait in P at the end: its time is in the
-                    # trip, its energy is not (see Drive.p_wait_min).
+                    # Less the wait in P only on trips recorded while its
+                    # energy was kept outside the trip (those carry
+                    # p_wait_kwh); since 10 Oct the wait is in both.
                     driving_wh_val := sync_mod.driving_only_wh_per_km(
                         d.energy_used_kwh, d.distance_km,
                         max((d.duration_min or 0.0)
-                            - (getattr(d, "p_wait_min", None) or 0.0), 0.0)
+                            - ((getattr(d, "p_wait_min", None) or 0.0)
+                               if getattr(d, "p_wait_kwh", None) else 0.0), 0.0)
                         or d.duration_min,
                         d.outside_temp_c, getattr(d, "climate_min", None))
                     if has_valid_energy(d) else None
