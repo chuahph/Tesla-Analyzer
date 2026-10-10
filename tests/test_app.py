@@ -12370,3 +12370,53 @@ def test_the_car_s_rated_line_is_recomputed_from_rated_range():
     bare = {"available": True, "recent_trips": [{"distance_km": 8.0, "energy_kwh": 1.5}]}
     routes_mod._car_rated_line(bare, None, {"available": False}, 68.3)
     assert "vs_rated_pts" not in bare["recent_trips"][0]
+
+
+def test_fold_p_wait_brings_old_trips_under_the_new_rule():
+    """A trip that kept its P-wait energy outside gets it back, on the row and
+    on the stored streamed trip, and only when asked."""
+    import json as _json
+    from datetime import datetime
+    from app import state
+    from app.database import SessionLocal
+    from app.models import Drive, Vehicle
+
+    settings = get_settings()
+    old = settings.app_passcode
+    settings.app_passcode = ""
+    with SessionLocal() as s:
+        prev = state.get(s, state.TELEMETRY_TRIPS_KEY)
+        v = Vehicle(vin="FOLDPWAIT0000001", name="T", model="Model 3")
+        s.add(v); s.flush()
+        d = Drive(vehicle_id=v.id, start_time=datetime(2026, 10, 10, 16, 14),
+                  end_time=datetime(2026, 10, 10, 16, 31), distance_km=7.364,
+                  duration_min=16.0, start_soc=67.0, end_soc=65.5, energy_used_kwh=1.02,
+                  avg_speed_kmh=27.0, max_speed_kmh=71.0, outside_temp_c=32.0,
+                  shadow_start_ts=1791584040.0, p_wait_min=0.6, p_wait_kwh=0.02,
+                  source="telemetry")
+        s.add(d); s.flush(); did = d.id
+        state.put(s, state.TELEMETRY_TRIPS_KEY, _json.dumps([
+            {"vin": v.vin, "start_ts": 1791584040.0, "distance_km": 7.364,
+             "energy_kwh": 1.02, "wh_per_km": 138.5, "p_wait_kwh": 0.02}]))
+        s.commit()
+    try:
+        with TestClient(app) as client:
+            dry = client.get(f"/api/fold-p-wait?drive_id={did}").json()
+            assert dry["would_fold"] == 1 and dry["trips"][0]["kwh"] == [1.02, 1.04]
+            with SessionLocal() as s:
+                assert s.get(Drive, did).energy_used_kwh == 1.02
+            done = client.get(f"/api/fold-p-wait?drive_id={did}&apply=true").json()
+            assert done["folded"] == 1
+            with SessionLocal() as s:
+                row = s.get(Drive, did)
+                assert row.energy_used_kwh == pytest.approx(1.04) and row.p_wait_kwh is None
+                t = _json.loads(state.get(s, state.TELEMETRY_TRIPS_KEY))[0]
+                assert t["energy_kwh"] == pytest.approx(1.04) and t["p_wait_kwh"] is None
+            assert client.get(f"/api/fold-p-wait?drive_id={did}").json()["would_fold"] == 0
+    finally:
+        with SessionLocal() as s:
+            state.put(s, state.TELEMETRY_TRIPS_KEY, prev or "[]")
+            s.query(Drive).filter(Drive.id == did).delete()
+            s.query(Vehicle).filter(Vehicle.vin == "FOLDPWAIT0000001").delete()
+            s.commit()
+        settings.app_passcode = old

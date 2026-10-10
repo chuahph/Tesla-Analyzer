@@ -14708,6 +14708,68 @@ def telemetry_drop_trips(
     return {"dropped": len(doomed), "kept": len(kept), "trips": listing}
 
 
+@router.api_route("/fold-p-wait", methods=["GET", "POST"])
+def fold_p_wait(
+    drive_id: int | None = Query(None),
+    apply: bool = Query(False),
+    session: Session = Depends(get_session),
+):
+    """Bring trips recorded from 1 to 10 October under today's P-wait rule.
+
+    Those trips kept the energy of a wait in P outside the trip
+    (``p_wait_kwh``); since 10 October it is part of the trip. This adds it
+    back to the trip's energy and Wh/km and clears ``p_wait_kwh``, on the
+    stored streamed trip as well as the drive row, so a re-promotion cannot
+    put the old figure back. The since-charge and park books are unchanged:
+    they already added the wait, and now find it inside the trip instead.
+
+    One trip with ``drive_id``, otherwise every trip that still has one.
+    Dry run by default; ``apply=true`` writes.
+    """
+    import json as _json
+
+    q = select(Drive).where(Drive.p_wait_kwh.is_not(None), Drive.p_wait_kwh > 0)
+    if drive_id is not None:
+        q = q.where(Drive.id == drive_id)
+    rows = session.scalars(q.order_by(Drive.start_time)).all()
+    try:
+        trips = _json.loads(state.get(session, state.TELEMETRY_TRIPS_KEY) or "[]") or []
+    except ValueError:
+        raise HTTPException(500, "The stored trips are not readable JSON.")
+    by_start = {int(float(t["start_ts"])): t for t in trips if t.get("start_ts") is not None}
+
+    changes = []
+    for d in rows:
+        wait = float(d.p_wait_kwh)
+        new_kwh = round(float(d.energy_used_kwh or 0.0) + wait, 3)
+        new_whkm = (round(new_kwh * 1000.0 / d.distance_km, 1)
+                    if d.distance_km else None)
+        changes.append({"drive_id": d.id, "start": d.start_time.isoformat(timespec="minutes"),
+                        "p_wait_min": d.p_wait_min, "p_wait_kwh": round(wait, 3),
+                        "kwh": [round(float(d.energy_used_kwh or 0.0), 3), new_kwh],
+                        "wh_per_km": [round(float(d.energy_used_kwh or 0.0) * 1000.0
+                                            / d.distance_km, 1) if d.distance_km else None,
+                                      new_whkm]})
+        if not apply:
+            continue
+        d.energy_used_kwh = new_kwh
+        d.p_wait_kwh = None
+        t = by_start.get(int(d.shadow_start_ts)) if d.shadow_start_ts else None
+        if t is not None and t.get("p_wait_kwh"):
+            t["energy_kwh"] = round(float(t.get("energy_kwh") or 0.0)
+                                    + float(t["p_wait_kwh"]), 3)
+            km = float(t.get("distance_km") or 0.0)
+            t["wh_per_km"] = round(t["energy_kwh"] * 1000.0 / km, 1) if km > 0 else None
+            t["p_wait_kwh"] = None
+    if not apply:
+        return {"would_fold": len(changes), "trips": changes,
+                "how": "Add &apply=true to this address to apply them."}
+    if changes:
+        _put_trips(session, trips)
+    session.commit()
+    return {"folded": len(changes), "trips": changes}
+
+
 @router.api_route("/telemetry/recover-gaps", methods=["GET", "POST"])
 @_holding_shadow_lock
 def telemetry_recover_gaps(
